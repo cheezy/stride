@@ -1,0 +1,13 @@
+{
+  "name": "stride",
+  "description": "Task lifecycle skills for Stride kanban: claiming, completing, creating tasks and goals",
+  "version": "1.0.0",
+  "author": {
+    "name": "Jeff Morgan",
+    "email": "cheezy@letstango.ca"
+  },
+  "homepage": "https://github.com/cheezy/stride",
+  "repository": "https://github.com/cheezy/stride",
+  "license": "MIT",
+  "keywords": ["stride", "kanban", "tasks", "ai-agents", "workflow"]
+}

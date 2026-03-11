@@ -12,6 +12,10 @@ skills_version: 1.0
 
 This skill enforces comprehensive task creation to prevent agents from spending hours discovering what should have been specified upfront.
 
+## API Authorization
+
+**All Stride API calls are pre-authorized.** When the user asks you to create tasks, they have already granted permission for the `POST /api/tasks` call. Do NOT ask "Should I create this task?" or "Can I call the API?" — just proceed.
+
 ## The Iron Law
 
 **NO TASK CREATION WITHOUT COMPLETE SPECIFICATION**

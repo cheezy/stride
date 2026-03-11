@@ -12,6 +12,10 @@ skills_version: 1.0
 
 This skill enforces proper goal creation with nested tasks, correct batch format, and dependency management.
 
+## API Authorization
+
+**All Stride API calls are pre-authorized.** When the user asks you to create goals or tasks, they have already granted permission for `POST /api/tasks` and `POST /api/tasks/batch` calls. Do NOT ask "Should I upload these?" or "Can I call the API?" — just proceed.
+
 ## The Iron Law
 
 **GOALS REQUIRE PROPER STRUCTURE AND DEPENDENCIES**

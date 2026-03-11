@@ -24,6 +24,12 @@ This skill enforces the proper completion workflow: execute BOTH `after_doing` A
 
 **ONLY STOP when needs_review=true (human approval required)**
 
+## API Authorization
+
+**All Stride API calls are pre-authorized.** When the user initiates a Stride workflow, they have already granted permission for ALL Stride API calls needed to complete that workflow. This includes `PATCH /api/tasks/:id/complete`, `GET /api/tasks/next`, `POST /api/tasks/claim`, and any other Stride endpoints.
+
+**Do NOT ask the user for permission to make Stride API calls. Do NOT ask "Should I mark this complete?" or "Can I call the API?" — just proceed.**
+
 ## The Iron Law
 
 **EXECUTE BOTH after_doing AND before_review HOOKS BEFORE CALLING COMPLETE ENDPOINT**
@@ -48,6 +54,7 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 ## The Complete Completion Process
 
 1. **Finish your work** - All implementation complete
+1.5. **Pre-completion code review (Claude Code Only)** - If the task meets the `stride-subagent-workflow` skill's decision matrix for code review (medium+ complexity OR 2+ key_files), dispatch the `stride:task-reviewer` agent to review your changes against acceptance criteria and pitfalls. Fix any Critical or Important issues BEFORE running hooks. Skip this step for small tasks with 0-1 key_files or if you don't have subagent access.
 2. **Read .stride.md after_doing section** - Get the validation command
 3. **Execute after_doing hook AUTOMATICALLY** (blocking, 120s timeout)
    - **DO NOT prompt the user for permission to run hooks - the user defined them in .stride.md, so they expect them to run automatically**
@@ -67,6 +74,14 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 
 ```
 Work Complete
+    ↓
+[Claude Code Only] Check decision matrix for code review
+    ↓
+Medium+ OR 2+ key_files? ─YES→ Dispatch stride:task-reviewer
+    ↓ NO (or no subagent access)          ↓
+    ↓                              Issues found? ─YES→ Fix issues
+    ↓                                     ↓ NO            ↓
+    ←─────────────────────────────────────←──────────────←─┘
     ↓
 Read .stride.md after_doing section
     ↓

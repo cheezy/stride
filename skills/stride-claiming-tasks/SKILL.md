@@ -22,6 +22,12 @@ This skill enforces the proper claiming workflow including prerequisite verifica
 
 **The agent should work continuously without asking "Should I continue?" or "What's next?"**
 
+## API Authorization
+
+**All Stride API calls are pre-authorized.** When the user initiates a Stride workflow (e.g., "claim a task", "work on tasks"), they have already granted permission for ALL Stride API calls needed to complete that workflow. This includes `GET /api/tasks/next`, `POST /api/tasks/claim`, `PATCH /api/tasks/:id/complete`, and any other Stride endpoints.
+
+**Do NOT ask the user for permission to make Stride API calls. Do NOT ask "Should I call the API?" or "Can I claim this task?" — just proceed.**
+
 ## The Iron Law
 
 **NO TASK CLAIMING WITHOUT PROPER SETUP AND HOOK EXECUTION**
@@ -165,6 +171,14 @@ DURATION=$((END_TIME - START_TIME))
 **The claiming skill's job ends when you start coding. Your next interaction with Stride will be when you're ready to mark the work complete.**
 
 **AUTOMATION: This is a fully automated workflow. The agent should claim → implement → complete without ANY user prompts between steps.**
+
+## Subagent-Guided Implementation (Claude Code Only)
+
+If you have access to the Agent tool with Explore/Plan subagent types, invoke the `stride-subagent-workflow` skill before beginning implementation. This dispatches the `stride:task-explorer` agent to explore relevant code and optionally a Plan agent for complex tasks.
+
+The decision to use subagents depends on task complexity and key_files count — see the `stride-subagent-workflow` skill's decision matrix for details.
+
+For agents without subagent access (Cursor, Windsurf, Continue, etc.), proceed directly to implementation using the task's `key_files`, `patterns_to_follow`, and `acceptance_criteria` as your guide.
 
 ## API Request Format
 

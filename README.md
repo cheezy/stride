@@ -34,6 +34,20 @@ Comprehensive task specification enforcement for creating individual work tasks 
 
 Goal and batch creation with dependency management. Handles creating large initiatives with multiple nested tasks, proper dependency ordering, and cross-goal coordination.
 
+### stride-subagent-workflow
+
+Orchestrates specialized subagents at three points in the task lifecycle: codebase exploration after claiming, implementation planning for complex tasks, and code review before completion hooks. Uses a decision matrix based on task complexity and key_files count to determine which subagents to dispatch — zero overhead for simple tasks, full coverage for complex ones. Claude Code only.
+
+## Agents
+
+### stride:task-explorer
+
+A read-only codebase exploration agent dispatched after claiming a task. Reads every file listed in `key_files`, finds related test files, searches for patterns referenced in `patterns_to_follow`, navigates to `where_context`, and returns a structured summary so the primary agent can start coding with full context.
+
+### stride:task-reviewer
+
+A pre-completion code review agent dispatched after implementation but before running hooks. Validates the git diff against `acceptance_criteria`, detects `pitfalls` violations, checks `patterns_to_follow` compliance, and verifies `testing_strategy` alignment. Returns categorized issues (Critical/Important/Minor) with file and line references.
+
 ## Configuration
 
 Before using Stride skills, you need two configuration files in your project root:

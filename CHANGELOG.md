@@ -2,6 +2,21 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.2.0] - 2026-03-12
+
+### Added
+
+- **`stride-enriching-tasks` skill** — 4-phase enrichment workflow that transforms minimal task specifications into full implementation-ready specs. Explores codebase to populate key_files, testing_strategy, verification_steps, acceptance_criteria, patterns_to_follow, and 10 other fields. Handles defect tasks, title-only tasks, and ambiguous contexts with decision logic for when to explore vs. ask a human.
+- **`stride:task-decomposer` agent** — Custom Claude Code agent that breaks goals and large tasks into dependency-ordered child tasks. Uses 6-step methodology: Scope Analysis, Task Boundary Identification (4 strategies), Dependency Ordering (3 types), Complexity Estimation, Full Specification per Task, and Output Assembly. Produces ready-to-create task arrays with correct dependency indices.
+- **`stride:hook-diagnostician` agent** — Custom Claude Code agent that analyzes hook failure output and returns a prioritized fix plan. Parses 6 failure categories (compilation errors, test failures, security warnings, credo issues, format failures, git failures) with regex-based detection, structured output per issue, and a fix prioritization scheme that prevents wasted effort on cascading failures.
+
+### Changed
+
+- **`stride-claiming-tasks`** — Added step 4 "Check task completeness" with enrichment check. Tasks with missing key_files, testing_strategy, verification_steps, acceptance_criteria, or patterns_to_follow now invoke stride-enriching-tasks before the before_doing hook. Updated flowchart and quick reference card.
+- **`stride-completing-tasks`** — Added "Diagnostician-Assisted Debugging" section to hook failure handling. Both after_doing and before_review failure paths now dispatch stride:hook-diagnostician as the first step (Claude Code only) with fallback to manual debugging. Updated flowchart with diagnostician branches.
+- **`stride-subagent-workflow`** — Added Phase 0: Decomposition before existing phases. Updated decision matrix with decomposer dispatch criteria (goal type, large complexity without children, 25+ hour estimate). Updated flowchart and quick reference card with decomposer agent.
+- **`plugin.json`** — Version bumped from 1.1.0 to 1.2.0.
+
 ## [1.1.0] - 2026-03-11
 
 ### Added

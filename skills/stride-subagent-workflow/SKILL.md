@@ -10,7 +10,7 @@ skills_version: 1.0
 
 **Coding without context = wrong approach and rework. Exploring and planning first = confident, first-pass quality.**
 
-This skill orchestrates subagents at three points in the Stride workflow: exploration after claiming, planning for complex tasks, and code review before completion hooks. It tells you WHEN to dispatch each subagent — the agents themselves handle the HOW.
+This skill orchestrates subagents at four points in the Stride workflow: decomposition for goals, exploration after claiming, planning for complex tasks, and code review before completion hooks. It tells you WHEN to dispatch each subagent — the agents themselves handle the HOW.
 
 ## Claude Code Only
 
@@ -41,15 +41,53 @@ Invoke this skill **after claiming a task** (via `stride-claiming-tasks`) and **
 
 Use this matrix to determine which subagents to dispatch based on task attributes:
 
-| Task Attributes | stride:task-explorer | Plan Agent | stride:task-reviewer |
-|---|---|---|---|
-| small, 0-1 key_files | Skip | Skip | Skip |
-| small, 2+ key_files | Run | Skip | Run |
-| medium (any) | Run | Run | Run |
-| large (any) | Run | Run | Run |
-| Defect type | Run | Skip (unless large) | Run |
+| Task Attributes | stride:task-decomposer | stride:task-explorer | Plan Agent | stride:task-reviewer |
+|---|---|---|---|---|
+| small, 0-1 key_files | Skip | Skip | Skip | Skip |
+| small, 2+ key_files | Skip | Run | Skip | Run |
+| medium (any) | Skip | Run | Run | Run |
+| large (any) | Skip | Run | Run | Run |
+| Defect type | Skip | Run | Skip (unless large) | Run |
+| Goal type | Run | Skip* | Skip* | Skip* |
+| Large complexity, not yet decomposed | Run | Skip* | Skip* | Skip* |
+| 25+ hour estimate, not yet decomposed | Run | Skip* | Skip* | Skip* |
 
-**Quick rule:** If the task is small with 0-1 key_files, skip all subagents and code directly. Otherwise, at minimum run the explorer and reviewer.
+*After decomposition, each resulting child task follows its own row in this matrix when claimed individually.
+
+**Quick rules:**
+- If the task is a **goal** or has **large complexity without child tasks** or a **25+ hour estimate**: dispatch the decomposer first. The decomposer breaks it into claimable child tasks — you don't implement goals directly.
+- If the task is small with 0-1 key_files, skip all subagents and code directly.
+- Otherwise, at minimum run the explorer and reviewer.
+
+## Phase 0: Decomposition (Goals and Large Undecomposed Tasks)
+
+**When:** Task type is `goal`, OR task has `large` complexity with no child tasks, OR task has a 25+ hour estimate.
+
+**What to do:** Dispatch the `stride:task-decomposer` agent, passing the goal/task metadata.
+
+Provide the agent with:
+- The task's `title` and `description`
+- The task's `acceptance_criteria`
+- The task's `key_files` array (if any)
+- The task's `where_context` text
+- The task's `patterns_to_follow` text
+- The project's technology stack context
+
+The decomposer will return an ordered list of child tasks with:
+- Titles and descriptions for each task
+- Dependency ordering between tasks
+- Complexity estimates per task
+- Key files and testing strategies per task
+
+**After decomposition:**
+1. Use `POST /api/tasks` or `POST /api/tasks/batch` to create the child tasks under the goal
+2. Do NOT implement the goal directly — claim and implement the child tasks individually
+3. Each child task follows its own row in the Decision Matrix when claimed
+
+**Skip decomposition when:**
+- Task type is `work` or `defect` (already at implementation level)
+- Goal already has child tasks (already decomposed)
+- Task complexity is `small` or `medium` without a 25+ hour estimate
 
 ## Phase 1: Exploration (After Claim, Before Coding)
 
@@ -107,42 +145,52 @@ The reviewer will return either "Approved" or a list of issues categorized as Cr
 Task Claimed
     |
     v
-Check decision matrix
+Is it a goal OR large+undecomposed OR 25+ hours?
     |
-    +--> Small, 0-1 key_files? --> Skip all subagents --> Begin implementation
+    +--> YES --> Dispatch stride:task-decomposer
+    |               |
+    |               v
+    |           Create child tasks via API
+    |               |
+    |               v
+    |           Claim first child task --> (re-enter this flowchart)
     |
-    +--> Medium/Large OR 2+ key_files?
-            |
-            v
-        Dispatch stride:task-explorer
-            |
-            v
-        Medium/Large OR 3+ key_files OR 3+ criteria?
-            |
-            +--> YES --> Dispatch Plan agent
-            |             |
-            |             v
-            +--> NO  --> Begin implementation (using explorer output)
-            |
-            v
-        Begin implementation (using explorer + plan output)
-            |
-            v
-        Implementation complete
-            |
-            v
-        Check decision matrix for reviewer
-            |
-            +--> Small, 0-1 key_files? --> Skip reviewer --> Run after_doing hook
-            |
-            +--> Otherwise --> Dispatch stride:task-reviewer
-                                |
-                                v
-                            Issues found?
-                                |
-                                +--> YES --> Fix issues --> Run after_doing hook
-                                |
-                                +--> NO  --> Run after_doing hook
+    +--> NO --> Check decision matrix
+                    |
+                    +--> Small, 0-1 key_files? --> Skip all subagents --> Begin implementation
+                    |
+                    +--> Medium/Large OR 2+ key_files?
+                            |
+                            v
+                        Dispatch stride:task-explorer
+                            |
+                            v
+                        Medium/Large OR 3+ key_files OR 3+ criteria?
+                            |
+                            +--> YES --> Dispatch Plan agent
+                            |             |
+                            |             v
+                            +--> NO  --> Begin implementation (using explorer output)
+                            |
+                            v
+                        Begin implementation (using explorer + plan output)
+                            |
+                            v
+                        Implementation complete
+                            |
+                            v
+                        Check decision matrix for reviewer
+                            |
+                            +--> Small, 0-1 key_files? --> Skip reviewer --> Run after_doing hook
+                            |
+                            +--> Otherwise --> Dispatch stride:task-reviewer
+                                                |
+                                                v
+                                            Issues found?
+                                                |
+                                                +--> YES --> Fix issues --> Run after_doing hook
+                                                |
+                                                +--> NO  --> Run after_doing hook
 ```
 
 ## Red Flags - STOP
@@ -170,7 +218,11 @@ Check decision matrix
 
 ```
 SUBAGENT WORKFLOW:
-├─ 1. Task claimed successfully
+├─ 0. Task claimed successfully
+├─ 1. Is it a goal OR large+undecomposed OR 25+ hours?
+│     ├─ YES → Dispatch stride:task-decomposer
+│     ├─ Create child tasks via API
+│     └─ Claim first child task (re-enter workflow)
 ├─ 2. Check decision matrix (complexity + key_files count)
 ├─ 3. If medium+ OR 2+ key_files:
 │     ├─ Dispatch stride:task-explorer with task metadata
@@ -185,15 +237,19 @@ SUBAGENT WORKFLOW:
 └─ 7. Proceed to after_doing hook (stride-completing-tasks)
 
 CUSTOM AGENTS:
-  stride:task-explorer  - Reads key_files, finds tests, searches patterns
-  stride:task-reviewer  - Reviews diff against acceptance criteria & pitfalls
+  stride:task-decomposer - Breaks goals into dependency-ordered child tasks
+  stride:task-explorer   - Reads key_files, finds tests, searches patterns
+  stride:task-reviewer   - Reviews diff against acceptance criteria & pitfalls
 
 BUILT-IN AGENTS:
-  Plan                  - Designs implementation approach from task metadata
+  Plan                   - Designs implementation approach from task metadata
 
-SKIP ALL SUBAGENTS WHEN:
+DISPATCH DECOMPOSER WHEN:
+  Task type is goal, OR large complexity without children, OR 25+ hour estimate
+
+SKIP ALL OTHER SUBAGENTS WHEN:
   Task is small complexity AND has 0-1 key_files
 ```
 
 ---
-**References:** This skill works with `stride-claiming-tasks` (invoke after claim) and `stride-completing-tasks` (code review before hooks). Agent definitions are in `stride/agents/task-explorer.md` and `stride/agents/task-reviewer.md`.
+**References:** This skill works with `stride-claiming-tasks` (invoke after claim) and `stride-completing-tasks` (code review before hooks). Agent definitions are in `stride/agents/task-decomposer.md`, `stride/agents/task-explorer.md`, and `stride/agents/task-reviewer.md`.

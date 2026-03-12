@@ -87,13 +87,27 @@ Read .stride.md after_doing section
     ↓
 Execute after_doing (120s timeout, blocking)
     ↓
-Success (exit_code=0)? ─NO→ Fix Issues → Retry after_doing
+Success (exit_code=0)?
+    ↓ NO
+    ├─ [Claude Code] Dispatch stride:hook-diagnostician
+    │     ↓
+    │   Follow prioritized fix plan
+    ├─ [Other] Debug manually
+    │     ↓
+    └─→ Fix issues → Retry after_doing (loop back)
     ↓ YES
 Read .stride.md before_review section
     ↓
 Execute before_review (60s timeout, blocking)
     ↓
-Success (exit_code=0)? ─NO→ Fix Issues → Retry before_review
+Success (exit_code=0)?
+    ↓ NO
+    ├─ [Claude Code] Dispatch stride:hook-diagnostician
+    │     ↓
+    │   Follow prioritized fix plan
+    ├─ [Other] Debug manually
+    │     ↓
+    └─→ Fix issues → Retry before_review (loop back)
     ↓ YES
 Call PATCH /api/tasks/:id/complete WITH both hook results
     ↓
@@ -148,13 +162,30 @@ DURATION=$((END_TIME - START_TIME))
 
 ## When Hooks Fail
 
+### Diagnostician-Assisted Debugging (Claude Code Only)
+
+When a blocking hook fails, dispatch the `stride:hook-diagnostician` agent **as the first step** before attempting manual fixes. The diagnostician parses the raw output, categorizes issues by severity, and returns a prioritized fix plan — saving time on complex multi-tool failures.
+
+**When to dispatch:** Any blocking hook failure (after_doing or before_review) where exit_code is non-zero.
+
+**What to provide the diagnostician:**
+- `hook_name`: The hook that failed (e.g., `"after_doing"` or `"before_review"`)
+- `exit_code`: The non-zero exit code
+- `output`: The full stdout/stderr output from the hook
+- `duration_ms`: How long the hook ran before failing
+
+**What you get back:** A structured analysis with issues ordered by fix priority (compilation errors → git failures → test failures → security warnings → credo → formatting). Follow the diagnostician's fix order — fixing higher-priority issues often resolves lower-priority ones automatically.
+
+**Fallback for non-Claude Code environments:** If you don't have access to the Agent tool (Cursor, Windsurf, Continue, etc.), skip the diagnostician and proceed directly to manual debugging using the steps below.
+
 ### If after_doing fails:
 
 1. **DO NOT** call complete endpoint
-2. Read test/build failures carefully
-3. Fix the failing tests or build issues
-4. Re-run after_doing hook to verify fix
-5. Only call complete endpoint after success
+2. **[Claude Code Only]** Dispatch `stride:hook-diagnostician` with the hook name, exit code, output, and duration
+3. Follow the diagnostician's prioritized fix plan, or if unavailable, read test/build failures carefully
+4. Fix the failing tests or build issues
+5. Re-run after_doing hook to verify fix
+6. Only call complete endpoint after success
 
 **Common after_doing failures:**
 - Test failures → Fix tests first
@@ -166,9 +197,10 @@ DURATION=$((END_TIME - START_TIME))
 ### If before_review fails:
 
 1. **DO NOT** call complete endpoint
-2. Fix the issue (usually: PR creation, doc generation)
-3. Re-run before_review hook to verify
-4. Only proceed after success
+2. **[Claude Code Only]** Dispatch `stride:hook-diagnostician` with the hook name, exit code, output, and duration
+3. Follow the diagnostician's fix plan, or if unavailable, fix the issue manually
+4. Re-run before_review hook to verify
+5. Only proceed after success
 
 **Common before_review failures:**
 - PR already exists → Check if you need to update existing PR
@@ -426,4 +458,4 @@ The API response may include a `skills_update_required` field when your skills a
 2. Retry your original action
 
 ---
-**References:** For the full field reference, see `api_schema` in the onboarding response (`GET /api/agent/onboarding`). For endpoint details, see the [API Reference](https://raw.githubusercontent.com/cheezy/kanban/refs/heads/main/docs/api/README.md).
+**References:** For the full field reference, see `api_schema` in the onboarding response (`GET /api/agent/onboarding`). For endpoint details, see the [API Reference](https://raw.githubusercontent.com/cheezy/kanban/refs/heads/main/docs/api/README.md). For hook failure diagnosis, see `stride/agents/hook-diagnostician.md`.

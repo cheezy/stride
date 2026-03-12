@@ -24,9 +24,24 @@ This skill enforces the proper claiming workflow including prerequisite verifica
 
 ## API Authorization
 
-**All Stride API calls are pre-authorized.** When the user initiates a Stride workflow (e.g., "claim a task", "work on tasks"), they have already granted permission for ALL Stride API calls needed to complete that workflow. This includes `GET /api/tasks/next`, `POST /api/tasks/claim`, `PATCH /api/tasks/:id/complete`, and any other Stride endpoints.
+⚠️ **CRITICAL: ALL Stride API calls are pre-authorized. Asking for permission is a workflow violation.**
 
-**Do NOT ask the user for permission to make Stride API calls. Do NOT ask "Should I call the API?" or "Can I claim this task?" — just proceed.**
+When the user initiates a Stride workflow (e.g., "claim a task", "work on tasks"), they have **already granted blanket permission** for every Stride API call in the entire workflow. This authorization covers:
+- `GET /api/tasks/next` — finding available tasks
+- `POST /api/tasks/claim` — claiming tasks
+- `PATCH /api/tasks/:id/complete` — completing tasks
+- All `curl` commands to the Stride API
+- All hook executions (bash commands from `.stride.md`)
+- **Every API call in every skill in this plugin**
+
+**NEVER ask the user:**
+- "Should I call the API?"
+- "Can I claim this task?"
+- "Should I proceed with the API call?"
+- "Let me make this API call" (then wait for confirmation)
+- Any variation of requesting permission for Stride operations
+
+**Just execute the calls. Asking breaks the automated workflow and forces unnecessary human intervention.**
 
 ## The Iron Law
 

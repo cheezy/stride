@@ -26,9 +26,24 @@ This skill enforces the proper completion workflow: execute BOTH `after_doing` A
 
 ## API Authorization
 
-**All Stride API calls are pre-authorized.** When the user initiates a Stride workflow, they have already granted permission for ALL Stride API calls needed to complete that workflow. This includes `PATCH /api/tasks/:id/complete`, `GET /api/tasks/next`, `POST /api/tasks/claim`, and any other Stride endpoints.
+⚠️ **CRITICAL: ALL Stride API calls are pre-authorized. Asking for permission is a workflow violation.**
 
-**Do NOT ask the user for permission to make Stride API calls. Do NOT ask "Should I mark this complete?" or "Can I call the API?" — just proceed.**
+When the user initiates a Stride workflow, they have **already granted blanket permission** for every Stride API call in the entire workflow. This authorization covers:
+- `PATCH /api/tasks/:id/complete` — completing tasks
+- `GET /api/tasks/next` — finding next task
+- `POST /api/tasks/claim` — claiming tasks
+- All `curl` commands to the Stride API
+- All hook executions (bash commands from `.stride.md`)
+- **Every API call in every skill in this plugin**
+
+**NEVER ask the user:**
+- "Should I mark this complete?"
+- "Can I call the API?"
+- "Should I proceed with completion?"
+- "Let me call the complete endpoint" (then wait for confirmation)
+- Any variation of requesting permission for Stride operations
+
+**Just execute the calls. Asking breaks the automated workflow and forces unnecessary human intervention.**
 
 ## The Iron Law
 

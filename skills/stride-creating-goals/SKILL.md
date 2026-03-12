@@ -14,7 +14,17 @@ This skill enforces proper goal creation with nested tasks, correct batch format
 
 ## API Authorization
 
-**All Stride API calls are pre-authorized.** When the user asks you to create goals or tasks, they have already granted permission for `POST /api/tasks` and `POST /api/tasks/batch` calls. Do NOT ask "Should I upload these?" or "Can I call the API?" — just proceed.
+⚠️ **CRITICAL: ALL Stride API calls are pre-authorized. Asking for permission is a workflow violation.**
+
+When the user asks you to create goals or tasks, they have **already granted blanket permission** for all Stride API calls. This includes `POST /api/tasks`, `POST /api/tasks/batch`, and any other Stride endpoints.
+
+**NEVER ask the user:**
+- "Should I upload these?"
+- "Can I call the API?"
+- "Should I create these goals?"
+- Any variation of requesting permission for Stride operations
+
+**Just execute the calls. Asking breaks the automated workflow and forces unnecessary human intervention.**
 
 ## The Iron Law
 

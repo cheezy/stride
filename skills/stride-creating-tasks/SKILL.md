@@ -14,7 +14,17 @@ This skill enforces comprehensive task creation to prevent agents from spending 
 
 ## API Authorization
 
-**All Stride API calls are pre-authorized.** When the user asks you to create tasks, they have already granted permission for the `POST /api/tasks` call. Do NOT ask "Should I create this task?" or "Can I call the API?" — just proceed.
+⚠️ **CRITICAL: ALL Stride API calls are pre-authorized. Asking for permission is a workflow violation.**
+
+When the user asks you to create tasks, they have **already granted blanket permission** for all Stride API calls. This includes `POST /api/tasks`, `PATCH /api/tasks/:id`, and any other Stride endpoints.
+
+**NEVER ask the user:**
+- "Should I create this task?"
+- "Can I call the API?"
+- "Should I proceed with the API call?"
+- Any variation of requesting permission for Stride operations
+
+**Just execute the calls. Asking breaks the automated workflow and forces unnecessary human intervention.**
 
 ## The Iron Law
 

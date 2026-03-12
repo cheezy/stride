@@ -2,6 +2,19 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.2.1] - 2026-03-12
+
+### Changed
+
+- **`stride-claiming-tasks`** — Added "MANDATORY: Next Skill After Claiming" section that explicitly lists the 3 skills agents must invoke after claiming (stride-subagent-workflow, stride-development-guidelines, stride-completing-tasks). Prevents agents from skipping directly to completion.
+- **`stride-completing-tasks`** — Added mandatory preamble listing all 5 required completion API fields (completion_summary, actual_complexity, actual_files_changed, after_doing_result, before_review_result) with warning that skipping causes 3+ failed API calls. Added "MANDATORY: Previous Skill Before Completing" section referencing prerequisite skills.
+- **`stride-subagent-workflow`** — Added "MANDATORY: Skill Chain Position" section showing where this skill sits in the claim→subagent→guidelines→complete sequence.
+- **`plugin.json`** — Version bumped from 1.2.0 to 1.2.1.
+
+### Fixed
+
+- Agents skipping stride plugin skills and calling completion API from memory, resulting in repeated API rejections due to missing required fields and hook results. Skills now cross-reference each other in a mandatory chain.
+
 ## [1.2.0] - 2026-03-12
 
 ### Added

@@ -71,13 +71,14 @@ Before claiming any task, verify these files exist:
 1. **Verify prerequisites** - Check .stride_auth.md and .stride.md exist
 2. **Find available task** - Call `GET /api/tasks/next`
 3. **Review task details** - Read description, acceptance criteria, key files
-4. **Read .stride.md before_doing section** - Get the setup command
-5. **Execute before_doing hook AUTOMATICALLY** (blocking, 60s timeout)
+4. **Check task completeness** - If key_files is empty OR testing_strategy is missing OR verification_steps is empty, invoke stride-enriching-tasks to enrich the task before proceeding (see Enrichment Check below)
+5. **Read .stride.md before_doing section** - Get the setup command
+6. **Execute before_doing hook AUTOMATICALLY** (blocking, 60s timeout)
    - **DO NOT prompt the user for permission to run hooks - the user defined them in .stride.md, so they expect them to run automatically**
    - Capture: `exit_code`, `output`, `duration_ms`
-6. **If before_doing fails:** FIX ISSUES, do NOT proceed
-7. **Hook succeeded?** Call `POST /api/tasks/claim` WITH hook result
-8. **Task claimed?** BEGIN IMPLEMENTATION IMMEDIATELY
+7. **If before_doing fails:** FIX ISSUES, do NOT proceed
+8. **Hook succeeded?** Call `POST /api/tasks/claim` WITH hook result
+9. **Task claimed?** BEGIN IMPLEMENTATION IMMEDIATELY
 
 ## Claiming Workflow Flowchart
 
@@ -92,6 +93,12 @@ Call GET /api/tasks/next
     ↓
 Review task details
     ↓
+Task well-specified? ─NO→ Invoke stride-enriching-tasks
+(key_files, testing_strategy,       ↓
+ verification_steps present?)  Enrich task fields
+    ↓ YES                          ↓
+    ←──────────────────────────────←
+    ↓
 Read .stride.md before_doing section
     ↓
 Execute before_doing (60s timeout, blocking)
@@ -104,6 +111,31 @@ Task claimed successfully?
     ↓ YES
 BEGIN IMPLEMENTATION IMMEDIATELY
 ```
+
+## Enrichment Check (Optional)
+
+After reviewing task details, check if the task has sufficient specification for implementation. **Well-specified tasks skip this step entirely.**
+
+**Invoke stride-enriching-tasks if ANY of these are true:**
+- `key_files` is empty or missing
+- `testing_strategy` is missing
+- `verification_steps` is empty or missing
+- `acceptance_criteria` is missing or blank
+- `patterns_to_follow` is missing or blank
+
+**Skip enrichment if the task has:**
+- Populated `key_files` with file paths and notes
+- A `testing_strategy` with unit_tests and integration_tests
+- `verification_steps` with runnable commands
+- Clear `acceptance_criteria`
+
+**How to enrich:**
+1. Invoke the `stride-enriching-tasks` skill with the task's title and description
+2. The skill will explore the codebase and populate missing fields
+3. Use `PATCH /api/tasks/:id` to update the task with enriched fields
+4. Continue with the claiming process (before_doing hook)
+
+**Important:** Enrichment happens BEFORE the before_doing hook, not after. The enriched fields help the agent understand the task scope before starting work.
 
 ## Hook Execution Pattern
 
@@ -274,12 +306,13 @@ POST /api/tasks/claim
 1. **Verify prerequisites** - Ensure auth and hooks files exist
 2. **Get next task** - Call GET /api/tasks/next
 3. **Review task** - Read all task details thoroughly
-4. **Execute before_doing hook** - Run setup with timeout
-5. **Check exit code** - Must be 0
-6. **If failed:** Fix issues, re-run, do NOT proceed
-7. **Call claim endpoint** - Include before_doing_result
-8. **Begin implementation** - Start coding immediately
-9. **Work until complete** - Use stride-completing-tasks when done
+4. **Check task completeness** - If key_files/testing_strategy/verification_steps missing, invoke stride-enriching-tasks
+5. **Execute before_doing hook** - Run setup with timeout
+6. **Check exit code** - Must be 0
+7. **If failed:** Fix issues, re-run, do NOT proceed
+8. **Call claim endpoint** - Include before_doing_result
+9. **Begin implementation** - Start coding immediately
+10. **Work until complete** - Use stride-completing-tasks when done
 
 ## Quick Reference Card
 
@@ -290,12 +323,13 @@ CLAIMING WORKFLOW:
 ├─ 3. Extract API token and URL ✓
 ├─ 4. Call GET /api/tasks/next ✓
 ├─ 5. Review task details ✓
-├─ 6. Read before_doing hook from .stride.md ✓
-├─ 7. Execute before_doing (60s timeout, blocking) ✓
-├─ 8. Capture exit_code, output, duration_ms ✓
-├─ 9. Hook succeeds? → Call POST /api/tasks/claim WITH result ✓
-├─ 10. Hook fails? → Fix issues, retry, never skip ✓
-└─ 11. Task claimed? → BEGIN IMPLEMENTATION IMMEDIATELY ✓
+├─ 6. Check completeness → if minimal, invoke stride-enriching-tasks ✓
+├─ 7. Read before_doing hook from .stride.md ✓
+├─ 8. Execute before_doing (60s timeout, blocking) ✓
+├─ 9. Capture exit_code, output, duration_ms ✓
+├─ 10. Hook succeeds? → Call POST /api/tasks/claim WITH result ✓
+├─ 11. Hook fails? → Fix issues, retry, never skip ✓
+└─ 12. Task claimed? → BEGIN IMPLEMENTATION IMMEDIATELY ✓
 
 API ENDPOINT: POST /api/tasks/claim
 REQUIRED BODY: {

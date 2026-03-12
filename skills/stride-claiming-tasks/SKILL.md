@@ -219,6 +219,16 @@ DURATION=$((END_TIME - START_TIME))
 
 **AUTOMATION: This is a fully automated workflow. The agent should claim → implement → complete without ANY user prompts between steps.**
 
+## MANDATORY: Next Skill After Claiming
+
+After claiming a task, you MUST invoke the next skill in sequence:
+
+1. **`stride-subagent-workflow`** (Claude Code only) — Check the decision matrix to determine if you need the explorer, planner, or reviewer. Invoke BEFORE implementation.
+2. **`stride-development-guidelines`** — Invoke BEFORE writing any code in lib/, test/, or assets/.
+3. **`stride-completing-tasks`** — Invoke WHEN implementation is done. Contains the exact API format for completion (required fields: `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result`).
+
+**FORBIDDEN:** Completing a task without invoking `stride-completing-tasks`. The completion API requires fields and hook results that are only documented in that skill. Attempting to call the API from memory will result in 3+ failed attempts.
+
 ## Subagent-Guided Implementation (Claude Code Only)
 
 If you have access to the Agent tool with Explore/Plan subagent types, invoke the `stride-subagent-workflow` skill before beginning implementation. This dispatches the `stride:task-explorer` agent to explore relevant code and optionally a Plan agent for complex tasks.

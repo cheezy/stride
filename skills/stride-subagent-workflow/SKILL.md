@@ -251,5 +251,16 @@ SKIP ALL OTHER SUBAGENTS WHEN:
   Task is small complexity AND has 0-1 key_files
 ```
 
+## MANDATORY: Skill Chain Position
+
+This skill sits between claiming and completing in the workflow:
+
+1. **`stride-claiming-tasks`** ← You should have invoked this BEFORE this skill
+2. **`stride-subagent-workflow`** ← YOU ARE HERE
+3. **`stride-development-guidelines`** ← Invoke NEXT, before writing code
+4. **`stride-completing-tasks`** ← Invoke WHEN implementation is done
+
+**FORBIDDEN:** Skipping from claiming directly to completing without checking the decision matrix here. Even for small tasks, you must check the matrix — it takes 5 seconds and prevents wrong decisions.
+
 ---
 **References:** This skill works with `stride-claiming-tasks` (invoke after claim) and `stride-completing-tasks` (code review before hooks). Agent definitions are in `stride/agents/task-decomposer.md`, `stride/agents/task-explorer.md`, and `stride/agents/task-reviewer.md`.

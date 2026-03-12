@@ -1,10 +1,23 @@
 ---
 name: stride-completing-tasks
-description: Use when you've finished work on a Stride task and need to mark it complete, before calling /api/tasks/:id/complete. Enforces proper hook execution order.
+description: MANDATORY before calling /api/tasks/:id/complete. Contains ALL required fields and hook formats. Skipping this skill causes 3+ API rejections. Invoke when you've finished work on a Stride task.
 skills_version: 1.0
 ---
 
 # Stride: Completing Tasks
+
+## ⚠️ THIS SKILL IS MANDATORY — NOT OPTIONAL ⚠️
+
+**If you are about to call `PATCH /api/tasks/:id/complete`, you MUST have invoked this skill first.**
+
+The completion API requires fields that are ONLY documented here:
+- `completion_summary` (required — not the same as `completion_notes`)
+- `actual_complexity` (required — enum: "small", "medium", "large")
+- `actual_files_changed` (required — comma-separated STRING, not array)
+- `after_doing_result` (required — object with `exit_code`, `output`, `duration_ms`)
+- `before_review_result` (required — object with `exit_code`, `output`, `duration_ms`)
+
+**Attempting to complete a task from memory without this skill results in 3+ failed API calls** as you discover each missing field one at a time. This has been observed in practice.
 
 ## Overview
 
@@ -471,6 +484,16 @@ The API response may include a `skills_update_required` field when your skills a
 **When you see `skills_update_required`:**
 1. Run `/plugin update stride` to get the latest skills
 2. Retry your original action
+
+## MANDATORY: Previous Skill Before Completing
+
+You should have already invoked these skills before reaching this point:
+
+1. **`stride-claiming-tasks`** — To claim the task with proper before_doing hook execution
+2. **`stride-subagent-workflow`** (Claude Code only) — To explore, plan, and review based on the decision matrix
+3. **`stride-development-guidelines`** — To pass GATE 1, 2, and 3 quality checks
+
+If you skipped any of these, the after_doing hook is likely to fail. Go back and verify.
 
 ---
 **References:** For the full field reference, see `api_schema` in the onboarding response (`GET /api/agent/onboarding`). For endpoint details, see the [API Reference](https://raw.githubusercontent.com/cheezy/kanban/refs/heads/main/docs/api/README.md). For hook failure diagnosis, see `stride/agents/hook-diagnostician.md`.

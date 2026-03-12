@@ -1,10 +1,23 @@
 ---
 name: stride-enriching-tasks
-description: Use when a human provides a minimal task (title only or title + brief description) and you need to enrich it into a complete Stride task specification before calling POST /api/tasks. Automates field discovery through codebase exploration.
+description: MANDATORY when a task has empty key_files, missing testing_strategy, or no verification_steps. Transforms minimal human-provided task specs into complete implementation-ready specifications through automated codebase exploration. Without enrichment, implementing agents waste 3+ hours on unfocused exploration that this skill does in 5 minutes.
 skills_version: 1.0
 ---
 
 # Stride: Enriching Tasks
+
+## ⚠️ THIS SKILL IS MANDATORY FOR SPARSE TASKS — NOT OPTIONAL ⚠️
+
+**If you are about to create or claim a task and it has empty `key_files`, missing `testing_strategy`, or no `verification_steps`, you MUST invoke this skill first.**
+
+This skill transforms minimal specifications into complete ones by:
+- Exploring the codebase to discover `key_files` (5-10 minutes)
+- Reading existing tests to build `testing_strategy`
+- Generating `verification_steps` from discovered patterns
+- Identifying `pitfalls` from code analysis
+- Writing `acceptance_criteria` from intent analysis
+
+**Without enrichment, the implementing agent spends 3+ hours doing this same exploration** in an unfocused way, often missing critical context.
 
 ## Overview
 

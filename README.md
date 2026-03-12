@@ -16,31 +16,69 @@ Then install the Stride plugin:
 /plugin install stride@stride-marketplace
 ```
 
+## Mandatory Skill Chain
+
+Every Stride skill is **MANDATORY** — not optional. Each skill contains required API fields, hook execution patterns, and validation rules that are ONLY documented in that skill. Attempting to call Stride API endpoints without invoking the corresponding skill first results in API rejections, malformed data, or hours of wasted rework.
+
+### Workflow Order
+
+When working on tasks, skills MUST be invoked in this order:
+
+```
+stride:stride-claiming-tasks          ← BEFORE calling GET /api/tasks/next or POST /api/tasks/claim
+    ↓
+stride:stride-subagent-workflow       ← AFTER claim succeeds, BEFORE implementation (Claude Code only)
+    ↓
+[implementation]
+    ↓
+stride:stride-completing-tasks        ← BEFORE calling PATCH /api/tasks/:id/complete
+```
+
+When creating tasks or goals:
+
+```
+stride:stride-enriching-tasks         ← WHEN task has empty key_files/testing_strategy/verification_steps
+    ↓
+stride:stride-creating-tasks          ← BEFORE calling POST /api/tasks (work tasks or defects)
+stride:stride-creating-goals          ← BEFORE calling POST /api/tasks/batch (goals with nested tasks)
+```
+
+### Why This Matters
+
+| Without skill | What happens |
+|---------------|-------------|
+| Claim without `stride-claiming-tasks` | API rejects — missing `before_doing_result` |
+| Complete without `stride-completing-tasks` | 3+ failed API calls — missing `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result` |
+| Create task without `stride-creating-tasks` | Malformed `verification_steps`, `key_files`, `testing_strategy` — causes 3+ hours wasted during implementation |
+| Create goal without `stride-creating-goals` | 422 error — wrong root key (`"tasks"` instead of `"goals"`) |
+| Skip `stride-subagent-workflow` | No codebase exploration, no code review — wrong approach, missed acceptance criteria |
+| Skip `stride-enriching-tasks` | Sparse task specs → implementing agent wastes 3+ hours on unfocused exploration |
+
 ## Skills
 
 ### stride-claiming-tasks
 
-Enforces the proper task claiming workflow including prerequisite verification, before_doing hook execution, and immediate transition to active work. Prevents merge conflicts and outdated code by ensuring setup runs before any task is claimed.
+**MANDATORY** before any task claiming or discovery API call. Enforces proper before_doing hook execution, prerequisite verification, and immediate transition to active work. Contains the claim request format including `before_doing_result`.
 
 ### stride-completing-tasks
 
-Manages the task completion workflow with after_doing hook execution (tests, linting, formatting), completion API calls, and review lifecycle management. Ensures validation passes before marking work as done.
+**MANDATORY** before any task completion API call. Contains ALL 5 required completion fields and both hook execution patterns (after_doing + before_review). Skipping causes 3+ failed API calls as missing fields are discovered one at a time.
 
 ### stride-creating-tasks
 
-Comprehensive task specification enforcement for creating individual work tasks and defects. Prevents underspecified tasks that lead to failed implementations by requiring detailed context, acceptance criteria, key files, and verification steps.
+**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings).
 
 ### stride-creating-goals
 
-Goal and batch creation with dependency management. Handles creating large initiatives with multiple nested tasks, proper dependency ordering, and cross-goal coordination.
+**MANDATORY** before batch creation or goal creation. Contains the only correct batch format — root key must be `"goals"` not `"tasks"`. Most common API error when skipped.
 
 ### stride-enriching-tasks
 
-Transforms minimal task specifications into full implementation-ready specs. Explores the codebase in 4 phases to populate key_files, testing_strategy, verification_steps, acceptance_criteria, patterns_to_follow, and other fields. Handles defect tasks, title-only tasks, and ambiguous contexts.
+**MANDATORY** when a task has sparse specification. Transforms minimal human-provided specs into complete implementation-ready tasks through automated codebase exploration. 5 minutes of enrichment saves 3+ hours of unfocused implementation.
 
 ### stride-subagent-workflow
 
-Orchestrates specialized subagents at four points in the task lifecycle: goal decomposition, codebase exploration after claiming, implementation planning for complex tasks, and code review before completion hooks. Uses a decision matrix based on task complexity and key_files count to determine which subagents to dispatch — zero overhead for simple tasks, full coverage for complex ones. Claude Code only.
+**MANDATORY** after claiming any task (Claude Code only). Contains the decision matrix for dispatching task-explorer, task-reviewer, task-decomposer, and hook-diagnostician agents. Determines exploration and review strategy based on task complexity and key_files count.
 
 ## Agents
 

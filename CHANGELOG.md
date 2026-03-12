@@ -6,14 +6,19 @@ All notable changes to the Stride plugin will be documented in this file.
 
 ### Changed
 
-- **`stride-claiming-tasks`** — Added "MANDATORY: Next Skill After Claiming" section that explicitly lists the 3 skills agents must invoke after claiming (stride-subagent-workflow, stride-development-guidelines, stride-completing-tasks). Prevents agents from skipping directly to completion.
-- **`stride-completing-tasks`** — Added mandatory preamble listing all 5 required completion API fields (completion_summary, actual_complexity, actual_files_changed, after_doing_result, before_review_result) with warning that skipping causes 3+ failed API calls. Added "MANDATORY: Previous Skill Before Completing" section referencing prerequisite skills.
-- **`stride-subagent-workflow`** — Added "MANDATORY: Skill Chain Position" section showing where this skill sits in the claim→subagent→guidelines→complete sequence.
-- **`plugin.json`** — Version bumped from 1.2.0 to 1.2.1.
+- **ALL 6 skills** — Changed frontmatter descriptions from soft "Use when..." language to "MANDATORY before calling [endpoint]..." language with specific API endpoints and failure consequences. These descriptions appear in the available skills list and are the primary lever for compelling invocation.
+- **`stride-claiming-tasks`** — Added mandatory preamble section (matching completing-tasks pattern) listing required `before_doing_result` fields and the mandatory skill chain to invoke after claiming. Updated "MANDATORY: Next Skill After Claiming" to reference only plugin skills.
+- **`stride-completing-tasks`** — Added mandatory preamble listing all 5 required completion API fields (completion_summary, actual_complexity, actual_files_changed, after_doing_result, before_review_result) with warning that skipping causes 3+ failed API calls. Updated "MANDATORY: Previous Skill Before Completing" to reference only plugin skills.
+- **`stride-creating-tasks`** — Added mandatory preamble listing all field format requirements (verification_steps objects, key_files objects, testing_strategy arrays, type enum).
+- **`stride-creating-goals`** — Added mandatory preamble documenting the critical batch format requirement (root key "goals" not "tasks") and dependency patterns.
+- **`stride-subagent-workflow`** — Added mandatory preamble listing all 4 agents that can be dispatched and what skipping means (no exploration, no review, no decomposition). Updated skill chain position to reference only plugin skills.
+- **`stride-enriching-tasks`** — Added mandatory preamble with trigger conditions (empty key_files, missing testing_strategy, no verification_steps) and enrichment capabilities.
+- **`README.md`** — Added "Mandatory Skill Chain" section with workflow order diagram, "Why This Matters" failure table, and updated all skill descriptions to lead with "MANDATORY".
 
 ### Fixed
 
-- Agents skipping stride plugin skills and calling completion API from memory, resulting in repeated API rejections due to missing required fields and hook results. Skills now cross-reference each other in a mandatory chain.
+- Agents skipping stride plugin skills and calling completion API from memory, resulting in repeated API rejections due to missing required fields and hook results. Root cause: 4 of 6 skill descriptions used soft "Use when..." language that agents interpreted as optional. All descriptions now use "MANDATORY before calling [endpoint]" pattern with failure consequences.
+- Cross-skill references included project-specific skills (`stride-development-guidelines`) that don't ship with the plugin. Removed all references to non-plugin skills from the skill chain.
 
 ## [1.2.0] - 2026-03-12
 

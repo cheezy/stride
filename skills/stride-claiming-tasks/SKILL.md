@@ -1,10 +1,27 @@
 ---
 name: stride-claiming-tasks
-description: Use when you want to claim a task from Stride, before making any API calls to /api/tasks/claim. After successful claiming, immediately begin implementation.
+description: MANDATORY before calling GET /api/tasks/next or POST /api/tasks/claim. Contains required before_doing hook execution pattern and claim request format. The claim endpoint REQUIRES before_doing_result which is ONLY documented here — skipping causes API rejection. Invoke for ANY task claiming or discovery operation.
 skills_version: 1.0
 ---
 
 # Stride: Claiming Tasks
+
+## ⚠️ THIS SKILL IS MANDATORY — NOT OPTIONAL ⚠️
+
+**If you are about to call `GET /api/tasks/next` or `POST /api/tasks/claim`, you MUST have invoked this skill first.**
+
+The claim API requires fields that are ONLY documented here:
+- `before_doing_result` (required — object with `exit_code`, `output`, `duration_ms`)
+- Hook command sourced from `.stride.md` `## before_doing` section
+- Environment variables set from task metadata
+
+**Attempting to claim a task without this skill results in API rejection** because the required hook result is missing.
+
+**After claiming, you MUST invoke these skills in order:**
+1. `stride:stride-subagent-workflow` — Dispatch exploration/planning agents (Claude Code only)
+2. `stride:stride-completing-tasks` — Hook execution and completion API format
+
+**Skipping ANY skill in this chain has been observed to cause task failures, missed acceptance criteria, and 3+ hours of rework.**
 
 ## Overview
 
@@ -223,11 +240,10 @@ DURATION=$((END_TIME - START_TIME))
 
 After claiming a task, you MUST invoke the next skill in sequence:
 
-1. **`stride-subagent-workflow`** (Claude Code only) — Check the decision matrix to determine if you need the explorer, planner, or reviewer. Invoke BEFORE implementation.
-2. **`stride-development-guidelines`** — Invoke BEFORE writing any code in lib/, test/, or assets/.
-3. **`stride-completing-tasks`** — Invoke WHEN implementation is done. Contains the exact API format for completion (required fields: `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result`).
+1. **`stride:stride-subagent-workflow`** (Claude Code only) — Check the decision matrix to determine if you need the explorer, planner, or reviewer. Invoke BEFORE implementation.
+2. **`stride:stride-completing-tasks`** — Invoke WHEN implementation is done. Contains the exact API format for completion (required fields: `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result`).
 
-**FORBIDDEN:** Completing a task without invoking `stride-completing-tasks`. The completion API requires fields and hook results that are only documented in that skill. Attempting to call the API from memory will result in 3+ failed attempts.
+**FORBIDDEN:** Completing a task without invoking `stride:stride-completing-tasks`. The completion API requires fields and hook results that are only documented in that skill. Attempting to call the API from memory will result in 3+ failed attempts.
 
 ## Subagent-Guided Implementation (Claude Code Only)
 

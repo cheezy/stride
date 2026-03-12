@@ -1,10 +1,27 @@
 ---
 name: stride-subagent-workflow
-description: Use after claiming a Stride task (Claude Code only) to orchestrate subagents for codebase exploration, implementation planning, and pre-completion code review. Invoke before beginning implementation.
+description: MANDATORY after claiming any Stride task (Claude Code only). Contains the decision matrix for dispatching stride:task-explorer, stride:task-reviewer, stride:task-decomposer, and stride:hook-diagnostician agents. Skipping means no codebase exploration before implementation and no code review before completion — causing wrong approaches and missed acceptance criteria. Invoke IMMEDIATELY after claim succeeds, BEFORE writing any code.
 skills_version: 1.0
 ---
 
 # Stride: Subagent Workflow
+
+## ⚠️ THIS SKILL IS MANDATORY AFTER CLAIMING — NOT OPTIONAL ⚠️
+
+**If you just claimed a Stride task and are about to start implementation, you MUST invoke this skill first.**
+
+This skill contains the decision matrix that determines which agents to dispatch:
+- `stride:task-explorer` — Read key_files and discover patterns before coding
+- `stride:task-reviewer` — Review your changes against acceptance criteria before completion
+- `stride:task-decomposer` — Break goals into properly-sized subtasks
+- `stride:hook-diagnostician` — Diagnose hook failures with prioritized fix plans
+
+**Skipping this skill means:**
+- No codebase exploration before implementation (wrong approach, 2+ hours wasted)
+- No code review before completion hooks (acceptance criteria violations missed)
+- No goal decomposition (goals attempted as monolithic work)
+
+**Skill chain position:** `stride:stride-claiming-tasks` → **THIS SKILL** → implementation → `stride:stride-completing-tasks`
 
 ## Overview
 
@@ -255,10 +272,9 @@ SKIP ALL OTHER SUBAGENTS WHEN:
 
 This skill sits between claiming and completing in the workflow:
 
-1. **`stride-claiming-tasks`** ← You should have invoked this BEFORE this skill
-2. **`stride-subagent-workflow`** ← YOU ARE HERE
-3. **`stride-development-guidelines`** ← Invoke NEXT, before writing code
-4. **`stride-completing-tasks`** ← Invoke WHEN implementation is done
+1. **`stride:stride-claiming-tasks`** ← You should have invoked this BEFORE this skill
+2. **`stride:stride-subagent-workflow`** ← YOU ARE HERE
+3. **`stride:stride-completing-tasks`** ← Invoke WHEN implementation is done
 
 **FORBIDDEN:** Skipping from claiming directly to completing without checking the decision matrix here. Even for small tasks, you must check the matrix — it takes 5 seconds and prevents wrong decisions.
 

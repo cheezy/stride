@@ -1,10 +1,22 @@
 ---
 name: stride-creating-tasks
-description: Use when creating a new Stride task or defect, before calling POST /api/tasks. Prevents 3+ hour exploration failures from minimal task specifications.
+description: MANDATORY before calling POST /api/tasks to create a work task or defect. Contains ALL required field formats — verification_steps MUST be objects (not strings), key_files MUST be objects (not strings), testing_strategy arrays MUST be arrays (not strings). Skipping causes malformed tasks and 3+ hour implementation failures.
 skills_version: 1.0
 ---
 
 # Stride: Creating Tasks
+
+## ⚠️ THIS SKILL IS MANDATORY — NOT OPTIONAL ⚠️
+
+**If you are about to call `POST /api/tasks` to create a work task or defect, you MUST have invoked this skill first.**
+
+The task API requires specific field formats that are ONLY documented here:
+- `verification_steps` (MUST be array of objects with `step_type`, `step_text`, `expected_result`, `position` — NOT strings)
+- `key_files` (MUST be array of objects with `file_path`, `note`, `position` — NOT strings)
+- `testing_strategy` (MUST have `unit_tests`, `integration_tests`, `manual_tests` as arrays of strings)
+- `type` (MUST be exactly `"work"`, `"defect"`, or `"goal"` — no other values)
+
+**Attempting to create a task from memory results in malformed fields** that cause either API 422 errors or tasks that waste 3+ hours during implementation.
 
 ## Overview
 

@@ -489,9 +489,8 @@ The API response may include a `skills_update_required` field when your skills a
 
 You should have already invoked these skills before reaching this point:
 
-1. **`stride-claiming-tasks`** — To claim the task with proper before_doing hook execution
-2. **`stride-subagent-workflow`** (Claude Code only) — To explore, plan, and review based on the decision matrix
-3. **`stride-development-guidelines`** — To pass GATE 1, 2, and 3 quality checks
+1. **`stride:stride-claiming-tasks`** — To claim the task with proper before_doing hook execution
+2. **`stride:stride-subagent-workflow`** (Claude Code only) — To explore, plan, and review based on the decision matrix
 
 If you skipped any of these, the after_doing hook is likely to fail. Go back and verify.
 

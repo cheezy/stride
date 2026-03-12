@@ -1,10 +1,23 @@
 ---
 name: stride-creating-goals
-description: Use when creating a Stride goal with nested tasks or using batch creation, before calling POST /api/tasks or POST /api/tasks/batch. Ensures proper structure and dependencies.
+description: MANDATORY before calling POST /api/tasks/batch or creating goals with POST /api/tasks. Contains the ONLY correct batch format — the root key MUST be "goals" not "tasks" (most common mistake, causes 422 error). Skipping causes API rejections and malformed dependency chains.
 skills_version: 1.0
 ---
 
 # Stride: Creating Goals
+
+## ⚠️ THIS SKILL IS MANDATORY — NOT OPTIONAL ⚠️
+
+**If you are about to call `POST /api/tasks/batch` or create a goal with `POST /api/tasks`, you MUST have invoked this skill first.**
+
+The batch API has a critical format requirement ONLY documented here:
+- Root key MUST be `"goals"` — NOT `"tasks"` (most common mistake, causes 422 error)
+- Dependencies within goals use array indices `[0, 1, 2]`
+- Dependencies across goals use identifiers `["W47", "W48"]`
+- Nested tasks MUST follow full `stride:stride-creating-tasks` specification
+- NEVER specify identifiers — they are auto-generated
+
+**Attempting to create goals from memory results in 422 errors** from the wrong root key in 80%+ of cases.
 
 ## Overview
 

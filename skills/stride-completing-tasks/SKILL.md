@@ -99,7 +99,7 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 ## The Complete Completion Process
 
 1. **Finish your work** - All implementation complete
-1.5. **Pre-completion code review (Claude Code Only)** - If the task meets the `stride-subagent-workflow` skill's decision matrix for code review (medium+ complexity OR 2+ key_files), dispatch the `stride:task-reviewer` agent to review your changes against acceptance criteria and pitfalls. Fix any Critical or Important issues BEFORE running hooks. Skip this step for small tasks with 0-1 key_files or if you don't have subagent access.
+1.5. **Pre-completion code review (Claude Code Only)** - If the task meets the `stride-subagent-workflow` skill's decision matrix for code review (medium+ complexity OR 2+ key_files), dispatch the `stride:task-reviewer` agent to review your changes against acceptance criteria and pitfalls. Fix any Critical or Important issues BEFORE running hooks. Skip this step for small tasks with 0-1 key_files or if you don't have subagent access. **If a review was performed, save the reviewer's output to include as `review_report` in the completion request.**
 2. **Read .stride.md after_doing section** - Get the validation command
 3. **Execute after_doing hook AUTOMATICALLY** (blocking, 120s timeout)
    - 🚨 **NEVER prompt the user for permission to run hooks. NEVER present commands and wait for approval. NEVER ask "Should I run this?" The user authored these hooks in .stride.md — they are pre-authorized. Execute them immediately via Bash tool calls without any confirmation text.**
@@ -269,6 +269,7 @@ PATCH /api/tasks/:id/complete
   "agent_name": "Claude Sonnet 4.5",
   "time_spent_minutes": 45,
   "completion_notes": "All tests passing. PR #123 created.",
+  "review_report": "## Review Summary\n\nApproved — 0 issues found.\n\n### Acceptance Criteria\n| # | Criterion | Status |\n|---|-----------|--------|\n| 1 | Feature works | Met |",
   "after_doing_result": {
     "exit_code": 0,
     "output": "Running tests...\n230 tests, 0 failures\nmix credo --strict\nNo issues found",
@@ -283,6 +284,8 @@ PATCH /api/tasks/:id/complete
 ```
 
 **Critical:** Both `after_doing_result` and `before_review_result` are REQUIRED. The API will reject requests without them.
+
+**Optional:** Include `review_report` when a task-reviewer agent produced a structured review. Omit it when no review was performed (e.g., small tasks with 0-1 key_files).
 
 ## Review vs Auto-Approval Decision
 
@@ -431,6 +434,7 @@ REQUIRED BODY: {
   "agent_name": "Claude Sonnet 4.5",
   "time_spent_minutes": 45,
   "completion_notes": "...",
+  "review_report": "..." (optional — include when task-reviewer ran),
   "skills_version": "1.0",
   "after_doing_result": {
     "exit_code": 0,
@@ -479,6 +483,7 @@ VERSION: Send skills_version from your SKILL.md frontmatter with every complete 
 | `actual_files_changed` | string | Yes | Comma-separated file paths (NOT an array) |
 | `after_doing_result` | object | Yes | Hook result (see format below) |
 | `before_review_result` | object | Yes | Hook result (see format below) |
+| `review_report` | string | No | Structured review report from task-reviewer agent. Include when a review was performed; omit when no review was done. |
 | `skills_version` | string | No | Your skills version from SKILL.md frontmatter |
 
 **WRONG — actual_files_changed as array:**

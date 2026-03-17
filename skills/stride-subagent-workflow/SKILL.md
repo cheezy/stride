@@ -150,6 +150,8 @@ The Plan agent will return an ordered implementation plan. Follow this plan duri
 
 The reviewer will return either "Approved" or a list of issues categorized as Critical, Important, or Minor.
 
+**Capture the reviewer's output as `review_report`:** Save the full structured review output returned by the task-reviewer agent. You will include this as the `review_report` field in the completion API call (via `stride-completing-tasks`). Capture it regardless of whether the review found issues — an "Approved" report is still valuable for traceability. When the reviewer is skipped (small tasks with 0-1 key_files), simply omit `review_report` from the completion call.
+
 **If issues are found:**
 - Fix all Critical issues before proceeding
 - Fix Important issues before proceeding

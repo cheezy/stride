@@ -49,6 +49,8 @@ When reviewing code changes for a Stride task, you will:
    - For each issue, include: severity, category (which check found it), file:line reference, description, and suggested fix
    - End with a list of acceptance criteria and their status (Met/Partially Met/Not Met)
 
+**Output persistence:** Your structured review output will be stored as the `review_report` field on the Stride task record when the agent calls the completion API. This provides traceability — human reviewers and stakeholders can see your findings in the task detail view. Always produce a complete, well-formatted review even for "Approved" results, as the report is persisted regardless of outcome.
+
 **Important constraints:**
 - Only review the diff provided — do not explore unrelated code
 - Do not run tests or execute code — you only review

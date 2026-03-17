@@ -70,17 +70,23 @@ Use when a human provides:
 
 ### BEFORE (what the human provides):
 
-```
-"Fix the bug where task comments don't show timestamps"
+```json
+{
+  "title": "Fix the bug where task comments don't show timestamps",
+  "type": "defect",
+  "description": "Task comments don't show timestamps"
+}
 ```
 
 ### AFTER (what enrichment produces):
 
+Note: `title`, `type`, and `description` are preserved exactly as the human provided them. Enrichment only adds the technical fields below.
+
 ```json
 {
-  "title": "Fix missing timestamps on task comments display",
+  "title": "Fix the bug where task comments don't show timestamps",
   "type": "defect",
-  "description": "Task comments in the task detail view do not display their creation timestamps. Users cannot tell when comments were posted, making it difficult to follow the conversation timeline. The timestamps exist in the database but are not rendered in the template.",
+  "description": "Task comments don't show timestamps",
   "complexity": "small",
   "priority": "medium",
   "needs_review": false,
@@ -137,25 +143,12 @@ Use when a human provides:
 
 Extract what you can from the human's input alone — before touching the codebase.
 
+**Important:** The `title`, `type`, and `description` fields are human-provided and MUST be preserved exactly as given. Enrichment never modifies these fields.
+
 | Field | Discovery Strategy | Source |
 |-------|-------------------|--------|
-| `title` | Reformat to `[Verb] [What] [Where]` if needed | Human input |
-| `type` | Infer from language: "fix/bug/broken" → `"defect"`, "add/implement/create" → `"work"` | Human input |
-| `description` | Expand the title into WHY + WHAT. If the human gave a reason, use it. Otherwise defer to Phase 2 | Human input + inference |
 | `priority` | Default to `"medium"` unless human specified urgency or it's a defect blocking other work | Human input or default |
 | `dependencies` | Only if the human explicitly mentions prerequisite tasks | Human input |
-
-**Decision rule for `type`:**
-```
-Title/description contains "fix", "bug", "broken", "error", "crash", "incorrect", "wrong"
-  → type: "defect"
-Title/description contains "add", "implement", "create", "build", "new", "introduce"
-  → type: "work"
-Title/description contains "update", "change", "modify", "refactor", "improve", "enhance"
-  → type: "work"
-Ambiguous?
-  → type: "work" (safer default)
-```
 
 ### Phase 2: Explore Codebase (Targeted Discovery)
 
@@ -333,9 +326,7 @@ All existing tests still pass
 Combine all discovered fields into the final task specification.
 
 **Pre-submission checklist:**
-- [ ] `title` follows `[Verb] [What] [Where]` format
-- [ ] `type` is exactly `"work"` or `"defect"`
-- [ ] `description` contains both WHY and WHAT
+- [ ] `title`, `type`, and `description` are preserved from human input (never modified by enrichment)
 - [ ] `complexity` matches the heuristic analysis
 - [ ] `priority` is set (default `"medium"` if unspecified)
 - [ ] `why` explains the problem or value
@@ -355,9 +346,7 @@ Combine all discovered fields into the final task specification.
 ```
 Human provides minimal input (title + optional description)
     ↓
-Phase 1: Parse Intent
-├─ Extract title → reformat to [Verb] [What] [Where]
-├─ Infer type (work vs defect) from language
+Phase 1: Parse Intent (preserve title, type, description from human input)
 ├─ Set priority (from input or default "medium")
 ├─ Note any explicit dependencies
     ↓
@@ -419,8 +408,7 @@ curl -s -X PATCH \
     "where_context": "...",
     "complexity": "medium",
     "why": "...",
-    "what": "...",
-    "description": "..."
+    "what": "..."
   }' \
   $STRIDE_API_URL/api/tasks/:id
 ```
@@ -506,13 +494,13 @@ When the task references technology you don't recognize in the codebase:
 
 When the human provides just a title like "Add search":
 
-1. Run Phase 1 with best-effort inference (type=work, priority=medium)
+1. Run Phase 1 with defaults (priority=medium) — title, type, and description are preserved as-is from human input
 2. In Phase 2, use the title keywords more aggressively:
    ```bash
    Grep pattern="search" path="lib/" output_mode="files_with_matches"
    Grep pattern="search" path="test/" output_mode="files_with_matches"
    ```
-3. The `description`, `why`, and `what` fields will be primarily derived from what you find in the codebase
+3. The `why` and `what` fields will be primarily derived from what you find in the codebase
 4. If the title is too vague to determine even the general area (e.g., "Fix it"), ask the human for clarification
 
 ## When to Explore vs When to Ask the Human
@@ -534,18 +522,13 @@ When the human provides just a title like "Add search":
 Can I determine the answer from the codebase alone?
   → YES: Explore and decide
   → NO, but I can make a reasonable default?
-  → YES: Use the default, note it in the description
+  → YES: Use the default, note it in the task fields
   → NO: Ask the human (provide 2-3 specific options, not open-ended questions)
 ```
 
 ## Handling Defect Tasks
 
-Defect enrichment follows the same phases but with adjusted strategies:
-
-**Phase 1 differences:**
-- `type` is always `"defect"`
-- `description` should include: symptom, expected behavior, reproduction steps (if known)
-- `why` focuses on the impact of the bug
+Defect enrichment follows the same phases but with adjusted strategies. Note: `title`, `type`, and `description` are preserved from human input — the human is responsible for setting `type` to `"defect"` and providing an appropriate description.
 
 **Phase 2 differences:**
 - Step 1: Search for error messages, stack traces, or the buggy behavior in code
@@ -702,8 +685,8 @@ The enriched task MUST match the Stride API task schema exactly:
 
 ## Implementation Workflow
 
-1. **Receive minimal input** - Human provides title + optional description
-2. **Parse intent** - Extract type, priority, dependencies from input
+1. **Receive minimal input** - Human provides title, type, and optional description (preserved as-is)
+2. **Parse intent** - Extract priority and dependencies from input
 3. **Search codebase** - Grep for keywords from title in `lib/` and `test/`
 4. **Read candidate files** - Confirm relevance, identify key_files
 5. **Find patterns** - Read sibling modules and analogs
@@ -740,8 +723,7 @@ The enriched task MUST match the Stride API task schema exactly:
 ```
 ENRICHMENT PHASES:
 ├─ Phase 1: Parse Intent (no codebase access needed)
-│   ├─ title → [Verb] [What] [Where]
-│   ├─ type → "work" or "defect" from language cues
+│   ├─ title, type, description → preserved from human input (NEVER modified)
 │   ├─ priority → from input or default "medium"
 │   └─ dependencies → from human input only
 │
@@ -761,22 +743,22 @@ ENRICHMENT PHASES:
     ├─ Run 16-item checklist
     └─ Submit via POST /api/tasks
 
+PRESERVED FROM HUMAN INPUT (never modified by enrichment):
+  - title, type, description
+
 FIELD DISCOVERY ORDER (optimized for dependency):
-  1. title (reformat)        — from input
-  2. type (infer)            — from input
-  3. key_files (search)      — enables steps 4-8
-  4. where_context (derive)  — from key_files location
-  5. patterns_to_follow      — from key_files siblings
-  6. testing_strategy        — from key_files test mapping
-  7. verification_steps      — from testing_strategy
-  8. pitfalls                — from key_files analysis
-  9. acceptance_criteria     — from task intent + code context
- 10. description (expand)    — from all above
- 11. why (articulate)        — from input + context
- 12. what (specify)          — from key_files + patterns
- 13. complexity (estimate)   — from all signals
- 14. priority               — from input or default
- 15. dependencies           — from input only
+  1. key_files (search)      — enables steps 2-6
+  2. where_context (derive)  — from key_files location
+  3. patterns_to_follow      — from key_files siblings
+  4. testing_strategy        — from key_files test mapping
+  5. verification_steps      — from testing_strategy
+  6. pitfalls                — from key_files analysis
+  7. acceptance_criteria     — from task intent + code context
+  8. why (articulate)        — from input + context
+  9. what (specify)          — from key_files + patterns
+ 10. complexity (estimate)   — from all signals
+ 11. priority               — from input or default
+ 12. dependencies           — from input only
 
 DECISION RULE:
   Can determine from codebase? → Explore and decide

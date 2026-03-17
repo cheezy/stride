@@ -2,6 +2,14 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.4.0] - 2026-03-17
+
+### Changed
+
+- **`stride-completing-tasks`** — Added optional `review_report` field to all 4 completion documentation sections: API Request Format JSON example, Completion Request Field Reference table (type: string, required: No), Quick Reference Card REQUIRED BODY, and step 1.5 (capture reviewer output for review_report). Clearly documented as optional — agents omit it when no review was performed.
+- **`stride-subagent-workflow`** — Updated Phase 3 (Code Review) to instruct agents to capture the task-reviewer agent's return value as `review_report` for inclusion in the completion API call. Capture applies regardless of review outcome (Approved or issues found). When the reviewer is skipped (small tasks with 0-1 key_files), `review_report` is simply omitted.
+- **`stride:task-reviewer` agent** — Added "Output persistence" note clarifying that the structured review output will be stored as the `review_report` field on the Stride task record via the completion API. Instructs the agent to always produce a complete, well-formatted review even for Approved results since the report is persisted.
+
 ## [1.3.0] - 2026-03-17
 
 ### Changed

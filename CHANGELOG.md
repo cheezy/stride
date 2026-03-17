@@ -2,6 +2,12 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.3.0] - 2026-03-17
+
+### Changed
+
+- **`stride-enriching-tasks`** — Enrichment no longer modifies `title`, `type`, or `description` fields. These are now preserved exactly as the human provided them. Previously, the skill would reformat the title to `[Verb] [What] [Where]`, infer `type` from language cues (e.g., "fix" → defect), and expand the description. Enrichment now only populates technical fields discovered through codebase exploration: `key_files`, `testing_strategy`, `verification_steps`, `patterns_to_follow`, `pitfalls`, `acceptance_criteria`, `where_context`, `why`, `what`, and `complexity`. Updated Phase 1, Before/After example, Phase 4 checklist, flowchart, PATCH API example, defect handling section, Quick Reference Card, and implementation workflow to reflect this change.
+
 ## [1.2.1] - 2026-03-12
 
 ### Changed

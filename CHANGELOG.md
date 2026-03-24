@@ -2,6 +2,20 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.5.0] - 2026-03-24
+
+### Added
+
+- **`hooks/stride-hook.sh`** — Generic shell script that bridges Claude Code hooks to Stride `.stride.md` hook execution. Parses any user-defined `.stride.md` file, routes Claude Code PreToolUse/PostToolUse events to the correct hook section based on API endpoint patterns (claim → before_doing, complete → after_doing/before_review, mark_reviewed → after_review), and executes each uncommented command sequentially. Exits 2 on failure to block tool calls in PreToolUse context. Eliminates all permission prompts for hook commands.
+- **`hooks/hooks.json`** — Claude Code hook configuration that activates automatically when the Stride plugin is enabled. Registers PostToolUse and PreToolUse hooks on Bash commands, routing to stride-hook.sh. No user settings changes needed.
+- **Environment variable caching** — After a successful task claim, stride-hook.sh extracts task metadata (TASK_ID, TASK_IDENTIFIER, TASK_TITLE, TASK_STATUS, TASK_COMPLEXITY, TASK_PRIORITY) from the API response and caches them to `.stride-env-cache`. All subsequent hooks load the cached variables, enabling `.stride.md` commands to reference `$TASK_IDENTIFIER`, `$TASK_TITLE`, etc. Cache is cleaned up after the after_review hook.
+- **Structured JSON output** — stride-hook.sh emits structured JSON on stdout for both success and failure. On failure: hook name, failed_command, command_index, exit_code, stdout, stderr, commands_completed, commands_remaining. On success: hook name, commands_completed, duration_seconds. Command output goes to stderr for Claude's feedback channel.
+
+### Changed
+
+- **`stride:hook-diagnostician` agent** — Added structured JSON input detection and parsing. The diagnostician now accepts both structured JSON from Claude Code hooks (with pre-parsed fields) and raw text from legacy agent-executed hooks. When JSON input is detected, fields are extracted directly without boundary detection. Output format updated to include command sequence context (PASSED/FAILED/SKIPPED) when structured JSON is the input.
+- **`README.md`** — Added "Automatic Hook Execution (Claude Code Hooks)" section documenting the new hook routing, environment variable caching, and `.stride-env-cache` gitignore note.
+
 ## [1.4.0] - 2026-03-17
 
 ### Changed

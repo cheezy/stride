@@ -139,10 +139,12 @@ if [ ${#CMD_LIST[@]} -eq 0 ]; then
 fi
 
 # --- Execute commands with structured output ---
+# Use temp files instead of bash arrays to avoid set -u issues with empty arrays
 cd "$PROJECT_DIR"
-COMPLETED=()
+COMPLETED_FILE=$(mktemp)
 START_SECS=$(date +%s)
 CMD_INDEX=0
+CMD_TOTAL=${#CMD_LIST[@]}
 
 for trimmed in "${CMD_LIST[@]}"; do
   # Capture stdout and stderr separately
@@ -150,7 +152,7 @@ for trimmed in "${CMD_LIST[@]}"; do
   CMD_STDERR_FILE=$(mktemp)
 
   if eval "$trimmed" > "$CMD_STDOUT_FILE" 2> "$CMD_STDERR_FILE"; then
-    COMPLETED+=("$trimmed")
+    echo "$trimmed" >> "$COMPLETED_FILE"
     # Print command output to stderr so Claude sees it as feedback
     cat "$CMD_STDOUT_FILE" >&2
     cat "$CMD_STDERR_FILE" >&2
@@ -160,14 +162,19 @@ for trimmed in "${CMD_LIST[@]}"; do
     CMD_STDERR=$(tail -50 "$CMD_STDERR_FILE")
     rm -f "$CMD_STDOUT_FILE" "$CMD_STDERR_FILE"
 
-    # Build remaining commands list
-    REMAINING=()
-    for i in $(seq $((CMD_INDEX + 1)) $((${#CMD_LIST[@]} - 1))); do
-      REMAINING+=("${CMD_LIST[$i]}")
-    done
+    # Build remaining commands as a temp file
+    REMAINING_FILE=$(mktemp)
+    if [ $((CMD_INDEX + 1)) -lt $CMD_TOTAL ]; then
+      for i in $(seq $((CMD_INDEX + 1)) $((CMD_TOTAL - 1))); do
+        echo "${CMD_LIST[$i]}" >> "$REMAINING_FILE"
+      done
+    fi
 
     # Emit structured JSON on stdout for Claude to parse
     if [ "$HAS_JQ" = "true" ]; then
+      COMPLETED_JSON=$(jq -R . < "$COMPLETED_FILE" | jq -s . 2>/dev/null || echo "[]")
+      REMAINING_JSON=$(jq -R . < "$REMAINING_FILE" | jq -s . 2>/dev/null || echo "[]")
+
       jq -n \
         --arg hook "$HOOK_NAME" \
         --arg failed "$trimmed" \
@@ -175,8 +182,8 @@ for trimmed in "${CMD_LIST[@]}"; do
         --argjson exit_code "$CMD_EXIT" \
         --arg stdout "$CMD_STDOUT" \
         --arg stderr "$CMD_STDERR" \
-        --argjson completed "$(printf '%s\n' "${COMPLETED[@]}" | jq -R . | jq -s .)" \
-        --argjson remaining "$(printf '%s\n' "${REMAINING[@]}" | jq -R . | jq -s .)" \
+        --argjson completed "$COMPLETED_JSON" \
+        --argjson remaining "$REMAINING_JSON" \
         '{
           hook: $hook,
           status: "failed",
@@ -194,8 +201,9 @@ for trimmed in "${CMD_LIST[@]}"; do
     fi
 
     # Human-readable error on stderr for Claude's feedback
-    echo "Stride $HOOK_NAME hook failed on command $((CMD_INDEX + 1))/${#CMD_LIST[@]}: $trimmed" >&2
+    echo "Stride $HOOK_NAME hook failed on command $((CMD_INDEX + 1))/$CMD_TOTAL: $trimmed" >&2
     [ -n "$CMD_STDERR" ] && echo "$CMD_STDERR" >&2
+    rm -f "$COMPLETED_FILE" "$REMAINING_FILE"
     exit 2
   fi
 
@@ -208,10 +216,12 @@ END_SECS=$(date +%s)
 DURATION=$((END_SECS - START_SECS))
 
 if [ "$HAS_JQ" = "true" ]; then
+  COMPLETED_JSON=$(jq -R . < "$COMPLETED_FILE" | jq -s . 2>/dev/null || echo "[]")
+
   jq -n \
     --arg hook "$HOOK_NAME" \
     --argjson duration "$DURATION" \
-    --argjson completed "$(printf '%s\n' "${COMPLETED[@]}" | jq -R . | jq -s .)" \
+    --argjson completed "$COMPLETED_JSON" \
     '{
       hook: $hook,
       status: "success",
@@ -219,6 +229,8 @@ if [ "$HAS_JQ" = "true" ]; then
       duration_seconds: $duration
     }'
 fi
+
+rm -f "$COMPLETED_FILE"
 
 # Clean up env cache after the final hook in the lifecycle
 if [ "$HOOK_NAME" = "after_review" ] && [ -f "$ENV_CACHE" ]; then

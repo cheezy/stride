@@ -96,7 +96,29 @@ A pre-completion code review agent dispatched after implementation but before ru
 
 ### stride:hook-diagnostician
 
-Analyzes hook failure output and returns a prioritized fix plan. Parses compilation errors, test failures, security warnings, credo issues, format failures, and git failures with structured diagnosis per issue. Dispatched automatically when blocking hooks fail during the completion workflow. Claude Code only.
+Analyzes hook failure output and returns a prioritized fix plan. Parses compilation errors, test failures, security warnings, credo issues, format failures, and git failures with structured diagnosis per issue. Accepts both structured JSON from Claude Code hooks and raw text from legacy agent-executed hooks. Dispatched automatically when blocking hooks fail during the completion workflow. Claude Code only.
+
+## Automatic Hook Execution (Claude Code Hooks)
+
+When the Stride plugin is enabled, `.stride.md` hooks execute **automatically without permission prompts** via Claude Code's hook system. The plugin ships a `hooks/hooks.json` that registers PreToolUse and PostToolUse hooks on Bash commands, and a `hooks/stride-hook.sh` script that:
+
+1. Detects Stride API calls (claim, complete, mark_reviewed) in Bash tool commands
+2. Parses the corresponding section from your `.stride.md`
+3. Executes each uncommented command sequentially
+4. Caches task environment variables (`$TASK_IDENTIFIER`, `$TASK_TITLE`, etc.) from the claim response for use in all subsequent hooks
+5. Outputs structured JSON for diagnostics on both success and failure
+6. Blocks tool calls (exit 2) on failure in PreToolUse context
+
+**Hook routing:**
+
+| Claude Code Event | API Endpoint Pattern | Stride Hook |
+|---|---|---|
+| PostToolUse (Bash) | `/api/tasks/claim` | `before_doing` |
+| PreToolUse (Bash) | `/api/tasks/:id/complete` | `after_doing` (blocks completion on failure) |
+| PostToolUse (Bash) | `/api/tasks/:id/complete` | `before_review` |
+| PostToolUse (Bash) | `/api/tasks/:id/mark_reviewed` | `after_review` |
+
+**Note:** Add `.stride-env-cache` to your `.gitignore` — this temp file caches task metadata between hook invocations and is cleaned up automatically after the `after_review` hook.
 
 ## Configuration
 

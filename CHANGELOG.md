@@ -2,6 +2,16 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.5.1] - 2026-03-24
+
+### Fixed
+
+- **`hooks/stride-hook.sh`** — Replaced `awk`, `sed`, and `seq` with pure bash equivalents for cross-platform compatibility. Windows systems (Git Bash/MSYS2) do not ship `awk` or `sed`, causing the `.stride.md` parser to silently skip all hook commands and exit 0 — a silent failure where hooks appeared to succeed without executing anything. The parser now uses a `while read` loop with `case` statements, the JSON extraction fallback uses bash parameter expansion, whitespace trimming uses `${var#pattern}`, and the remaining-commands loop uses C-style `for ((...))` arithmetic. Also fixed the no-jq JSON extraction guard: when the `"command"` key was absent from the hook JSON, the fallback would extract a value from an unrelated key instead of returning empty.
+
+### Added
+
+- **`hooks/test-stride-hook.sh`** — Comprehensive test suite for stride-hook.sh with 67 tests across 6 groups: JSON command extraction (no-jq fallback), `.stride.md` section parser, whitespace trimming, command list building, full end-to-end integration, and edge cases (CRLF line endings, no trailing newline, environment variable caching). Validates all pure bash replacements produce identical behavior to the original `awk`/`sed` implementations.
+
 ## [1.5.0] - 2026-03-24
 
 ### Added

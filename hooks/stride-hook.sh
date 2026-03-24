@@ -30,11 +30,20 @@ HAS_JQ=false
 command -v jq > /dev/null 2>&1 && HAS_JQ=true
 
 # Extract the Bash command from hook JSON
-# Try jq first, fall back to sed for environments without jq
+# Try jq first, fall back to pure bash for environments without jq
 if [ "$HAS_JQ" = "true" ]; then
   COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null || echo "")
 else
-  COMMAND=$(echo "$INPUT" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  # Pure bash JSON extraction: find "command" : "value"
+  _tmp="${INPUT#*\"command\"}"
+  # If the expansion didn't change, the key wasn't found
+  if [ "$_tmp" = "$INPUT" ]; then
+    COMMAND=""
+  else
+    _tmp="${_tmp#*:}"
+    _tmp="${_tmp#*\"}"
+    COMMAND="${_tmp%%\"*}"
+  fi
 fi
 
 [ -n "$COMMAND" ] || exit 0
@@ -106,19 +115,31 @@ fi
 
 # --- Parse .stride.md for the hook section ---
 # Extracts lines from the first ```bash code block under ## <hook_name>
-COMMANDS=$(awk -v hook="$HOOK_NAME" '
-  /^## / {
-    if (found) exit
-    line = $0
-    gsub(/^## /, "", line)
-    gsub(/[[:space:]]*$/, "", line)
-    if (line == hook) found = 1
-    next
-  }
-  found && /^```bash/ { capture = 1; next }
-  found && capture && /^```/ { exit }
-  found && capture { print }
-' "$STRIDE_MD")
+# Uses pure bash to avoid awk/sed dependency (not available on all platforms)
+COMMANDS=""
+_found=0
+_capture=0
+while IFS= read -r _line || [ -n "$_line" ]; do
+  # Check for ## heading
+  case "$_line" in
+    "## "*)
+      [ "$_found" -eq 1 ] && break
+      _section="${_line#\#\# }"
+      # Trim trailing whitespace
+      _section="${_section%"${_section##*[![:space:]]}"}"
+      [ "$_section" = "$HOOK_NAME" ] && _found=1
+      continue
+      ;;
+  esac
+  if [ "$_found" -eq 1 ]; then
+    case "$_line" in
+      '```bash'*) _capture=1; continue ;;
+      '```'*)     [ "$_capture" -eq 1 ] && break; continue ;;
+    esac
+    [ "$_capture" -eq 1 ] && COMMANDS="${COMMANDS}${_line}
+"
+  fi
+done < "$STRIDE_MD"
 
 # No commands for this hook — exit cleanly
 [ -n "$COMMANDS" ] || exit 0
@@ -127,7 +148,7 @@ COMMANDS=$(awk -v hook="$HOOK_NAME" '
 # Split commands into an array for structured output
 CMD_LIST=()
 while IFS= read -r cmd; do
-  trimmed=$(echo "$cmd" | sed 's/^[[:space:]]*//')
+  trimmed="${cmd#"${cmd%%[![:space:]]*}"}"
   [ -z "$trimmed" ] && continue
   case "$trimmed" in \#*) continue ;; esac
   CMD_LIST+=("$trimmed")
@@ -165,7 +186,7 @@ for trimmed in "${CMD_LIST[@]}"; do
     # Build remaining commands as a temp file
     REMAINING_FILE=$(mktemp)
     if [ $((CMD_INDEX + 1)) -lt $CMD_TOTAL ]; then
-      for i in $(seq $((CMD_INDEX + 1)) $((CMD_TOTAL - 1))); do
+      for ((i = CMD_INDEX + 1; i < CMD_TOTAL; i++)); do
         echo "${CMD_LIST[$i]}" >> "$REMAINING_FILE"
       done
     fi

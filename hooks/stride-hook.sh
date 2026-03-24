@@ -123,27 +123,102 @@ COMMANDS=$(awk -v hook="$HOOK_NAME" '
 # No commands for this hook — exit cleanly
 [ -n "$COMMANDS" ] || exit 0
 
-# --- Execute commands ---
-cd "$PROJECT_DIR"
-
+# --- Build command list for tracking ---
+# Split commands into an array for structured output
+CMD_LIST=()
 while IFS= read -r cmd; do
-  # Trim leading whitespace
   trimmed=$(echo "$cmd" | sed 's/^[[:space:]]*//')
-
-  # Skip empty lines
   [ -z "$trimmed" ] && continue
+  case "$trimmed" in \#*) continue ;; esac
+  CMD_LIST+=("$trimmed")
+done <<< "$COMMANDS"
 
-  # Skip comments
-  case "$trimmed" in
-    \#*) continue ;;
-  esac
+# Nothing to execute after filtering
+if [ ${#CMD_LIST[@]} -eq 0 ]; then
+  exit 0
+fi
 
-  # Execute the command — eval allows variable expansion ($TASK_IDENTIFIER, etc.)
-  if ! eval "$trimmed"; then
-    echo "Stride $HOOK_NAME hook failed on: $trimmed" >&2
+# --- Execute commands with structured output ---
+cd "$PROJECT_DIR"
+COMPLETED=()
+START_SECS=$(date +%s)
+CMD_INDEX=0
+
+for trimmed in "${CMD_LIST[@]}"; do
+  # Capture stdout and stderr separately
+  CMD_STDOUT_FILE=$(mktemp)
+  CMD_STDERR_FILE=$(mktemp)
+
+  if eval "$trimmed" > "$CMD_STDOUT_FILE" 2> "$CMD_STDERR_FILE"; then
+    COMPLETED+=("$trimmed")
+    # Print command output to stderr so Claude sees it as feedback
+    cat "$CMD_STDOUT_FILE" >&2
+    cat "$CMD_STDERR_FILE" >&2
+  else
+    CMD_EXIT=$?
+    CMD_STDOUT=$(tail -50 "$CMD_STDOUT_FILE")
+    CMD_STDERR=$(tail -50 "$CMD_STDERR_FILE")
+    rm -f "$CMD_STDOUT_FILE" "$CMD_STDERR_FILE"
+
+    # Build remaining commands list
+    REMAINING=()
+    for i in $(seq $((CMD_INDEX + 1)) $((${#CMD_LIST[@]} - 1))); do
+      REMAINING+=("${CMD_LIST[$i]}")
+    done
+
+    # Emit structured JSON on stdout for Claude to parse
+    if [ "$HAS_JQ" = "true" ]; then
+      jq -n \
+        --arg hook "$HOOK_NAME" \
+        --arg failed "$trimmed" \
+        --argjson index "$CMD_INDEX" \
+        --argjson exit_code "$CMD_EXIT" \
+        --arg stdout "$CMD_STDOUT" \
+        --arg stderr "$CMD_STDERR" \
+        --argjson completed "$(printf '%s\n' "${COMPLETED[@]}" | jq -R . | jq -s .)" \
+        --argjson remaining "$(printf '%s\n' "${REMAINING[@]}" | jq -R . | jq -s .)" \
+        '{
+          hook: $hook,
+          status: "failed",
+          failed_command: $failed,
+          command_index: $index,
+          exit_code: $exit_code,
+          stdout: $stdout,
+          stderr: $stderr,
+          commands_completed: $completed,
+          commands_remaining: $remaining
+        }'
+    else
+      # Fallback: plain text structured output
+      echo "HOOK=$HOOK_NAME STATUS=failed COMMAND=$trimmed EXIT=$CMD_EXIT"
+    fi
+
+    # Human-readable error on stderr for Claude's feedback
+    echo "Stride $HOOK_NAME hook failed on command $((CMD_INDEX + 1))/${#CMD_LIST[@]}: $trimmed" >&2
+    [ -n "$CMD_STDERR" ] && echo "$CMD_STDERR" >&2
     exit 2
   fi
-done <<< "$COMMANDS"
+
+  rm -f "$CMD_STDOUT_FILE" "$CMD_STDERR_FILE"
+  CMD_INDEX=$((CMD_INDEX + 1))
+done
+
+# --- Success output ---
+END_SECS=$(date +%s)
+DURATION=$((END_SECS - START_SECS))
+
+if [ "$HAS_JQ" = "true" ]; then
+  jq -n \
+    --arg hook "$HOOK_NAME" \
+    --argjson duration "$DURATION" \
+    --argjson completed "$(printf '%s\n' "${COMPLETED[@]}" | jq -R . | jq -s .)" \
+    '{
+      hook: $hook,
+      status: "success",
+      commands_completed: $completed,
+      duration_seconds: $duration
+    }'
+fi
 
 # Clean up env cache after the final hook in the lifecycle
 if [ "$HOOK_NAME" = "after_review" ] && [ -f "$ENV_CACHE" ]; then

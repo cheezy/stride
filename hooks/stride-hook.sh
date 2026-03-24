@@ -16,6 +16,7 @@ set -uo pipefail
 PHASE="${1:-}"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
 STRIDE_MD="$PROJECT_DIR/.stride.md"
+ENV_CACHE="$PROJECT_DIR/.stride-env-cache"
 
 # Exit early if no phase argument or no .stride.md
 [ -n "$PHASE" ] || exit 0
@@ -24,9 +25,13 @@ STRIDE_MD="$PROJECT_DIR/.stride.md"
 # Read Claude Code hook input from stdin
 INPUT=$(cat)
 
+# Detect jq availability once
+HAS_JQ=false
+command -v jq > /dev/null 2>&1 && HAS_JQ=true
+
 # Extract the Bash command from hook JSON
 # Try jq first, fall back to sed for environments without jq
-if command -v jq > /dev/null 2>&1; then
+if [ "$HAS_JQ" = "true" ]; then
   COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null || echo "")
 else
   COMMAND=$(echo "$INPUT" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
@@ -60,6 +65,44 @@ esac
 
 # Not a Stride API call — exit cleanly
 [ -n "$HOOK_NAME" ] || exit 0
+
+# --- Environment variable caching ---
+# After a successful claim (before_doing), extract task metadata from the API
+# response and cache it. All subsequent hooks load the cache so .stride.md
+# commands can reference $TASK_IDENTIFIER, $TASK_TITLE, etc.
+
+if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
+  RESPONSE=$(echo "$INPUT" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
+  if [ -n "$RESPONSE" ]; then
+    # tool_response may be raw JSON or may need extraction
+    # Try parsing directly, then try extracting embedded JSON
+    TASK_JSON=""
+    if echo "$RESPONSE" | jq -e '.data.id' > /dev/null 2>&1; then
+      TASK_JSON=$(echo "$RESPONSE" | jq -r '.data' 2>/dev/null)
+    elif echo "$RESPONSE" | jq -e '.id' > /dev/null 2>&1; then
+      TASK_JSON="$RESPONSE"
+    fi
+
+    if [ -n "$TASK_JSON" ]; then
+      # Values are single-quoted to handle spaces in titles/descriptions
+      {
+        echo "TASK_ID='$(echo "$TASK_JSON" | jq -r '.id // empty')'"
+        echo "TASK_IDENTIFIER='$(echo "$TASK_JSON" | jq -r '.identifier // empty')'"
+        echo "TASK_TITLE='$(echo "$TASK_JSON" | jq -r '.title // empty')'"
+        echo "TASK_STATUS='$(echo "$TASK_JSON" | jq -r '.status // empty')'"
+        echo "TASK_COMPLEXITY='$(echo "$TASK_JSON" | jq -r '.complexity // empty')'"
+        echo "TASK_PRIORITY='$(echo "$TASK_JSON" | jq -r '.priority // empty')'"
+      } > "$ENV_CACHE" 2>/dev/null || true
+    fi
+  fi
+fi
+
+# Load cached env vars if available (all hooks benefit from this)
+if [ -f "$ENV_CACHE" ]; then
+  set -a
+  . "$ENV_CACHE" 2>/dev/null || true
+  set +a
+fi
 
 # --- Parse .stride.md for the hook section ---
 # Extracts lines from the first ```bash code block under ## <hook_name>
@@ -101,5 +144,10 @@ while IFS= read -r cmd; do
     exit 2
   fi
 done <<< "$COMMANDS"
+
+# Clean up env cache after the final hook in the lifecycle
+if [ "$HOOK_NAME" = "after_review" ] && [ -f "$ENV_CACHE" ]; then
+  rm -f "$ENV_CACHE"
+fi
 
 exit 0

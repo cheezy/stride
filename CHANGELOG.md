@@ -2,6 +2,19 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.5.2] - 2026-03-25
+
+### Added
+
+- **`hooks/stride-hook.ps1`** — PowerShell companion script that mirrors all functionality of stride-hook.sh for Windows compatibility. Uses PowerShell-native idioms: ConvertFrom-Json for JSON parsing (eliminates jq dependency), ConvertTo-Json for structured output, Start-Process for command execution with separate stdout/stderr capture, and [DateTimeOffset]::UtcNow for timing. Handles CRLF line endings, environment variable caching, and all 4 hook lifecycle phases. Produces identical structured JSON output format as the bash version.
+- **`hooks/test-stride-hook.ps1`** — Comprehensive PowerShell test suite with 70 assertions across 6 test groups mirroring test-stride-hook.sh. Covers JSON extraction, .stride.md parsing, whitespace trimming, command list building, full end-to-end integration, and edge cases (CRLF, no trailing newline, env caching, structured JSON output). Self-contained — no Pester dependency.
+- **Platform detection dispatcher in `stride-hook.sh`** — Detects native Windows environments (COMSPEC set, no OSTYPE) and automatically delegates to stride-hook.ps1 via `powershell.exe -ExecutionPolicy Bypass`. Git Bash (OSTYPE=msys) and WSL continue running bash directly. Provides clear error messages if stride-hook.ps1 or powershell.exe are missing.
+
+### Changed
+
+- **`stride-claiming-tasks` skill** — Added "Claude Code: Hooks Are Fully Automatic" section explaining that hooks.json handles hook execution automatically via stride-hook.sh. Agents in Claude Code should make API calls directly without manually executing .stride.md commands. Separated claiming workflow into "Claude Code (Automatic Hooks)" and "Other Environments (Manual Hooks)" paths. Added new Common Mistake #4 for manually executing hooks in Claude Code. Updated flowchart and Quick Reference Card with both paths.
+- **`stride-completing-tasks` skill** — Added identical "Claude Code: Hooks Are Fully Automatic" section for completion hooks. Separated completion workflow into Claude Code and other environment paths. PreToolUse auto-runs after_doing before the complete curl; PostToolUse auto-runs before_review after. Added new Common Mistake #4. Updated flowchart and Quick Reference Card.
+
 ## [1.5.1] - 2026-03-24
 
 ### Fixed

@@ -18,6 +18,28 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
 STRIDE_MD="$PROJECT_DIR/.stride.md"
 ENV_CACHE="$PROJECT_DIR/.stride-env-cache"
 
+# --- Platform detection: delegate to PowerShell on native Windows ---
+# Git Bash (OSTYPE=msys*) and WSL have full bash — run directly.
+# Native Windows without bash (COMSPEC set, no OSTYPE) → delegate to .ps1
+_delegate_to_ps1=false
+if [ -z "${OSTYPE:-}" ] && [ -n "${COMSPEC:-}" ]; then
+  _delegate_to_ps1=true
+fi
+
+if [ "$_delegate_to_ps1" = "true" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  PS1_SCRIPT="$SCRIPT_DIR/stride-hook.ps1"
+  if [ ! -f "$PS1_SCRIPT" ]; then
+    echo "stride-hook.sh: Windows detected but stride-hook.ps1 not found at $PS1_SCRIPT" >&2
+    exit 2
+  fi
+  if ! command -v powershell.exe > /dev/null 2>&1; then
+    echo "stride-hook.sh: Windows detected but powershell.exe not found in PATH" >&2
+    exit 2
+  fi
+  exec powershell.exe -ExecutionPolicy Bypass -File "$PS1_SCRIPT" "$PHASE"
+fi
+
 # Exit early if no phase argument or no .stride.md
 [ -n "$PHASE" ] || exit 0
 [ -f "$STRIDE_MD" ] || exit 0

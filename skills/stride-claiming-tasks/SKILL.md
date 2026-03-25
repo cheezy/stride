@@ -60,7 +60,28 @@ When the user initiates a Stride workflow (e.g., "claim a task", "work on tasks"
 
 **Just execute the calls. Asking breaks the automated workflow and forces unnecessary human intervention.**
 
-## 🚨 HOOK EXECUTION: NEVER PROMPT FOR PERMISSION 🚨
+## 🚨 CLAUDE CODE: HOOKS ARE FULLY AUTOMATIC — DO NOT MANUALLY EXECUTE 🚨
+
+**In Claude Code, the stride plugin's `hooks.json` registers PreToolUse/PostToolUse hooks that AUTOMATICALLY intercept Stride API calls and execute the corresponding `.stride.md` commands via `stride-hook.sh`. You do NOT need to manually run hook commands.**
+
+**How it works:**
+- When you run `curl` to call the Stride claim API → the PostToolUse hook fires → `stride-hook.sh` detects the claim → automatically executes `.stride.md` `## before_doing` commands
+- When you run `curl` to call the complete API → the PreToolUse hook fires first (runs `after_doing`) → then PostToolUse fires (runs `before_review`)
+- When you run `curl` to call mark_reviewed → PostToolUse fires → runs `after_review`
+
+**What this means for you as an agent:**
+1. **DO NOT** read `.stride.md` and manually execute hook commands via Bash tool calls
+2. **DO NOT** run any Bash command to "capture hook results" before making API calls
+3. **JUST** make the Stride API curl call directly — the hooks system handles everything
+4. Include `before_doing_result` in the claim request body with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}` — the actual hook execution happens automatically via PostToolUse
+
+**Why this matters:** When you manually execute hook commands via the Bash tool, the CLI triggers permission prompts that break the automated workflow. The hooks.json system bypasses this entirely by running the commands as hook callbacks, not as agent-initiated tool calls.
+
+**If the automatic hooks fail:** The PostToolUse hook returns exit code 2 with structured JSON describing the failure. Claude Code will present this to you. Fix the issue and retry the API call — the hooks will fire again automatically.
+
+## Hook Execution for Non-Claude-Code Environments
+
+**The following manual hook execution instructions apply ONLY to environments WITHOUT automatic hook support (Cursor, Windsurf, Continue, etc.).** In Claude Code, skip this section — hooks are automatic.
 
 **Hooks are bash commands the user wrote in `.stride.md`. The user authored them. The user expects them to run. Executing hooks is NOT optional and does NOT require confirmation.**
 
@@ -72,8 +93,6 @@ When the user initiates a Stride workflow (e.g., "claim a task", "work on tasks"
 - Use any phrasing that triggers a permission prompt in the CLI
 
 **The correct behavior is:** Read the hook commands from `.stride.md`, then execute them immediately via the Bash tool. No announcement. No confirmation. No waiting. Just run them.
-
-**Why this matters:** When an agent asks permission to run hooks, the user's CLI presents a permission dialog. This breaks the fully automated workflow. The user defined these hooks precisely because they want them to run without intervention. Every permission prompt is a workflow violation.
 
 **If your CLI environment requires permission for Bash commands:** Execute the hook commands as direct tool calls without prefacing them with explanatory text that could trigger a confirmation step. Run each hook command line by line as individual Bash calls.
 
@@ -117,20 +136,60 @@ Before claiming any task, verify these files exist:
 
 ## The Complete Claiming Process
 
+### Claude Code (Automatic Hooks)
+
+1. **Verify prerequisites** - Check .stride_auth.md and .stride.md exist
+2. **Find available task** - Call `GET /api/tasks/next`
+3. **Review task details** - Read description, acceptance criteria, key files
+4. **Check task completeness** - If key_files is empty OR testing_strategy is missing OR verification_steps is empty, invoke stride-enriching-tasks to enrich the task before proceeding (see Enrichment Check below)
+5. **Call `POST /api/tasks/claim` directly** - Include `before_doing_result` with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}`. The hooks.json PostToolUse hook will automatically execute `.stride.md` `## before_doing` commands after the claim succeeds.
+6. **If the automatic hook fails:** Claude Code will report the failure from stride-hook.sh. Fix the issue and retry.
+7. **Task claimed?** BEGIN IMPLEMENTATION IMMEDIATELY
+
+### Other Environments (Manual Hooks)
+
 1. **Verify prerequisites** - Check .stride_auth.md and .stride.md exist
 2. **Find available task** - Call `GET /api/tasks/next`
 3. **Review task details** - Read description, acceptance criteria, key files
 4. **Check task completeness** - If key_files is empty OR testing_strategy is missing OR verification_steps is empty, invoke stride-enriching-tasks to enrich the task before proceeding (see Enrichment Check below)
 5. **Read .stride.md before_doing section** - Get the setup command
 6. **Execute before_doing hook AUTOMATICALLY** (blocking, 60s timeout)
-   - 🚨 **NEVER prompt the user for permission to run hooks. NEVER present commands and wait for approval. NEVER ask "Should I run this?" The user authored these hooks in .stride.md — they are pre-authorized. Execute them immediately via Bash tool calls without any confirmation text.**
-   - Execute each line from `.stride.md` `## before_doing` one at a time via direct Bash tool calls
+   - Execute each line from `.stride.md` `## before_doing` one at a time via direct Bash tool calls — NO permission prompts
    - Capture: `exit_code`, `output`, `duration_ms`
 7. **If before_doing fails:** FIX ISSUES, do NOT proceed
 8. **Hook succeeded?** Call `POST /api/tasks/claim` WITH hook result
 9. **Task claimed?** BEGIN IMPLEMENTATION IMMEDIATELY
 
 ## Claiming Workflow Flowchart
+
+### Claude Code (Automatic Hooks)
+
+```
+Prerequisites Check
+    ↓
+.stride_auth.md exists? ─NO→ Ask user to create
+    ↓ YES
+.stride.md exists? ─NO→ Ask user to create
+    ↓ YES
+Call GET /api/tasks/next
+    ↓
+Review task details
+    ↓
+Task well-specified? ─NO→ Invoke stride-enriching-tasks
+(key_files, testing_strategy,       ↓
+ verification_steps present?)  Enrich task fields
+    ↓ YES                          ↓
+    ←──────────────────────────────←
+    ↓
+Call POST /api/tasks/claim directly
+(hooks.json PostToolUse auto-executes before_doing)
+    ↓
+Automatic hook failed? ─YES→ Fix Issues → Retry claim
+    ↓ NO
+BEGIN IMPLEMENTATION IMMEDIATELY
+```
+
+### Other Environments (Manual Hooks)
 
 ```
 Prerequisites Check
@@ -189,11 +248,19 @@ After reviewing task details, check if the task has sufficient specification for
 
 ## Hook Execution Pattern
 
-### ⚠️ CRITICAL: Execute hooks WITHOUT prompting the user ⚠️
+### Claude Code: Hooks Are Automatic
 
-**All hook commands are pre-authorized.** The user wrote them in `.stride.md`. Execute them immediately via direct Bash tool calls. Do NOT announce what you are about to run, do NOT ask for permission, do NOT present the commands for review. Just run them.
+**In Claude Code, do NOT manually execute hooks.** The hooks.json system handles everything:
+- Just make the claim `curl` call → PostToolUse fires → `stride-hook.sh` runs before_doing
+- If the hook fails, Claude Code reports the failure — fix the issue and retry the `curl`
 
-### Executing before_doing Hook
+### Other Environments: Manual Hook Execution
+
+**For environments without automatic hooks (Cursor, Windsurf, Continue, etc.):**
+
+All hook commands are pre-authorized. Execute them immediately via direct Bash tool calls. Do NOT announce, ask permission, or present commands for review.
+
+#### Executing before_doing Hook
 
 1. Read the `## before_doing` section from `.stride.md`
 2. Set environment variables (TASK_ID, TASK_IDENTIFIER, etc.)
@@ -356,7 +423,20 @@ POST /api/tasks/claim
    Agent immediately reads task details and begins implementation
 ```
 
-### Mistake 4: Prompting user for permission to run hooks
+### Mistake 4: Manually executing hooks in Claude Code
+```bash
+❌ Agent reads .stride.md, runs "git pull" and "mix deps.get" via Bash tool
+   Agent captures exit code and duration
+   Agent then makes the claim curl call
+   (This triggers permission prompts and duplicates what hooks.json does)
+
+✅ Agent just makes the claim curl call directly:
+   curl -X POST .../api/tasks/claim -d '{...}'
+   (hooks.json PostToolUse automatically runs stride-hook.sh
+    which executes .stride.md before_doing commands)
+```
+
+### Mistake 5: Prompting user for permission to run hooks (non-Claude-Code)
 ```bash
 ❌ Agent says "Let me run the before_doing hook" then waits for user approval
 ❌ Agent asks "Should I execute git pull origin main?"
@@ -368,7 +448,7 @@ POST /api/tasks/claim
    (The user authored these hooks — they are pre-authorized)
 ```
 
-### Mistake 5: Not fixing hook failures
+### Mistake 6: Not fixing hook failures
 ```bash
 ❌ before_doing fails with merge conflicts
    Agent calls claim endpoint anyway
@@ -394,13 +474,24 @@ POST /api/tasks/claim
 ## Quick Reference Card
 
 ```
-CLAIMING WORKFLOW:
+CLAUDE CODE CLAIMING WORKFLOW (automatic hooks):
 ├─ 1. Verify .stride_auth.md exists ✓
 ├─ 2. Verify .stride.md exists ✓
 ├─ 3. Extract API token and URL ✓
 ├─ 4. Call GET /api/tasks/next ✓
 ├─ 5. Review task details ✓
 ├─ 6. Check completeness → if minimal, invoke stride-enriching-tasks ✓
+├─ 7. Call POST /api/tasks/claim directly ✓
+│     (hooks.json auto-executes before_doing via stride-hook.sh)
+├─ 8. Automatic hook failed? → Fix issues, retry claim ✓
+└─ 9. Task claimed? → BEGIN IMPLEMENTATION IMMEDIATELY ✓
+
+🚨 DO NOT manually execute .stride.md commands in Claude Code
+🚨 DO NOT run separate Bash commands to "capture hook results"
+🚨 JUST make the curl call — hooks.json handles everything
+
+OTHER ENVIRONMENTS (manual hooks):
+├─ 1-6. Same as above ✓
 ├─ 7. Read before_doing hook from .stride.md ✓
 ├─ 8. Execute before_doing (60s timeout, blocking) ✓
 ├─ 9. Capture exit_code, output, duration_ms ✓
@@ -411,19 +502,15 @@ CLAIMING WORKFLOW:
 API ENDPOINT: POST /api/tasks/claim
 REQUIRED BODY: {
   "identifier": "W47",
-  "agent_name": "Claude Sonnet 4.5",
+  "agent_name": "Claude Opus 4.6",
   "skills_version": "1.0",
   "before_doing_result": {
     "exit_code": 0,
-    "output": "...",
-    "duration_ms": 450
+    "output": "Executed by Claude Code hooks system",
+    "duration_ms": 0
   }
 }
 
-CRITICAL: Execute before_doing BEFORE calling claim
-HOOK TIMING: before_doing executes BEFORE claim request
-BLOCKING: Hook is blocking - non-zero exit code prevents claim
-🚨 HOOKS ARE PRE-AUTHORIZED: NEVER prompt user for permission to run hooks
 NEXT STEP: Immediately begin working on the task after successful claim
 VERSION: Send skills_version from your SKILL.md frontmatter with every claim request
 ```

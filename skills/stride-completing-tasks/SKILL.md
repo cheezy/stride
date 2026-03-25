@@ -58,7 +58,25 @@ When the user initiates a Stride workflow, they have **already granted blanket p
 
 **Just execute the calls. Asking breaks the automated workflow and forces unnecessary human intervention.**
 
-## 🚨 HOOK EXECUTION: NEVER PROMPT FOR PERMISSION 🚨
+## 🚨 CLAUDE CODE: HOOKS ARE FULLY AUTOMATIC — DO NOT MANUALLY EXECUTE 🚨
+
+**In Claude Code, the stride plugin's `hooks.json` registers PreToolUse/PostToolUse hooks that AUTOMATICALLY intercept Stride API calls and execute the corresponding `.stride.md` commands via `stride-hook.sh`. You do NOT need to manually run hook commands.**
+
+**How it works for completion:**
+- When you run `curl` to call the complete API → the PreToolUse hook fires FIRST (runs `after_doing` and blocks if it fails) → then the curl executes → then PostToolUse fires (runs `before_review`)
+- When you run `curl` to call mark_reviewed → PostToolUse fires → runs `after_review`
+
+**What this means for you as an agent:**
+1. **DO NOT** read `.stride.md` and manually execute hook commands via Bash tool calls
+2. **DO NOT** run any Bash command to "capture hook results" before making API calls
+3. **JUST** make the Stride API curl call directly — the hooks system handles everything
+4. Include `after_doing_result` and `before_review_result` in the complete request body with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}` — the actual hook execution happens automatically via PreToolUse/PostToolUse
+
+**If the automatic hooks fail:** The PreToolUse hook returns exit code 2 with structured JSON describing the failure (e.g., test failures, linting errors). Claude Code will present this to you. Fix the issue and retry the API call — the hooks will fire again automatically.
+
+## Hook Execution for Non-Claude-Code Environments
+
+**The following manual hook execution instructions apply ONLY to environments WITHOUT automatic hook support (Cursor, Windsurf, Continue, etc.).** In Claude Code, skip this section — hooks are automatic.
 
 **Hooks are bash commands the user wrote in `.stride.md`. The user authored them. The user expects them to run. Executing hooks is NOT optional and does NOT require confirmation.**
 
@@ -70,8 +88,6 @@ When the user initiates a Stride workflow, they have **already granted blanket p
 - Use any phrasing that triggers a permission prompt in the CLI
 
 **The correct behavior is:** Read the hook commands from `.stride.md`, then execute them immediately via the Bash tool. No announcement. No confirmation. No waiting. Just run them.
-
-**Why this matters:** When an agent asks permission to run hooks, the user's CLI presents a permission dialog. This breaks the fully automated workflow. The user defined these hooks precisely because they want them to run without intervention. Every permission prompt is a workflow violation.
 
 **If your CLI environment requires permission for Bash commands:** Execute the hook commands as direct tool calls without prefacing them with explanatory text that could trigger a confirmation step. Run each hook command line by line as individual Bash calls.
 
@@ -98,18 +114,29 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 
 ## The Complete Completion Process
 
+### Claude Code (Automatic Hooks)
+
 1. **Finish your work** - All implementation complete
-1.5. **Pre-completion code review (Claude Code Only)** - If the task meets the `stride-subagent-workflow` skill's decision matrix for code review (medium+ complexity OR 2+ key_files), dispatch the `stride:task-reviewer` agent to review your changes against acceptance criteria and pitfalls. Fix any Critical or Important issues BEFORE running hooks. Skip this step for small tasks with 0-1 key_files or if you don't have subagent access. **If a review was performed, save the reviewer's output to include as `review_report` in the completion request.**
+2. **Pre-completion code review (Claude Code Only)** - If the task meets the `stride-subagent-workflow` skill's decision matrix for code review (medium+ complexity OR 2+ key_files), dispatch the `stride:task-reviewer` agent. Fix any Critical or Important issues. Save the reviewer's output to include as `review_report` in the completion request.
+3. **Call `PATCH /api/tasks/:id/complete` directly** - Include `after_doing_result` and `before_review_result` with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}`. The hooks.json system will:
+   - PreToolUse: automatically execute `.stride.md` `## after_doing` BEFORE the curl runs (blocks if it fails)
+   - PostToolUse: automatically execute `.stride.md` `## before_review` AFTER the curl succeeds
+4. **If PreToolUse hook fails (after_doing):** Claude Code reports the failure. Fix the issue (test failures, lint errors, etc.) and retry the curl call.
+5. **Check needs_review flag:**
+   - `needs_review=true`: STOP and wait for human review
+   - `needs_review=false`: Execute after_review hook (automatic), **then AUTOMATICALLY invoke stride-claiming-tasks to claim next task**
+
+### Other Environments (Manual Hooks)
+
+1. **Finish your work** - All implementation complete
 2. **Read .stride.md after_doing section** - Get the validation command
-3. **Execute after_doing hook AUTOMATICALLY** (blocking, 120s timeout)
-   - 🚨 **NEVER prompt the user for permission to run hooks. NEVER present commands and wait for approval. NEVER ask "Should I run this?" The user authored these hooks in .stride.md — they are pre-authorized. Execute them immediately via Bash tool calls without any confirmation text.**
-   - Execute each line from `.stride.md` `## after_doing` one at a time via direct Bash tool calls
+3. **Execute after_doing hook** (blocking, 120s timeout)
+   - Execute each line from `.stride.md` `## after_doing` one at a time via direct Bash tool calls — NO permission prompts
    - Capture: `exit_code`, `output`, `duration_ms`
 4. **If after_doing fails:** FIX ISSUES, do NOT proceed
 5. **Read .stride.md before_review section** - Get the PR/doc command
-6. **Execute before_review hook AUTOMATICALLY** (blocking, 60s timeout)
-   - 🚨 **NEVER prompt the user for permission to run hooks. NEVER present commands and wait for approval. NEVER ask "Should I run this?" The user authored these hooks in .stride.md — they are pre-authorized. Execute them immediately via Bash tool calls without any confirmation text.**
-   - Execute each line from `.stride.md` `## before_review` one at a time via direct Bash tool calls
+6. **Execute before_review hook** (blocking, 60s timeout)
+   - Execute each line from `.stride.md` `## before_review` one at a time via direct Bash tool calls — NO permission prompts
    - Capture: `exit_code`, `output`, `duration_ms`
 7. **If before_review fails:** FIX ISSUES, do NOT proceed
 8. **Both hooks succeeded?** Call `PATCH /api/tasks/:id/complete` WITH both results
@@ -173,11 +200,19 @@ Claim next task and begin implementation
 
 ## Hook Execution Pattern
 
-### ⚠️ CRITICAL: Execute ALL hooks WITHOUT prompting the user ⚠️
+### Claude Code: Hooks Are Automatic
 
-**All hook commands are pre-authorized.** The user wrote them in `.stride.md`. Execute them immediately via direct Bash tool calls. Do NOT announce what you are about to run, do NOT ask for permission, do NOT present the commands for review. Just run them.
+**In Claude Code, do NOT manually execute hooks.** The hooks.json system handles everything:
+- Just make the complete `curl` call → PreToolUse fires `after_doing` (blocks if it fails) → curl executes → PostToolUse fires `before_review`
+- If `after_doing` fails, the PreToolUse hook blocks the curl with exit 2 and reports the failure — fix the issue and retry
 
-### Executing after_doing Hook
+### Other Environments: Manual Hook Execution
+
+**For environments without automatic hooks (Cursor, Windsurf, Continue, etc.):**
+
+All hook commands are pre-authorized. Execute them immediately via direct Bash tool calls. Do NOT announce, ask permission, or present commands for review.
+
+#### Executing after_doing Hook
 
 1. Read the `## after_doing` section from `.stride.md`
 2. Set environment variables (TASK_ID, TASK_IDENTIFIER, etc.)
@@ -194,7 +229,7 @@ DURATION=$((END_TIME - START_TIME))
 
 5. Check exit code - MUST be 0 to proceed
 
-### Executing before_review Hook
+#### Executing before_review Hook
 
 1. Read the `## before_review` section from `.stride.md`
 2. Set environment variables
@@ -376,7 +411,20 @@ After the complete endpoint succeeds:
    Agent STOPS and waits for human review
 ```
 
-### Mistake 4: Prompting user for permission to run hooks
+### Mistake 4: Manually executing hooks in Claude Code
+```bash
+❌ Agent reads .stride.md, runs "mix test" and "mix credo" via Bash tool
+   Agent captures exit code and duration
+   Agent then makes the complete curl call
+   (This triggers permission prompts and duplicates what hooks.json does)
+
+✅ Agent just makes the complete curl call directly:
+   curl -X PATCH .../api/tasks/:id/complete -d '{...}'
+   (hooks.json PreToolUse auto-runs after_doing via stride-hook.sh
+    hooks.json PostToolUse auto-runs before_review via stride-hook.sh)
+```
+
+### Mistake 5: Prompting user for permission to run hooks (non-Claude-Code)
 ```bash
 ❌ Agent says "Let me run the after_doing hooks" then waits for user approval
 ❌ Agent asks "Should I execute mix test?"
@@ -388,7 +436,7 @@ After the complete endpoint succeeds:
    (The user authored these hooks — they are pre-authorized)
 ```
 
-### Mistake 5: Not fixing hook failures
+### Mistake 6: Not fixing hook failures
 ```bash
 ❌ after_doing fails with test errors
    Agent calls complete endpoint anyway
@@ -415,43 +463,49 @@ After the complete endpoint succeeds:
 ## Quick Reference Card
 
 ```
-COMPLETION WORKFLOW:
+CLAUDE CODE COMPLETION WORKFLOW (automatic hooks):
 ├─ 1. Work is complete ✓
-├─ 2. Read after_doing hook from .stride.md ✓
-├─ 3. Execute after_doing (120s timeout, blocking) ✓
-├─ 4. Capture exit_code, output, duration_ms ✓
+├─ 2. [Optional] Dispatch task-reviewer for code review ✓
+├─ 3. Call PATCH /api/tasks/:id/complete directly ✓
+│     (hooks.json PreToolUse auto-runs after_doing first
+│      hooks.json PostToolUse auto-runs before_review after)
+├─ 4. PreToolUse hook failed? → Fix issues, retry curl ✓
+├─ 5. needs_review=true? → STOP, wait for human ✓
+└─ 6. needs_review=false? → after_review auto-fires, claim next ✓
+
+🚨 DO NOT manually execute .stride.md commands in Claude Code
+🚨 DO NOT run separate Bash commands to "capture hook results"
+🚨 JUST make the curl call — hooks.json handles everything
+
+OTHER ENVIRONMENTS (manual hooks):
+├─ 1. Work is complete ✓
+├─ 2. Execute after_doing (120s timeout, blocking) ✓
+├─ 3. Hook fails? → FIX, retry, DO NOT proceed ✓
+├─ 4. Execute before_review (60s timeout, blocking) ✓
 ├─ 5. Hook fails? → FIX, retry, DO NOT proceed ✓
-├─ 6. Read before_review hook from .stride.md ✓
-├─ 7. Execute before_review (60s timeout, blocking) ✓
-├─ 8. Capture exit_code, output, duration_ms ✓
-├─ 9. Hook fails? → FIX, retry, DO NOT proceed ✓
-├─ 10. Both succeed? → Call PATCH /api/tasks/:id/complete WITH both results ✓
-├─ 11. needs_review=true? → STOP, wait for human ✓
-└─ 12. needs_review=false? → Execute after_review, claim next ✓
+├─ 6. Both succeed? → Call PATCH /api/tasks/:id/complete WITH both results ✓
+├─ 7. needs_review=true? → STOP, wait for human ✓
+└─ 8. needs_review=false? → Execute after_review, claim next ✓
 
 API ENDPOINT: PATCH /api/tasks/:id/complete
 REQUIRED BODY: {
-  "agent_name": "Claude Sonnet 4.5",
+  "agent_name": "Claude Opus 4.6",
   "time_spent_minutes": 45,
   "completion_notes": "...",
   "review_report": "..." (optional — include when task-reviewer ran),
   "skills_version": "1.0",
   "after_doing_result": {
     "exit_code": 0,
-    "output": "...",
-    "duration_ms": 45678
+    "output": "Executed by Claude Code hooks system",
+    "duration_ms": 0
   },
   "before_review_result": {
     "exit_code": 0,
-    "output": "...",
-    "duration_ms": 2340
+    "output": "Executed by Claude Code hooks system",
+    "duration_ms": 0
   }
 }
 
-CRITICAL: Execute BOTH after_doing AND before_review BEFORE calling complete
-HOOK ORDER: after_doing → before_review → complete (with both results) → after_review
-BLOCKING: All hooks are blocking - non-zero exit codes will cause API rejection
-🚨 HOOKS ARE PRE-AUTHORIZED: NEVER prompt user for permission to run hooks
 VERSION: Send skills_version from your SKILL.md frontmatter with every complete request
 ```
 

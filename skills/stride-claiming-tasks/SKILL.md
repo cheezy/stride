@@ -31,13 +31,15 @@ This skill enforces the proper claiming workflow including prerequisite verifica
 
 ## ⚡ AUTOMATION NOTICE ⚡
 
-**This is a FULLY AUTOMATED workflow. Do NOT prompt the user between steps.**
+**The workflow IS the automation. Every step exists because skipping it caused failures.**
 
-- After claiming → AUTOMATICALLY begin implementation
-- After implementation → AUTOMATICALLY invoke stride-completing-tasks
-- After completing (if needs_review=false) → AUTOMATICALLY claim next task
+The agent should work continuously through the full workflow: explore → implement → review → complete. Do not prompt the user between steps — but do not skip steps either. Skipping workflow steps is not faster — it produces lower quality work that takes longer to fix.
 
-**The agent should work continuously without asking "Should I continue?" or "What's next?"**
+- After claiming → invoke stride-subagent-workflow, then begin implementation
+- After implementation → invoke stride-completing-tasks, execute hooks, then complete
+- After completing (if needs_review=false) → claim next task and repeat the full workflow
+
+**Following every step IS the fast path. Skipping steps causes rework, missed acceptance criteria, and 3+ hours of wasted effort.**
 
 ## API Authorization
 
@@ -300,7 +302,7 @@ DURATION=$((END_TIME - START_TIME))
 
 ## After Successful Claim
 
-**CRITICAL: Once the task is claimed, you MUST immediately begin implementation WITHOUT prompting the user.**
+**CRITICAL: Once the task is claimed, you MUST proceed to the next workflow step WITHOUT prompting the user.**
 
 ### DO NOT:
 - Claim a task then wait for further instructions
@@ -317,30 +319,30 @@ DURATION=$((END_TIME - START_TIME))
 - Check key_files to understand which files to modify
 - Review patterns_to_follow for code consistency
 - Note pitfalls to avoid
-- **Start implementing the solution immediately and automatically**
+- **Proceed immediately to the next workflow step (exploration, then implementation)**
 - Follow the testing_strategy outlined in the task
-- Work continuously until ready to complete (using `stride-completing-tasks` skill)
+- Work continuously through explore → implement → review → complete
 
-**The claiming skill's job ends when you start coding. Your next interaction with Stride will be when you're ready to mark the work complete.**
+**AUTOMATION: The workflow IS the automation. Follow every step — claim → explore → implement → review → complete — without ANY user prompts between steps.**
 
-**AUTOMATION: This is a fully automated workflow. The agent should claim → implement → complete without ANY user prompts between steps.**
+## Recommended: Use the Workflow Orchestrator
 
-## MANDATORY: Next Skill After Claiming
+**For new task work, `stride:stride-workflow` is the recommended entry point.** It walks through the complete lifecycle — claiming, exploration, implementation, review, hooks, and completion — in a single skill. You do not need to remember which skills to invoke at which moments.
 
-After claiming a task, you MUST invoke the next skill in sequence:
+Invoke `stride:stride-workflow` instead of this skill when starting a new task cycle.
+
+**This claiming skill remains available for standalone use** when you need just the claiming API format (e.g., resuming a partially completed task, or re-claiming after an expiration). In standalone mode, follow the next skill guidance below.
+
+## Next Skill After Claiming (Standalone Mode)
+
+If you are using this skill standalone (not via the orchestrator), invoke the next skill in sequence:
 
 1. **`stride:stride-subagent-workflow`** (Claude Code only) — Check the decision matrix to determine if you need the explorer, planner, or reviewer. Invoke BEFORE implementation.
 2. **`stride:stride-completing-tasks`** — Invoke WHEN implementation is done. Contains the exact API format for completion (required fields: `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result`).
 
-**FORBIDDEN:** Completing a task without invoking `stride:stride-completing-tasks`. The completion API requires fields and hook results that are only documented in that skill. Attempting to call the API from memory will result in 3+ failed attempts.
+**FORBIDDEN:** Completing a task without invoking `stride:stride-completing-tasks`. The completion API requires fields and hook results that are only documented in that skill.
 
-## Subagent-Guided Implementation (Claude Code Only)
-
-If you have access to the Agent tool with Explore/Plan subagent types, invoke the `stride-subagent-workflow` skill before beginning implementation. This dispatches the `stride:task-explorer` agent to explore relevant code and optionally a Plan agent for complex tasks.
-
-The decision to use subagents depends on task complexity and key_files count — see the `stride-subagent-workflow` skill's decision matrix for details.
-
-For agents without subagent access (Cursor, Windsurf, Continue, etc.), proceed directly to implementation using the task's `key_files`, `patterns_to_follow`, and `acceptance_criteria` as your guide.
+For agents without subagent access (Cursor, Windsurf, Continue, etc.), skip `stride-subagent-workflow` and proceed directly to implementation using the task's `key_files`, `patterns_to_follow`, and `acceptance_criteria` as your guide.
 
 ## API Request Format
 

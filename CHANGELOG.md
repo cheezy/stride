@@ -2,6 +2,18 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.6.0] - 2026-04-13
+
+### Added
+
+- **`stride-workflow` skill** — Single orchestrator that replaces the pattern of invoking 6+ separate skills at specific moments. Walks through the complete task lifecycle in one skill: prerequisites check, task discovery, claiming with hooks, codebase exploration (subagent dispatch on Claude Code, manual on other platforms), implementation, code review, hook execution, completion API call, and auto-loop for needs_review=false. Includes the subagent decision matrix (from stride-subagent-workflow), platform detection guidance, dual Quick Reference Cards for Claude Code and other environments, edge case handling (hook failures, needs_review branching, goal decomposition), and a failure modes prevention table.
+
+### Changed
+
+- **`stride-claiming-tasks`** — Rewrote the `AUTOMATION NOTICE` section from speed-focused ("work continuously without asking") to process-focused ("the workflow IS the automation — every step exists because skipping it caused failures"). Added "Recommended: Use the Workflow Orchestrator" section pointing to stride-workflow as the primary entry point for new task work. Renamed "MANDATORY: Next Skill After Claiming" to "Next Skill After Claiming (Standalone Mode)" for agents using this skill directly. Removed "Subagent-Guided Implementation" section (absorbed by orchestrator).
+- **`stride-completing-tasks`** — Rewrote the `AUTOMATION NOTICE` section with identical process-over-speed reframing consistent with claiming skill. Added "Arriving from stride-workflow" section confirming prerequisites are met when using the orchestrator. Renamed "MANDATORY: Previous Skill Before Completing" to "Previous Skill Before Completing (Standalone Mode)" with stride-workflow listed as the recommended primary path.
+- **`README.md`** — Added stride-workflow to the Mandatory Skill Chain, workflow order diagram, and Skills section. Updated descriptions to reflect orchestrator as the recommended entry point.
+
 ## [1.5.2] - 2026-03-25
 
 ### Added

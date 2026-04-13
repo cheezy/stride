@@ -325,15 +325,21 @@ DURATION=$((END_TIME - START_TIME))
 
 **AUTOMATION: The workflow IS the automation. Follow every step — claim → explore → implement → review → complete — without ANY user prompts between steps.**
 
-## Recommended: Use the Workflow Orchestrator
+## ⚠️ YOUR NEXT STEP (NON-NEGOTIABLE) ⚠️
 
-**For new task work, `stride:stride-workflow` is the recommended entry point.** It walks through the complete lifecycle — claiming, exploration, implementation, review, hooks, and completion — in a single skill. You do not need to remember which skills to invoke at which moments.
+**Task claimed successfully. Now invoke `stride:stride-workflow` IMMEDIATELY.**
 
-Invoke `stride:stride-workflow` instead of this skill when starting a new task cycle.
+Do NOT write any code, create any files, or make any edits until you have invoked the orchestrator. This is not optional. This is not a suggestion. This IS the next step.
 
-**This claiming skill remains available for standalone use** when you need just the claiming API format (e.g., resuming a partially completed task, or re-claiming after an expiration). In standalone mode, follow the next skill guidance below.
+The orchestrator walks through exploration, implementation, review, hooks, and completion — ensuring no mandatory step is skipped. Agents that skip the orchestrator and go directly to coding miss exploration and review, resulting in wrong approaches, missed acceptance criteria, and 3+ hours of rework.
+
+**If you are thinking "I'll just start coding" — STOP. Invoke `stride:stride-workflow` NOW.**
+
+This claiming skill remains available for standalone use (e.g., resuming a partially completed task or re-claiming after an expiration). If you are genuinely in standalone mode, follow the guidance below — but be aware that standalone mode without the orchestrator means YOU are responsible for every step the orchestrator would have handled.
 
 ## Next Skill After Claiming (Standalone Mode)
+
+**⚠️ WARNING:** Using standalone mode means you must manually ensure exploration, review, and hook execution happen. Skipping any of these is a workflow violation that produces lower quality work.
 
 If you are using this skill standalone (not via the orchestrator), invoke the next skill in sequence:
 

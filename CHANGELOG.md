@@ -2,6 +2,13 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.7.0] - 2026-04-13
+
+### Changed
+
+- **`stride-claiming-tasks`** — Replaced soft "Recommended: Use the Workflow Orchestrator" section with non-negotiable "YOUR NEXT STEP" gate that demands stride-workflow invocation immediately after claiming. Added workflow violation warning to standalone mode section. Defense-in-depth: catches agents that bypass the orchestrator and invoke the claiming skill directly.
+- **`stride-completing-tasks`** — Added "BEFORE CALLING COMPLETE: Verification Checklist" with 4 yes/no items: (1) Did you invoke stride-workflow? (2) Did you explore the codebase? (3) Did you review against acceptance criteria? (4) Are you ready for after_doing? If any answer is no, agents are instructed to go back and complete the step. Placed before "The Complete Completion Process" section.
+
 ## [1.6.0] - 2026-04-13
 
 ### Added

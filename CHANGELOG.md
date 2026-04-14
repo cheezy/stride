@@ -2,6 +2,12 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.7.5] - 2026-04-14
+
+### Removed
+
+- **`hooks/stride-hook.sh`** — Removed the diagnostic logging introduced in 1.7.3. The hook no longer writes to `$CLAUDE_PROJECT_DIR/.stride-hook.log` on every invocation: the `_stride_debug` helper, the `_stride_debug_log_file` variable, the `STRIDE_HOOK_DEBUG` environment toggle, and all ~20 `_stride_debug` call sites are gone. The log file served its purpose diagnosing the 1.7.3/1.7.4 env-cache bug, and leaving it on by default pollutes every Stride-enabled project directory with an ever-growing file the user didn't ask for. Operators who need per-invocation traces can temporarily re-add logging locally or run the test suite. Fatal failures (non-zero exit from a hook command) still emit structured JSON on stdout and a human-readable error on stderr — that output is unchanged. The PowerShell companion (`stride-hook.ps1`) never had the debug logging, so it is unchanged in this release.
+
 ## [1.7.4] - 2026-04-14
 
 ### Fixed

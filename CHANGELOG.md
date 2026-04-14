@@ -2,11 +2,17 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
-## [1.7.1] - 2026-04-14
+## [1.7.2] - 2026-04-14
 
 ### Fixed
 
-- **`plugin.json`** — Added `"hooks": "./hooks/hooks.json"` to the plugin manifest so Claude Code actually registers the PreToolUse/PostToolUse handlers at session start. Without this declaration, `hooks/hooks.json` was present in the plugin but never loaded, leaving all four lifecycle hooks (`before_doing`, `after_doing`, `before_review`, `after_review`) silently inactive on Claude Code. Symptoms of the bug: `.stride-env-cache` was never written after claims, `after_doing` quality gates never ran before completion, and no commit was produced by the completion hook chain. Follows the same convention used by the Superpowers plugin (`"hooks": "./hooks/hooks-cursor.json"`).
+- **`plugin.json`** — Reverted the `"hooks": "./hooks/hooks.json"` declaration added in 1.7.1. Claude Code auto-loads `hooks/hooks.json` by convention, and the `manifest.hooks` field is only for *additional* hook files — so the explicit reference triggered a `Duplicate hooks file detected` installation error. 1.7.1 is broken at install time; upgrade directly to 1.7.2. The underlying question of why hooks appeared inactive in earlier sessions needs further investigation; it is not solved by manifest changes.
+
+## [1.7.1] - 2026-04-14
+
+### Broken
+
+- Declared `"hooks": "./hooks/hooks.json"` in `plugin.json`. Claude Code refuses to install this version with `Duplicate hooks file detected`. Skip this version — upgrade to 1.7.2 instead.
 
 ## [1.7.0] - 2026-04-13
 

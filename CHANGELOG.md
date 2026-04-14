@@ -2,6 +2,12 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.7.3] - 2026-04-14
+
+### Added
+
+- **`hooks/stride-hook.sh`** — Always-on diagnostic logging to `$CLAUDE_PROJECT_DIR/.stride-hook.log`. One line per hook invocation records the phase, pid, extracted command, routed `HOOK_NAME`, every early-exit reason, the env-cache parse outcome, and each command executed. Lets operators confirm whether Claude Code is invoking the hook at all and trace exactly which branch caused a silent exit. Set `STRIDE_HOOK_DEBUG=0` to disable. Log file is safe to delete and should be added to `.gitignore`. The PowerShell companion (`stride-hook.ps1`) is unchanged in this release.
+
 ## [1.7.2] - 2026-04-14
 
 ### Fixed

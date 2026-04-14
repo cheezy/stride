@@ -18,6 +18,20 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
 STRIDE_MD="$PROJECT_DIR/.stride.md"
 ENV_CACHE="$PROJECT_DIR/.stride-env-cache"
 
+# --- Debug logging (enabled unless STRIDE_HOOK_DEBUG=0) ---
+# Writes one line per event to $PROJECT_DIR/.stride-hook.log so operators can
+# verify whether Claude Code is invoking the hook at all and trace which
+# branch causes a silent exit. Log file is safe to delete; add to .gitignore.
+_stride_debug_log_file="$PROJECT_DIR/.stride-hook.log"
+_stride_debug() {
+  [ "${STRIDE_HOOK_DEBUG:-1}" = "0" ] && return 0
+  local _ts
+  _ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '?')"
+  printf '[%s pid=%d phase=%s] %s\n' "$_ts" "$$" "${PHASE:-?}" "$*" \
+    >> "$_stride_debug_log_file" 2>/dev/null || true
+}
+_stride_debug "FIRED argv='${*:-<empty>}' cwd=$(pwd) CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-<unset>}"
+
 # --- Platform detection: delegate to PowerShell on native Windows ---
 # Git Bash (OSTYPE=msys*) and WSL have full bash — run directly.
 # Native Windows without bash (COMSPEC set, no OSTYPE) → delegate to .ps1
@@ -41,11 +55,18 @@ if [ "$_delegate_to_ps1" = "true" ]; then
 fi
 
 # Exit early if no phase argument or no .stride.md
-[ -n "$PHASE" ] || exit 0
-[ -f "$STRIDE_MD" ] || exit 0
+if [ -z "$PHASE" ]; then
+  _stride_debug "EXIT early: no PHASE argument"
+  exit 0
+fi
+if [ ! -f "$STRIDE_MD" ]; then
+  _stride_debug "EXIT early: no .stride.md at $STRIDE_MD"
+  exit 0
+fi
 
 # Read Claude Code hook input from stdin
 INPUT=$(cat)
+_stride_debug "INPUT bytes=${#INPUT} head='$(printf '%s' "$INPUT" | head -c 300 | tr '\n' ' ')'"
 
 # Detect jq availability once
 HAS_JQ=false
@@ -68,7 +89,12 @@ else
   fi
 fi
 
-[ -n "$COMMAND" ] || exit 0
+_stride_debug "COMMAND has_jq=$HAS_JQ len=${#COMMAND} value='$(printf '%s' "$COMMAND" | head -c 300 | tr '\n' ' ')'"
+
+if [ -z "$COMMAND" ]; then
+  _stride_debug "EXIT early: COMMAND extraction returned empty (tool_input shape may have changed)"
+  exit 0
+fi
 
 # --- Determine which Stride hook to run ---
 # Routing:
@@ -94,8 +120,13 @@ case "$PHASE" in
     ;;
 esac
 
+_stride_debug "ROUTE phase=$PHASE → HOOK_NAME='${HOOK_NAME:-<none>}'"
+
 # Not a Stride API call — exit cleanly
-[ -n "$HOOK_NAME" ] || exit 0
+if [ -z "$HOOK_NAME" ]; then
+  _stride_debug "EXIT: command did not match any Stride API URL pattern"
+  exit 0
+fi
 
 # --- Environment variable caching ---
 # After a successful claim (before_doing), extract task metadata from the API
@@ -104,14 +135,19 @@ esac
 
 if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
   RESPONSE=$(echo "$INPUT" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
+  _stride_debug "ENV_CACHE attempt: RESPONSE len=${#RESPONSE} head='$(printf '%s' "$RESPONSE" | head -c 200 | tr '\n' ' ')'"
   if [ -n "$RESPONSE" ]; then
     # tool_response may be raw JSON or may need extraction
     # Try parsing directly, then try extracting embedded JSON
     TASK_JSON=""
     if echo "$RESPONSE" | jq -e '.data.id' > /dev/null 2>&1; then
       TASK_JSON=$(echo "$RESPONSE" | jq -r '.data' 2>/dev/null)
+      _stride_debug "ENV_CACHE: parsed tool_response as {data:{id:...}}"
     elif echo "$RESPONSE" | jq -e '.id' > /dev/null 2>&1; then
       TASK_JSON="$RESPONSE"
+      _stride_debug "ENV_CACHE: parsed tool_response as flat {id:...}"
+    else
+      _stride_debug "ENV_CACHE: tool_response did not contain .data.id or .id — cache not written"
     fi
 
     if [ -n "$TASK_JSON" ]; then
@@ -124,7 +160,10 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
         echo "TASK_COMPLEXITY='$(echo "$TASK_JSON" | jq -r '.complexity // empty')'"
         echo "TASK_PRIORITY='$(echo "$TASK_JSON" | jq -r '.priority // empty')'"
       } > "$ENV_CACHE" 2>/dev/null || true
+      _stride_debug "ENV_CACHE written to $ENV_CACHE"
     fi
+  else
+    _stride_debug "ENV_CACHE skipped: empty tool_response (Claude Code may not expose it on this call path)"
   fi
 fi
 
@@ -164,7 +203,10 @@ while IFS= read -r _line || [ -n "$_line" ]; do
 done < "$STRIDE_MD"
 
 # No commands for this hook — exit cleanly
-[ -n "$COMMANDS" ] || exit 0
+if [ -z "$COMMANDS" ]; then
+  _stride_debug "EXIT: no commands parsed from .stride.md '## $HOOK_NAME' section"
+  exit 0
+fi
 
 # --- Build command list for tracking ---
 # Split commands into an array for structured output
@@ -178,8 +220,11 @@ done <<< "$COMMANDS"
 
 # Nothing to execute after filtering
 if [ ${#CMD_LIST[@]} -eq 0 ]; then
+  _stride_debug "EXIT: '## $HOOK_NAME' section found but all lines were blank or comments"
   exit 0
 fi
+
+_stride_debug "EXECUTE: $HOOK_NAME has ${#CMD_LIST[@]} command(s) queued"
 
 # --- Execute commands with structured output ---
 # Use temp files instead of bash arrays to avoid set -u issues with empty arrays
@@ -190,6 +235,7 @@ CMD_INDEX=0
 CMD_TOTAL=${#CMD_LIST[@]}
 
 for trimmed in "${CMD_LIST[@]}"; do
+  _stride_debug "EXEC [$((CMD_INDEX + 1))/$CMD_TOTAL]: $trimmed"
   # Capture stdout and stderr separately
   CMD_STDOUT_FILE=$(mktemp)
   CMD_STDERR_FILE=$(mktemp)
@@ -201,6 +247,7 @@ for trimmed in "${CMD_LIST[@]}"; do
     cat "$CMD_STDERR_FILE" >&2
   else
     CMD_EXIT=$?
+    _stride_debug "EXEC FAILED [$((CMD_INDEX + 1))/$CMD_TOTAL] exit=$CMD_EXIT: $trimmed"
     CMD_STDOUT=$(tail -50 "$CMD_STDOUT_FILE")
     CMD_STDERR=$(tail -50 "$CMD_STDERR_FILE")
     rm -f "$CMD_STDOUT_FILE" "$CMD_STDERR_FILE"
@@ -257,6 +304,7 @@ done
 # --- Success output ---
 END_SECS=$(date +%s)
 DURATION=$((END_SECS - START_SECS))
+_stride_debug "SUCCESS: $HOOK_NAME completed ${CMD_TOTAL} command(s) in ${DURATION}s"
 
 if [ "$HAS_JQ" = "true" ]; then
   COMPLETED_JSON=$(jq -R . < "$COMPLETED_FILE" | jq -s . 2>/dev/null || echo "[]")

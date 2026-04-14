@@ -2,6 +2,13 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.8.0] - 2026-04-14
+
+### Added
+
+- **`stride-workflow` skill** — New "Workflow Telemetry: The `workflow_steps` Array" section documenting the telemetry array the orchestrator must build up during a task and submit in the `/complete` payload. Defines the six-name vocabulary (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`), the per-step schema (`name`, `dispatched`, `duration_ms`, `reason`), and two end-of-workflow examples — one with full dispatch, one showing decision-matrix skips on a small task. Step 8 is updated to list `workflow_steps` as a required field in the completion payload and to include it in the example JSON.
+- **`stride-completing-tasks` skill** — Surfaced `workflow_steps` in four places so agents cannot forget it: (1) the pre-completion Verification Checklist now asks "Is `workflow_steps` included in the complete payload?" with the six-name vocabulary inline; (2) the primary API Request Format payload example includes a six-entry `workflow_steps` array; (3) the Completion Request Field Reference table lists `workflow_steps` as a required array field with a pointer to the stride-workflow schema; (4) the Quick Reference Card's `REQUIRED BODY` example includes it. Schema matches `stride-workflow` key-for-key.
+
 ## [1.7.5] - 2026-04-14
 
 ### Removed

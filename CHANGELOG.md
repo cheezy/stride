@@ -2,6 +2,18 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.7.4] - 2026-04-14
+
+### Fixed
+
+- **`hooks/stride-hook.sh` and `hooks/stride-hook.ps1`** — Env-cache parsing for Claude Code's `tool_response` shape. Claude Code's Bash tool wraps the curl response as `{"stdout": "<api-json-string>", "stderr": "...", ...}`, so the API JSON we want lives inside `.tool_response.stdout` as a string. Earlier versions only matched legacy shapes (raw JSON-encoded string in `tool_response`, or a flat object) and silently logged `tool_response did not contain .data.id or .id — cache not written` against every claim from Claude Code. Result: `TASK_IDENTIFIER`, `TASK_TITLE`, etc. were never exported, and any `.stride.md` command that referenced them ran with empty values (e.g. `git commit -m "Completed task : "`). The hook now tries the wrapper shape first, then falls back to the two legacy shapes.
+- **`hooks/stride-hook.sh`** — User commands no longer abort on unset env vars. The hook ran with `set -uo pipefail`, which propagated into each `eval` and aborted the command before it executed if it referenced an unset variable. Now `set +uo pipefail` is set immediately around the `eval`, then re-engaged. Combined with the env-cache fix above, this means a `.stride.md` line like `git commit -a -m "$TASK_TITLE"` runs reliably.
+- **`hooks/stride-hook.sh`** — Added `EXEC RESULT` log line for every command (success and failure) recording exit code, stdout bytes, and stderr bytes. Previous versions only logged failures, so a command that returned 0 with empty output (or one that failed silently before running due to `set -u`) left no trace. Operators can now confirm what each step actually did from `.stride-hook.log`.
+
+### Added
+
+- **`hooks/test-stride-hook.sh`** — Regression test for the Claude Code `{"stdout":"<json>"}` env-cache wrapper shape (test 6e). Locks in the 1.7.4 fix so the parsing can't silently regress to the 1.7.3 behavior.
+
 ## [1.7.3] - 2026-04-14
 
 ### Added

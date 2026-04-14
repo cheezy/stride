@@ -613,6 +613,16 @@ STRIDE
   assert_contains "env cache: title" "title=Test Task" "$OUTPUT"
   # Clean up env cache
   rm -f "$CACHE_PROJ/.stride-env-cache"
+
+  # 6e: Claude Code Bash tool wraps API JSON inside tool_response.stdout
+  # (the wrapper that broke env caching before 1.7.4)
+  CC_CLAIM='{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":1526,\"identifier\":\"W217\",\"title\":\"Wrapped Task\",\"status\":\"in_progress\",\"complexity\":\"medium\",\"priority\":\"high\"}}","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}}'
+  OUTPUT=$(echo "$CC_CLAIM" | CLAUDE_PROJECT_DIR="$CACHE_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  EXIT_CODE=$?
+  assert_exit "env caching (Claude Code stdout wrapper) exits 0" 0 "$EXIT_CODE"
+  assert_contains "env cache (wrapped): identifier" "id=W217" "$OUTPUT"
+  assert_contains "env cache (wrapped): title" "title=Wrapped Task" "$OUTPUT"
+  rm -f "$CACHE_PROJ/.stride-env-cache"
 else
   echo "  SKIP: env caching tests (jq not available)"
 fi

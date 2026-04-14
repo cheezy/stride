@@ -137,17 +137,35 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
   RESPONSE=$(echo "$INPUT" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
   _stride_debug "ENV_CACHE attempt: RESPONSE len=${#RESPONSE} head='$(printf '%s' "$RESPONSE" | head -c 200 | tr '\n' ' ')'"
   if [ -n "$RESPONSE" ]; then
-    # tool_response may be raw JSON or may need extraction
-    # Try parsing directly, then try extracting embedded JSON
+    # Claude Code wraps Bash tool output as {"stdout":"<json>","stderr":"...",...}
+    # so the API JSON we want lives inside .tool_response.stdout as a string.
+    # Other harnesses may pass the API JSON directly. Try both shapes.
     TASK_JSON=""
-    if echo "$RESPONSE" | jq -e '.data.id' > /dev/null 2>&1; then
-      TASK_JSON=$(echo "$RESPONSE" | jq -r '.data' 2>/dev/null)
+    INNER=""
+
+    # Shape 1: {"stdout":"<json>"} — Claude Code Bash tool
+    if echo "$RESPONSE" | jq -e 'type == "object" and has("stdout")' > /dev/null 2>&1; then
+      INNER=$(echo "$RESPONSE" | jq -r '.stdout // ""' 2>/dev/null)
+      if [ -n "$INNER" ] && echo "$INNER" | jq -e '.data.id' > /dev/null 2>&1; then
+        TASK_JSON=$(echo "$INNER" | jq -c '.data' 2>/dev/null)
+        _stride_debug "ENV_CACHE: parsed tool_response.stdout as {data:{id:...}}"
+      elif [ -n "$INNER" ] && echo "$INNER" | jq -e '.id' > /dev/null 2>&1; then
+        TASK_JSON="$INNER"
+        _stride_debug "ENV_CACHE: parsed tool_response.stdout as flat {id:...}"
+      fi
+    fi
+
+    # Shape 2: raw API JSON directly in tool_response (other harnesses)
+    if [ -z "$TASK_JSON" ] && echo "$RESPONSE" | jq -e '.data.id' > /dev/null 2>&1; then
+      TASK_JSON=$(echo "$RESPONSE" | jq -c '.data' 2>/dev/null)
       _stride_debug "ENV_CACHE: parsed tool_response as {data:{id:...}}"
-    elif echo "$RESPONSE" | jq -e '.id' > /dev/null 2>&1; then
+    elif [ -z "$TASK_JSON" ] && echo "$RESPONSE" | jq -e '.id' > /dev/null 2>&1; then
       TASK_JSON="$RESPONSE"
       _stride_debug "ENV_CACHE: parsed tool_response as flat {id:...}"
-    else
-      _stride_debug "ENV_CACHE: tool_response did not contain .data.id or .id — cache not written"
+    fi
+
+    if [ -z "$TASK_JSON" ]; then
+      _stride_debug "ENV_CACHE: tool_response did not contain .data.id or .id (checked .stdout and root) — cache not written"
     fi
 
     if [ -n "$TASK_JSON" ]; then
@@ -240,13 +258,25 @@ for trimmed in "${CMD_LIST[@]}"; do
   CMD_STDOUT_FILE=$(mktemp)
   CMD_STDERR_FILE=$(mktemp)
 
-  if eval "$trimmed" > "$CMD_STDOUT_FILE" 2> "$CMD_STDERR_FILE"; then
+  # Relax `set -u` and `pipefail` for the user's command so that a reference
+  # to an unset env var (e.g. $TASK_IDENTIFIER when env-cache failed to write)
+  # doesn't silently abort the eval before the actual command runs. The hook
+  # script's strictness re-engages immediately after.
+  set +uo pipefail
+  eval "$trimmed" > "$CMD_STDOUT_FILE" 2> "$CMD_STDERR_FILE"
+  CMD_EXIT=$?
+  set -uo pipefail
+
+  CMD_STDOUT_LEN=$(wc -c < "$CMD_STDOUT_FILE" 2>/dev/null | tr -d ' ')
+  CMD_STDERR_LEN=$(wc -c < "$CMD_STDERR_FILE" 2>/dev/null | tr -d ' ')
+  _stride_debug "EXEC RESULT [$((CMD_INDEX + 1))/$CMD_TOTAL] exit=$CMD_EXIT stdout_bytes=${CMD_STDOUT_LEN:-0} stderr_bytes=${CMD_STDERR_LEN:-0}"
+
+  if [ "$CMD_EXIT" -eq 0 ]; then
     echo "$trimmed" >> "$COMPLETED_FILE"
     # Print command output to stderr so Claude sees it as feedback
     cat "$CMD_STDOUT_FILE" >&2
     cat "$CMD_STDERR_FILE" >&2
   else
-    CMD_EXIT=$?
     _stride_debug "EXEC FAILED [$((CMD_INDEX + 1))/$CMD_TOTAL] exit=$CMD_EXIT: $trimmed"
     CMD_STDOUT=$(tail -50 "$CMD_STDOUT_FILE")
     CMD_STDERR=$(tail -50 "$CMD_STDERR_FILE")

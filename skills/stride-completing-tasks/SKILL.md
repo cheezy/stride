@@ -16,6 +16,8 @@ The completion API requires fields that are ONLY documented here:
 - `actual_files_changed` (required — comma-separated STRING, not array)
 - `after_doing_result` (required — object with `exit_code`, `output`, `duration_ms`)
 - `before_review_result` (required — object with `exit_code`, `output`, `duration_ms`)
+- `explorer_result` (required — object: dispatched `stride:task-explorer` result OR self-reported skip; see Explorer/Reviewer Result Schema)
+- `reviewer_result` (required — object: dispatched `stride:task-reviewer` result OR self-reported skip; see Explorer/Reviewer Result Schema)
 
 **Attempting to complete a task from memory without this skill results in 3+ failed API calls** as you discover each missing field one at a time. This has been observed in practice.
 
@@ -122,6 +124,7 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 - [ ] **Did you review your changes against `acceptance_criteria`?** If no → walk through each acceptance criterion and verify your implementation meets it. Check `pitfalls` too.
 - [ ] **Are you ready to run the `after_doing` hook (tests, linting)?** If no → fix any known issues first. The hook will fail if tests don't pass.
 - [ ] **Is `workflow_steps` included in the complete payload?** If no → add it now. The array is required on every completion. It must contain one entry for each of the six step names (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`) — see the stride-workflow skill for the schema.
+- [ ] **Are `explorer_result` and `reviewer_result` included?** If no → add them now. Both are required on every completion, either as a dispatched-subagent result or as a self-reported skip with a reason from the fixed enum. See the Explorer/Reviewer Result Schema section below.
 
 **If ANY answer is NO → Go back and do it now. Do NOT proceed to completion.**
 
@@ -330,6 +333,18 @@ PATCH /api/tasks/:id/complete
     "output": "Creating pull request...\nPR #123 created: https://github.com/org/repo/pull/123",
     "duration_ms": 2340
   },
+  "explorer_result": {
+    "dispatched": true,
+    "summary": "Explored lib/foo.ex and test/foo_test.exs; identified existing error-tuple pattern to mirror",
+    "duration_ms": 12450
+  },
+  "reviewer_result": {
+    "dispatched": true,
+    "summary": "Reviewed the diff against all 5 acceptance criteria and the 3 pitfalls; no issues found",
+    "duration_ms": 15300,
+    "acceptance_criteria_checked": 5,
+    "issues_found": 0
+  },
   "workflow_steps": [
     {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
     {"name": "planner",        "dispatched": true,  "duration_ms": 8200},
@@ -341,11 +356,85 @@ PATCH /api/tasks/:id/complete
 }
 ```
 
-**Critical:** `after_doing_result`, `before_review_result`, and `workflow_steps` are all REQUIRED. The API will reject requests without them.
+**Critical:** `after_doing_result`, `before_review_result`, `explorer_result`, `reviewer_result`, and `workflow_steps` are all REQUIRED. The API will reject requests without them.
 
 **Schema reference:** The `workflow_steps` array must match the schema documented in the `stride-workflow` skill — key-for-key. Always include one entry per step name (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`). Skipped steps use `{"name": "<step>", "dispatched": false, "reason": "<why>"}`.
 
 **Optional:** Include `review_report` when a task-reviewer agent produced a structured review. Omit it when no review was performed (e.g., small tasks with 0-1 key_files).
+
+## Explorer/Reviewer Result Schema
+
+Every `/complete` call **must** include both `explorer_result` and `reviewer_result` as top-level objects. Each is either a dispatched-subagent result or a self-reported skip. Server-side validation is pre-validated by `Kanban.Tasks.CompletionValidation`; invalid payloads are logged during the grace-period rollout and rejected with `422` once `:strict_completion_validation` flips.
+
+### Shape 1 — dispatched subagent (preferred on Claude Code)
+
+```json
+"explorer_result": {
+  "dispatched": true,
+  "summary": "<40+ non-whitespace characters describing what was explored>",
+  "duration_ms": 12000
+}
+
+"reviewer_result": {
+  "dispatched": true,
+  "summary": "<40+ non-whitespace characters describing what was reviewed>",
+  "duration_ms": 8000,
+  "acceptance_criteria_checked": 5,
+  "issues_found": 0
+}
+```
+
+`reviewer_result` additionally requires `acceptance_criteria_checked` and `issues_found` as non-negative integers when `dispatched` is `true`.
+
+### Shape 2 — self-reported skip (for decision-matrix skips or no-subagent platforms)
+
+```json
+{
+  "dispatched": false,
+  "reason": "<one of the 5 enum values below>",
+  "summary": "<40+ non-whitespace characters explaining why and what was self-reported>"
+}
+```
+
+The `reason` must be exactly one of:
+
+| Reason | When to use |
+|---|---|
+| `no_subagent_support` | Platform has no subagent dispatch available (Codex/OpenCode graceful fallback) |
+| `small_task_0_1_key_files` | Decision matrix: task is small with 0–1 key_files |
+| `trivial_change_docs_only` | Docs-only change with no code impact |
+| `self_reported_exploration` | Explored the codebase manually rather than dispatching the explorer agent |
+| `self_reported_review` | Self-reviewed the diff against acceptance criteria rather than dispatching the reviewer agent |
+
+Free-form reasons are rejected — the enum is the contract.
+
+### Minimum summary length
+
+Summaries must contain at least **40 non-whitespace characters**. Trivial summaries like `"explored files"` or `"reviewed code"` are rejected. The minimum is counted after stripping all whitespace, so inserting spaces does not help.
+
+### 422 rejection example
+
+When strict mode is on and a payload fails validation:
+
+```json
+{
+  "error": "completion validation failed",
+  "failures": [
+    {
+      "field": "explorer_result",
+      "errors": [
+        {"field": "summary", "message": "must be a string of at least 40 non-whitespace characters"}
+      ]
+    }
+  ],
+  "required_format": { /* both shapes documented above */ },
+  "documentation": "https://.../AI-WORKFLOW.md#completing-tasks"
+}
+```
+
+### Grace-period rollout
+
+Until the server flips `:strict_completion_validation` to true, missing or invalid `explorer_result`/`reviewer_result` produces a structured warning log but the request succeeds. **Emit the fields correctly now** — agents that lag the rollout will start getting 422 rejections on the flip day.
 
 ## Review vs Auto-Approval Decision
 
@@ -529,6 +618,18 @@ REQUIRED BODY: {
     "output": "Executed by Claude Code hooks system",
     "duration_ms": 0
   },
+  "explorer_result": {
+    "dispatched": true,
+    "summary": "<40+ non-whitespace chars>",
+    "duration_ms": 12000
+  },
+  "reviewer_result": {
+    "dispatched": true,
+    "summary": "<40+ non-whitespace chars>",
+    "duration_ms": 8000,
+    "acceptance_criteria_checked": 5,
+    "issues_found": 0
+  },
   "workflow_steps": [
     {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
     {"name": "planner",        "dispatched": true,  "duration_ms": 8200},
@@ -538,6 +639,11 @@ REQUIRED BODY: {
     {"name": "before_review",  "dispatched": true,  "duration_ms": 2340}
   ]
 }
+
+SKIP FORM for explorer_result / reviewer_result (when subagent not dispatched):
+  {"dispatched": false, "reason": "<enum>", "summary": "<40+ non-whitespace chars>"}
+Reason enum: no_subagent_support, small_task_0_1_key_files, trivial_change_docs_only,
+             self_reported_exploration, self_reported_review
 
 VERSION: Send skills_version from your SKILL.md frontmatter with every complete request
 ```
@@ -571,6 +677,8 @@ VERSION: Send skills_version from your SKILL.md frontmatter with every complete 
 | `after_doing_result` | object | Yes | Hook result (see format below) |
 | `before_review_result` | object | Yes | Hook result (see format below) |
 | `workflow_steps` | array | Yes | Telemetry array with one entry per step name. See stride-workflow skill for full schema. |
+| `explorer_result` | object | Yes | `stride:task-explorer` dispatch result OR self-reported skip. See Explorer/Reviewer Result Schema section. |
+| `reviewer_result` | object | Yes | `stride:task-reviewer` dispatch result OR self-reported skip. See Explorer/Reviewer Result Schema section. |
 | `review_report` | string | No | Structured review report from task-reviewer agent. Include when a review was performed; omit when no review was done. |
 | `skills_version` | string | No | Your skills version from SKILL.md frontmatter |
 

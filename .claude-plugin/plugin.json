@@ -1,7 +1,7 @@
 {
   "name": "stride",
   "description": "Task lifecycle skills for Stride kanban: claiming, completing, creating tasks and goals",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "author": {
     "name": "Jeff Morgan",
     "email": "cheezy@letstango.ca"

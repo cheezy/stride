@@ -2,6 +2,12 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.9.1] - 2026-04-17
+
+### Changed
+
+- **`agents/task-explorer.md` and `agents/hook-diagnostician.md`** — Pinned both subagents to `model: sonnet` (previously `model: inherit`). Task exploration is mechanical file-reading and pattern-matching, and hook diagnosis is structured triage over tool output — both are well within Sonnet's range and run frequently enough that the speed/cost delta matters. `task-reviewer` and `task-decomposer` remain on `inherit` because reviewer quality and decomposition judgment benefit more from the parent model.
+
 ## [1.9.0] - 2026-04-16
 
 ### Added

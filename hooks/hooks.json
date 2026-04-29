@@ -22,6 +22,16 @@
             "timeout": 120
           }
         ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stride-skill-gate.sh",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }

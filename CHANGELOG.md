@@ -2,6 +2,29 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.10.0] - 2026-04-29
+
+### Added
+
+- **`hooks/stride-skill-gate.sh` and `hooks/stride-skill-gate.ps1`** — New PreToolUse hook that gates direct invocations of internal Stride sub-skills. The gate reads `tool_input.skill` from the hook payload, allows `stride-workflow` and any non-Stride skill silently, and blocks the six protected sub-skills (`stride-claiming-tasks`, `stride-completing-tasks`, `stride-creating-tasks`, `stride-creating-goals`, `stride-enriching-tasks`, `stride-subagent-workflow`) unless an orchestrator marker file is present and fresh. Block decisions emit a compact `{"decision":"block","reason":"..."}` JSON to stdout, a human-readable line to stderr, and exit 2 (Claude Code's PreToolUse block convention). Bash version uses jq with a parameter-expansion fallback and portable `date -d`/`date -j -f` freshness logic; PowerShell version uses `ConvertFrom-Json` and `[datetime]::Parse`. Native-Windows delegation mirrors `stride-hook.sh`.
+- **`hooks/test-stride-skill-gate.sh` and `hooks/test-stride-skill-gate.ps1`** — Test harnesses covering all seven scenarios: marker missing, marker fresh, marker stale (>4h), `stride-workflow` always allowed, non-Stride skills always allowed, `STRIDE_ALLOW_DIRECT=1` bypass, and plugin-namespaced names (`stride:stride-claiming-tasks`) recognized and gated.
+- **`hooks/hooks.json`** — New PreToolUse entry with matcher `Skill` invoking `${CLAUDE_PLUGIN_ROOT}/hooks/stride-skill-gate.sh` (timeout 10s). Existing PostToolUse(Bash) and PreToolUse(Bash) entries unchanged.
+- **`skills/stride-workflow/SKILL.md`** — New "Orchestrator Activation Marker" section documenting the marker file contract: path (`$CLAUDE_PROJECT_DIR/.stride/.orchestrator_active`), single-line JSON shape (`session_id`, `started_at` ISO8601-Z, `pid`), 4-hour freshness window, and the `STRIDE_ALLOW_DIRECT=1` bypass. Step 0 (Prerequisites) now writes the marker; Step 9 (Post-Completion) clears it via `rm -f`.
+- **All sub-skill `SKILL.md` files** — New "## STOP — orchestrator check" preamble inserted as the first H2 after the title in `stride-claiming-tasks`, `stride-completing-tasks`, `stride-creating-tasks`, `stride-creating-goals`, `stride-enriching-tasks`, and `stride-subagent-workflow`. The block tells the agent to invoke `stride:stride-workflow` and not read further if it arrived directly from a user prompt.
+
+### Changed
+
+- **All sub-skill frontmatter `description:` fields** — Reframed as `INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt.` followed by API-contract framing. Removes user-intent verbs (`claim a task`, `complete a task`) so the skill matcher does not pick sub-skills on plain-English Stride prompts.
+- **`skills/stride-workflow/SKILL.md` frontmatter `description:`** — Amplified to enumerate user-intent phrases (`claim a task`, `work on the next stride task`, `complete a stride task`, `enrich a stride task`, `decompose a goal`, `create a goal or stride tasks`) and to explicitly list the six sub-skill names dispatched from inside the orchestrator. The matcher now resolves Stride-related user intent to the orchestrator instead of to a sub-skill.
+
+### Why this release
+
+Background and rationale documented in `docs/plans/stride-plugin-feedback.md` (downstream agent feedback from a Claude session that consistently bypassed the orchestrator). This release implements all three layers described there in increasing strength: (1) hard-stop body preambles, (2) reframed frontmatter descriptions, (3) the PreToolUse hook gate. The override env var (`STRIDE_ALLOW_DIRECT=1`) is provided for plugin debugging and CI scenarios where direct sub-skill invocation is intentional.
+
+### Behavior change for users
+
+After upgrading, invoking `stride-claiming-tasks`, `stride-completing-tasks`, `stride-creating-tasks`, `stride-creating-goals`, `stride-enriching-tasks`, or `stride-subagent-workflow` directly will be **blocked** by the PreToolUse hook unless `stride-workflow` was invoked first (writing the marker file in Step 0) or unless `STRIDE_ALLOW_DIRECT=1` is set. Existing flows that already use `stride-workflow` as their entry point are unaffected — the orchestrator dispatches sub-skills through the same Skill tool and the gate reads its own marker as proof of legitimate dispatch.
+
 ## [1.9.1] - 2026-04-17
 
 ### Changed

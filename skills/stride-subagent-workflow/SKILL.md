@@ -1,6 +1,6 @@
 ---
 name: stride-subagent-workflow
-description: INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt. Contains the Claude Code subagent decision matrix (when to dispatch stride:task-explorer, stride:task-reviewer, stride:task-decomposer, stride:hook-diagnostician), used during the orchestrator's exploration and review phases.
+description: INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt. Contains the Claude Code subagent decision matrix (when to dispatch stride:task-enricher, stride:task-explorer, stride:task-reviewer, stride:task-decomposer, stride:hook-diagnostician), used during the orchestrator's enrichment, exploration, and review phases.
 skills_version: 1.0
 ---
 
@@ -17,6 +17,7 @@ Sub-skills are dispatched by the orchestrator only.
 **If you just claimed a Stride task and are about to start implementation, you MUST invoke this skill first.**
 
 This skill contains the decision matrix that determines which agents to dispatch:
+- `stride:task-enricher` — Enrich a sparse task with key_files, patterns, testing strategy, etc. **before claiming**
 - `stride:task-explorer` — Read key_files and discover patterns before coding
 - `stride:task-reviewer` — Review your changes against acceptance criteria before completion
 - `stride:task-decomposer` — Break goals into properly-sized subtasks
@@ -81,6 +82,28 @@ Use this matrix to determine which subagents to dispatch based on task attribute
 - If the task is a **goal** or has **large complexity without child tasks** or a **25+ hour estimate**: dispatch the decomposer first. The decomposer breaks it into claimable child tasks — you don't implement goals directly.
 - If the task is small with 0-1 key_files, skip all subagents and code directly.
 - Otherwise, at minimum run the explorer and reviewer.
+
+## Pre-Claim: Enrichment (Sparse Tasks)
+
+**When:** During the orchestrator's Step 1 enrichment check, BEFORE claiming. Triggered when the task has empty `key_files` OR missing `testing_strategy` OR empty `verification_steps` OR blank `acceptance_criteria`.
+
+**What to do:** Dispatch the `stride:task-enricher` agent, passing the sparse task fields.
+
+Provide the agent with:
+- The task's `identifier` (e.g., `W339`)
+- The task's `title`, `type`, and `description` (the agent must NOT modify these — only read them)
+- Any `priority` or `dependencies` the human specified
+
+The enricher will return a single JSON object containing the enriched fields: `key_files`, `patterns_to_follow`, `testing_strategy`, `verification_steps`, `pitfalls`, `acceptance_criteria`, `complexity`, `why`, `what`, `where_context`. The agent does NOT call the Stride API itself.
+
+**After enrichment:**
+1. Submit the returned JSON via `PATCH /api/tasks/:id` to populate the missing fields on the existing task
+2. Re-fetch the task with `GET /api/tasks/:id` to verify all required fields are populated
+3. Proceed to claim the task as normal — the rest of the matrix below applies once it's claimed
+
+**Skip enrichment when:**
+- The task is already well-specified (all four trigger fields populated)
+- The task type is `goal` (decompose first; the resulting child tasks may need enrichment individually)
 
 ## Phase 0: Decomposition (Goals and Large Undecomposed Tasks)
 

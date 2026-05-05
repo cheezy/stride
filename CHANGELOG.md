@@ -2,6 +2,28 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.11.0] - 2026-05-05
+
+### Added
+
+- **`agents/task-enricher.md`** — New Claude Code subagent that owns the four-phase task enrichment procedure (parse intent, explore codebase, estimate complexity, assemble JSON). Frontmatter mirrors `task-explorer.md` (model: sonnet, two inline `<example>` blocks). Body covers all six Phase 2 exploration steps with decision-logic blocks, the Phase 3 complexity heuristic table, the 16-item Phase 4 pre-submission checklist, five edge cases, and five common mistakes. Read-only — does NOT call the Stride API; returns a single enriched-task JSON object for the orchestrator to submit. Title, type, and description from human input are sacrosanct and never modified by the agent.
+- **`skills/stride-subagent-workflow/SKILL.md`** — New `## Pre-Claim: Enrichment (Sparse Tasks)` section between the Decision Matrix and Phase 0, documenting when to dispatch `stride:task-enricher` (sparse fields detected at orchestrator Step 1), what to pass (identifier + sparse fields with title/type/description sacrosanct), what to expect back (single enriched JSON), and the post-enrichment workflow (PATCH + re-fetch + claim). Agent inventory bullet list also updated.
+
+### Changed
+
+- **`skills/stride-enriching-tasks/SKILL.md`** — Slimmed from 781 lines to 269 lines (66% reduction). Restructured body into platform-aware dispatcher: a `#### Claude Code: Dispatch the Enricher Agent` H4 block (numbered steps mirroring stride-workflow Step 3 style) that dispatches `stride:task-enricher` and submits returned JSON via the existing API Integration block, plus a `#### Other Environments: Manual Walkthrough` block with condensed Phase 1-4 walkthrough for Cursor/Windsurf/Continue users without subagent dispatch. STOP/orchestrator-check preamble preserved verbatim. API Authorization warning preserved verbatim. Phase 4 16-item checklist preserved verbatim. Heuristic tables, edge cases, common mistakes, full output format example, and rationalization tables moved into `agents/task-enricher.md` (manual walkthrough cross-references the agent file for the deep procedure). Frontmatter unchanged.
+- **`skills/stride-workflow/SKILL.md`** — Step 1 enrichment check (line 142) updated with Claude Code vs Other Environments subsections matching Step 3's H4 + bold-verb + numbered-step style. Claude Code subsection dispatches `stride:task-enricher` and submits returned JSON via `PATCH /api/tasks/:id`. Other Environments subsection invokes `stride-enriching-tasks` and walks its Manual Walkthrough Phases. Sparse-detection trigger (empty `key_files` OR missing `testing_strategy` OR empty `verification_steps` OR blank `acceptance_criteria`) preserved.
+- **`skills/stride-subagent-workflow/SKILL.md` frontmatter** — Description updated to enumerate `stride:task-enricher` alongside the other four agents and to mention the orchestrator's enrichment phase.
+
+### Why this release
+
+Enrichment was the only major exploratory phase still inlined as a heavyweight skill (781 lines). Moving it into a Claude Code subagent matches the established pattern (`task-explorer`, `task-decomposer`, `task-reviewer`, `hook-diagnostician`), isolates the exploration work from the orchestrator's context window, and enables parallel enrichment of multiple sparse tasks. The slimmed skill remains as a thin platform-aware dispatcher so non-Claude-Code users (Cursor, Windsurf, Continue) can still walk the four phases manually.
+
+### Behavior change for users
+
+- **Claude Code users**: when the orchestrator's Step 1 enrichment check fires, it now dispatches the `stride:task-enricher` agent instead of inlining the 781-line skill body. Behavior is equivalent — the agent runs the same four phases — but the orchestrator's context stays clean and the work can run in parallel for batch enrichment scenarios.
+- **Other-environment users**: the `stride-enriching-tasks` skill now contains a condensed manual walkthrough (Phase 1-4 with the 16-item checklist preserved verbatim) plus a footer pointer to `agents/task-enricher.md` for the full decision logic, edge cases, and common mistakes. End-to-end verification confirmed the slimmed skill produces enrichments comparable in quality to the agent-path.
+
 ## [1.10.0] - 2026-04-29
 
 ### Added

@@ -246,12 +246,6 @@ Follow:
 
 ---
 
-## Step 5: Invoke Development Guidelines
-
-**Before considering implementation complete, invoke the `stride-development-guidelines` skill** (if working in the Stride codebase). This ensures code quality gates are met before proceeding to review.
-
----
-
 ## Step 6: Code Review (Decision Matrix)
 
 **Check the decision matrix from Step 3.** If the task is medium+ OR has 2+ key_files, review is required.
@@ -556,10 +550,6 @@ STEP 4: Implement
   Follow patterns_to_follow, avoid pitfalls
   |
   v
-STEP 5: Development Guidelines
-  Invoke stride-development-guidelines (if applicable)
-  |
-  v
 STEP 6: Code Review (Decision Matrix)
   Small, 0-1 key_files? --> Skip to Step 7
   Otherwise:
@@ -624,7 +614,6 @@ CLAUDE CODE WORKFLOW:
 │     ├─ Small, 0-1 key_files → Skip to Step 4
 │     └─ Otherwise → Dispatch task-explorer (+ Plan agent if medium+)
 ├─ 4. Implement: Write code using explorer/plan output
-├─ 5. Dev Guidelines: Invoke stride-development-guidelines
 ├─ 6. Review (check decision matrix):
 │     ├─ Small, 0-1 key_files → Skip to Step 7
 │     └─ Otherwise → Dispatch task-reviewer, fix issues
@@ -641,7 +630,6 @@ OTHER ENVIRONMENTS (Cursor, Windsurf, Continue):
 │     ├─ Small, 0-1 key_files → Skip to Step 4
 │     └─ Otherwise → Read key_files, search patterns, outline approach
 ├─ 4. Implement: Write code using task metadata as guide
-├─ 5. Dev Guidelines: Invoke stride-development-guidelines
 ├─ 6. Review (check decision matrix):
 │     ├─ Small, 0-1 key_files → Skip to Step 7
 │     └─ Otherwise → Self-review against acceptance criteria + pitfalls

@@ -2,6 +2,16 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.12.0] - 2026-05-08
+
+### Removed
+
+- **`skills/stride-workflow/SKILL.md`** — Removed all four references to the user-private `stride-development-guidelines` skill. The Step 5 ("Invoke Development Guidelines") section, the corresponding flowchart node, and the two Quick Reference Card lines (Claude Code + Other Environments) have been deleted. That skill is project-local to the plugin author's machine and is not distributed with this plugin, so end users would have seen Step 5 instructing them to invoke a skill that does not exist for them. The numbered Step 5 slot is left empty rather than renumbered — line 121 ("Steps 2, 3, 6, and 8") and the H2 headers for Steps 6–9 reference step numbers explicitly, so renumbering would have required widespread cross-reference updates.
+
+### Why this release
+
+Cross-skill references to non-plugin skills break the workflow for end users. This is the second time `stride-development-guidelines` references have crept into the plugin (see `[1.2.1]` for the prior removal); these guard rails are being applied to all five Stride plugins (`stride`, `stride-codex`, `stride-gemini`, `stride-opencode`, `stride-pi`) in a coordinated release.
+
 ## [1.11.0] - 2026-05-05
 
 ### Added

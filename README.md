@@ -104,6 +104,8 @@ Breaks goals and large tasks into dependency-ordered child tasks. Uses scope ana
 
 A pre-completion code review agent dispatched after implementation but before running hooks. Validates the git diff against `acceptance_criteria`, detects `pitfalls` violations, checks `patterns_to_follow` compliance, and verifies `testing_strategy` alignment. Returns categorized issues (Critical/Important/Minor) with file and line references.
 
+The canonical `reviewer_result` JSON schema — `schema_version`, `summary`, `status`, `issue_counts`, `issues[]`, and `acceptance_criteria[]` with the `met`/`not_met` enum — is defined in [`agents/task-reviewer.md`](agents/task-reviewer.md) and is the schema of record for all six reviewer-variant prompts. Variant prompts cite that path; do not duplicate the schema elsewhere.
+
 ### stride:hook-diagnostician
 
 Analyzes hook failure output and returns a prioritized fix plan. Parses compilation errors, test failures, security warnings, credo issues, format failures, and git failures with structured diagnosis per issue. Accepts both structured JSON from Claude Code hooks and raw text from legacy agent-executed hooks. Dispatched automatically when blocking hooks fail during the completion workflow. Claude Code only.

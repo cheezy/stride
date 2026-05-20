@@ -935,6 +935,105 @@ STRIDE
     FAIL=$((FAIL + 1))
   fi
   rm -rf "$NOCMD_DIR"
+
+  # 7l: Legacy bypass — non-after_doing hooks must NOT touch the snapshot file
+  # If a stale snapshot exists from a prior after_doing, before_review (or any
+  # other phase) must leave it untouched. This preserves the backward-compat
+  # guarantee: legacy code paths that don't run the capture continue to work.
+  BYPASS_DIR=$(mktemp -d)
+  (
+    cd "$BYPASS_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > x.txt
+    git add x.txt > /dev/null
+    git commit -q -m "v1"
+
+    cat > .stride.md << 'STRIDE'
+## before_review
+```bash
+echo "ran before_review"
+```
+STRIDE
+
+    # Pre-seed the snapshot file with a marker we can detect.
+    echo '[{"path":"stale.txt","diff":"stale"}]' > .stride-changed-files.json
+
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/1/complete"}}'
+    # `post` phase + complete URL → before_review (not after_doing)
+    echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  if [ -f "$BYPASS_DIR/.stride-changed-files.json" ]; then
+    BYPASS_JSON=$(cat "$BYPASS_DIR/.stride-changed-files.json")
+    if echo "$BYPASS_JSON" | jq -e '.[0].path == "stale.txt"' > /dev/null 2>&1; then
+      echo -e "  ${GREEN}PASS${RESET}: legacy bypass — before_review preserves snapshot file"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: legacy bypass — before_review overwrote the snapshot: $BYPASS_JSON"
+      FAIL=$((FAIL + 1))
+    fi
+  else
+    echo -e "  ${RED}FAIL${RESET}: legacy bypass — before_review deleted the snapshot unexpectedly"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$BYPASS_DIR"
+
+  # 7m: Empty changed-files list — base ref resolves but no files differ
+  EMPTY_DIFF_DIR=$(mktemp -d)
+  (
+    cd "$EMPTY_DIFF_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > y.txt
+    git add y.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    # Make a second commit with no real changes (use --allow-empty)
+    git commit -q --allow-empty -m "empty"
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$EMPTY_DIFF_DIR/out.json" 2>/dev/null
+  EMPTY_DIFF_OUTPUT=$(cat "$EMPTY_DIFF_DIR/out.json")
+  if echo "$EMPTY_DIFF_OUTPUT" | jq -e 'type == "array" and length == 0' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: empty changed-files list returns []"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: empty changed-files expected [], got: $EMPTY_DIFF_OUTPUT"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$EMPTY_DIFF_DIR"
+
+  # 7n: File with embedded null bytes — git --numstat reports as binary, so the
+  # placeholder must be emitted (no patch attempt)
+  NULL_DIR=$(mktemp -d)
+  (
+    cd "$NULL_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    printf 'plain text\n' > nullfile.dat
+    git add nullfile.dat > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    # Replace contents with bytes that include nulls
+    printf 'text\x00with\x00nulls\n' > nullfile.dat
+    git add nullfile.dat > /dev/null
+    git commit -q -m "v2"
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$NULL_DIR/out.json" 2>/dev/null
+  NULL_OUTPUT=$(cat "$NULL_DIR/out.json")
+  NULL_DIFF=$(echo "$NULL_OUTPUT" | jq -r '.[0].diff // ""')
+  assert_eq "null-byte file emits binary placeholder" \
+    "[binary file — no diff captured]" \
+    "$NULL_DIFF"
+  rm -rf "$NULL_DIR"
 fi
 
 # ============================================================

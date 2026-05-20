@@ -680,6 +680,7 @@ VERSION: Send skills_version from your SKILL.md frontmatter with every complete 
 | `completion_summary` | string | Yes | Brief summary for tracking |
 | `actual_complexity` | enum | Yes | `"small"`, `"medium"`, or `"large"` |
 | `actual_files_changed` | string | Yes | Comma-separated file paths (NOT an array) |
+| `changed_files` | array | No | Per-file diff entries — see the **Per-File Diff Capture** section below |
 | `after_doing_result` | object | Yes | Hook result (see format below) |
 | `before_review_result` | object | Yes | Hook result (see format below) |
 | `workflow_steps` | array | Yes | Telemetry array with one entry per step name. See stride-workflow skill for full schema. |
@@ -697,6 +698,54 @@ VERSION: Send skills_version from your SKILL.md frontmatter with every complete 
 ```json
 "actual_files_changed": "lib/foo.ex, lib/bar.ex"
 ```
+
+## Per-File Diff Capture (Optional)
+
+The completion payload accepts an optional top-level `changed_files` array — one
+entry per file the agent touched, with the unified-patch text alongside the
+path. The Stride server is the consumer; the review-queue UI renders these
+diffs inline so reviewers approve or reject without leaving Stride.
+
+The full encoding rules — field shape, the 500-line truncation marker, the
+binary-file placeholder, and the backward-compatibility guarantees — live in
+the contract doc and are the single source of truth:
+
+> **Contract:** [`docs/diff-contract.md`](https://raw.githubusercontent.com/cheezy/kanban/refs/heads/main/docs/diff-contract.md)
+> (defines `path` / `diff` keys, exact truncation marker string, exact binary
+> placeholder string, the 500-line inclusive cap, and the optional-field rules)
+
+**How the stride plugin produces this data.** After a successful `after_doing`
+hook the plugin captures `git diff $TASK_BASE_REF..HEAD` per changed file,
+applies the contract's truncation and binary conventions, and writes the
+JSON array to `$CLAUDE_PROJECT_DIR/.stride-changed-files.json`. The snapshot
+is per-project, refreshed at the end of every `after_doing`, and cleaned up
+on `after_review`.
+
+**How to populate `changed_files` in your payload.** If
+`.stride-changed-files.json` exists when you assemble the completion curl,
+read it and embed it verbatim:
+
+```bash
+CHANGED_FILES=$(cat .stride-changed-files.json 2>/dev/null || printf '[]')
+```
+
+Then inject it into the JSON payload (e.g., with `jq --argjson changed_files`).
+If the file is absent — older plugin install, non-git project, capture
+failed — **omit the field entirely**. Both shapes are valid completions:
+
+```json
+"changed_files": [
+  {"path": "lib/foo.ex", "diff": "--- a/lib/foo.ex\n+++ b/lib/foo.ex\n@@ -1,3 +1,4 @@\n defmodule Foo do\n+  @moduledoc \"Foo\"\n end\n"},
+  {"path": "assets/logo.png", "diff": "[binary file — no diff captured]"}
+]
+```
+
+**Backward compatibility.** `changed_files` is strictly optional. Completion
+payloads that omit it remain fully valid forever — the server treats the
+absence as "no diff data available" and the review queue shows the file list
+from `actual_files_changed` without an inline diff panel. Do NOT synthesize
+diffs by hand to "fill in" the field; emit only what the plugin captured (or
+nothing at all).
 
 ## Hook Result Format Reminder
 

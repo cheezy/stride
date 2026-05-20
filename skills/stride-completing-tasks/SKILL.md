@@ -131,6 +131,7 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 - [ ] **Are you ready to run the `after_doing` hook (tests, linting)?** If no → fix any known issues first. The hook will fail if tests don't pass.
 - [ ] **Is `workflow_steps` included in the complete payload?** If no → add it now. The array is required on every completion. It must contain one entry for each of the six step names (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`) — see the stride-workflow skill for the schema.
 - [ ] **Are `explorer_result` and `reviewer_result` included?** If no → add them now. Both are required on every completion, either as a dispatched-subagent result or as a self-reported skip with a reason from the fixed enum. See the Explorer/Reviewer Result Schema section below.
+- [ ] **Did you embed `.stride-changed-files.json` into the payload as `changed_files`?** If the snapshot file exists in the project root, read it and embed it verbatim as the `changed_files` array in the PATCH body. If the file is absent (older plugin install, non-git project, capture failed), omit the field entirely — never synthesize diffs by hand. See the Per-File Diff Capture (Optional) section below.
 
 **If ANY answer is NO → Go back and do it now. Do NOT proceed to completion.**
 
@@ -328,6 +329,10 @@ PATCH /api/tasks/:id/complete
   "agent_name": "Claude Sonnet 4.5",
   "time_spent_minutes": 45,
   "completion_notes": "All tests passing. PR #123 created.",
+  "actual_files_changed": "lib/foo.ex, test/foo_test.exs",
+  "changed_files": [
+    {"path": "lib/foo.ex", "diff": "--- a/lib/foo.ex\n+++ b/lib/foo.ex\n@@ -1,3 +1,4 @@\n defmodule Foo do\n+  @moduledoc \"Foo\"\n end\n"}
+  ],
   "review_report": "## Review Summary\n\nApproved — 0 issues found.\n\n### Acceptance Criteria\n| # | Criterion | Status |\n|---|-----------|--------|\n| 1 | Feature works | Met |",
   "after_doing_result": {
     "exit_code": 0,
@@ -367,6 +372,8 @@ PATCH /api/tasks/:id/complete
 **Schema reference:** The `workflow_steps` array must match the schema documented in the `stride-workflow` skill — key-for-key. Always include one entry per step name (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`). Skipped steps use `{"name": "<step>", "dispatched": false, "reason": "<why>"}`.
 
 **Optional:** Include `review_report` when a task-reviewer agent produced a structured review. Omit it when no review was performed (e.g., small tasks with 0-1 key_files).
+
+**Optional:** Include `changed_files` whenever `.stride-changed-files.json` exists in the project root — embed the snapshot file's contents verbatim. Omit the field entirely when the snapshot is absent. See the [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section below for the snapshot lifecycle and the read pattern; the encoding rules (500-line truncation marker, binary placeholder, `{path, diff}` shape) live in `docs/diff-contract.md` and should not be duplicated into the example.
 
 ## Explorer/Reviewer Result Schema
 

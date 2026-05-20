@@ -2,6 +2,17 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.14.1] - 2026-05-20
+
+### Changed
+
+- **`skills/stride-completing-tasks/SKILL.md`** — Surface the optional `changed_files` field in two canonical reading locations so agents who skim the standard example don't have to navigate to the dedicated Per-File Diff Capture (Optional) section before adopting the field. (1) The API Request Format example body (around line 329) now includes both `actual_files_changed` and `changed_files` rows. The `changed_files` entry contains a single object with `path` and a realistic unified-patch `diff` string (proper `\n` and `\"` escapes so the JSON parses). (2) The pre-completion verification checklist (around line 124) now contains a new item with the exact literal text required by W748's AC2: `- [ ] **Did you embed \`.stride-changed-files.json\` into the payload as \`changed_files\`?**` followed by conditional embed-when-exists / omit-when-absent guidance and a cross-link back to the Per-File Diff Capture (Optional) section. (3) A new `**Optional:**` note below the existing review_report optional note points readers at the same section for the snapshot lifecycle and read pattern; the 500-line truncation marker, binary placeholder, and `{path, diff}` shape rules continue to live solely in `docs/diff-contract.md` and are not duplicated. The existing Per-File Diff Capture (Optional) section is preserved untouched. Sourced from W748.
+- **`.claude-plugin/plugin.json`** — Patch-bumped from `1.14.0` to `1.14.1`.
+
+### Source
+
+Patch release shipping the W748 SKILL.md surfacing edits. No code, hook, or test changes — pure documentation update so installed plugins pick up the canonical-example and checklist additions via `/plugin update stride@stride-marketplace`. Companion marketplace pin bump lands as W756's stride-marketplace side.
+
 ## [1.14.0] - 2026-05-20
 
 ### Added

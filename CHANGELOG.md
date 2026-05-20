@@ -2,6 +2,27 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.14.0] - 2026-05-20
+
+### Added
+
+- **`hooks/stride-hook.sh`** — New `capture_changed_files()` bash function implements the G148/W719 per-file diff JSON contract. The function diffs each tracked file between `$TASK_BASE_REF` (captured at claim time in `before_doing`, with `HEAD~1` fallback if absent) and `HEAD`, truncates each diff at exactly 500 lines with the exact contract marker `[diff truncated at 500 lines]`, and emits the exact binary placeholder `[binary file — no diff captured]` (em-dash, U+2014) for files `git diff --numstat` reports as binary. After a successful `after_doing` hook — including the no-commands fast-path where the user's `.stride.md` is empty or all-commented — the script writes the resulting JSON array to `$CLAUDE_PROJECT_DIR/.stride-changed-files.json` so subsequent agent payload assembly can pick it up as the contract's optional `changed_files` field. `before_doing` now snapshots `git rev-parse HEAD` as `TASK_BASE_REF` into `.stride-env-cache` and clears any stale snapshot from a prior task; `after_review` cleans up both the env cache and the snapshot file. The function degrades to `[]` for any non-fatal failure (jq missing, git missing, non-git directory, no commits to diff), so legacy code paths remain valid. The script's early-exit checks were converted to `return 0 2>/dev/null || exit 0` so the test harness can `source` the script and exercise the function in isolation.
+- **`skills/stride-completing-tasks/SKILL.md`** — New "Per-File Diff Capture (Optional)" section after the `actual_files_changed` examples documents the optional top-level `changed_files` array on the completion payload, where the snapshot comes from (the stride plugin writes `.stride-changed-files.json` at the end of `after_doing`), how the agent reads it to populate the field (`cat .stride-changed-files.json`, embed verbatim via `jq --argjson`, or omit when the file is absent — both shapes valid), and the backward-compatibility guarantee that completion payloads without `changed_files` remain valid forever. A new row in the Completion Request Field Reference table marks the field as optional. Cross-links to the contract reference doc at `docs/diff-contract.md` as the single source of truth — encoding rules, exact strings, and truncation/binary conventions are not duplicated.
+- **`hooks/test-stride-hook.sh`** — New "Test Group 7: Per-file diff capture" (19 cases): truncation at exactly 500 lines (no marker), truncation at 750 lines (truncated to 500 total with marker as the last line), empty input, binary detection via numstat (positive / negative / missing-file), full integration in temp git repos with text + binary + deleted files, non-repo fallback returns `[]`, empty-base-ref → `HEAD~1` fallback, end-to-end `after_doing` snapshot write under both populated and all-commented `.stride.md`, legacy bypass (`before_review` leaves the snapshot file untouched), empty changed-files list when base resolves but no files differ, and null-byte file binary detection. Suite total: 91/91 passing — no regression in the existing six test groups.
+- **`README.md`** — Gitignore note expanded to include `.stride-changed-files.json` alongside `.stride-env-cache`, with the cleanup lifecycle explained.
+
+### Changed
+
+- **`agents/task-reviewer.md`, `README.md`** — Declared `agents/task-reviewer.md` as the canonical source of truth for the `reviewer_result` JSON schema (W693). The README now points at the agent file for the structured-review schema rather than risking schema drift between the agent prompt and the workflow skill.
+
+### Why this release
+
+W720 added the server-side optional `changed_files` field. W721–W724 wired the kanban-app review-queue diff panel that consumes it. W719 published the JSON contract. This release implements the agent-side capture for the stride plugin so completion payloads carry per-file unified-patch text alongside the existing `actual_files_changed` comma-separated list. Reviewers can now approve or reject from the review queue without leaving Stride.
+
+### Backward compatibility
+
+`changed_files` is strictly optional on the completion payload and within each entry. Legacy plugin installs (pre-1.14.0) that emit no `changed_files` continue to validate cleanly — the review queue simply shows the file list with no inline diff panel content. Plugins emitting only `path` with no `diff` (because capture failed or the file was deleted) also continue to validate. The marketplace bump pinning users to this release follows in stride-marketplace v1.27.0.
+
 ## [1.13.0] - 2026-05-19
 
 ### Changed

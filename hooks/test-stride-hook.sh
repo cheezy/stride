@@ -824,6 +824,7 @@ else
 
   # 7i: Fallback — empty base ref with a valid HEAD~1 still captures
   FALLBACK_DIR=$(mktemp -d)
+  FALLBACK_OUT=$(mktemp)
   (
     cd "$FALLBACK_DIR" || exit 1
     git init -q
@@ -839,8 +840,9 @@ else
     # shellcheck disable=SC1090
     source "$HOOK_SCRIPT" 2>/dev/null || true
     capture_changed_files ""
-  ) > "$FALLBACK_DIR/out.json" 2>/dev/null
-  FALLBACK_OUTPUT=$(cat "$FALLBACK_DIR/out.json")
+  ) > "$FALLBACK_OUT" 2>/dev/null
+  FALLBACK_OUTPUT=$(cat "$FALLBACK_OUT")
+  rm -f "$FALLBACK_OUT"
   if echo "$FALLBACK_OUTPUT" | jq -e 'type == "array" and length == 1 and .[0].path == "c.txt"' > /dev/null 2>&1; then
     echo -e "  ${GREEN}PASS${RESET}: empty base falls back to HEAD~1 successfully"
     PASS=$((PASS + 1))
@@ -857,9 +859,16 @@ else
     git init -q
     git config user.email "test@test.local"
     git config user.name "Test"
+    # Gitignore the hook's runtime artifacts so they don't leak into the
+    # snapshot via the Option D untracked-file capture.
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+GITIGNORE
     echo "v1" > tracked.txt
-    git add tracked.txt > /dev/null
-    git commit -q -m "v1"
+    git add .gitignore tracked.txt > /dev/null
+    git commit -q -m "v1 + gitignore"
     BASE=$(git rev-parse HEAD)
     echo "v2" > tracked.txt
     git add tracked.txt > /dev/null
@@ -902,6 +911,14 @@ STRIDE
     git config user.name "Test"
     echo "v1" > f.txt
     git add f.txt > /dev/null
+    # Gitignore stride runtime artifacts (Option D would otherwise capture
+    # the test-fixture .stride.md / .stride-env-cache as untracked files).
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+GITIGNORE
+    git add .gitignore > /dev/null
     git commit -q -m "v1"
     BASE=$(git rev-parse HEAD)
     echo "v2" > f.txt
@@ -981,6 +998,7 @@ STRIDE
 
   # 7m: Empty changed-files list — base ref resolves but no files differ
   EMPTY_DIFF_DIR=$(mktemp -d)
+  EMPTY_DIFF_OUT=$(mktemp)
   (
     cd "$EMPTY_DIFF_DIR" || exit 1
     git init -q
@@ -996,8 +1014,9 @@ STRIDE
     # shellcheck disable=SC1090
     source "$HOOK_SCRIPT" 2>/dev/null || true
     capture_changed_files "$BASE"
-  ) > "$EMPTY_DIFF_DIR/out.json" 2>/dev/null
-  EMPTY_DIFF_OUTPUT=$(cat "$EMPTY_DIFF_DIR/out.json")
+  ) > "$EMPTY_DIFF_OUT" 2>/dev/null
+  EMPTY_DIFF_OUTPUT=$(cat "$EMPTY_DIFF_OUT")
+  rm -f "$EMPTY_DIFF_OUT"
   if echo "$EMPTY_DIFF_OUTPUT" | jq -e 'type == "array" and length == 0' > /dev/null 2>&1; then
     echo -e "  ${GREEN}PASS${RESET}: empty changed-files list returns []"
     PASS=$((PASS + 1))
@@ -1034,6 +1053,187 @@ STRIDE
     "[binary file — no diff captured]" \
     "$NULL_DIFF"
   rm -rf "$NULL_DIR"
+
+  # ---------------------------------------------------------------------------
+  # Test Group 7 (Option D semantic) — cases 7o-7s
+  # The snapshot must reflect the agent's working state at completion time:
+  # modified-uncommitted tracked files, staged-uncommitted changes, untracked
+  # new files (synthesized new-file patches), untracked binaries (placeholder),
+  # and dedupe when a path is both committed-since-base AND further modified
+  # in the working tree.
+  # ---------------------------------------------------------------------------
+
+  # 7o: Modified-uncommitted tracked file appears in the snapshot
+  UNCOMMITTED_DIR=$(mktemp -d)
+  (
+    cd "$UNCOMMITTED_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > tracked.txt
+    git add tracked.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+
+    # Modify the tracked file WITHOUT committing or staging
+    echo "v2-uncommitted" > tracked.txt
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$UNCOMMITTED_DIR/out.json" 2>/dev/null
+  UNCOMMITTED_OUTPUT=$(cat "$UNCOMMITTED_DIR/out.json")
+  UNCOMMITTED_DIFF=$(echo "$UNCOMMITTED_OUTPUT" | jq -r '.[] | select(.path == "tracked.txt") | .diff')
+  if [ -n "$UNCOMMITTED_DIFF" ]; then
+    assert_contains "Option D: modified-uncommitted tracked file has unified-patch header" \
+      "diff --git a/tracked.txt" \
+      "$UNCOMMITTED_DIFF"
+    assert_contains "Option D: modified-uncommitted tracked file diff body present" \
+      "+v2-uncommitted" \
+      "$UNCOMMITTED_DIFF"
+  else
+    echo -e "  ${RED}FAIL${RESET}: Option D: modified-uncommitted tracked file missing from snapshot"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$UNCOMMITTED_DIR"
+
+  # 7p: Staged-uncommitted change appears in the snapshot
+  STAGED_DIR=$(mktemp -d)
+  (
+    cd "$STAGED_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > staged.txt
+    git add staged.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+
+    # Modify and stage WITHOUT committing
+    echo "v2-staged" > staged.txt
+    git add staged.txt > /dev/null
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$STAGED_DIR/out.json" 2>/dev/null
+  STAGED_OUTPUT=$(cat "$STAGED_DIR/out.json")
+  STAGED_DIFF=$(echo "$STAGED_OUTPUT" | jq -r '.[] | select(.path == "staged.txt") | .diff')
+  if [ -n "$STAGED_DIFF" ]; then
+    assert_contains "Option D: staged-uncommitted file has unified-patch header" \
+      "diff --git a/staged.txt" \
+      "$STAGED_DIFF"
+    assert_contains "Option D: staged-uncommitted file diff body present" \
+      "+v2-staged" \
+      "$STAGED_DIFF"
+  else
+    echo -e "  ${RED}FAIL${RESET}: Option D: staged-uncommitted file missing from snapshot"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$STAGED_DIR"
+
+  # 7q: Untracked new file appears as synthesized new-file patch
+  UNTRACKED_DIR=$(mktemp -d)
+  (
+    cd "$UNTRACKED_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > existing.txt
+    git add existing.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+
+    # Create a NEW untracked file
+    cat > new_file.txt << 'NEW'
+line one
+line two
+line three
+NEW
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$UNTRACKED_DIR/out.json" 2>/dev/null
+  UNTRACKED_OUTPUT=$(cat "$UNTRACKED_DIR/out.json")
+  UNTRACKED_DIFF=$(echo "$UNTRACKED_OUTPUT" | jq -r '.[] | select(.path == "new_file.txt") | .diff')
+  if [ -n "$UNTRACKED_DIFF" ]; then
+    # Synthesized new-file patch should have the +++ b/<path> header and at
+    # least one `+<content>` body line.
+    assert_contains "Option D: untracked new file has +++ b/<path> header" \
+      "+++ b/new_file.txt" \
+      "$UNTRACKED_DIFF"
+    assert_contains "Option D: untracked new file has +<content> body lines" \
+      "+line one" \
+      "$UNTRACKED_DIFF"
+  else
+    echo -e "  ${RED}FAIL${RESET}: Option D: untracked new file missing from snapshot (output: $UNTRACKED_OUTPUT)"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$UNTRACKED_DIR"
+
+  # 7r: Untracked binary uses the binary placeholder
+  UNTRACKED_BIN_DIR=$(mktemp -d)
+  (
+    cd "$UNTRACKED_BIN_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > a.txt
+    git add a.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+
+    # Create an untracked file with NUL bytes (binary)
+    printf 'binary\x00data\x00here\n' > new.bin
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$UNTRACKED_BIN_DIR/out.json" 2>/dev/null
+  UNTRACKED_BIN_OUTPUT=$(cat "$UNTRACKED_BIN_DIR/out.json")
+  UNTRACKED_BIN_DIFF=$(echo "$UNTRACKED_BIN_OUTPUT" | jq -r '.[] | select(.path == "new.bin") | .diff')
+  assert_eq "Option D: untracked binary file emits exact binary placeholder" \
+    "[binary file — no diff captured]" \
+    "$UNTRACKED_BIN_DIFF"
+  rm -rf "$UNTRACKED_BIN_DIR"
+
+  # 7s: Dedupe — committed-and-further-modified path appears exactly once
+  DEDUPE_DIR=$(mktemp -d)
+  (
+    cd "$DEDUPE_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > dual.txt
+    git add dual.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+
+    # Commit a change…
+    echo "v2-committed" > dual.txt
+    git add dual.txt > /dev/null
+    git commit -q -m "v2"
+
+    # …then modify the same path further WITHOUT committing
+    echo "v3-uncommitted-on-top" > dual.txt
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$DEDUPE_DIR/out.json" 2>/dev/null
+  DEDUPE_OUTPUT=$(cat "$DEDUPE_DIR/out.json")
+  DEDUPE_COUNT=$(echo "$DEDUPE_OUTPUT" | jq -r '[.[] | select(.path == "dual.txt")] | length')
+  assert_eq "Option D: dedupe — committed + further-modified path appears exactly once" \
+    "1" \
+    "$DEDUPE_COUNT"
+  # And the diff should reflect the FINAL working-tree state (not the
+  # intermediate committed value).
+  DEDUPE_DIFF=$(echo "$DEDUPE_OUTPUT" | jq -r '.[] | select(.path == "dual.txt") | .diff')
+  assert_contains "Option D: dedupe — diff reflects final working-tree content" \
+    "+v3-uncommitted-on-top" \
+    "$DEDUPE_DIFF"
+  rm -rf "$DEDUPE_DIR"
 fi
 
 # ============================================================

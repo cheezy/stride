@@ -2,6 +2,27 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.15.0] - 2026-05-20
+
+### Changed
+
+- **`hooks/stride-hook.sh`** — `capture_changed_files()` now reflects the agent's full working state at completion time, not just committed history. The function uses `git diff $base` (no `..HEAD`) so committed-since-base, staged-but-uncommitted, AND modified-but-unstaged changes all surface in a single pass, and adds a `git ls-files --others --exclude-standard` pass to enumerate untracked new files. Untracked text files appear as synthesized new-file unified patches (diffed against `/dev/null` via `git diff --no-index --no-color`); untracked binaries are detected via the `Binary files ... differ` sentinel that `--no-index` emits and use the existing binary placeholder string. A path that is both committed-since-base AND further modified in the working tree appears exactly once in the snapshot with a diff that reflects the final working-tree state. The 500-line per-file truncation rule and the `[binary file — no diff captured]` placeholder string are preserved unchanged.
+- **`skills/stride-completing-tasks/SKILL.md`** — Three coordinated surface rewrites so agents stop the broken "separate cat then curl" pattern. (1) The canonical "API Request Format" section now leads with a `bash`/`curl` example that inlines the snapshot read via `--argjson cf "$(cat \"$CLAUDE_PROJECT_DIR/.stride-changed-files.json\" 2>/dev/null || echo '[]')"` INSIDE the `jq -n` that builds the curl's `-d` payload — followed by the JSON body shape as an illustrative supplement. The absolute `$CLAUDE_PROJECT_DIR/...` path is used so a non-root agent CWD does not silently miss the file. (2) The Per-File Diff Capture (Optional) section now contains a "Why inline?" paragraph explaining that the PreToolUse-on-complete hook writes the snapshot DURING the curl call, so a separate Bash tool call BEFORE the curl reads the file before the hook populates it. (3) The pre-completion verification checklist item for `changed_files` is rewritten to test for the inline pattern + absolute path explicitly, replacing the older "read it and embed it verbatim" prose. A new "Working-tree semantic (v1.15.0+)" paragraph documents the broadened capture.
+- **`hooks/test-stride-hook.sh`** — Test Group 7 grows from 14 cases to 19 cases with 5 new Option D cases (7o-7s): modified-uncommitted tracked file present in snapshot, staged-uncommitted change present, untracked new file appears as synthesized `+++ b/<path>` patch with `+<content>` body, untracked binary file emits the exact binary placeholder, and dedupe — a committed-then-further-modified path appears exactly once with the diff reflecting the final working-tree content. Existing 7g (real-git integration), 7i (HEAD~1 fallback), 7j (e2e after_doing), 7k (all-commented after_doing), and 7m (empty diff) fixtures updated to add a `.gitignore` for stride runtime artifacts (`.stride.md`, `.stride-env-cache`, `.stride-changed-files.json`) and to redirect subshell stdout to a sibling temp file rather than to a path inside the test's working directory — both adjustments accommodate the new untracked-file capture without weakening any assertion. Test suite reports 100 passed / 0 failed.
+- **`.claude-plugin/plugin.json`** — Minor version bump from `1.14.1` to `1.15.0` (the snapshot semantic broadens; the wire shape is unchanged).
+
+### Why this release
+
+A Claude Code task completing without an intermediate commit produced an empty `.stride-changed-files.json`. Diagnosis: (a) `capture_changed_files()` was anchored to `<base>..HEAD`, so working-tree-only changes were invisible; (b) the canonical SKILL.md example read the snapshot in a Bash tool call BEFORE the curl, which means the PreToolUse-on-complete hook had not yet populated the file at read time. This release fixes both seams together — the snapshot now reflects the agent's working state regardless of commit state, and the canonical example inlines the snapshot read inside the curl invocation so the read happens AFTER the hook fires.
+
+### Backward compatibility
+
+The wire shape of `changed_files` is unchanged — same `path` + `diff` keys, same 500-line truncation rule, same binary placeholder string. Completion payloads that omit `changed_files` entirely continue to validate (the empty-array form produced by the inline `|| echo '[]'` fallback is also valid). Reviewers consuming the field see additional content under the new semantic — uncommitted edits and untracked new files now appear in `/review` whereas previously they were silently dropped.
+
+### Source
+
+Implemented as G156/W758 (combined SKILL.md + hook + tests + contract doc + release). Companion contract update lands in `kanban/docs/diff-contract.md` (working-tree-relative encoding guidance, untracked-file note); companion marketplace pin update lands in `stride-marketplace/marketplace.json` and CHANGELOG. Cross-plugin parity ports (G151–G154, G158) port this release into the other five plugins.
+
 ## [1.14.1] - 2026-05-20
 
 ### Changed

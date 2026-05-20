@@ -40,14 +40,19 @@ if [ "$_delegate_to_ps1" = "true" ]; then
   exec powershell.exe -ExecutionPolicy Bypass -File "$PS1_SCRIPT" "$PHASE"
 fi
 
-# --- Per-file diff capture (G148/W719 contract) ---
-# Emits a JSON array of `{path, diff}` entries to stdout, one per changed file
-# between $1 (base ref) and HEAD. Truncates diffs over 500 lines with the
-# contract marker; emits the binary placeholder for files git reports as
-# binary in --numstat. Falls back to HEAD~1 when the provided base is empty
-# or unresolvable. Returns an empty array (and exit 0) for any degraded path
-# (jq missing, git missing, not in a repo, no commits to diff) so callers can
-# treat this strictly as "best-effort capture".
+# --- Per-file diff capture (G148/W719 contract, Option D semantic) ---
+# Emits a JSON array of `{path, diff}` entries to stdout, one per file that
+# differs between $1 (base ref) and the agent's WORKING TREE at the time the
+# function runs. The snapshot captures committed-since-base, staged-but-
+# uncommitted, modified-but-unstaged, AND untracked-but-not-gitignored changes
+# in a single pass — so reviewers see the agent's full working state at
+# completion time, regardless of whether the agent committed before calling
+# /complete. Truncates diffs over 500 lines with the contract marker; emits
+# the binary placeholder for files git reports as binary in --numstat (tracked)
+# or that contain a NUL byte (untracked). Falls back to HEAD~1 when the
+# provided base is empty or unresolvable. Returns an empty array (and exit 0)
+# for any degraded path (jq missing, git missing, not in a repo, no commits to
+# diff) so callers can treat this strictly as "best-effort capture".
 capture_changed_files() {
   local base="${1:-}"
   local max_lines=500
@@ -68,15 +73,32 @@ capture_changed_files() {
     fi
   fi
 
-  local files
-  files=$(git diff --name-only "$base"..HEAD 2>/dev/null || printf '')
-  if [ -z "$files" ]; then
+  # Tracked files that differ between base and the working tree (committed,
+  # staged, and unstaged changes all surface in a single `git diff <base>`).
+  local tracked_files
+  tracked_files=$(git diff --name-only "$base" 2>/dev/null || printf '')
+
+  # Untracked files not covered by .gitignore.
+  local untracked_files
+  untracked_files=$(git ls-files --others --exclude-standard 2>/dev/null || printf '')
+
+  # Combine; dedupe by path. Untracked entries should not overlap tracked
+  # (git would report a path as one OR the other, not both), but the awk
+  # `!seen` guard makes a single-entry-per-path invariant explicit.
+  local all_files
+  all_files=$(printf '%s\n%s\n' "$tracked_files" "$untracked_files" \
+    | awk 'NF && !seen[$0]++')
+
+  if [ -z "$all_files" ]; then
     printf '[]\n'
     return 0
   fi
 
+  # numstat for tracked changes — used to detect binaries among tracked files
+  # via the `- - <path>` marker. Untracked files are not in numstat; their
+  # binary detection runs separately on file contents.
   local numstat
-  numstat=$(git diff --numstat "$base"..HEAD 2>/dev/null || printf '')
+  numstat=$(git diff --numstat "$base" 2>/dev/null || printf '')
 
   local jsonl_file
   jsonl_file=$(mktemp)
@@ -85,8 +107,44 @@ capture_changed_files() {
   while IFS= read -r file; do
     [ -z "$file" ] && continue
 
+    # Determine whether this path is in the untracked list (membership lookup,
+    # not just empty check — tracked_files and untracked_files were merged
+    # above with dedupe).
+    local is_untracked=0
+    if [ -n "$untracked_files" ]; then
+      local u
+      while IFS= read -r u; do
+        if [ "$u" = "$file" ]; then
+          is_untracked=1
+          break
+        fi
+      done <<< "$untracked_files"
+    fi
+
     local is_binary=0
-    if [ -n "$numstat" ]; then
+    local diff_text=""
+
+    if [ "$is_untracked" -eq 1 ]; then
+      # Untracked: synthesize a new-file unified patch by diffing the file
+      # against /dev/null. `git diff --no-index` exits 1 when files differ —
+      # that is the expected path here, so we ignore the exit code and
+      # capture whatever stdout it produced. --no-color guards against
+      # pager/color being inherited from the user's git config.
+      #
+      # Binary detection uses git's own determination: when --no-index sees
+      # a binary file, it emits "Binary files /dev/null and <path> differ"
+      # instead of a unified patch. Sniffing that prefix is more reliable
+      # than a NUL-byte grep (bash truncates $'\0' to an empty pattern,
+      # which matches every line and falsely flags text files as binary).
+      diff_text=$(git diff --no-index --no-color /dev/null "$file" 2>/dev/null)
+      # For new files, --no-index emits a header (`diff --git`,
+      # `new file mode`, `index ...`) BEFORE the "Binary files ... differ"
+      # sentinel line, so we have to check anywhere in the output rather
+      # than just the prefix.
+      if printf '%s\n' "$diff_text" | grep -q '^Binary files .* differ$'; then
+        is_binary=1
+      fi
+    elif [ -n "$numstat" ]; then
       local nl added rest deleted path
       while IFS= read -r nl; do
         added="${nl%%	*}"
@@ -100,11 +158,15 @@ capture_changed_files() {
       done <<< "$numstat"
     fi
 
-    local diff_text
     if [ "$is_binary" -eq 1 ]; then
       diff_text="$bin_placeholder"
     else
-      diff_text=$(git diff "$base"..HEAD -- "$file" 2>/dev/null || printf '')
+      if [ "$is_untracked" -eq 0 ]; then
+        # Tracked: working-tree diff vs base (committed + staged + unstaged
+        # changes all in one diff).
+        diff_text=$(git diff "$base" -- "$file" 2>/dev/null || printf '')
+      fi
+      # diff_text for untracked was already captured above.
       local line_count=0
       if [ -n "$diff_text" ]; then
         local _no_nl="${diff_text//$'\n'/}"
@@ -119,7 +181,7 @@ ${trunc_marker}"
     fi
 
     jq -n --arg path "$file" --arg diff "$diff_text" '{path: $path, diff: $diff}' >> "$jsonl_file"
-  done <<< "$files"
+  done <<< "$all_files"
 
   if [ -s "$jsonl_file" ]; then
     jq -s '.' < "$jsonl_file"

@@ -40,12 +40,103 @@ if [ "$_delegate_to_ps1" = "true" ]; then
   exec powershell.exe -ExecutionPolicy Bypass -File "$PS1_SCRIPT" "$PHASE"
 fi
 
-# Exit early if no phase argument or no .stride.md
+# --- Per-file diff capture (G148/W719 contract) ---
+# Emits a JSON array of `{path, diff}` entries to stdout, one per changed file
+# between $1 (base ref) and HEAD. Truncates diffs over 500 lines with the
+# contract marker; emits the binary placeholder for files git reports as
+# binary in --numstat. Falls back to HEAD~1 when the provided base is empty
+# or unresolvable. Returns an empty array (and exit 0) for any degraded path
+# (jq missing, git missing, not in a repo, no commits to diff) so callers can
+# treat this strictly as "best-effort capture".
+capture_changed_files() {
+  local base="${1:-}"
+  local max_lines=500
+  local trunc_marker="[diff truncated at 500 lines]"
+  local bin_placeholder="[binary file — no diff captured]"
+
+  if ! command -v jq > /dev/null 2>&1 || ! command -v git > /dev/null 2>&1; then
+    printf '[]\n'
+    return 0
+  fi
+
+  if [ -z "$base" ] || ! git rev-parse --verify "$base" > /dev/null 2>&1; then
+    if git rev-parse --verify "HEAD~1" > /dev/null 2>&1; then
+      base="HEAD~1"
+    else
+      printf '[]\n'
+      return 0
+    fi
+  fi
+
+  local files
+  files=$(git diff --name-only "$base"..HEAD 2>/dev/null || printf '')
+  if [ -z "$files" ]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  local numstat
+  numstat=$(git diff --numstat "$base"..HEAD 2>/dev/null || printf '')
+
+  local jsonl_file
+  jsonl_file=$(mktemp)
+
+  local file
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+
+    local is_binary=0
+    if [ -n "$numstat" ]; then
+      local nl added rest deleted path
+      while IFS= read -r nl; do
+        added="${nl%%	*}"
+        rest="${nl#*	}"
+        deleted="${rest%%	*}"
+        path="${rest#*	}"
+        if [ "$added" = "-" ] && [ "$deleted" = "-" ] && [ "$path" = "$file" ]; then
+          is_binary=1
+          break
+        fi
+      done <<< "$numstat"
+    fi
+
+    local diff_text
+    if [ "$is_binary" -eq 1 ]; then
+      diff_text="$bin_placeholder"
+    else
+      diff_text=$(git diff "$base"..HEAD -- "$file" 2>/dev/null || printf '')
+      local line_count=0
+      if [ -n "$diff_text" ]; then
+        local _no_nl="${diff_text//$'\n'/}"
+        line_count=$(( ${#diff_text} - ${#_no_nl} + 1 ))
+      fi
+      if [ "$line_count" -gt "$max_lines" ]; then
+        local truncated
+        truncated=$(printf '%s\n' "$diff_text" | head -n $((max_lines - 1)))
+        diff_text="${truncated}
+${trunc_marker}"
+      fi
+    fi
+
+    jq -n --arg path "$file" --arg diff "$diff_text" '{path: $path, diff: $diff}' >> "$jsonl_file"
+  done <<< "$files"
+
+  if [ -s "$jsonl_file" ]; then
+    jq -s '.' < "$jsonl_file"
+  else
+    printf '[]\n'
+  fi
+  rm -f "$jsonl_file"
+}
+
+# Exit early if no phase argument or no .stride.md. Placed AFTER the
+# capture_changed_files definition so tests can source this script to use the
+# function in isolation.
 if [ -z "$PHASE" ]; then
-  exit 0
+  return 0 2>/dev/null || exit 0
 fi
 if [ ! -f "$STRIDE_MD" ]; then
-  exit 0
+  return 0 2>/dev/null || exit 0
 fi
 
 # Read Claude Code hook input from stdin
@@ -137,7 +228,11 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
     fi
 
     if [ -n "$TASK_JSON" ]; then
-      # Values are single-quoted to handle spaces in titles/descriptions
+      # Values are single-quoted to handle spaces in titles/descriptions.
+      # TASK_BASE_REF anchors per-file diff capture to the commit HEAD pointed
+      # at when the task was claimed (consumed by capture_changed_files at
+      # after_doing time).
+      _base_ref=$(cd "$PROJECT_DIR" && git rev-parse HEAD 2>/dev/null || true)
       {
         echo "TASK_ID='$(echo "$TASK_JSON" | jq -r '.id // empty')'"
         echo "TASK_IDENTIFIER='$(echo "$TASK_JSON" | jq -r '.identifier // empty')'"
@@ -145,7 +240,10 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
         echo "TASK_STATUS='$(echo "$TASK_JSON" | jq -r '.status // empty')'"
         echo "TASK_COMPLEXITY='$(echo "$TASK_JSON" | jq -r '.complexity // empty')'"
         echo "TASK_PRIORITY='$(echo "$TASK_JSON" | jq -r '.priority // empty')'"
+        echo "TASK_BASE_REF='$_base_ref'"
       } > "$ENV_CACHE" 2>/dev/null || true
+      # Clear any stale per-file diff snapshot from a previous task.
+      rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
     fi
   fi
 fi
@@ -185,8 +283,19 @@ while IFS= read -r _line || [ -n "$_line" ]; do
   fi
 done < "$STRIDE_MD"
 
-# No commands for this hook — exit cleanly
+# Helper: persist the per-file diff snapshot. Runs only for after_doing; safe
+# to call from any exit point — capture failures are non-fatal.
+finalize_after_doing() {
+  if [ "$HOOK_NAME" = "after_doing" ]; then
+    local snapshot
+    snapshot=$(capture_changed_files "${TASK_BASE_REF:-}" 2>/dev/null || printf '[]')
+    printf '%s\n' "$snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
+  fi
+}
+
+# No commands for this hook — finalize and exit cleanly
 if [ -z "$COMMANDS" ]; then
+  finalize_after_doing
   exit 0
 fi
 
@@ -200,8 +309,9 @@ while IFS= read -r cmd; do
   CMD_LIST+=("$trimmed")
 done <<< "$COMMANDS"
 
-# Nothing to execute after filtering
+# Nothing to execute after filtering — finalize and exit cleanly
 if [ ${#CMD_LIST[@]} -eq 0 ]; then
+  finalize_after_doing
   exit 0
 fi
 
@@ -286,6 +396,12 @@ for trimmed in "${CMD_LIST[@]}"; do
   CMD_INDEX=$((CMD_INDEX + 1))
 done
 
+# --- Per-file diff snapshot (G148/W719) ---
+# Capture the per-file diffs between the task base ref and the current HEAD
+# and write them to .stride-changed-files.json so the completion payload can
+# pick them up as `changed_files` per the contract. No-op outside after_doing.
+finalize_after_doing
+
 # --- Success output ---
 END_SECS=$(date +%s)
 DURATION=$((END_SECS - START_SECS))
@@ -307,9 +423,11 @@ fi
 
 rm -f "$COMPLETED_FILE"
 
-# Clean up env cache after the final hook in the lifecycle
-if [ "$HOOK_NAME" = "after_review" ] && [ -f "$ENV_CACHE" ]; then
-  rm -f "$ENV_CACHE"
+# Clean up env cache and per-file diff snapshot after the final hook in the
+# lifecycle
+if [ "$HOOK_NAME" = "after_review" ]; then
+  rm -f "$ENV_CACHE" 2>/dev/null || true
+  rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
 fi
 
 exit 0

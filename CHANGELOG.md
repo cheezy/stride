@@ -2,6 +2,32 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.16.0] - 2026-05-21
+
+### Added
+
+- **`hooks/stride-hook.sh`** — `finalize_after_doing()` now PUTs the per-file diff snapshot to Stride immediately after writing `.stride-changed-files.json` to disk. URL and Bearer token are extracted from the intercepted agent completion command in `$COMMAND` (via `grep -oE`) — no new top-level env vars, no `.stride_auth.md` read. The PUT is fire-and-forget (`-s ... > /dev/null 2>&1 || true`) and silently no-ops when any prerequisite is missing (`HAS_JQ=false`, no `curl`, no `TASK_ID`, no URL/token in `$COMMAND`). The function definition moved above the no-`PHASE` early-return guard so tests can source the script and invoke it in isolation — matching the existing pattern documented for `capture_changed_files`. The three call sites in the main flow (no-commands fast-path, empty-cmd-list fast-path, success path) are preserved unchanged. Implementation is 23 lines (under the 30-line ceiling).
+- **`hooks/stride-hook.ps1`** — New `Invoke-FinalizeAfterDoing` function mirrors the bash PUT: extracts URL/token from `$Command` via `-match`, PUTs `.stride-changed-files.json` via `Invoke-WebRequest -Method Put` inside `try/catch` with `-ErrorAction SilentlyContinue` for fire-and-forget semantics. Called at three matching exit points (no-commands, empty-cmd-list, success-path). Gated on the snapshot file existing on disk so Windows-only deployments (where `capture_changed_files` is not yet ported to PowerShell) degrade silently to current behavior.
+- **`hooks/test-stride-hook.sh`** — New Test Group 8 (W780) — 6 sub-cases covering PUT-success (URL/token/method/body assertions via a stub `curl` recorded into a fixture), no-Bearer-token (PUT skipped, snapshot still written), no-`TASK_ID` (PUT skipped), empty-snapshot (`[]` still PUTs the literal empty array), PUT-failure (stub exits 1, hook still exits 0, snapshot persists), and `HAS_JQ=false` (PUT skipped via the sourced unit-test path). Suite total: 112 passed / 0 failed.
+- **`hooks/test-stride-hook.ps1`** — New Test Group 7 (W780) — HttpListener-backed PUT-success test (asserts method, path, Authorization header, body content) plus 4 wrapper-resilience cases (unreachable port doesn't propagate, no snapshot file no-ops, no Bearer token no-ops, no `TASK_ID` no-ops).
+- **`skills/stride-completing-tasks/SKILL.md`** — Documentation surface updated for the new flow (W781). The pre-completion verification checklist item for `changed_files` is rewritten to say "No agent-side action is required on Stride server v1.16.0+ — the after_doing hook PUTs the snapshot automatically", with a cross-link to the Per-File Diff Capture (Optional) section for back-compat against ≤ v1.15.x servers. The canonical API Request Format example drops `--argjson cf` and `changed_files: $cf` from the `jq -n`/curl, and its body-shape example drops the `changed_files` field — both reflect the v1.16.0+ flow where the hook owns the upload. The Per-File Diff Capture (Optional) section now leads with an "Upload flow (v1.16.0+)" paragraph describing the hook PUT, followed by a new "Backwards compatibility" subsection with a server-version table and prose explaining both modes coexist. The legacy inline-cat pattern is preserved verbatim under "Legacy inline pattern (≤ v1.15.x deployments)" so agents targeting older servers retain a working recipe. Cross-link to `docs/diff-contract.md` preserved; the schema reference table still lists `changed_files` as optional.
+
+### Why this release
+
+Closes the loop on the "agent must inline the snapshot" bug class. Through v1.15.x, every agent runtime (Claude Code CLI, Claude Code TypeScript SDK, Codex, Gemini, opencode, pi, copilot) had to remember to include `--argjson cf "$(cat ...)"` in the completion curl. Any agent that forgot — or that ran under a runtime where `$CLAUDE_PROJECT_DIR` was unset (fixed in v1.15.1 for the SDK path), or that read the snapshot in a separate Bash tool call before the curl — POSTed an empty `changed_files` even though the hook had captured the diff correctly. With v1.16.0, the `after_doing` hook owns the upload via `PUT /api/tasks/:id/changed_files`. The hook runs in a controlled environment for every agent, so no agent can silently omit `changed_files` anymore. The completion body shrinks accordingly.
+
+### Backward compatibility
+
+`changed_files` in the completion body remains accepted by every supported Stride server — older agent installs that still inline-cat continue to work against v1.16.0+ servers (the server treats the PUT-uploaded value as authoritative when both are present). Against ≤ v1.15.x servers, the new hook PUT 404s harmlessly (fire-and-forget), and the inline-cat pattern is the only path that carries the snapshot — the SKILL.md "Legacy inline pattern" subsection documents it explicitly for that case. The wire shape of the snapshot (`{path, diff}`, the 500-line truncation marker, the binary placeholder) is unchanged.
+
+### Migration
+
+`/plugin update stride@stride-marketplace`. No `.stride_auth.md`, `.stride.md`, or `.gitignore` changes are required. Agent runtimes that still inline `--argjson cf` need no update — both paths coexist. Server-side, the receiving deploy must include the `PUT /api/tasks/:id/changed_files` endpoint (W777); deploys without it 404 the hook PUT silently and the older inline-body path remains the only source of `changed_files`.
+
+### Source
+
+Implemented as G162 / W780 (hook + tests) and W781 (SKILL.md). Companion server endpoint lands in kanban as W777. Companion marketplace pin bump lands in stride-marketplace.
+
 ## [1.15.1] - 2026-05-21
 
 ### Fixed

@@ -558,6 +558,170 @@ Assert-Contains "failure JSON has hook field" '"hook"' $r.Stdout
 Assert-Contains "failure JSON has failed status" '"failed"' $r.Stdout
 
 # ============================================================
+# Test Group 7: PUT snapshot upload (W780)
+# ============================================================
+# Mirror of test-stride-hook.sh Test Group 8. Invoke-FinalizeAfterDoing PUTs
+# the on-disk snapshot to {URL}/api/tasks/{TASK_ID}/changed_files. Full URL/
+# token extraction is covered by the bash test suite — these tests verify
+# wrapper behavior (exit codes, fire-and-forget semantics, snapshot
+# persistence) which is the ps1-specific contract.
+Write-Host ""
+Write-Host "=== Test Group 7: PUT snapshot upload (W780) ==="
+
+# 7a: PUT-success — snapshot uploaded to a local HttpListener
+$putSuccessProj = Join-Path $TmpDir 'put-success-project'
+New-Item -ItemType Directory -Path $putSuccessProj -Force | Out-Null
+Set-Content -Path (Join-Path $putSuccessProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $putSuccessProj '.stride-changed-files.json') `
+    -Value '[{"path":"foo.txt","diff":"unified patch body"}]' -Encoding UTF8
+Set-Content -Path (Join-Path $putSuccessProj '.stride-env-cache') `
+    -Value "TASK_ID=99`nTASK_BASE_REF=abc" -Encoding UTF8
+
+# Bind a one-shot listener on an ephemeral port.
+$putPort = 18877
+$putFixture = Join-Path $TmpDir 'put-fixture.json'
+if (Test-Path $putFixture) { Remove-Item -Force $putFixture }
+
+$putListenerJob = Start-Job -ArgumentList $putPort, $putFixture -ScriptBlock {
+    param($Port, $Fixture)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        $ctx = $l.GetContext()
+        $req = $ctx.Request
+        $reader = [System.IO.StreamReader]::new($req.InputStream)
+        $body = $reader.ReadToEnd()
+        @{
+            Method = $req.HttpMethod
+            Path   = $req.Url.AbsolutePath
+            Auth   = $req.Headers['Authorization']
+            Body   = $body
+        } | ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+        $resp = $ctx.Response
+        $resp.StatusCode = 200
+        $resp.OutputStream.Close()
+    } catch {
+        # Listener tear-down errors are ignored.
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+}
+
+try {
+    $putCompleteCmd = "curl -X PATCH http://localhost:$putPort/api/tasks/99/complete -H `"Authorization: Bearer test_token_xyz`""
+    $putJson = "{`"tool_input`":{`"command`":`"$putCompleteCmd`"}}"
+    $r = Invoke-HookScript -InputJson $putJson -Phase 'pre' -ProjectDir $putSuccessProj
+    Assert-Exit "7a: hook exits 0 after PUT" 0 $r.ExitCode
+
+    Wait-Job $putListenerJob -Timeout 8 | Out-Null
+    Remove-Job $putListenerJob -Force -ErrorAction SilentlyContinue
+
+    if (Test-Path $putFixture) {
+        $record = Get-Content -Raw -Path $putFixture | ConvertFrom-Json
+        Assert-Eq "7a: PUT method" "PUT" $record.Method
+        Assert-Contains "7a: PUT path targets /changed_files" "/api/tasks/99/changed_files" $record.Path
+        Assert-Eq "7a: Bearer token from `$Command" "Bearer test_token_xyz" $record.Auth
+        Assert-Contains "7a: PUT body contains snapshot content" "foo.txt" $record.Body
+    } else {
+        Write-Host "  FAIL: 7a: PUT did not arrive at listener" -ForegroundColor Red
+        $script:FAIL++
+    }
+} finally {
+    if ($putListenerJob -and $putListenerJob.State -eq 'Running') {
+        Stop-Job $putListenerJob -ErrorAction SilentlyContinue
+        Remove-Job $putListenerJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 7b: PUT failure (unreachable URL) does not propagate
+$putFailProj = Join-Path $TmpDir 'put-fail-project'
+New-Item -ItemType Directory -Path $putFailProj -Force | Out-Null
+Set-Content -Path (Join-Path $putFailProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $putFailProj '.stride-changed-files.json') `
+    -Value '[{"path":"foo.txt","diff":"body"}]' -Encoding UTF8
+Set-Content -Path (Join-Path $putFailProj '.stride-env-cache') `
+    -Value "TASK_ID=99`nTASK_BASE_REF=abc" -Encoding UTF8
+
+# Port 1 is unreachable on every reasonable system.
+$failCmd = 'curl -X PATCH http://127.0.0.1:1/api/tasks/99/complete -H "Authorization: Bearer tok"'
+$failJson = "{`"tool_input`":{`"command`":`"$failCmd`"}}"
+$r = Invoke-HookScript -InputJson $failJson -Phase 'pre' -ProjectDir $putFailProj
+Assert-Exit "7b: hook exits 0 even when PUT fails" 0 $r.ExitCode
+$snapshotPath7b = Join-Path $putFailProj '.stride-changed-files.json'
+if (Test-Path $snapshotPath7b) {
+    Write-Host "  PASS: 7b: snapshot file persists across failed PUT" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 7b: snapshot file missing after failed PUT" -ForegroundColor Red
+    $script:FAIL++
+}
+
+# 7c: No snapshot file on disk → Invoke-FinalizeAfterDoing no-ops cleanly
+$noSnapProj = Join-Path $TmpDir 'no-snap-project'
+New-Item -ItemType Directory -Path $noSnapProj -Force | Out-Null
+Set-Content -Path (Join-Path $noSnapProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $noSnapProj '.stride-env-cache') `
+    -Value "TASK_ID=99" -Encoding UTF8
+$noSnapCmd = 'curl -X PATCH http://127.0.0.1:1/api/tasks/99/complete -H "Authorization: Bearer tok"'
+$noSnapJson = "{`"tool_input`":{`"command`":`"$noSnapCmd`"}}"
+$r = Invoke-HookScript -InputJson $noSnapJson -Phase 'pre' -ProjectDir $noSnapProj
+Assert-Exit "7c: hook exits 0 with no snapshot file" 0 $r.ExitCode
+
+# 7d: No Bearer token in `$Command → finalize no-ops (snapshot still untouched)
+$noTokProj = Join-Path $TmpDir 'no-tok-project'
+New-Item -ItemType Directory -Path $noTokProj -Force | Out-Null
+Set-Content -Path (Join-Path $noTokProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $noTokProj '.stride-changed-files.json') `
+    -Value '[{"path":"foo.txt","diff":"body"}]' -Encoding UTF8
+Set-Content -Path (Join-Path $noTokProj '.stride-env-cache') `
+    -Value "TASK_ID=99" -Encoding UTF8
+# No Authorization header in the agent's curl.
+$noTokCmd = 'curl -X PATCH http://stride.example.com/api/tasks/99/complete'
+$noTokJson = "{`"tool_input`":{`"command`":`"$noTokCmd`"}}"
+$r = Invoke-HookScript -InputJson $noTokJson -Phase 'pre' -ProjectDir $noTokProj
+Assert-Exit "7d: hook exits 0 with no Bearer token" 0 $r.ExitCode
+
+# 7e: No TASK_ID in env cache → finalize no-ops
+$noIdProj = Join-Path $TmpDir 'no-id-project'
+New-Item -ItemType Directory -Path $noIdProj -Force | Out-Null
+Set-Content -Path (Join-Path $noIdProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $noIdProj '.stride-changed-files.json') `
+    -Value '[{"path":"foo.txt","diff":"body"}]' -Encoding UTF8
+# Env cache without TASK_ID.
+Set-Content -Path (Join-Path $noIdProj '.stride-env-cache') `
+    -Value "TASK_BASE_REF=abc" -Encoding UTF8
+$noIdCmd = 'curl -X PATCH http://stride.example.com/api/tasks/99/complete -H "Authorization: Bearer tok"'
+$noIdJson = "{`"tool_input`":{`"command`":`"$noIdCmd`"}}"
+$r = Invoke-HookScript -InputJson $noIdJson -Phase 'pre' -ProjectDir $noIdProj
+Assert-Exit "7e: hook exits 0 with no TASK_ID" 0 $r.ExitCode
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

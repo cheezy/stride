@@ -130,7 +130,7 @@ When the Stride plugin is enabled, `.stride.md` hooks execute **automatically wi
 | PostToolUse (Bash) | `/api/tasks/:id/complete` | `before_review` |
 | PostToolUse (Bash) | `/api/tasks/:id/mark_reviewed` | `after_review` |
 
-**Note:** Add `.stride-env-cache` and `.stride-changed-files.json` to your `.gitignore` — both are temp files written between hook invocations. `.stride-env-cache` caches task metadata (including the base commit captured at claim time); `.stride-changed-files.json` holds the per-file diff snapshot captured at the end of `after_doing` for the completion payload. Both are cleaned up automatically after the `after_review` hook.
+**Note:** Add `.stride-env-cache` and `.stride-changed-files.json` to your `.gitignore` — both are temp files written between hook invocations. `.stride-env-cache` caches task metadata (including the base commit captured at claim time); `.stride-changed-files.json` holds the per-file diff snapshot captured at the end of `after_doing`. On Stride server v1.16.0+ the `after_doing` hook PUTs this snapshot to the server automatically (no agent action required); against older servers, agents inline-cat the file into the completion body (see `stride-completing-tasks` SKILL.md). Both files are cleaned up automatically after the `after_review` hook.
 
 ## Configuration
 

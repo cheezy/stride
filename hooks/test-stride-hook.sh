@@ -1237,6 +1237,276 @@ NEW
 fi
 
 # ============================================================
+# Test Group 8: PUT snapshot upload (W780)
+# ============================================================
+# finalize_after_doing PUTs the snapshot to {URL}/api/tasks/{TASK_ID}/changed_files
+# after writing it to disk. URL+token are extracted from the intercepted
+# agent completion request ($COMMAND). Failures must be silent.
+echo ""
+echo "=== Test Group 8: PUT snapshot upload (W780) ==="
+
+if ! command -v jq > /dev/null 2>&1 || ! command -v git > /dev/null 2>&1; then
+  echo "  SKIP: jq or git missing — Group 8 requires both"
+else
+  # Helper to build the curl stub. Writes args + stdin into $1 and exits $2.
+  make_curl_stub() {
+    local stub_dir="$1" fixture="$2" exit_code="${3:-0}"
+    mkdir -p "$stub_dir"
+    cat > "$stub_dir/curl" << CURLSTUB
+#!/usr/bin/env bash
+{
+  printf 'ARGS:'
+  for a in "\$@"; do printf ' %s' "\$a"; done
+  printf '\n'
+} >> "$fixture"
+# If --data-binary @<file> is present, also record file contents for assertions
+for a in "\$@"; do
+  case "\$a" in
+    @*)
+      printf 'BODY:\n' >> "$fixture"
+      cat "\${a#@}" >> "$fixture" 2>/dev/null || true
+      printf '\n' >> "$fixture"
+      ;;
+  esac
+done
+exit $exit_code
+CURLSTUB
+    chmod +x "$stub_dir/curl"
+  }
+
+  # Shared fixture: a git repo with one tracked change since BASE.
+  setup_put_repo() {
+    local dir="$1"
+    cd "$dir" || return 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+GITIGNORE
+    echo "v1" > tracked.txt
+    git add .gitignore tracked.txt > /dev/null
+    git commit -q -m "v1"
+    PUT_BASE=$(git rev-parse HEAD)
+    echo "v2" > tracked.txt
+    git add tracked.txt > /dev/null
+    git commit -q -m "v2"
+    cat > .stride.md << 'STRIDE'
+## after_doing
+```bash
+echo "ran after_doing"
+```
+STRIDE
+    printf "TASK_ID='42'\nTASK_BASE_REF='%s'\n" "$PUT_BASE" > .stride-env-cache
+  }
+
+  # 8a: PUT-success — token+URL in $COMMAND triggers a PUT with the snapshot body
+  PUT_DIR=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  PUT_FIXTURE="$PUT_DIR/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$PUT_FIXTURE" 0
+  (
+    setup_put_repo "$PUT_DIR" || exit 1
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer test_token_abc123\""}}'
+    echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  if [ -f "$PUT_FIXTURE" ]; then
+    PUT_CONTENTS=$(cat "$PUT_FIXTURE")
+    assert_contains "8a: PUT call targets /api/tasks/42/changed_files" \
+      "https://stride.example.com/api/tasks/42/changed_files" "$PUT_CONTENTS"
+    assert_contains "8a: PUT call sends Bearer token from \$COMMAND" \
+      "Bearer test_token_abc123" "$PUT_CONTENTS"
+    # The stub's ARGS line includes "X PUT" (the "-" is recorded but assert_contains
+    # via `grep -qF` treats a leading "-" as an option; use the un-dashed substring).
+    assert_contains "8a: PUT call uses PUT method" "X PUT " "$PUT_CONTENTS"
+    assert_contains "8a: PUT body contains the changed file path" \
+      "tracked.txt" "$PUT_CONTENTS"
+  else
+    echo -e "  ${RED}FAIL${RESET}: 8a: PUT call was not made (no fixture written)"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$PUT_DIR" "$STUB_DIR"
+
+  # 8b: No Authorization header in $COMMAND → no PUT call
+  NOTOK_DIR=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  NOTOK_FIXTURE="$NOTOK_DIR/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$NOTOK_FIXTURE" 0
+  (
+    setup_put_repo "$NOTOK_DIR" || exit 1
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete"}}'
+    echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  if [ ! -f "$NOTOK_FIXTURE" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 8b: no Bearer token in \$COMMAND → PUT skipped"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 8b: PUT was made despite missing token: $(cat "$NOTOK_FIXTURE")"
+    FAIL=$((FAIL + 1))
+  fi
+  # Snapshot file must still be written for legacy --argjson cf consumers.
+  if [ -f "$NOTOK_DIR/.stride-changed-files.json" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 8b: snapshot still written when PUT skipped"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 8b: snapshot was not written when PUT skipped"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$NOTOK_DIR" "$STUB_DIR"
+
+  # 8c: No TASK_ID in env cache → no PUT call
+  NOID_DIR=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  NOID_FIXTURE="$NOID_DIR/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$NOID_FIXTURE" 0
+  (
+    cd "$NOID_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+GITIGNORE
+    echo "v1" > x.txt
+    git add .gitignore x.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    echo "v2" > x.txt
+    git add x.txt > /dev/null
+    git commit -q -m "v2"
+    cat > .stride.md << 'STRIDE'
+## after_doing
+```bash
+echo "ran"
+```
+STRIDE
+    # No TASK_ID line — only TASK_BASE_REF.
+    printf "TASK_BASE_REF='%s'\n" "$BASE" > .stride-env-cache
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer test_token\""}}'
+    echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  if [ ! -f "$NOID_FIXTURE" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 8c: missing TASK_ID → PUT skipped"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 8c: PUT was made despite missing TASK_ID: $(cat "$NOID_FIXTURE")"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$NOID_DIR" "$STUB_DIR"
+
+  # 8d: Empty snapshot ([]) still triggers a PUT (legitimate clear)
+  EMPTY_DIR=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  EMPTY_FIXTURE="$EMPTY_DIR/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$EMPTY_FIXTURE" 0
+  (
+    cd "$EMPTY_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+GITIGNORE
+    echo "v1" > y.txt
+    git add .gitignore y.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    # Empty commit so capture_changed_files returns [].
+    git commit -q --allow-empty -m "empty"
+    cat > .stride.md << 'STRIDE'
+## after_doing
+```bash
+echo "ran"
+```
+STRIDE
+    printf "TASK_ID='42'\nTASK_BASE_REF='%s'\n" "$BASE" > .stride-env-cache
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer tok\""}}'
+    echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  if [ -f "$EMPTY_FIXTURE" ]; then
+    EMPTY_CONTENTS=$(cat "$EMPTY_FIXTURE")
+    assert_contains "8d: empty snapshot still triggers PUT" "X PUT " "$EMPTY_CONTENTS"
+    # Body should be exactly the empty-array literal on its own line.
+    if printf '%s\n' "$EMPTY_CONTENTS" | grep -qFx '[]'; then
+      echo -e "  ${GREEN}PASS${RESET}: 8d: PUT body is the literal empty array"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: 8d: PUT body was not []: $EMPTY_CONTENTS"
+      FAIL=$((FAIL + 1))
+    fi
+  else
+    echo -e "  ${RED}FAIL${RESET}: 8d: PUT call was not made for empty snapshot"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$EMPTY_DIR" "$STUB_DIR"
+
+  # 8e: PUT failure (stub curl exits 1) does not propagate — hook still exits 0
+  FAIL_DIR=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  FAIL_FIXTURE="$FAIL_DIR/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$FAIL_FIXTURE" 1
+  (
+    setup_put_repo "$FAIL_DIR" || exit 1
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer tok\""}}'
+    echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  FAIL_EXIT=$?
+  # Run again outside the subshell to capture the actual exit code.
+  (
+    cd "$FAIL_DIR" || exit 1
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer tok\""}}'
+    echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  FAIL_EXIT=$?
+  assert_exit "8e: PUT failure does not propagate (hook exits 0)" 0 "$FAIL_EXIT"
+  # And the snapshot file is still on disk.
+  if [ -f "$FAIL_DIR/.stride-changed-files.json" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 8e: snapshot file persists across failed PUT"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 8e: snapshot file missing after failed PUT"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$FAIL_DIR" "$STUB_DIR"
+
+  # 8f: HAS_JQ=false → PUT skipped (sourced unit test). Sourcing the hook
+  # script with no PHASE arg short-circuits before the main flow runs, leaving
+  # the function definitions in scope so we can call finalize_after_doing
+  # directly with a forced HAS_JQ=false.
+  NOJQ_DIR=$(mktemp -d)
+  NOJQ_STUB=$(mktemp -d)
+  NOJQ_FIXTURE="$NOJQ_DIR/curl-call.txt"
+  make_curl_stub "$NOJQ_STUB" "$NOJQ_FIXTURE" 0
+  (
+    cd "$NOJQ_DIR" || exit 1
+    printf '[]\n' > .stride-changed-files.json
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    HAS_JQ=false
+    HOOK_NAME=after_doing
+    TASK_ID=42
+    COMMAND='curl -X PATCH https://stride.example.com/api/tasks/42/complete -H "Authorization: Bearer tok"'
+    PROJECT_DIR="$NOJQ_DIR"
+    PATH="$NOJQ_STUB:$PATH"
+    finalize_after_doing
+  )
+  if [ ! -f "$NOJQ_FIXTURE" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 8f: HAS_JQ=false → PUT skipped"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 8f: PUT made with HAS_JQ=false: $(cat "$NOJQ_FIXTURE")"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$NOJQ_DIR" "$NOJQ_STUB"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

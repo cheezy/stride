@@ -148,6 +148,38 @@ if (Test-Path $EnvCache) {
     }
 }
 
+# Fire-and-forget upload of the per-file diff snapshot to the Stride server.
+# Mirror of stride-hook.sh's finalize_after_doing PUT path. URL and token are
+# parsed from the intercepted agent completion command in $Command — no new
+# env vars or auth file reads. Silently no-ops if any prerequisite is missing
+# (snapshot file, URL, token, TASK_ID, curl.exe) so behavior degrades to the
+# legacy on-disk-only snapshot.
+function Invoke-FinalizeAfterDoing {
+    if ($HookName -ne 'after_doing') { return }
+    $snapshotPath = Join-Path $ProjectDir '.stride-changed-files.json'
+    if (-not (Test-Path $snapshotPath)) { return }
+
+    $apiBase = ''
+    $token = ''
+    if ($Command -match 'https?://[A-Za-z0-9._-]+(:[0-9]+)?') { $apiBase = $Matches[0] }
+    if ($Command -match 'Bearer\s+([A-Za-z0-9._+/=-]+)') { $token = $Matches[1] }
+
+    $taskId = [System.Environment]::GetEnvironmentVariable('TASK_ID', 'Process')
+    if (-not $apiBase -or -not $token -or -not $taskId) { return }
+
+    try {
+        Invoke-WebRequest `
+            -Uri "$apiBase/api/tasks/$taskId/changed_files" `
+            -Method Put `
+            -InFile $snapshotPath `
+            -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -UseBasicParsing -TimeoutSec 10 -ErrorAction SilentlyContinue | Out-Null
+    } catch {
+        # Fire-and-forget — swallow all errors.
+    }
+}
+
 # --- Parse .stride.md for the hook section ---
 # Extracts lines from the first ```bash code block under ## <hook_name>
 $rawContent = Get-Content $StrideMd -Raw -Encoding UTF8
@@ -185,8 +217,11 @@ foreach ($rawLine in $lines) {
     }
 }
 
-# No commands for this hook — exit cleanly
-if (-not $commands.Trim()) { exit 0 }
+# No commands for this hook — finalize and exit cleanly
+if (-not $commands.Trim()) {
+    Invoke-FinalizeAfterDoing
+    exit 0
+}
 
 # --- Build command list for tracking ---
 # Split commands, filter comments and blank lines
@@ -198,8 +233,11 @@ foreach ($cmd in ($commands -split "`n")) {
     $cmdList += $trimmed
 }
 
-# Nothing to execute after filtering
-if ($cmdList.Count -eq 0) { exit 0 }
+# Nothing to execute after filtering — finalize and exit cleanly
+if ($cmdList.Count -eq 0) {
+    Invoke-FinalizeAfterDoing
+    exit 0
+}
 
 # --- Execute commands with structured output ---
 Set-Location $ProjectDir
@@ -278,6 +316,9 @@ foreach ($trimmed in $cmdList) {
 
     $cmdIndex++
 }
+
+# Mirror of stride-hook.sh's per-file diff PUT (W780). No-op outside after_doing.
+Invoke-FinalizeAfterDoing
 
 # --- Success output ---
 $endTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()

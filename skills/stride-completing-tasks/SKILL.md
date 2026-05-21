@@ -131,7 +131,7 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 - [ ] **Are you ready to run the `after_doing` hook (tests, linting)?** If no → fix any known issues first. The hook will fail if tests don't pass.
 - [ ] **Is `workflow_steps` included in the complete payload?** If no → add it now. The array is required on every completion. It must contain one entry for each of the six step names (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`) — see the stride-workflow skill for the schema.
 - [ ] **Are `explorer_result` and `reviewer_result` included?** If no → add them now. Both are required on every completion, either as a dispatched-subagent result or as a self-reported skip with a reason from the fixed enum. See the Explorer/Reviewer Result Schema section below.
-- [ ] **Did you embed `.stride-changed-files.json` into the payload as `changed_files`?** Read it INLINE inside the same curl invocation via `--argjson cf "$(cat "${CLAUDE_PROJECT_DIR:-.}/.stride-changed-files.json" 2>/dev/null || echo '[]')"`. Use the absolute `$CLAUDE_PROJECT_DIR` path (not a relative `.stride-changed-files.json`) — a non-root agent CWD silently misses the file otherwise. Reading the snapshot in a SEPARATE Bash tool call before the curl runs the cat BEFORE the PreToolUse hook has written the file, producing an empty or stale read. See the Per-File Diff Capture (Optional) section below for the canonical pattern.
+- [ ] **Per-file diffs.** No agent-side action is required on Stride server v1.16.0+ — the `after_doing` hook PUTs the snapshot to the server automatically. For older Stride deployments that still expect `changed_files` in the completion body, see the [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section below for the inline-cat pattern.
 
 **If ANY answer is NO → Go back and do it now. Do NOT proceed to completion.**
 
@@ -321,20 +321,19 @@ When a blocking hook fails, dispatch the `stride:hook-diagnostician` agent **as 
 
 ## API Request Format
 
-After BOTH hooks succeed, assemble and send the completion request as a
-SINGLE Bash invocation that inlines the snapshot read inside `jq -n`. The
-inline pattern matters because the PreToolUse-on-complete hook writes
-`.stride-changed-files.json` during the curl call — a separate Bash tool
-call BEFORE the curl reads the file BEFORE the hook has populated it. See
-the "Why inline?" paragraph in the [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional)
-section below.
+After BOTH hooks succeed, send the completion request. On Stride server
+v1.16.0+ the `after_doing` hook PUTs `.stride-changed-files.json` to the
+server before the completion curl executes, so the agent's completion body
+does NOT need to include `changed_files`. For older Stride deployments
+that still expect `changed_files` in the body, see the
+[Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section
+below for the inline-cat pattern.
 
 ```bash
 curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
   -H "Authorization: Bearer $STRIDE_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d "$(jq -n \
-    --argjson cf "$(cat "${CLAUDE_PROJECT_DIR:-.}/.stride-changed-files.json" 2>/dev/null || echo '[]')" \
     --arg agent_name 'Claude Sonnet 4.5' \
     --arg notes 'All tests passing. PR #123 created.' \
     --arg summary 'Brief one-line summary for tracking.' \
@@ -348,7 +347,6 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
        completion_summary: $summary,
        actual_complexity: $complexity,
        actual_files_changed: $files,
-       changed_files: $cf,
        review_report: $report,
        after_doing_result: {exit_code: 0, output: "...", duration_ms: 45678},
        before_review_result: {exit_code: 0, output: "...", duration_ms: 2340},
@@ -366,7 +364,7 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
 ```
 
 The resulting request body has this shape (illustrative — populated values
-match the `--arg` / `--argjson` substitutions above):
+match the `--arg` substitutions above):
 
 ```json
 {
@@ -376,9 +374,6 @@ match the `--arg` / `--argjson` substitutions above):
   "completion_summary": "Brief one-line summary for tracking.",
   "actual_complexity": "small",
   "actual_files_changed": "lib/foo.ex, test/foo_test.exs",
-  "changed_files": [
-    {"path": "lib/foo.ex", "diff": "--- a/lib/foo.ex\n+++ b/lib/foo.ex\n@@ -1,3 +1,4 @@\n defmodule Foo do\n+  @moduledoc \"Foo\"\n end\n"}
-  ],
   "review_report": "## Review Summary\n\nApproved — 0 issues found.",
   "after_doing_result": {
     "exit_code": 0,
@@ -419,7 +414,7 @@ match the `--arg` / `--argjson` substitutions above):
 
 **Optional:** Include `review_report` when a task-reviewer agent produced a structured review. Omit it when no review was performed (e.g., small tasks with 0-1 key_files).
 
-**Optional:** Include `changed_files` whenever `.stride-changed-files.json` exists in the project root — read it INLINE inside the same curl invocation (see the bash example above and the [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section below). The `|| echo '[]'` fallback produces an empty array when the snapshot is absent or unreadable; emitting `changed_files: []` is a valid completion. The encoding rules (500-line truncation marker, binary placeholder, `{path, diff}` shape) live in `docs/diff-contract.md` and should not be duplicated into the example.
+**Optional (back-compat only):** On Stride server v1.16.0+, the `after_doing` hook PUTs `.stride-changed-files.json` to the server before the completion curl executes, so the agent does NOT need to send `changed_files` in the body. For older Stride deployments, the body still accepts `changed_files` — see the [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section below for the inline-cat pattern that targets those servers. The encoding rules (500-line truncation marker, binary placeholder, `{path, diff}` shape) live in `docs/diff-contract.md` and should not be duplicated into the example.
 
 ## Explorer/Reviewer Result Schema
 
@@ -785,19 +780,38 @@ populated snapshot — the diff is captured from the working tree against
 `$TASK_BASE_REF`, not from `..HEAD`. Earlier plugin versions (≤ 1.14.x)
 required a commit before completion or the snapshot was empty.
 
-**Why inline?** The PreToolUse-on-complete hook fires `after_doing` BEFORE
-the curl runs. The hook writes `.stride-changed-files.json` during that
-phase. If the agent's payload assembly reads the snapshot in a SEPARATE Bash
-tool call BEFORE the curl call, that earlier Bash invocation runs BEFORE the
-PreToolUse hook fires — so the file may not yet exist (or contains a stale
-snapshot from a prior task). The fix is to inline the `cat` inside the same
-curl invocation, so the read happens AFTER the PreToolUse hook has populated
-the file but BEFORE the request body is serialized.
+**Upload flow (v1.16.0+).** The plugin's `after_doing` hook now uploads the
+snapshot to the Stride server itself: immediately after writing
+`.stride-changed-files.json`, the hook issues a fire-and-forget
+`PUT {URL}/api/tasks/{TASK_ID}/changed_files` with the snapshot as the
+request body. URL and Bearer token are extracted from the agent's intercepted
+completion curl — no extra configuration, no `.stride_auth.md` read. The PUT
+runs BEFORE the agent's completion request executes (inside the PreToolUse
+path) so the server has the diff data attached to the task by the time
+`/complete` lands. The agent's completion body does NOT need to include
+`changed_files`.
 
-**How to populate `changed_files` in your payload.** Inline the snapshot read
+### Backwards compatibility
+
+| Server version | How `changed_files` reaches the server |
+|---|---|
+| v1.16.0+ | `after_doing` hook PUTs the snapshot. Agent body does NOT need `changed_files`. |
+| ≤ v1.15.x | Hook only writes the snapshot to disk. Agent must inline-read it in the completion body via the legacy pattern below. |
+
+Both modes coexist: on a v1.16.0+ server, sending `changed_files` in the body
+still works (the server treats the PUT-uploaded value as authoritative). On
+older servers, the hook PUT 404s harmlessly (fire-and-forget) and the inline
+body remains the only path. If you are unsure of the deployed server version
+or you want a single curl that works against both, use the legacy inline
+pattern below — it remains valid against every supported server.
+
+**Legacy inline pattern (≤ v1.15.x deployments).** Inline the snapshot read
 inside the curl invocation using `jq -n --argjson cf`, with the absolute
 `$CLAUDE_PROJECT_DIR` path so the read works regardless of the Bash call's
-CWD:
+CWD. The inline-cat must live inside the SAME curl invocation: the
+PreToolUse-on-complete hook writes `.stride-changed-files.json` during the
+curl call, so any earlier Bash tool call that reads the file runs BEFORE the
+hook has populated it.
 
 ```bash
 curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
@@ -833,10 +847,9 @@ below are valid completions:
 "changed_files": []
 ```
 
-**Backward compatibility.** `changed_files` is strictly optional. Completion
-payloads that omit it remain fully valid forever — the server treats the
-absence as "no diff data available" and the review queue shows the file list
-from `actual_files_changed` without an inline diff panel.
+`changed_files` in the completion body is strictly optional — completion
+payloads that omit it remain fully valid forever, regardless of server
+version.
 
 ## Hook Result Format Reminder
 

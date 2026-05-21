@@ -191,9 +191,39 @@ ${trunc_marker}"
   rm -f "$jsonl_file"
 }
 
+# Helper: persist the per-file diff snapshot, then fire-and-forget PUT it to
+# the Stride server. Runs only for after_doing; capture and upload failures
+# are both non-fatal. URL and token are parsed from the intercepted agent
+# completion command in $COMMAND — no new env vars or auth file reads.
+# Placed before the early-return guards so tests can source this script and
+# invoke finalize_after_doing in isolation.
+finalize_after_doing() {
+  if [ "${HOOK_NAME:-}" = "after_doing" ]; then
+    local snapshot
+    snapshot=$(capture_changed_files "${TASK_BASE_REF:-}" 2>/dev/null || printf '[]')
+    printf '%s\n' "$snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
+
+    # No-op silently if any prerequisite is missing — preserves the on-disk
+    # snapshot for legacy --argjson cf consumers.
+    if [ "${HAS_JQ:-false}" = "true" ] && command -v curl > /dev/null 2>&1 && [ -n "${TASK_ID:-}" ]; then
+      local _api_base _token
+      _api_base=$(printf '%s' "${COMMAND:-}" | grep -oE 'https?://[A-Za-z0-9._-]+(:[0-9]+)?' | head -n 1 || true)
+      _token=$(printf '%s' "${COMMAND:-}" | grep -oE 'Bearer +[A-Za-z0-9._+/=-]+' | head -n 1 | sed 's/^Bearer  *//' || true)
+      if [ -n "$_api_base" ] && [ -n "$_token" ]; then
+        curl -s -X PUT \
+          -H "Authorization: Bearer $_token" \
+          -H 'Content-Type: application/json' \
+          --data-binary "@$PROJECT_DIR/.stride-changed-files.json" \
+          "$_api_base/api/tasks/$TASK_ID/changed_files" \
+          > /dev/null 2>&1 || true
+      fi
+    fi
+  fi
+}
+
 # Exit early if no phase argument or no .stride.md. Placed AFTER the
-# capture_changed_files definition so tests can source this script to use the
-# function in isolation.
+# capture_changed_files and finalize_after_doing definitions so tests can
+# source this script to use the functions in isolation.
 if [ -z "$PHASE" ]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -344,16 +374,6 @@ while IFS= read -r _line || [ -n "$_line" ]; do
 "
   fi
 done < "$STRIDE_MD"
-
-# Helper: persist the per-file diff snapshot. Runs only for after_doing; safe
-# to call from any exit point — capture failures are non-fatal.
-finalize_after_doing() {
-  if [ "$HOOK_NAME" = "after_doing" ]; then
-    local snapshot
-    snapshot=$(capture_changed_files "${TASK_BASE_REF:-}" 2>/dev/null || printf '[]')
-    printf '%s\n' "$snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
-  fi
-}
 
 # No commands for this hook — finalize and exit cleanly
 if [ -z "$COMMANDS" ]; then

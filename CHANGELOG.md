@@ -2,6 +2,24 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.15.1] - 2026-05-21
+
+### Fixed
+
+- **`skills/stride-completing-tasks/SKILL.md`** — Replaced three occurrences of `"$CLAUDE_PROJECT_DIR/.stride-changed-files.json"` with the defaulted form `"${CLAUDE_PROJECT_DIR:-.}/.stride-changed-files.json"` in the canonical inline-cat pattern. Affected lines: the pre-completion verification checklist item, the canonical `API Request Format` PATCH snippet, and the `Per-File Diff Capture (Optional)` snippet. The inline structure, the `--argjson cf "$(cat ... 2>/dev/null || echo '[]')"` shape, and the binary/truncation contract are unchanged — only the variable expansion is defaulted.
+
+### Why this release
+
+Under Claude Code's TypeScript SDK runtime, `$CLAUDE_PROJECT_DIR` is unset/empty, so the bare expansion produced `/.stride-changed-files.json`. The `cat` failed, the `|| echo '[]'` fallback fired, and agents POSTed `changed_files: []` even when the PreToolUse-on-complete hook had correctly written the snapshot. The defaulted form `${CLAUDE_PROJECT_DIR:-.}` falls back to the current working directory whenever the variable is unset or empty, so the read finds the snapshot under both Claude Code CLI (where the variable is set) and the TypeScript SDK (where it is not). Three of the six Stride plugins are affected by the same defect; stride/ is the lead because it is the most widely installed (via stride-marketplace).
+
+### Backward compatibility
+
+Wire shape unchanged. `hooks/stride-hook.sh` already used the defaulted form, so behavior under the Claude Code CLI is byte-identical to v1.15.0. Under the TypeScript SDK, agents that follow the canonical SKILL.md pattern now successfully capture the snapshot they were already trying to send.
+
+### Source
+
+Implemented as W767/W768 (SKILL.md hotfix in dependent task; release coordination in this task). Companion marketplace pin bump lands in stride-marketplace/.claude-plugin/marketplace.json (stride → 1.15.1) and CHANGELOG. Cross-plugin parity ports for the other affected plugins follow as separate tasks.
+
 ## [1.15.0] - 2026-05-20
 
 ### Changed

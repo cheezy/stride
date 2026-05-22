@@ -162,6 +162,43 @@ echo "after"
 ```
 STRIDE
 
+cat > "$TMPDIR_TEST/after-goal-present.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "before_doing"
+```
+
+## after_goal
+```bash
+echo "goal $GOAL_IDENTIFIER finished"
+./scripts/notify-team.sh "$GOAL_TITLE"
+```
+STRIDE
+
+cat > "$TMPDIR_TEST/after-goal-missing.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "before_doing only — no after_goal"
+```
+
+## after_doing
+```bash
+echo "after_doing only"
+```
+STRIDE
+
+cat > "$TMPDIR_TEST/after-goal-duplicate.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "first wins"
+```
+
+## after_goal
+```bash
+echo "second loses"
+```
+STRIDE
+
 # ============================================================
 # Test Group 1: Pure bash JSON extraction (no-jq fallback)
 # ============================================================
@@ -342,6 +379,33 @@ fi
 
 RESULT=$(parse_stride_md "$TMPDIR_TEST/adjacent-sections.stride.md" "after_doing")
 assert_contains "adjacent: after_doing correct" 'echo "after"' "$RESULT"
+
+# 2m: after_goal section is recognized like the other hooks
+RESULT=$(parse_stride_md "$TMPDIR_TEST/after-goal-present.stride.md" "after_goal")
+assert_contains "after_goal: line 1 captured" 'echo "goal $GOAL_IDENTIFIER finished"' "$RESULT"
+assert_contains "after_goal: line 2 captured" './scripts/notify-team.sh "$GOAL_TITLE"' "$RESULT"
+if echo "$RESULT" | grep -qF 'echo "before_doing"'; then
+  echo -e "  ${RED}FAIL${RESET}: after_goal should not bleed from before_doing"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: after_goal does not bleed from before_doing"
+  PASS=$((PASS + 1))
+fi
+
+# 2n: Missing after_goal returns empty (back-compat — older .stride.md files)
+RESULT=$(parse_stride_md "$TMPDIR_TEST/after-goal-missing.stride.md" "after_goal")
+assert_eq "missing after_goal returns empty (back-compat)" "" "$RESULT"
+
+# 2o: Duplicate after_goal sections — only the first is used
+RESULT=$(parse_stride_md "$TMPDIR_TEST/after-goal-duplicate.stride.md" "after_goal")
+assert_contains "duplicate after_goal: first wins" 'echo "first wins"' "$RESULT"
+if echo "$RESULT" | grep -qF "second loses"; then
+  echo -e "  ${RED}FAIL${RESET}: duplicate after_goal should not include second section"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: duplicate after_goal — second section ignored"
+  PASS=$((PASS + 1))
+fi
 
 # ============================================================
 # Test Group 3: Whitespace trimming (pure bash)

@@ -722,6 +722,149 @@ $r = Invoke-HookScript -InputJson $noIdJson -Phase 'pre' -ProjectDir $noIdProj
 Assert-Exit "7e: hook exits 0 with no TASK_ID" 0 $r.ExitCode
 
 # ============================================================
+# Test Group 8: after_goal end-to-end routing (W506)
+# ============================================================
+# Mirrors stride-hook.sh Test Group 10. Each case constructs a realistic
+# tool_input + tool_response payload and asserts on the script's actual
+# stdout / stderr / exit code. Fixtures use generic URLs and task IDs
+# per the W506 pitfall.
+Write-Host ""
+Write-Host "=== Test Group 8: after_goal end-to-end routing (W506) ==="
+
+# Helper: build a tool_response payload whose hooks array carries the
+# listed entries. Mirrors the Claude Code Bash-tool transport shape
+# (tool_response is an object with a stdout property holding API JSON
+# as a string).
+function Build-AfterGoalInput {
+    param(
+        [string]$PrimaryCommand,
+        [string[]]$HookNames
+    )
+    $hooksArr = @($HookNames | ForEach-Object { @{ name = $_ } })
+    $inner = (@{ data = @{ id = 99 }; hooks = $hooksArr } | ConvertTo-Json -Depth 5 -Compress)
+    return (@{
+        tool_input    = @{ command = $PrimaryCommand }
+        tool_response = @{ stdout = $inner }
+    } | ConvertTo-Json -Depth 5 -Compress)
+}
+
+# Shared project with all five hook sections.
+$agProj = Join-Path $TmpDir 'after-goal-e2e'
+New-Item -ItemType Directory -Path $agProj -Force | Out-Null
+Set-Content -Path (Join-Path $agProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo "before_doing_ran"
+```
+
+## after_doing
+```bash
+echo "after_doing_ran"
+```
+
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_review
+```bash
+echo "after_review_ran"
+```
+
+## after_goal
+```bash
+echo "after_goal_ran for $GOAL_IDENTIFIER"
+```
+'@ -Encoding UTF8
+
+# 8a: after_goal in response + ## after_goal present -> section runs.
+$agInputPresent = Build-AfterGoalInput `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -HookNames @('after_doing', 'before_review', 'after_review', 'after_goal')
+$r = Invoke-HookScript -InputJson $agInputPresent -Phase 'post' -ProjectDir $agProj
+Assert-Exit "8a: end-to-end after_goal present exits 0" 0 $r.ExitCode
+Assert-Contains "8a: primary before_review ran" "before_review_ran" $r.Stderr
+Assert-Contains "8a: after_goal section ran" "after_goal_ran" $r.Stderr
+Assert-Contains "8a: structured success JSON for after_goal on stdout" '"hook":"after_goal"' $r.Stdout
+
+# 8b: after_goal in response + ## after_goal section ABSENT -> back-compat
+# no-op. Primary hook runs; after_goal silently produces no JSON.
+$agProjMissing = Join-Path $TmpDir 'after-goal-e2e-missing'
+New-Item -ItemType Directory -Path $agProjMissing -Force | Out-Null
+Set-Content -Path (Join-Path $agProjMissing '.stride.md') -Value @'
+## before_doing
+```bash
+echo "before_doing_ran"
+```
+
+## after_doing
+```bash
+echo "after_doing_ran"
+```
+
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_review
+```bash
+echo "after_review_ran"
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson $agInputPresent -Phase 'post' -ProjectDir $agProjMissing
+Assert-Exit "8b: end-to-end after_goal-missing-section exits 0 (back-compat)" 0 $r.ExitCode
+Assert-Contains "8b: primary before_review still ran" "before_review_ran" $r.Stderr
+Assert-NotContains "8b: missing ## after_goal emits no after_goal JSON" '"hook":"after_goal"' $r.Stdout
+
+# 8c: after_goal NOT in response -> behavior unchanged.
+$agInputAbsent = Build-AfterGoalInput `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -HookNames @('after_doing', 'before_review', 'after_review')
+$r = Invoke-HookScript -InputJson $agInputAbsent -Phase 'post' -ProjectDir $agProj
+Assert-Exit "8c: end-to-end after_goal-absent exits 0" 0 $r.ExitCode
+Assert-Contains "8c: primary before_review ran" "before_review_ran" $r.Stderr
+Assert-NotContains "8c: after_goal absent does not execute the section" "after_goal_ran" $r.Stderr
+
+# 8d: after_goal section command exits non-zero -> structured failure JSON
+# surfaces on stdout; script exit code stays 0 (primary curl already
+# succeeded — agent reads the failure off stdout to forward via PATCH
+# /api/tasks/:goal_id/after_goal).
+$agProjFail = Join-Path $TmpDir 'after-goal-e2e-fail'
+New-Item -ItemType Directory -Path $agProjFail -Force | Out-Null
+Set-Content -Path (Join-Path $agProjFail '.stride.md') -Value @'
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_review
+```bash
+echo "after_review_ran"
+```
+
+## after_goal
+```bash
+bash -c 'exit 11'
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson $agInputPresent -Phase 'post' -ProjectDir $agProjFail
+Assert-Exit "8d: end-to-end after_goal-failure does not propagate as script exit" 0 $r.ExitCode
+Assert-Contains "8d: structured failed JSON references after_goal on stdout" '"hook":"after_goal"' $r.Stdout
+Assert-Contains "8d: structured failed JSON has status:failed" '"status":"failed"' $r.Stdout
+Assert-Contains "8d: structured failed JSON carries non-zero exit_code" '"exit_code":11' $r.Stdout
+
+# 8e: mark_reviewed URL also routes after_goal (parity with /complete).
+$agInputMr = Build-AfterGoalInput `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed' `
+    -HookNames @('after_review', 'after_goal')
+$r = Invoke-HookScript -InputJson $agInputMr -Phase 'post' -ProjectDir $agProj
+Assert-Exit "8e: end-to-end after_goal on mark_reviewed exits 0" 0 $r.ExitCode
+Assert-Contains "8e: mark_reviewed runs after_review" "after_review_ran" $r.Stderr
+Assert-Contains "8e: mark_reviewed runs after_goal" "after_goal_ran" $r.Stderr
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

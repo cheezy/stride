@@ -2,6 +2,27 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.17.0] - 2026-05-22
+
+### Added
+
+- **`## after_goal` hook section** — fifth `.stride.md` hook, fires after the parent goal's final child task completes. Blocking, 60s timeout, same single-bash-fence parsing rule as the four existing hooks. Documented in `skills/stride-workflow/parser.md` (parsing contract) and `skills/stride-workflow/hook-execution.md` (executor contract: env-var forwarding, blocking semantics, result reporting, bounded backoff on network errors). The shell parser in `hooks/stride-hook.sh` is already section-name-agnostic — adding `after_goal` to the recognized set is a documentation-only change.
+- **`GOAL_*` env vars** — `GOAL_ID`, `GOAL_IDENTIFIER`, `GOAL_TITLE`, `GOAL_DESCRIPTION` forwarded by the executor into the `## after_goal` child process environment, sourced verbatim from the server-supplied `hook.env`. `BOARD_*`, `COLUMN_*`, `AGENT_NAME`, and `HOOK_NAME` remain present across all five hooks. The executor never invents, derives, or looks up these values client-side; missing keys export as empty string (defined-but-empty), never raised.
+- **Hooks reference table in `skills/stride-workflow/SKILL.md`** — Step 7 now opens with a five-row table listing every hook with timing, blocking, timeout, and purpose columns, followed by a Hook Environment Variables matrix (`TASK_*` vs `GOAL_*` per hook) and a Canonical Hook Examples block showing PR-creation for both `## before_review` and `## after_goal`. The example block explicitly notes the hooks are general-purpose — Slack notifications, artifact archival, release pipelines, and project-level smoke tests are equally valid uses.
+- **`hooks/test-stride-hook.sh`** — three new tests in Test Group 2 covering the `## after_goal` section: present (2m), absent / back-compat (2n), and duplicate / first-wins (2o). Suite total: 118 passed / 0 failed.
+
+### Backward compatibility
+
+A missing `## after_goal` section parses as a clean no-op (`exit_code: 0`, empty output) — older `.stride.md` files that predate the section keep working without any modification. The server-side grace-window path remains the back-compat bridge for agent runtimes that don't speak the after_goal protocol: when no agent report arrives within the configured window, the server's `AfterGoal.GraceWorker` synthesizes an attempt with `source: "after_goal_grace_worker"` and promotes the goal. Telemetry / metric queries that screen on adoption explicitly exclude the grace-worker `source` tag.
+
+### Migration
+
+`/plugin update stride@stride-marketplace`. Add a `## after_goal` section to `.stride.md` to opt into the new hook; omitting it preserves the prior behavior. Server-side, the receiving deploy must include the `PATCH /api/tasks/:id/after_goal` endpoint and the `after_goal_status` / `after_goal_result` / `after_goal_attempts` columns on the `tasks` table.
+
+### Source
+
+Implemented as G113 / W494 (parser docs + tests), W495 / W496 / W497 (executor doc — env-vars, blocking, agent-result POST), and W501 (SKILL.md hooks-table update). Server-side companion work landed in kanban as W498 (delivery telemetry), W499 (adoption metric), and W500 (goal-to-Done latency p50/p95). Companion marketplace pin bump lands in stride-marketplace.
+
 ## [1.16.0] - 2026-05-21
 
 ### Added

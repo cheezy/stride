@@ -105,7 +105,7 @@ You do NOT need to invoke `stride-claiming-tasks`, `stride-subagent-workflow`, o
 
 2. **`.stride.md`** -- Contains hook commands for each lifecycle phase
    - If missing: Ask user to create it
-   - Verify sections exist: `## before_doing`, `## after_doing`, `## before_review`, `## after_review`
+   - Verify sections exist: `## before_doing`, `## after_doing`, `## before_review`, `## after_review`, `## after_goal`
 
 **Then write the orchestrator activation marker** (see "Orchestrator Activation Marker" section above for the contract):
 
@@ -351,6 +351,22 @@ Walk through your changes against:
 
 ## Step 7: Execute Hooks
 
+### Hooks Reference
+
+The five recognized `.stride.md` hook sections, in lifecycle order:
+
+| Hook | Fires | Blocking | Timeout | Purpose |
+|---|---|:---:|---|---|
+| `## before_doing` | After `POST /api/tasks/claim` succeeds | yes | 60s | Pull latest, install deps, ensure clean working tree |
+| `## after_doing` | Before `PATCH /api/tasks/:id/complete` runs | yes | 120s | Run tests, lint, build — quality gate before completion |
+| `## before_review` | After `PATCH /api/tasks/:id/complete` succeeds | yes | 60s | Generate PR, post artifacts, notify reviewers |
+| `## after_review` | After `PATCH /api/tasks/:id/mark_reviewed` succeeds | yes | 60s | Merge, deploy, cleanup |
+| `## after_goal` | After the parent goal's final child task completes | yes | 60s | Project-level rollups, goal-completion notifications, archival |
+
+Blocking hooks abort the action if they fail. A missing `## after_goal` section parses as a clean no-op (`exit_code: 0`, empty output) — older `.stride.md` files that predate the section keep working without modification.
+
+The single-line, fenced-bash body rule is identical across all five sections. See [parser.md](parser.md) for the full parsing contract and [hook-execution.md](hook-execution.md) for the executor's env-var forwarding, blocking, and result-reporting behavior.
+
 ### Claude Code (automatic hooks)
 
 Hooks fire automatically when you make the completion curl call in Step 8:
@@ -380,6 +396,47 @@ If `after_doing` fails (PreToolUse returns exit 2), fix the issue and retry the 
    - Execute each command line one at a time via Bash
    - Capture `exit_code`, `output`, `duration_ms`
    - If fails: fix issues, re-run until success. Do NOT proceed while failing.
+
+### Hook Environment Variables
+
+The server populates `hook.env` and the executor forwards every key into the child process environment verbatim. The variable set differs by hook (`TASK_*` for the four task-scoped hooks, `GOAL_*` for `after_goal`); `BOARD_*`, `COLUMN_*`, `AGENT_NAME`, and `HOOK_NAME` are present across all five.
+
+| Variable | `before_doing` / `after_doing` / `before_review` / `after_review` | `after_goal` |
+|---|:---:|:---:|
+| `HOOK_NAME`, `AGENT_NAME` | ✓ | ✓ |
+| `BOARD_ID`, `BOARD_NAME` | ✓ | ✓ |
+| `COLUMN_ID`, `COLUMN_NAME` | ✓ | ✓ |
+| `TASK_ID`, `TASK_IDENTIFIER`, `TASK_TITLE`, `TASK_DESCRIPTION` | ✓ | — |
+| `TASK_STATUS`, `TASK_COMPLEXITY`, `TASK_PRIORITY`, `TASK_NEEDS_REVIEW` | ✓ | — |
+| `GOAL_ID`, `GOAL_IDENTIFIER`, `GOAL_TITLE`, `GOAL_DESCRIPTION` | — | ✓ |
+
+Server-supplied values are the single source of truth — the executor does not invent, derive, or look up any of these client-side. A key the server omits is exported as an empty string (defined-but-empty), never raised as an error. The complete forwarding contract — including the back-compat grace-window path that bypasses `## after_goal` entirely when no agent reports — lives in [hook-execution.md](hook-execution.md).
+
+### Canonical Hook Examples
+
+The hooks are general-purpose — any shell command is fair game. The examples below are common starting points, not the only valid uses.
+
+````markdown
+## before_review
+
+```bash
+gh pr create \
+  --title "$TASK_IDENTIFIER: $TASK_TITLE" \
+  --body "Implements $TASK_IDENTIFIER."
+```
+
+## after_goal
+
+```bash
+gh pr create \
+  --title "$GOAL_IDENTIFIER: $GOAL_TITLE" \
+  --body "Rolls up the completed goal $GOAL_IDENTIFIER ($GOAL_TITLE).
+
+  $GOAL_DESCRIPTION"
+```
+````
+
+`## after_goal` is not coupled to PR creation. Other valid uses include posting to Slack with `curl`, archiving artifacts, kicking off a release pipeline, or running a project-level smoke test. The blocking semantics (60s timeout, non-zero exit keeps the goal In Progress for retry) apply to whatever command you choose.
 
 ### Hook Failure Diagnosis (Claude Code)
 

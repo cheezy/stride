@@ -180,159 +180,255 @@ function Invoke-FinalizeAfterDoing {
     }
 }
 
-# --- Parse .stride.md for the hook section ---
-# Extracts lines from the first ```bash code block under ## <hook_name>
-$rawContent = Get-Content $StrideMd -Raw -Encoding UTF8
-# Normalize line endings
-$rawContent = $rawContent -replace "`r`n", "`n"
-$lines = $rawContent -split "`n"
+# Parse and execute one .stride.md hook section. Takes the section name
+# (e.g. "before_doing", "after_goal") and returns 0 on no-op (missing
+# section or empty commands) / all-success, or 2 on first failure.
+# Emits the same structured success/failed JSON shape as the original
+# inline block — `$Section` is substituted for what used to be the
+# global `$HookName`. Reuses Invoke-FinalizeAfterDoing which gates
+# internally on the GLOBAL `$HookName`, so calling this for "after_goal"
+# does NOT re-trigger the after_doing snapshot PUT.
+function Invoke-StrideSection {
+    param([string]$Section)
 
-$commands = ''
-$found = $false
-$capture = $false
+    $rawContent = Get-Content $StrideMd -Raw -Encoding UTF8
+    $rawContent = $rawContent -replace "`r`n", "`n"
+    $sectionLines = $rawContent -split "`n"
 
-foreach ($rawLine in $lines) {
-    $line = $rawLine.TrimEnd("`r")
+    $secCommands = ''
+    $secFound = $false
+    $secCapture = $false
 
-    # Check for ## heading
-    if ($line -match '^## (.+)$') {
-        if ($found) { break }
-        $section = $Matches[1].TrimEnd()
-        if ($section -eq $HookName) { $found = $true }
-        continue
-    }
+    foreach ($rawLine in $sectionLines) {
+        $line = $rawLine.TrimEnd("`r")
 
-    if ($found) {
-        if ($line -match '^```bash') {
-            $capture = $true
+        if ($line -match '^## (.+)$') {
+            if ($secFound) { break }
+            $heading = $Matches[1].TrimEnd()
+            if ($heading -eq $Section) { $secFound = $true }
             continue
         }
-        if ($line -match '^```') {
-            if ($capture) { break }
-            continue
-        }
-        if ($capture) {
-            $commands += $line + "`n"
+
+        if ($secFound) {
+            if ($line -match '^```bash') {
+                $secCapture = $true
+                continue
+            }
+            if ($line -match '^```') {
+                if ($secCapture) { break }
+                continue
+            }
+            if ($secCapture) {
+                $secCommands += $line + "`n"
+            }
         }
     }
-}
 
-# No commands for this hook — finalize and exit cleanly
-if (-not $commands.Trim()) {
+    if (-not $secCommands.Trim()) {
+        Invoke-FinalizeAfterDoing
+        return 0
+    }
+
+    $secCmdList = @()
+    foreach ($cmd in ($secCommands -split "`n")) {
+        $trimmedCmd = $cmd.TrimStart()
+        if (-not $trimmedCmd) { continue }
+        if ($trimmedCmd.StartsWith('#')) { continue }
+        $secCmdList += $trimmedCmd
+    }
+
+    if ($secCmdList.Count -eq 0) {
+        Invoke-FinalizeAfterDoing
+        return 0
+    }
+
+    Set-Location $ProjectDir
+    $secCompletedCmds = @()
+    $secStartTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $secCmdIndex = 0
+    $secCmdTotal = $secCmdList.Count
+
+    foreach ($execTrimmed in $secCmdList) {
+        $secStdoutFile = [System.IO.Path]::GetTempFileName()
+        $secStderrFile = [System.IO.Path]::GetTempFileName()
+
+        try {
+            $proc = Start-Process -FilePath 'bash' -ArgumentList '-c', $execTrimmed `
+                -RedirectStandardOutput $secStdoutFile `
+                -RedirectStandardError $secStderrFile `
+                -NoNewWindow -Wait -PassThru
+
+            if ($proc.ExitCode -eq 0) {
+                $secCompletedCmds += $execTrimmed
+                if (Test-Path $secStdoutFile) {
+                    $secStdout = Get-Content $secStdoutFile -Raw -Encoding UTF8
+                    if ($secStdout) { [Console]::Error.Write($secStdout) }
+                }
+                if (Test-Path $secStderrFile) {
+                    $secStderr = Get-Content $secStderrFile -Raw -Encoding UTF8
+                    if ($secStderr) { [Console]::Error.Write($secStderr) }
+                }
+            } else {
+                $secCmdExit = $proc.ExitCode
+                $secCmdStdout = ''
+                $secCmdStderr = ''
+                if (Test-Path $secStdoutFile) {
+                    # @() coerces $null (empty file) into an empty array so
+                    # .Count is safe under Set-StrictMode -Version Latest.
+                    $allLines = @(Get-Content $secStdoutFile -Encoding UTF8)
+                    if ($allLines.Count -gt 50) { $allLines = $allLines[-50..-1] }
+                    $secCmdStdout = $allLines -join "`n"
+                }
+                if (Test-Path $secStderrFile) {
+                    $allLines = @(Get-Content $secStderrFile -Encoding UTF8)
+                    if ($allLines.Count -gt 50) { $allLines = $allLines[-50..-1] }
+                    $secCmdStderr = $allLines -join "`n"
+                }
+                Remove-Item -Force $secStdoutFile, $secStderrFile -ErrorAction SilentlyContinue
+
+                $secRemainingCmds = @()
+                if (($secCmdIndex + 1) -lt $secCmdTotal) {
+                    $secRemainingCmds = $secCmdList[($secCmdIndex + 1)..($secCmdTotal - 1)]
+                }
+
+                $failureResult = [ordered]@{
+                    hook              = $Section
+                    status            = 'failed'
+                    failed_command    = $execTrimmed
+                    command_index     = $secCmdIndex
+                    exit_code         = $secCmdExit
+                    stdout            = $secCmdStdout
+                    stderr            = $secCmdStderr
+                    commands_completed = $secCompletedCmds
+                    commands_remaining = $secRemainingCmds
+                }
+                # Write JSON directly to the host stdout stream rather than
+                # via the function's output pipeline — otherwise the caller's
+                # $primaryRc = Invoke-StrideSection ... assignment captures
+                # the JSON alongside the int `return`, producing an array
+                # and breaking the `-ne 0` check on every success path.
+                [Console]::Out.WriteLine(($failureResult | ConvertTo-Json -Depth 5 -Compress))
+
+                [Console]::Error.WriteLine("Stride $Section hook failed on command $($secCmdIndex + 1)/$($secCmdTotal): $execTrimmed")
+                if ($secCmdStderr) { [Console]::Error.WriteLine($secCmdStderr) }
+
+                return 2
+            }
+        } finally {
+            Remove-Item -Force $secStdoutFile, $secStderrFile -ErrorAction SilentlyContinue
+        }
+
+        $secCmdIndex++
+    }
+
+    # Per-file diff snapshot PUT — no-op outside after_doing (gates on the
+    # GLOBAL $HookName, so calling this for "after_goal" does not retrigger).
     Invoke-FinalizeAfterDoing
-    exit 0
+
+    $secEndTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $secDuration = $secEndTime - $secStartTime
+
+    $successResult = [ordered]@{
+        hook               = $Section
+        status             = 'success'
+        commands_completed = $secCompletedCmds
+        duration_seconds   = $secDuration
+    }
+    # See the failure-path note above: route JSON to the host stdout so it
+    # is not captured by `$primaryRc = Invoke-StrideSection ...`.
+    [Console]::Out.WriteLine(($successResult | ConvertTo-Json -Depth 5 -Compress))
+
+    return 0
 }
 
-# --- Build command list for tracking ---
-# Split commands, filter comments and blank lines
-$cmdList = @()
-foreach ($cmd in ($commands -split "`n")) {
-    $trimmed = $cmd.TrimStart()
-    if (-not $trimmed) { continue }
-    if ($trimmed.StartsWith('#')) { continue }
-    $cmdList += $trimmed
-}
+# Detect an `after_goal` entry in the response's `hooks` array. Handles
+# both Claude Code's wrapped form (`tool_response.stdout` is a JSON string
+# whose body contains the response) and raw-API-JSON form. Returns $true
+# when an entry with name == "after_goal" is found, $false otherwise.
+# Mirrors stride-hook.sh:response_has_after_goal — both scripts must agree
+# on detection so Windows + Unix agents behave identically (pitfall:
+# behavioral drift between .sh and .ps1).
+function Test-AfterGoalInResponse {
+    param([string]$InputJson)
 
-# Nothing to execute after filtering — finalize and exit cleanly
-if ($cmdList.Count -eq 0) {
-    Invoke-FinalizeAfterDoing
-    exit 0
-}
-
-# --- Execute commands with structured output ---
-Set-Location $ProjectDir
-$completedCmds = @()
-$startTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-$cmdIndex = 0
-$cmdTotal = $cmdList.Count
-
-foreach ($trimmed in $cmdList) {
-    $cmdStdoutFile = [System.IO.Path]::GetTempFileName()
-    $cmdStderrFile = [System.IO.Path]::GetTempFileName()
+    if (-not $InputJson) { return $false }
 
     try {
-        # Execute command, capturing stdout and stderr to temp files
-        $proc = Start-Process -FilePath 'bash' -ArgumentList '-c', $trimmed `
-            -RedirectStandardOutput $cmdStdoutFile `
-            -RedirectStandardError $cmdStderrFile `
-            -NoNewWindow -Wait -PassThru
-
-        if ($proc.ExitCode -eq 0) {
-            $completedCmds += $trimmed
-            # Print command output to stderr so Claude sees it as feedback
-            if (Test-Path $cmdStdoutFile) {
-                $stdout = Get-Content $cmdStdoutFile -Raw -Encoding UTF8
-                if ($stdout) { [Console]::Error.Write($stdout) }
-            }
-            if (Test-Path $cmdStderrFile) {
-                $stderr = Get-Content $cmdStderrFile -Raw -Encoding UTF8
-                if ($stderr) { [Console]::Error.Write($stderr) }
-            }
-        } else {
-            $cmdExit = $proc.ExitCode
-            $cmdStdout = ''
-            $cmdStderr = ''
-            if (Test-Path $cmdStdoutFile) {
-                $allLines = Get-Content $cmdStdoutFile -Encoding UTF8
-                if ($allLines.Count -gt 50) { $allLines = $allLines[-50..-1] }
-                $cmdStdout = $allLines -join "`n"
-            }
-            if (Test-Path $cmdStderrFile) {
-                $allLines = Get-Content $cmdStderrFile -Encoding UTF8
-                if ($allLines.Count -gt 50) { $allLines = $allLines[-50..-1] }
-                $cmdStderr = $allLines -join "`n"
-            }
-            Remove-Item -Force $cmdStdoutFile, $cmdStderrFile -ErrorAction SilentlyContinue
-
-            # Build remaining commands
-            $remainingCmds = @()
-            if (($cmdIndex + 1) -lt $cmdTotal) {
-                $remainingCmds = $cmdList[($cmdIndex + 1)..($cmdTotal - 1)]
-            }
-
-            # Emit structured JSON on stdout for Claude to parse
-            $failureResult = [ordered]@{
-                hook              = $HookName
-                status            = 'failed'
-                failed_command    = $trimmed
-                command_index     = $cmdIndex
-                exit_code         = $cmdExit
-                stdout            = $cmdStdout
-                stderr            = $cmdStderr
-                commands_completed = $completedCmds
-                commands_remaining = $remainingCmds
-            }
-            $failureResult | ConvertTo-Json -Depth 5 -Compress
-
-            # Human-readable error on stderr for Claude's feedback
-            [Console]::Error.WriteLine("Stride $HookName hook failed on command $($cmdIndex + 1)/$($cmdTotal): $trimmed")
-            if ($cmdStderr) { [Console]::Error.WriteLine($cmdStderr) }
-
-            exit 2
-        }
-    } finally {
-        Remove-Item -Force $cmdStdoutFile, $cmdStderrFile -ErrorAction SilentlyContinue
+        $parsed = $InputJson | ConvertFrom-Json
+    } catch {
+        return $false
     }
 
-    $cmdIndex++
+    if ($parsed.PSObject.Properties.Name -notcontains 'tool_response') {
+        return $false
+    }
+
+    $resp = $parsed.tool_response
+    if (-not $resp) { return $false }
+
+    $payload = $null
+
+    # Shape 1: {"stdout":"<json>"} wrap (Claude Code Bash tool)
+    if ($resp -is [PSCustomObject] -and $resp.PSObject.Properties.Name -contains 'stdout') {
+        try {
+            $payload = $resp.stdout | ConvertFrom-Json
+        } catch {
+            $payload = $null
+        }
+    }
+
+    # Shape 2: tool_response is itself a JSON-encoded string
+    if ($null -eq $payload -and $resp -is [string]) {
+        try {
+            $payload = $resp | ConvertFrom-Json
+        } catch {
+            $payload = $null
+        }
+    }
+
+    # Shape 3: raw API JSON object directly
+    if ($null -eq $payload -and $resp -is [PSCustomObject]) {
+        $payload = $resp
+    }
+
+    if ($null -eq $payload) { return $false }
+    if (-not ($payload.PSObject.Properties.Name -contains 'hooks')) { return $false }
+    if ($null -eq $payload.hooks) { return $false }
+
+    foreach ($entry in @($payload.hooks)) {
+        if ($entry -and ($entry.PSObject.Properties.Name -contains 'name') -and $entry.name -eq 'after_goal') {
+            return $true
+        }
+    }
+
+    return $false
 }
 
-# Mirror of stride-hook.sh's per-file diff PUT (W780). No-op outside after_doing.
-Invoke-FinalizeAfterDoing
+# --- Execute the primary hook ---
+$primaryRc = Invoke-StrideSection -Section $HookName
 
-# --- Success output ---
-$endTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-$duration = $endTime - $startTime
-
-$successResult = [ordered]@{
-    hook               = $HookName
-    status             = 'success'
-    commands_completed = $completedCmds
-    duration_seconds   = $duration
+if ($primaryRc -ne 0) {
+    exit $primaryRc
 }
-$successResult | ConvertTo-Json -Depth 5 -Compress
 
-# Clean up env cache after the final hook in the lifecycle
+# --- After-goal routing (W505 / mirrors stride-hook.sh W504) ---
+# When the server bundles an `after_goal` entry in the response of /complete
+# or /mark_reviewed (last-child-of-goal case), run the local `## after_goal`
+# section as a blocking hook. Missing `## after_goal` in .stride.md is a
+# clean no-op (back-compat). A non-zero exit is surfaced via the same
+# structured JSON shape as the primary hook; we do NOT propagate it as a
+# non-zero script exit because the primary curl already succeeded — the
+# failure is captured in the structured stdout for the agent to forward
+# via PATCH /api/tasks/:goal_id/after_goal.
+if ($Phase -eq 'post' -and ($Command -match '/api/tasks/[^/]+/(complete|mark_reviewed)')) {
+    if (Test-AfterGoalInResponse -InputJson $Input) {
+        $null = Invoke-StrideSection -Section 'after_goal'
+    }
+}
+
+# Clean up env cache after the final hook in the lifecycle. after_goal
+# piggy-backs on after_review's lifecycle when present, so this gate
+# intentionally stays on $HookName == 'after_review'.
 if ($HookName -eq 'after_review' -and (Test-Path $EnvCache)) {
     Remove-Item -Force $EnvCache -ErrorAction SilentlyContinue
 }

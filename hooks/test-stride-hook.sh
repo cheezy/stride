@@ -1571,6 +1571,171 @@ STRIDE
 fi
 
 # ============================================================
+# Test Group 9: after_goal routing (W504)
+# ============================================================
+# Covers the new run_stride_section helper and the response_has_after_goal
+# detector. Verifies the four W504 integration cases:
+#   - after_goal present in response → run_stride_section executes ## after_goal
+#   - after_goal absent → no after_goal execution
+#   - ## after_goal missing from .stride.md → no-op (back-compat)
+#   - ## after_goal failure → structured failed-JSON surfaced, return 2
+echo ""
+echo "=== Test Group 9: after_goal routing (W504) ==="
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: jq missing — Group 9 requires jq for response parsing"
+else
+  # 9a: response_has_after_goal detects after_goal in Claude Code wrapped shape.
+  AG_INPUT_CC='{"tool_input":{"command":"curl"},"tool_response":{"stdout":"{\"data\":{},\"hooks\":[{\"name\":\"after_review\"},{\"name\":\"after_goal\"}]}"}}'
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    response_has_after_goal "$AG_INPUT_CC"
+  )
+  assert_eq "9a: response_has_after_goal detects after_goal in wrapped stdout shape" "0" "$?"
+
+  # 9b: response_has_after_goal detects after_goal in raw response shape.
+  AG_INPUT_RAW='{"tool_input":{"command":"curl"},"tool_response":{"data":{},"hooks":[{"name":"before_review"},{"name":"after_goal"}]}}'
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    response_has_after_goal "$AG_INPUT_RAW"
+  )
+  assert_eq "9b: response_has_after_goal detects after_goal in raw shape" "0" "$?"
+
+  # 9c: response_has_after_goal returns non-zero when no after_goal entry.
+  AG_INPUT_NONE='{"tool_input":{"command":"curl"},"tool_response":{"stdout":"{\"data\":{},\"hooks\":[{\"name\":\"after_review\"}]}"}}'
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    response_has_after_goal "$AG_INPUT_NONE"
+  )
+  AG_RC_NONE=$?
+  if [ "$AG_RC_NONE" -ne 0 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 9c: response_has_after_goal returns non-zero when after_goal absent"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 9c: response_has_after_goal should return non-zero (got 0)"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # 9d: response_has_after_goal returns non-zero with HAS_JQ=false (pitfall —
+  # gate on $HAS_JQ; environments without jq degrade cleanly).
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=false
+    response_has_after_goal "$AG_INPUT_CC"
+  )
+  AG_RC_NOJQ=$?
+  if [ "$AG_RC_NOJQ" -ne 0 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 9d: response_has_after_goal returns non-zero with HAS_JQ=false"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 9d: response_has_after_goal should return non-zero with HAS_JQ=false"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # 9e: response_has_after_goal returns non-zero when hooks array is missing.
+  AG_INPUT_NO_HOOKS='{"tool_input":{"command":"curl"},"tool_response":{"stdout":"{\"data\":{}}"}}'
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    response_has_after_goal "$AG_INPUT_NO_HOOKS"
+  )
+  AG_RC_NO_HOOKS=$?
+  if [ "$AG_RC_NO_HOOKS" -ne 0 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 9e: response_has_after_goal returns non-zero when hooks key missing"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 9e: response_has_after_goal should return non-zero when hooks key missing"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # 9f: run_stride_section executes ## after_goal when section is present.
+  AG_DIR_PRESENT=$(mktemp -d)
+  cat > "$AG_DIR_PRESENT/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "after_goal ran"
+```
+STRIDE
+  AG_OUTPUT_PRESENT=$(
+    cd "$AG_DIR_PRESENT" || exit 99
+    source "$HOOK_SCRIPT" 2>/dev/null
+    STRIDE_MD="$AG_DIR_PRESENT/.stride.md"
+    PROJECT_DIR="$AG_DIR_PRESENT"
+    HAS_JQ=true
+    HOOK_NAME=""  # avoid finalize_after_doing side effects
+    run_stride_section "after_goal" 2>&1
+  )
+  AG_RC_PRESENT=$?
+  rm -rf "$AG_DIR_PRESENT"
+  assert_exit "9f: run_stride_section 'after_goal' succeeds when section present" 0 "$AG_RC_PRESENT"
+  # jq pretty-prints with a space after the colon. The substring assertions
+  # below intentionally include that space so they match the rendered shape.
+  assert_contains "9f: structured success JSON references after_goal" '"hook": "after_goal"' "$AG_OUTPUT_PRESENT"
+  assert_contains "9f: structured success JSON has status:success" '"status": "success"' "$AG_OUTPUT_PRESENT"
+
+  # 9g: run_stride_section is a clean no-op when ## after_goal section is
+  # missing (back-compat — older .stride.md files keep working). Returns 0
+  # with no structured JSON.
+  AG_DIR_MISSING=$(mktemp -d)
+  cat > "$AG_DIR_MISSING/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "only before_doing here"
+```
+STRIDE
+  AG_OUTPUT_MISSING=$(
+    cd "$AG_DIR_MISSING" || exit 99
+    source "$HOOK_SCRIPT" 2>/dev/null
+    STRIDE_MD="$AG_DIR_MISSING/.stride.md"
+    PROJECT_DIR="$AG_DIR_MISSING"
+    HAS_JQ=true
+    HOOK_NAME=""
+    run_stride_section "after_goal" 2>&1
+  )
+  AG_RC_MISSING=$?
+  rm -rf "$AG_DIR_MISSING"
+  assert_exit "9g: run_stride_section 'after_goal' is a no-op when section missing" 0 "$AG_RC_MISSING"
+  if [ -z "$AG_OUTPUT_MISSING" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 9g: missing ## after_goal emits no structured JSON (back-compat)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 9g: missing ## after_goal should emit no JSON, got: $AG_OUTPUT_MISSING"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # 9h: run_stride_section surfaces a non-zero exit via structured JSON
+  # (pitfall — failures must be surfaced the same way after_doing surfaces them).
+  AG_DIR_FAIL=$(mktemp -d)
+  # Use `bash -c 'exit 7'` rather than bare `exit 7`: the latter would exit
+  # the subshell BEFORE the parent function captures $?. The wrapper isolates
+  # the failure to a child process whose exit status the parent observes.
+  cat > "$AG_DIR_FAIL/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+bash -c 'exit 7'
+```
+STRIDE
+  AG_OUTPUT_FAIL=$(
+    cd "$AG_DIR_FAIL" || exit 99
+    source "$HOOK_SCRIPT" 2>/dev/null
+    STRIDE_MD="$AG_DIR_FAIL/.stride.md"
+    PROJECT_DIR="$AG_DIR_FAIL"
+    HAS_JQ=true
+    HOOK_NAME=""
+    run_stride_section "after_goal" 2>/dev/null
+  )
+  AG_RC_FAIL=$?
+  rm -rf "$AG_DIR_FAIL"
+  assert_exit "9h: run_stride_section 'after_goal' returns 2 on non-zero command" 2 "$AG_RC_FAIL"
+  assert_contains "9h: structured failed JSON references after_goal" '"hook": "after_goal"' "$AG_OUTPUT_FAIL"
+  assert_contains "9h: structured failed JSON has status:failed" '"status": "failed"' "$AG_OUTPUT_FAIL"
+  assert_contains "9h: structured failed JSON carries non-zero exit_code" '"exit_code": 7' "$AG_OUTPUT_FAIL"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

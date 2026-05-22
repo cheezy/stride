@@ -530,6 +530,27 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 
 **Do not ask the user whether to continue. Do not ask "Should I claim the next task?" Just proceed.**
 
+### If this completion finishes the parent goal's last child task
+
+When the just-completed task is the **final child of a parent goal**, the server bundles a fifth `after_goal` entry in the response of `/complete` (when `needs_review=false`) or `/mark_reviewed` (when `needs_review=true`), alongside the primary hooks. The plugin's hook script auto-detects this entry and executes the local `## after_goal` section as a blocking hook (same shape as `after_doing` / `before_review`).
+
+The hook captures `{exit_code, output, duration_ms}` and emits the structured result on stdout. To flip the parent goal to Done, the agent must then POST that result:
+
+```bash
+curl -X PATCH "$STRIDE_API_URL/api/tasks/$GOAL_ID/after_goal" \
+  -H "Authorization: Bearer $STRIDE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$AFTER_GOAL_RESULT_JSON"
+```
+
+`$GOAL_ID` is supplied in the hook's `GOAL_ID` / `GOAL_IDENTIFIER` env vars (see Step 7's env-var matrix). A `2xx` with `exit_code == 0` transitions the goal to Done. A `2xx` with `exit_code != 0` records the failure on the goal's `after_goal_attempts` audit log and leaves the goal In Progress for the user to investigate and re-trigger.
+
+**Back-compat (matters for agent runtimes that predate this feature):**
+
+- If `.stride.md` has no `## after_goal` section, the hook script silently no-ops — no JSON is emitted, no POST is needed. The server's grace-window worker (configured per board, typically a few minutes) will promote the goal to Done automatically.
+- If the agent doesn't POST the result at all (older plugin versions, scripted environments), the same grace-window worker covers the gap. The goal transitions to Done after the wait expires, with `after_goal_status: :succeeded` and a synthetic attempt tagged `source: "after_goal_grace_worker"` in the audit log.
+- The `## after_goal` hook is general-purpose — Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses. See Step 7's "Canonical Hook Examples" for shape references.
+
 ### Clearing the Orchestrator Activation Marker
 
 When the workflow finally stops -- because there are no more tasks, the user halts the loop, `needs_review=true` puts the task into human review, or an unrecoverable error aborts -- clear the marker:

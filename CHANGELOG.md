@@ -2,6 +2,31 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.17.1] - 2026-05-22
+
+### Fixed
+
+- **`hooks/stride-hook.sh`** — Actually wire the `## after_goal` routing that v1.17.0 announced but did not implement. The release-vs-implementation gap meant a user adding `## after_goal` to `.stride.md` saw no execution even when the server delivered the hook entry in the response payload. Extracts the parse+exec block into a `run_stride_section <section_name>` function (byte-identical output for the four existing routes — empirically confirmed by the 118 pre-existing tests passing unchanged after the refactor) and adds a `response_has_after_goal <input>` detector. After the primary hook succeeds on `post` + `/complete` or `/mark_reviewed`, the script now inspects the response payload's `hooks` array and runs the `## after_goal` section if the server bundled the entry. Missing section is a clean no-op (back-compat). Non-zero exits are surfaced via the same structured JSON shape `after_doing` uses; the agent reads the JSON off stdout to forward via `PATCH /api/tasks/:goal_id/after_goal`. Implemented as W504.
+- **`hooks/stride-hook.ps1`** — Windows parallel of the above (W505). Mirrors the bash routing via `Invoke-StrideSection` and `Test-AfterGoalInResponse`. Critical PowerShell-specific fixes during implementation: structured JSON is routed via `[Console]::Out.WriteLine` rather than the function's output pipeline (the latter pollutes the caller's `$primaryRc = Invoke-StrideSection ...` assignment, producing an array instead of an int and breaking the `-ne 0` gate); `Get-Content` reads are wrapped in `@()` so `.Count` is safe under `Set-StrictMode -Version Latest` when commands produce no stdout/stderr.
+- **`hooks/test-stride-hook.sh`** and **`hooks/test-stride-hook.ps1`** — End-to-end test coverage for the routing (W506). Each harness adds five cases exercising the full script as a subprocess: after_goal present + section present, after_goal present + section absent (back-compat), after_goal absent (unchanged behavior), section command exits non-zero (structured failure JSON on stdout, script exit 0), and mark_reviewed parity with /complete. Bash suite now reports 149/0.
+
+### Updated
+
+- **`skills/stride-workflow/SKILL.md`** — Step 9 now describes the parent goal's Done transition triggered by a successful `after_goal` hook execution (W507). Documents the agent's PATCH /api/tasks/:goal_id/after_goal POST contract, the server-side grace-window worker that bridges older agents which don't POST, and reinforces that the hook is general-purpose (Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses). The Step 7 hooks reference table, GOAL_* env-var matrix, and canonical examples block landed in v1.17.0; this is the Step 9 follow-up.
+- **`README.md`** — Hook routing table flags the +after_goal-if-bundled cases on the /complete and /mark_reviewed rows; a paragraph below the table describes the blocking semantics, env vars, agent POST responsibility, and back-compat. The `.stride.md` example shows an optional `## after_goal` section (W508).
+
+### Backward compatibility
+
+A `.stride.md` without a `## after_goal` section continues to work unchanged — the new routing code is a clean no-op for that case. The four existing hook routes (`before_doing` / `after_doing` / `before_review` / `after_review`) produce byte-identical output to v1.17.0 (and prior), empirically confirmed by all 118 pre-existing tests passing unchanged after the parse-and-exec refactor. Older agent runtimes that don't speak the after_goal protocol — including those that don't make the PATCH POST — are covered by the server-side grace-window worker, which promotes the goal after the configured wait expires.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` (the marketplace pin update to 1.17.1 lands in stride-marketplace 1.30.1). No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required. To opt into the new hook, add a `## after_goal` section to `.stride.md`.
+
+### Source
+
+G117 / W504 (bash routing), W505 (PowerShell mirror), W506 (end-to-end tests), W507 (SKILL.md Step 9), W508 (README). Patch release because v1.17.0 advertised the feature but the routing wasn't wired — this release closes that gap without changing any other behavior.
+
 ## [1.17.0] - 2026-05-22
 
 ### Added

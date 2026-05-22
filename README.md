@@ -127,8 +127,10 @@ When the Stride plugin is enabled, `.stride.md` hooks execute **automatically wi
 |---|---|---|
 | PostToolUse (Bash) | `/api/tasks/claim` | `before_doing` |
 | PreToolUse (Bash) | `/api/tasks/:id/complete` | `after_doing` (blocks completion on failure) |
-| PostToolUse (Bash) | `/api/tasks/:id/complete` | `before_review` |
-| PostToolUse (Bash) | `/api/tasks/:id/mark_reviewed` | `after_review` |
+| PostToolUse (Bash) | `/api/tasks/:id/complete` | `before_review` (+ `after_goal` if the response bundles it) |
+| PostToolUse (Bash) | `/api/tasks/:id/mark_reviewed` | `after_review` (+ `after_goal` if the response bundles it) |
+
+**`after_goal` (v1.17.0+):** the server bundles an `after_goal` entry alongside the primary hook in the response of `/complete` or `/mark_reviewed` when the completing task is the final child of a parent goal. The plugin auto-executes the local `## after_goal` section as a blocking hook (60s timeout, same shape as `after_doing`) and emits a structured result on stdout. The agent forwards the result via `PATCH /api/tasks/:goal_id/after_goal` to flip the goal to Done. A missing `## after_goal` section in `.stride.md` is a clean no-op (back-compat — older `.stride.md` files keep working unmodified). The hook receives `GOAL_ID` / `GOAL_IDENTIFIER` / `GOAL_TITLE` / `GOAL_DESCRIPTION` env vars from the server's `hook.env`, and is general-purpose (Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses — not just PR creation).
 
 **Note:** Add `.stride-env-cache` and `.stride-changed-files.json` to your `.gitignore` — both are temp files written between hook invocations. `.stride-env-cache` caches task metadata (including the base commit captured at claim time); `.stride-changed-files.json` holds the per-file diff snapshot captured at the end of `after_doing`. On Stride server v1.16.0+ the `after_doing` hook PUTs this snapshot to the server automatically (no agent action required); against older servers, agents inline-cat the file into the completion body (see `stride-completing-tasks` SKILL.md). Both files are cleaned up automatically after the `after_review` hook.
 
@@ -158,6 +160,11 @@ mix deps.get
 ## after_doing
 mix test
 mix credo --strict
+
+## after_goal
+# Optional fifth hook — fires after the parent goal's final child task
+# completes. Omit the section entirely for the back-compat no-op path.
+./scripts/notify-team.sh "$GOAL_IDENTIFIER" "$GOAL_TITLE"
 ```
 
 ## Updating

@@ -175,6 +175,49 @@ To update to the latest version of Stride skills:
 /plugin update stride
 ```
 
+## Running the hook test suites
+
+The hook scripts ship with unit-style test suites that stub `curl` to verify
+argument shape:
+
+```
+bash hooks/test-stride-hook.sh
+pwsh hooks/test-stride-hook.ps1
+```
+
+These run by default with no setup. They do not make network requests.
+
+### Optional end-to-end PUT round-trip
+
+`test-stride-hook.sh` Test Group 11 drives `finalize_after_doing` against a
+real kanban server, GETs the task back, and asserts the persisted
+`changed_files` equals the snapshot. This catches wire-shape regressions
+across the plugin/server boundary that stub-only tests miss.
+
+The group is gated on three env vars and skips cleanly when any are unset:
+
+```
+cd stride
+STRIDE_TEST_E2E_URL=http://localhost:4000 \
+STRIDE_TEST_E2E_TOKEN=$(grep 'Local API Token:' ../.stride_auth.md | sed 's/.*`\(.*\)`.*/\1/') \
+STRIDE_TEST_E2E_TASK_ID=42 \
+bash hooks/test-stride-hook.sh
+```
+
+Required:
+- `STRIDE_TEST_E2E_URL` — base URL of the kanban server (must be
+  `http://localhost*`, `http://127.0.0.1*`, or end in `.dev` / `.local` /
+  `.test`; production hostnames are a hard fail)
+- `STRIDE_TEST_E2E_TOKEN` — API bearer token for that server
+- `STRIDE_TEST_E2E_TASK_ID` — id of a sacrificial test task whose
+  `changed_files` this group is allowed to overwrite
+
+The group does NOT create or delete tasks — it mutates only the
+`changed_files` field on the designated task. Pick a sacrificial task on a
+local board, not a production task. The group runs three sub-cases: a
+populated-snapshot round-trip, an empty-snapshot round-trip (legitimate
+clear), and a fail-soft check (missing token must not crash the hook).
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.

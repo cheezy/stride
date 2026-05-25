@@ -2,6 +2,30 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.17.2] - 2026-05-25
+
+### Critical fix
+
+- **`hooks/stride-hook.sh`** and **`hooks/stride-hook.ps1`** — `finalize_after_doing` now PUTs a body of shape `{"changed_files": [...]}` instead of a bare top-level array (D35). Under 1.17.1 and earlier the bare array landed at `params['_json']` under Plug.Parsers, validated as `{:ok, nil}`, and was persisted as NULL — silently clearing `changed_files` on every task completed against a 1.16.0+ server that did real PUT-side processing. Symptom: the review queue diff panel showed no per-file unified-patch text for any task completed under 1.17.1, even though the on-disk `.stride-changed-files.json` snapshot was correctly captured. The bash side switches from `--data-binary "@<file>"` to `-d "{\"changed_files\":$(cat "<file>")}"` (inline `cat`, no new temp file). The PowerShell mirror parses the snapshot, wraps it in `@{ changed_files = @($snapshotData) }`, and pipes through `ConvertTo-Json -Depth 100 -Compress` so PowerShell handles JSON escaping itself rather than relying on string concat. The snapshot write-to-disk step is preserved unchanged (legacy `--argjson cf` consumers on older deployments still read it); the fail-soft contract is preserved (`|| true` on bash; `try`/`catch` + `-ErrorAction SilentlyContinue` on PS).
+
+### Added
+
+- **`hooks/test-stride-hook.sh`** — Test Group 8 (D35) gains three new wire-shape assertions: body parses as a JSON object with a `changed_files` key (not a bare array), round-trip equality of the body's `.changed_files` value against the on-disk snapshot, and empty-snapshot wraps as `{"changed_files": []}` (the latter replaces the prior literal-`[]` assertion). The curl stub now captures `-d <inline>` bodies in addition to legacy `--data-binary @<file>`; a new `extract_body` awk helper isolates the captured body for jq-based assertions. Mirror assertions land in `hooks/test-stride-hook.ps1` Group 7. Bash suite total: 151 passed / 0 failed.
+- **`hooks/test-stride-hook.sh`** — Test Group 11 (W835) adds a gated end-to-end PUT round-trip that drives `finalize_after_doing` against a real kanban server, GETs the task back, and asserts the persisted `changed_files` equals the snapshot. Three sub-cases: populated-snapshot round-trip with an explicit NULL check that directly catches the D35 bare-array regression, empty-snapshot round-trip persists as `[]` (not NULL), and missing-token fail-soft (finalize exits 0). Gated on `STRIDE_TEST_E2E_URL` + `STRIDE_TEST_E2E_TOKEN` + `STRIDE_TEST_E2E_TASK_ID`; skips cleanly when any are unset; hard-fails (not skips) when the URL doesn't match the `localhost` / `127.0.0.1` / `[::1]` / `*.dev` / `*.local` / `*.test` allowlist. Stub-only testing missed the body-shape regression for multiple releases — this group is the integration-boundary case that wouldn't.
+- **`README.md`** — A new "Running the hook test suites" section documents the three required env vars for the gated E2E group and warns against pointing it at a production task. Both `bash hooks/test-stride-hook.sh` and `pwsh hooks/test-stride-hook.ps1` are documented as the default-no-setup test entry points.
+
+### Backward compatibility
+
+The wire-shape fix is fully backward-compatible at the server boundary — a wrapped `{"changed_files": [...]}` body has always been the documented contract; older server deployments that previously accepted a bare array (none observed in practice on 1.16.0+) continue to accept the wrapped form because both routes land at the same `params['changed_files']` slot when the body is a proper object. The four other `.stride.md` hooks (`before_doing`, `after_doing` outer body, `before_review`, `after_review`, `after_goal`) produce byte-identical output to v1.17.1. The on-disk `.stride-changed-files.json` snapshot is preserved unchanged so legacy `--argjson cf` consumers on older deployments still read it.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` (the marketplace pin update to 1.17.2 lands in stride-marketplace 1.30.2). No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required. Users on 1.17.1 who already completed tasks with NULLed `changed_files` cannot recover the lost diffs — those completions persisted NULL at the server. Going forward, every task completed under 1.17.2+ will populate `changed_files` correctly.
+
+### Source
+
+G161 / D35 (wire-shape fix in `hooks/stride-hook.{sh,ps1}` + Group 8 assertions in `hooks/test-stride-hook.{sh,ps1}`), W835 (gated E2E Group 11 in `hooks/test-stride-hook.sh` + README docs). Patch release — pure bugfix, no behavior change beyond the wire-shape correction. Critical because every Stride task completion under 1.17.1 silently destroyed diff data.
+
 ## [1.17.1] - 2026-05-22
 
 ### Fixed

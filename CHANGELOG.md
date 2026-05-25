@@ -2,6 +2,26 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.17.3] - 2026-05-25
+
+### Updated
+
+- **`skills/stride-creating-tasks/SKILL.md`** (W850) — Adds a top-of-file "⚠️ REVIEW QUEUE SCORING" callout that names the four fields the review_queue dashboard scores on every completion (`acceptance_criteria`, `testing_strategy`, `pitfalls`, `patterns_to_follow`) and frames the consequence of omitting any of them: a visible, public, persistent **empty pill** on the dashboard that does not get back-filled later. Reinforces the same four fields with four new bullets in the existing **Red Flags - STOP** list and four new rows in the existing **Rationalization Table** (each row keyed to a specific rationalization for dropping one of the four fields — "obvious from the title" / "doesn't apply here" / "just nice-to-have" / "can stay empty" — with `Reality` and `Consequence` columns spelling out the empty-pill outcome). No new top-level section was introduced; all reinforcement is co-located with existing structures per the skill's prior structural conventions.
+- **`skills/stride-enriching-tasks/SKILL.md`** (W851) — Adds a top-of-file "⚠️ REVIEW QUEUE SCORING — ENRICHMENT IS THE LAST CHANCE" callout that names the same four review_queue-scored fields and explicitly frames **enrichment as the final point at which they can be populated before the task hits Doing** — whatever is left empty here renders as an empty pill at completion, and the implementing agent will not back-fill it mid-flight. Strengthens the existing **Phase 4 16-item pre-submission checklist** by promoting `acceptance_criteria`, `testing_strategy`, `pitfalls`, and `patterns_to_follow` to individual mandatory-for-review checklist items (each line annotated with the review_queue-scored consequence and its specific empty-pill condition) rather than bundling them under a single "check formatting" line. Reinforces with four new **Red Flags - STOP** bullets matching the existing imperative tone.
+- **`skills/stride-creating-goals/SKILL.md`** (W852) — Adds a top-of-file "⚠️ REVIEW QUEUE SCORING — NESTED TASKS ARE NOT EXEMPT" callout that stresses the four-field minimum bar applies to **every nested task in a goal**, individually — there is no "it's just a subtask" discount and the goal-level `description` does not satisfy nested-task fields. Strengthens the existing **Task Nesting Rules** section with a per-field block that enumerates `acceptance_criteria` / `testing_strategy` / `pitfalls` / `patterns_to_follow` with their individual empty-pill conditions, and updates the closing "Minimal nested tasks fail the same way" line to include the review_queue consequence. Adds four new **Red Flags - STOP** bullets and four new **Rationalization Table** rows specifically targeting nested-task offloading rationalizations ("the goal description covers it" / "goal-level only" / "applies to the goal, not its children" / "lives on the goal").
+
+### Backward compatibility
+
+Content-only release. No hook script, parser contract, env-var matrix, API field shape, or workflow step changed — every behavior is byte-identical to 1.17.2. The three SKILL.md edits strengthen guidance only; existing task-creation, enrichment, and goal-creation calls continue to validate without modification. No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required. Agents that already populate the four fields see no behavior change; agents that previously skipped them get explicit prose about the downstream review_queue scoring consequence.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` (the marketplace pin update to 1.17.3 lands in stride-marketplace 1.30.3). No configuration changes required.
+
+### Source
+
+G166 / W850 (stride-creating-tasks emphasis), W851 (stride-enriching-tasks emphasis), W852 (stride-creating-goals emphasis), W873 (this release). Patch release because the changes are documentation-only emphasis updates inside three SKILL.md files — no behavior change, no API contract change, no hook contract change. The goal of the change set is to raise the floor on the four fields the review_queue dashboard scores at completion, so empty pills become rare rather than common.
+
 ## [1.17.2] - 2026-05-25
 
 ### Critical fix

@@ -1323,8 +1323,16 @@ else
   for a in "\$@"; do printf ' %s' "\$a"; done
   printf '\n'
 } >> "$fixture"
-# If --data-binary @<file> is present, also record file contents for assertions
+# Record body for assertions. Two forms are recognized:
+#   1. --data-binary @<file>   (legacy bare-array shape)
+#   2. -d <inline-body>        (current wrapped-object shape)
+prev=""
 for a in "\$@"; do
+  case "\$prev" in
+    -d|--data|--data-raw)
+      printf 'BODY:\n%s\n' "\$a" >> "$fixture"
+      ;;
+  esac
   case "\$a" in
     @*)
       printf 'BODY:\n' >> "$fixture"
@@ -1332,10 +1340,17 @@ for a in "\$@"; do
       printf '\n' >> "$fixture"
       ;;
   esac
+  prev="\$a"
 done
 exit $exit_code
 CURLSTUB
     chmod +x "$stub_dir/curl"
+  }
+
+  # Extract the BODY section emitted by make_curl_stub from a fixture file.
+  # Reads the line(s) following 'BODY:' up to the next blank line or EOF.
+  extract_body() {
+    awk '/^BODY:$/{flag=1; next} flag && /^$/{flag=0} flag' "$1"
   }
 
   # Shared fixture: a git repo with one tracked change since BASE.
@@ -1387,6 +1402,30 @@ STRIDE
     assert_contains "8a: PUT call uses PUT method" "X PUT " "$PUT_CONTENTS"
     assert_contains "8a: PUT body contains the changed file path" \
       "tracked.txt" "$PUT_CONTENTS"
+
+    # D35: body must be a wrapped JSON object with a "changed_files" key,
+    # NOT a bare array. A bare top-level array would land at params['_json']
+    # under Plug.Parsers and persist as NULL.
+    PUT_BODY=$(extract_body "$PUT_FIXTURE")
+    if [ -n "$PUT_BODY" ] && printf '%s' "$PUT_BODY" | jq -e 'type == "object" and has("changed_files")' > /dev/null 2>&1; then
+      echo -e "  ${GREEN}PASS${RESET}: 8a: PUT body parses as JSON object with 'changed_files' key (not bare array)"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: 8a: PUT body is not a wrapped object: $PUT_BODY"
+      FAIL=$((FAIL + 1))
+    fi
+
+    # D35: round-trip — body's changed_files value equals snapshot file contents.
+    SNAPSHOT_CONTENTS=$(cat "$PUT_DIR/.stride-changed-files.json")
+    BODY_INNER=$(printf '%s' "$PUT_BODY" | jq -c '.changed_files' 2>/dev/null)
+    SNAPSHOT_NORMALIZED=$(printf '%s' "$SNAPSHOT_CONTENTS" | jq -c '.' 2>/dev/null)
+    if [ -n "$BODY_INNER" ] && [ "$BODY_INNER" = "$SNAPSHOT_NORMALIZED" ]; then
+      echo -e "  ${GREEN}PASS${RESET}: 8a: PUT body's changed_files value equals snapshot file content"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: 8a: round-trip mismatch — body: $BODY_INNER vs snapshot: $SNAPSHOT_NORMALIZED"
+      FAIL=$((FAIL + 1))
+    fi
   else
     echo -e "  ${RED}FAIL${RESET}: 8a: PUT call was not made (no fixture written)"
     FAIL=$((FAIL + 1))
@@ -1496,12 +1535,14 @@ STRIDE
   if [ -f "$EMPTY_FIXTURE" ]; then
     EMPTY_CONTENTS=$(cat "$EMPTY_FIXTURE")
     assert_contains "8d: empty snapshot still triggers PUT" "X PUT " "$EMPTY_CONTENTS"
-    # Body should be exactly the empty-array literal on its own line.
-    if printf '%s\n' "$EMPTY_CONTENTS" | grep -qFx '[]'; then
-      echo -e "  ${GREEN}PASS${RESET}: 8d: PUT body is the literal empty array"
+    # D35: empty snapshot must wrap as {"changed_files": []} (still a valid
+    # object with the expected key, NOT a bare empty array).
+    EMPTY_BODY=$(extract_body "$EMPTY_FIXTURE")
+    if [ -n "$EMPTY_BODY" ] && printf '%s' "$EMPTY_BODY" | jq -e 'type == "object" and .changed_files == []' > /dev/null 2>&1; then
+      echo -e "  ${GREEN}PASS${RESET}: 8d: empty snapshot wraps as {\"changed_files\": []}"
       PASS=$((PASS + 1))
     else
-      echo -e "  ${RED}FAIL${RESET}: 8d: PUT body was not []: $EMPTY_CONTENTS"
+      echo -e "  ${RED}FAIL${RESET}: 8d: PUT body was not the wrapped empty form: $EMPTY_BODY"
       FAIL=$((FAIL + 1))
     fi
   else
@@ -1912,6 +1953,146 @@ STRIDE
   assert_exit "10e: end-to-end after_goal on mark_reviewed exits 0" 0 "$AG_E2E_RC_MR"
   assert_contains "10e: mark_reviewed runs after_review" "after_review_ran" "$AG_E2E_OUT_MR"
   assert_contains "10e: mark_reviewed runs after_goal" "after_goal_ran" "$AG_E2E_OUT_MR"
+fi
+
+# ============================================================
+# Test Group 11: End-to-end PUT round-trip (W835)
+# ============================================================
+# Gated on STRIDE_TEST_E2E_URL, STRIDE_TEST_E2E_TOKEN, and
+# STRIDE_TEST_E2E_TASK_ID. The stub-only tests in Group 8 missed a body-shape
+# regression (D35) because they never crossed the wire. This group drives
+# finalize_after_doing against a real kanban server, GETs the task back, and
+# asserts the persisted changed_files equals the snapshot — catching
+# wire-shape mismatches at the integration boundary.
+#
+# Required env vars (group skips cleanly when any unset):
+#   STRIDE_TEST_E2E_URL     — base URL of the local kanban server (must be
+#                             http://localhost*, http://127.0.0.1*, or end in
+#                             .dev / .local / .test to prevent production
+#                             pollution)
+#   STRIDE_TEST_E2E_TOKEN   — API bearer token for that server
+#   STRIDE_TEST_E2E_TASK_ID — id of a sacrificial test task whose
+#                             changed_files this group is allowed to overwrite
+echo ""
+echo "=== Test Group 11: End-to-end PUT round-trip (W835) ==="
+
+if [ -z "${STRIDE_TEST_E2E_URL:-}" ] || [ -z "${STRIDE_TEST_E2E_TOKEN:-}" ] || [ -z "${STRIDE_TEST_E2E_TASK_ID:-}" ]; then
+  echo "  SKIP: STRIDE_TEST_E2E_URL / STRIDE_TEST_E2E_TOKEN / STRIDE_TEST_E2E_TASK_ID unset — set all three to run the E2E round-trip"
+elif ! command -v jq > /dev/null 2>&1 || ! command -v curl > /dev/null 2>&1; then
+  echo "  SKIP: jq or curl missing — Group 11 requires both"
+else
+  # Safety: refuse to hit anything that doesn't look like a local/dev URL.
+  # Production hostnames are a hard fail — this group mutates task state and
+  # must never run there.
+  E2E_URL="${STRIDE_TEST_E2E_URL%/}"
+  E2E_URL_OK=0
+  case "$E2E_URL" in
+    http://localhost*|http://127.0.0.1*|http://[::1]*|https://*.dev|https://*.dev/*|https://*.local|https://*.local/*|https://*.test|https://*.test/*)
+      E2E_URL_OK=1
+      ;;
+    *)
+      echo -e "  ${RED}FAIL${RESET}: 11: refusing to run E2E against non-local URL: $E2E_URL"
+      FAIL=$((FAIL + 1))
+      ;;
+  esac
+
+  if [ "$E2E_URL_OK" -eq 1 ]; then
+    E2E_DIR=$(mktemp -d)
+    E2E_HEADERS=(-H "Authorization: Bearer $STRIDE_TEST_E2E_TOKEN" -H "Content-Type: application/json")
+    E2E_TASK_ID="$STRIDE_TEST_E2E_TASK_ID"
+
+    # Sanity-check the task exists and is reachable before mutating it.
+    E2E_PRECHECK=$(curl -sS -o /dev/null -w '%{http_code}' "${E2E_HEADERS[@]}" "$E2E_URL/api/tasks/$E2E_TASK_ID" 2>/dev/null || echo '000')
+    if [ "$E2E_PRECHECK" != "200" ]; then
+      echo -e "  ${RED}FAIL${RESET}: 11: GET /api/tasks/$E2E_TASK_ID returned $E2E_PRECHECK — verify STRIDE_TEST_E2E_TASK_ID"
+      FAIL=$((FAIL + 1))
+    else
+      # 11a: Round-trip with a populated snapshot. Body wrapped as
+      # {"changed_files": [...]} must land at task.changed_files (not NULL).
+      E2E_SNAPSHOT='[{"path":"e2e-w835.txt","diff":"diff --git a/e2e-w835.txt b/e2e-w835.txt\n+content"}]'
+      echo "$E2E_SNAPSHOT" > "$E2E_DIR/.stride-changed-files.json"
+
+      (
+        cd "$E2E_DIR" || exit 1
+        # shellcheck disable=SC1090
+        source "$HOOK_SCRIPT" 2>/dev/null || true
+        HOOK_NAME="after_doing" \
+          PROJECT_DIR="$E2E_DIR" \
+          TASK_ID="$E2E_TASK_ID" \
+          HAS_JQ="true" \
+          COMMAND="curl -X PATCH $E2E_URL/api/tasks/$E2E_TASK_ID/complete -H 'Authorization: Bearer $STRIDE_TEST_E2E_TOKEN'" \
+          finalize_after_doing
+      )
+
+      E2E_GET=$(curl -sS "${E2E_HEADERS[@]}" "$E2E_URL/api/tasks/$E2E_TASK_ID" 2>/dev/null || echo '{}')
+      E2E_PERSISTED=$(printf '%s' "$E2E_GET" | jq -c '.data.changed_files // null')
+      E2E_EXPECTED=$(printf '%s' "$E2E_SNAPSHOT" | jq -c '.')
+
+      if [ "$E2E_PERSISTED" = "null" ]; then
+        echo -e "  ${RED}FAIL${RESET}: 11a: task.changed_files is NULL (bare-array regression?)"
+        FAIL=$((FAIL + 1))
+      elif [ "$E2E_PERSISTED" = "[]" ]; then
+        echo -e "  ${RED}FAIL${RESET}: 11a: task.changed_files is [] after non-empty PUT"
+        FAIL=$((FAIL + 1))
+      elif [ "$E2E_PERSISTED" = "$E2E_EXPECTED" ]; then
+        echo -e "  ${GREEN}PASS${RESET}: 11a: round-trip — task.changed_files equals snapshot"
+        PASS=$((PASS + 1))
+      else
+        echo -e "  ${RED}FAIL${RESET}: 11a: round-trip mismatch — got: $E2E_PERSISTED expected: $E2E_EXPECTED"
+        FAIL=$((FAIL + 1))
+      fi
+
+      # 11b: Empty-snapshot round-trip — {"changed_files": []} is a
+      # legitimate clear and must persist as [] (not NULL).
+      echo '[]' > "$E2E_DIR/.stride-changed-files.json"
+      (
+        cd "$E2E_DIR" || exit 1
+        # shellcheck disable=SC1090
+        source "$HOOK_SCRIPT" 2>/dev/null || true
+        HOOK_NAME="after_doing" \
+          PROJECT_DIR="$E2E_DIR" \
+          TASK_ID="$E2E_TASK_ID" \
+          HAS_JQ="true" \
+          COMMAND="curl -X PATCH $E2E_URL/api/tasks/$E2E_TASK_ID/complete -H 'Authorization: Bearer $STRIDE_TEST_E2E_TOKEN'" \
+          finalize_after_doing
+      )
+
+      E2E_GET_EMPTY=$(curl -sS "${E2E_HEADERS[@]}" "$E2E_URL/api/tasks/$E2E_TASK_ID" 2>/dev/null || echo '{}')
+      E2E_EMPTY_PERSISTED=$(printf '%s' "$E2E_GET_EMPTY" | jq -c '.data.changed_files // null')
+      if [ "$E2E_EMPTY_PERSISTED" = "[]" ]; then
+        echo -e "  ${GREEN}PASS${RESET}: 11b: empty-snapshot round-trip persists as []"
+        PASS=$((PASS + 1))
+      else
+        echo -e "  ${RED}FAIL${RESET}: 11b: empty-snapshot did not persist as []: got $E2E_EMPTY_PERSISTED"
+        FAIL=$((FAIL + 1))
+      fi
+
+      # 11c: Fail-soft — missing Bearer token in $COMMAND must NOT crash the
+      # hook (finalize swallows the no-op silently and exits 0).
+      echo "$E2E_SNAPSHOT" > "$E2E_DIR/.stride-changed-files.json"
+      E2E_FAILSOFT_RC=0
+      (
+        cd "$E2E_DIR" || exit 1
+        # shellcheck disable=SC1090
+        source "$HOOK_SCRIPT" 2>/dev/null || true
+        HOOK_NAME="after_doing" \
+          PROJECT_DIR="$E2E_DIR" \
+          TASK_ID="$E2E_TASK_ID" \
+          HAS_JQ="true" \
+          COMMAND="curl -X PATCH $E2E_URL/api/tasks/$E2E_TASK_ID/complete" \
+          finalize_after_doing
+      ) || E2E_FAILSOFT_RC=$?
+      if [ "$E2E_FAILSOFT_RC" -eq 0 ]; then
+        echo -e "  ${GREEN}PASS${RESET}: 11c: missing-token finalize_after_doing exits 0 (fail-soft)"
+        PASS=$((PASS + 1))
+      else
+        echo -e "  ${RED}FAIL${RESET}: 11c: missing-token finalize_after_doing exited $E2E_FAILSOFT_RC (fail-soft broken)"
+        FAIL=$((FAIL + 1))
+      fi
+    fi
+
+    rm -rf "$E2E_DIR"
+  fi
 fi
 
 # ============================================================

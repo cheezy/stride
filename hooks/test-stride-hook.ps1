@@ -628,6 +628,36 @@ try {
         Assert-Contains "7a: PUT path targets /changed_files" "/api/tasks/99/changed_files" $record.Path
         Assert-Eq "7a: Bearer token from `$Command" "Bearer test_token_xyz" $record.Auth
         Assert-Contains "7a: PUT body contains snapshot content" "foo.txt" $record.Body
+
+        # D35: body must be a wrapped JSON object with a "changed_files" key,
+        # NOT a bare array. A bare top-level array would persist as NULL on
+        # the server side.
+        try {
+            $parsedBody = $record.Body | ConvertFrom-Json
+            if ($parsedBody -is [pscustomobject] -and $parsedBody.PSObject.Properties.Name -contains 'changed_files') {
+                Write-Host "  PASS: 7a: PUT body parses as JSON object with 'changed_files' key (not bare array)" -ForegroundColor Green
+                $script:PASS++
+            } else {
+                Write-Host "  FAIL: 7a: PUT body is not a wrapped object: $($record.Body)" -ForegroundColor Red
+                $script:FAIL++
+            }
+
+            # Round-trip: body's changed_files value equals the snapshot file contents.
+            $snapshotRaw = Get-Content -Raw -Path (Join-Path $putSuccessProj '.stride-changed-files.json')
+            $snapshotData = $snapshotRaw | ConvertFrom-Json
+            $bodyInner = $parsedBody.changed_files | ConvertTo-Json -Depth 100 -Compress
+            $snapshotInner = @($snapshotData) | ConvertTo-Json -Depth 100 -Compress
+            if ($bodyInner -eq $snapshotInner) {
+                Write-Host "  PASS: 7a: PUT body's changed_files value equals snapshot file content" -ForegroundColor Green
+                $script:PASS++
+            } else {
+                Write-Host "  FAIL: 7a: round-trip mismatch — body: $bodyInner vs snapshot: $snapshotInner" -ForegroundColor Red
+                $script:FAIL++
+            }
+        } catch {
+            Write-Host "  FAIL: 7a: PUT body did not parse as JSON: $($_.Exception.Message)" -ForegroundColor Red
+            $script:FAIL++
+        }
     } else {
         Write-Host "  FAIL: 7a: PUT did not arrive at listener" -ForegroundColor Red
         $script:FAIL++

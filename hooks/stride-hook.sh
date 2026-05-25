@@ -210,10 +210,14 @@ finalize_after_doing() {
       _api_base=$(printf '%s' "${COMMAND:-}" | grep -oE 'https?://[A-Za-z0-9._-]+(:[0-9]+)?' | head -n 1 || true)
       _token=$(printf '%s' "${COMMAND:-}" | grep -oE 'Bearer +[A-Za-z0-9._+/=-]+' | head -n 1 | sed 's/^Bearer  *//' || true)
       if [ -n "$_api_base" ] && [ -n "$_token" ]; then
+        # Wrap the bare snapshot array as {"changed_files": [...]} so the
+        # server's params['changed_files'] receives the list. A bare top-level
+        # array would land at params['_json'] under Plug.Parsers and persist
+        # as NULL — clearing the existing snapshot.
         curl -s -X PUT \
           -H "Authorization: Bearer $_token" \
           -H 'Content-Type: application/json' \
-          --data-binary "@$PROJECT_DIR/.stride-changed-files.json" \
+          -d "{\"changed_files\":$(cat "$PROJECT_DIR/.stride-changed-files.json")}" \
           "$_api_base/api/tasks/$TASK_ID/changed_files" \
           > /dev/null 2>&1 || true
       fi

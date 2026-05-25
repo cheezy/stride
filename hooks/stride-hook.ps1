@@ -168,10 +168,18 @@ function Invoke-FinalizeAfterDoing {
     if (-not $apiBase -or -not $token -or -not $taskId) { return }
 
     try {
+        # Wrap the bare snapshot array as {"changed_files": [...]} so the
+        # server's params['changed_files'] receives the list. A bare top-level
+        # array would land at params['_json'] under Plug.Parsers and persist
+        # as NULL. Construct via hashtable + ConvertTo-Json so PowerShell
+        # handles JSON escaping itself rather than relying on string concat.
+        $snapshotData = Get-Content -Raw -Path $snapshotPath | ConvertFrom-Json
+        if ($null -eq $snapshotData) { $snapshotData = @() }
+        $body = @{ changed_files = @($snapshotData) } | ConvertTo-Json -Depth 100 -Compress
         Invoke-WebRequest `
             -Uri "$apiBase/api/tasks/$taskId/changed_files" `
             -Method Put `
-            -InFile $snapshotPath `
+            -Body $body `
             -ContentType 'application/json' `
             -Headers @{ Authorization = "Bearer $token" } `
             -UseBasicParsing -TimeoutSec 10 -ErrorAction SilentlyContinue | Out-Null

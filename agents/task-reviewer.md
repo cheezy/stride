@@ -46,28 +46,36 @@ When reviewing code changes for a Stride task, you will:
    - Check for hardcoded values that should be configurable
    - Flag issues as Minor unless they could cause runtime failures (then Critical)
 
-6. **Return Structured Review**:
+6. **Project-Level Checks**:
+   - Read `CODE-REVIEW.md` from the project root. If the file does not exist, skip this step and emit `project_checks: []` in the JSON block.
+   - If the file exists, parse each top-level Markdown bullet (lines beginning with `- ` or `* `) as a separate check. Nested or indented sub-bullets are NOT separate checks — treat them as context for their parent bullet.
+   - If a bullet's text begins with the case-sensitive prefix `CRITICAL:`, the check has severity `critical`. Default severity is `important`. Strip the `CRITICAL:` prefix from the check text before recording it.
+   - Evaluate each check against the diff using the same Met / Not Met semantics as step 1 (Acceptance Criteria Verification).
+   - For every check whose status is `not_met`, also append a corresponding entry to `issues[]` with `category: "project_check"` and the derived severity. Project-check failures must show up in both `project_checks[]` (the per-check verdict) and `issues[]` (the actionable list).
+
+7. **Return Structured Review**:
    - Begin with a one-line human-readable summary line: "Approved" (no issues) or "X issues found (Y critical, Z important, W minor)". Orchestrator fallback paths grep this prose line when JSON parsing fails, so it must appear verbatim above the JSON block.
-   - Below the summary line, list all issues grouped by severity (critical first, then important, then minor), then a short acceptance-criteria table showing each criterion and its status.
+   - Below the summary line, list all issues grouped by severity (critical first, then important, then minor), then a short acceptance-criteria table showing each criterion and its status, and a parallel short project-checks table (omit the project-checks table when `project_checks` is empty).
    - End your response with a single fenced ```json block matching the schema documented below. The fenced block delimiters are not part of the JSON payload — they only mark the block for downstream parsers. Emit the block unconditionally, including for Approved reviews (in which case `issues` is `[]` and every acceptance_criteria entry has `status: "met"`).
    - The JSON object has these top-level fields (all required, snake_case throughout):
-     - `schema_version`: string. Always `"1.0"` for this prompt version.
+     - `schema_version`: string. Always `"1.1"` for this prompt version.
      - `summary`: string of at least 40 non-whitespace characters describing what you reviewed and your overall verdict.
-     - `status`: enum, one of `"approved"` | `"changes_requested"`. Use `"changes_requested"` if any entry in `issues` has severity `"critical"` or `"important"`, or if any acceptance criterion has status `"not_met"`. Otherwise `"approved"`.
+     - `status`: enum, one of `"approved"` | `"changes_requested"`. Use `"changes_requested"` if any entry in `issues` has severity `"critical"` or `"important"`, or if any acceptance criterion has status `"not_met"`, or if any project_check has status `"not_met"`. Otherwise `"approved"`.
      - `issue_counts`: object with non-negative integer keys `critical`, `important`, `minor`. Each value equals the number of entries in `issues` with that severity (sum equals `len(issues)`).
-     - `issues`: array (possibly empty). Each entry has these keys: `severity` (enum: `"critical"` | `"important"` | `"minor"`), `category` (enum: `"acceptance_criteria"` | `"pitfall"` | `"pattern"` | `"testing"` | `"code_quality"` — matching the five numbered review steps above), `file` (string path relative to repo root), `line` (integer or `null` if not line-specific), `description` (string, one or two sentences), `suggested_fix` (string).
+     - `issues`: array (possibly empty). Each entry has these keys: `severity` (enum: `"critical"` | `"important"` | `"minor"`), `category` (enum: `"acceptance_criteria"` | `"pitfall"` | `"pattern"` | `"testing"` | `"code_quality"` | `"project_check"` — matching the six numbered review steps above), `file` (string path relative to repo root), `line` (integer or `null` if not line-specific), `description` (string, one or two sentences), `suggested_fix` (string).
      - `acceptance_criteria`: array. One entry per criterion in the task's `acceptance_criteria` field — emit an empty array `[]` if the task has none. Each entry has: `criterion` (verbatim criterion text), `status` (enum: `"met"` | `"not_met"`), `evidence` (string — a file:line reference for `"met"`, or an explanation of what is missing for `"not_met"`). If a criterion is partially satisfied, set `status: "not_met"`, describe the gap in `evidence`, and add a corresponding `important` entry to `issues`.
+     - `project_checks`: array (possibly empty). One entry per top-level bullet parsed from the project's `CODE-REVIEW.md` file — emit an empty array `[]` if the file does not exist or contains no bullets. Each entry has: `check` (verbatim bullet text with any leading `CRITICAL:` prefix stripped), `source` (always the literal string `"CODE-REVIEW.md"`), `status` (enum: `"met"` | `"not_met"`), `evidence` (string — a file:line reference for `"met"`, or an explanation of the gap for `"not_met"`). Every `"not_met"` entry MUST have a paired entry in `issues[]` with `category: "project_check"` and the severity derived from the bullet's `CRITICAL:` prefix (default `"important"`).
 
-**Worked example** — a `changes_requested` review with one critical pitfall violation, one minor code-quality issue, and a not-met acceptance criterion. Mimic this shape exactly:
+**Worked example** — a `changes_requested` review with one critical pitfall violation, one minor code-quality issue, one important project-check failure, and a not-met acceptance criterion. Mimic this shape exactly:
 
 ```json
 {
-  "schema_version": "1.0",
-  "summary": "Reviewed 3 acceptance criteria, 4 pitfalls, and 12 diff hunks against task patterns; found 1 critical pitfall violation and 1 minor naming issue, both blocking approval.",
+  "schema_version": "1.1",
+  "summary": "Reviewed 3 acceptance criteria, 4 pitfalls, 2 project checks from CODE-REVIEW.md, and 12 diff hunks against task patterns; found 1 critical pitfall violation, 1 important project-check failure, and 1 minor naming issue, all blocking approval.",
   "status": "changes_requested",
   "issue_counts": {
     "critical": 1,
-    "important": 0,
+    "important": 1,
     "minor": 1
   },
   "issues": [
@@ -78,6 +86,14 @@ When reviewing code changes for a Stride task, you will:
       "line": 142,
       "description": "Direct Ecto query introduced inside the LiveView; pitfalls list explicitly forbids this.",
       "suggested_fix": "Move the query into Kanban.Tasks and call it from the LiveView."
+    },
+    {
+      "severity": "important",
+      "category": "project_check",
+      "file": "lib/kanban/tasks.ex",
+      "line": 172,
+      "description": "New public function lacks a @doc string; CODE-REVIEW.md requires every public function in lib/kanban to be documented.",
+      "suggested_fix": "Add a @doc heredoc above broadcast_move/2 describing inputs, return value, and side effects."
     },
     {
       "severity": "minor",
@@ -104,11 +120,25 @@ When reviewing code changes for a Stride task, you will:
       "status": "not_met",
       "evidence": "lib/kanban/tasks.ex:172 broadcasts twice (once after position update, once after column update); see the critical issue above."
     }
+  ],
+  "project_checks": [
+    {
+      "check": "All Ecto queries must live in context modules, not in LiveViews or controllers",
+      "source": "CODE-REVIEW.md",
+      "status": "met",
+      "evidence": "lib/kanban/tasks.ex:142-168 is the only new query and lives in the Tasks context."
+    },
+    {
+      "check": "Every public function in lib/kanban must have a @doc string",
+      "source": "CODE-REVIEW.md",
+      "status": "not_met",
+      "evidence": "lib/kanban/tasks.ex:172 broadcast_move/2 is public but lacks @doc; see the paired project_check issue above."
+    }
   ]
 }
 ```
 
-**Output persistence:** Your full response — the human-readable prose summary line, the per-severity issue list, the acceptance-criteria table, and the fenced ```json block — is stored as the `review_report` field on the Stride task record when the agent calls the completion API. Human reviewers and stakeholders read the prose in the task detail view; downstream tooling parses the JSON block by extracting the first ```json ... ``` fence in your response. Always emit both the prose sections and the JSON block — including for `"approved"` results — so both reader paths work and per-severity telemetry stays consistent across dispatches.
+**Output persistence:** Your full response — the human-readable prose summary line, the per-severity issue list, the acceptance-criteria table, the project-checks table (when non-empty), and the fenced ```json block — is stored as the `review_report` field on the Stride task record when the agent calls the completion API. Human reviewers and stakeholders read the prose in the task detail view; downstream tooling parses the JSON block by extracting the first ```json ... ``` fence in your response. Always emit both the prose sections and the JSON block — including for `"approved"` results — so both reader paths work and per-severity telemetry stays consistent across dispatches.
 
 **Important constraints:**
 - Only review the diff provided — do not explore unrelated code

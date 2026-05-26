@@ -2,6 +2,28 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.18.0] - 2026-05-26
+
+### Added
+
+- **`agents/task-reviewer.md`** (W875) — A new step 6 **Project-Level Checks** is inserted between the existing General Code Quality step and the Return Structured Review step (renumbered 6 → 7). The reviewer agent now reads `CODE-REVIEW.md` from the project root, parses each top-level Markdown bullet (`- ` / `* `) beneath any heading as a separate standing review check, evaluates each against the diff with the same Met / Not Met semantics the agent already uses for `acceptance_criteria`, and emits the verdict under a new top-level `project_checks[]` field in the structured JSON block. A case-sensitive `CRITICAL:` prefix on a bullet maps to severity `critical` (the prefix is stripped from the recorded check text); the default severity is `important`. Every `not_met` project_check MUST also produce a paired entry in `issues[]` with `category: "project_check"` and the derived severity, so per-severity telemetry stays consistent. When `CODE-REVIEW.md` does not exist or contains no bullets, `project_checks` is emitted as `[]` — older projects without a `CODE-REVIEW.md` file continue to produce a valid payload. The Output persistence paragraph is extended to list the new project-checks prose table alongside the existing acceptance-criteria table.
+
+### Updated
+
+- **`agents/task-reviewer.md`** (W875) — `schema_version` bumped from `"1.0"` to `"1.1"` in both the step 7 prose definition and the worked example. The `status` rule is extended: `"changes_requested"` now also fires when any `project_check` has status `"not_met"` (in addition to the existing critical/important issue and not_met acceptance_criterion triggers). The `issues[]` `category` enum gains `"project_check"`. The worked example gains a representative `project_checks` array (one `met` + one `not_met` paired with an `important` `project_check` issue) so downstream tooling has a shape reference. Sibling reviewer-variant prompts in the Stride marketplace (Cursor, Windsurf, Continue, Codex, Gemini) are deliberately not modified — they reference this file as the schema of record per the preamble.
+
+### Backward compatibility
+
+Wire-shape additive only. Existing reviewer payloads without `project_checks` continue to be tolerated by the kanban server (`reviewer_result` is persisted as `:jsonb`); existing categories in `issues[]` (`acceptance_criteria` / `pitfall` / `pattern` / `testing` / `code_quality`) continue to validate. Older orchestrators that parse the prior `"1.0"` schema can read the new `"1.1"` payload because the only schema additions are a new top-level array (`project_checks`) and a new value in the existing `category` enum — both forward-compatible additions, not breaking changes. Hook script (`hooks/stride-hook.sh` and `.ps1`) and parser contract are byte-identical to 1.17.3. No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` once the marketplace pin lands. Optional but recommended: add a `CODE-REVIEW.md` file at your project root with one bullet per standing review rule. Bullets prefixed with `CRITICAL:` will surface as critical-severity issues when violated; all other bullets surface as important-severity. With no `CODE-REVIEW.md` present, reviewer behavior is identical to 1.17.3 — the new field renders as `project_checks: []` and the structured payload is otherwise unchanged.
+
+### Source
+
+G186 / W875 (the task-reviewer.md edit), W877 (this release). Minor bump because the prompt adds a new agent capability and bumps `schema_version` from `"1.0"` to `"1.1"`. The kanban-server UI half of the rollout — rendering `project_checks` on the Review Queue panel — lives under G188 and ships independently of this plugin release.
+
 ## [1.17.3] - 2026-05-25
 
 ### Updated

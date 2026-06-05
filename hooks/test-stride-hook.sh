@@ -1609,6 +1609,81 @@ STRIDE
     FAIL=$((FAIL + 1))
   fi
   rm -rf "$NOJQ_DIR" "$NOJQ_STUB"
+
+  # 8g (D54): the documented completion curl uses shell VARIABLES
+  # ($STRIDE_API_URL / $STRIDE_API_TOKEN), so $COMMAND has no literal URL/token.
+  # finalize_after_doing must resolve them from .stride_auth.md and still PUT —
+  # using the production "**API Token:**" line, NOT "**Local API Token:**".
+  VAR_DIR=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  VAR_FIXTURE="$VAR_DIR/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$VAR_FIXTURE" 0
+  (
+    setup_put_repo "$VAR_DIR" || exit 1
+    cat > .stride_auth.md << 'AUTH'
+- **API URL:** `https://auth-file.example.com`
+- **Local API Token:** `LOCAL_should_not_be_used`
+- **API Token:** `PROD_token_from_auth_file`
+AUTH
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH \"$STRIDE_API_URL/api/tasks/42/complete\" -H \"Authorization: Bearer $STRIDE_API_TOKEN\""}}'
+    echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  if [ -f "$VAR_FIXTURE" ]; then
+    VAR_CONTENTS=$(cat "$VAR_FIXTURE")
+    assert_contains "8g: variable-command PUT targets the auth-file URL" \
+      "https://auth-file.example.com/api/tasks/42/changed_files" "$VAR_CONTENTS"
+    assert_contains "8g: variable-command PUT sends the production API Token" \
+      "Bearer PROD_token_from_auth_file" "$VAR_CONTENTS"
+    # Check the Authorization header specifically (the snapshot body may echo
+    # the test's .stride_auth.md content, so scan for the Bearer use precisely).
+    if echo "$VAR_CONTENTS" | grep -qF "Bearer LOCAL_should_not_be_used"; then
+      echo -e "  ${RED}FAIL${RESET}: 8g: Authorization used the Local API Token (must use the production one)"
+      FAIL=$((FAIL + 1))
+    else
+      echo -e "  ${GREEN}PASS${RESET}: 8g: Authorization did NOT use the Local API Token"
+      PASS=$((PASS + 1))
+    fi
+  else
+    echo -e "  ${RED}FAIL${RESET}: 8g: no PUT made for a variable-based command with .stride_auth.md"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$VAR_DIR" "$STUB_DIR"
+
+  # 8h (D54): sourced unit test — resolvers prefer .stride_auth.md and pick the
+  # production "**API Token:**" line over "**Local API Token:**".
+  RESOLVE_DIR=$(mktemp -d)
+  (
+    cd "$RESOLVE_DIR" || exit 1
+    cat > .stride_auth.md << 'AUTH'
+- **API URL:** `https://auth-file.example.com`
+- **Local API Token:** `LOCAL_tok`
+- **API Token:** `PROD_tok`
+AUTH
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    PROJECT_DIR="$RESOLVE_DIR"
+    COMMAND=''
+    printf 'URL=%s TOKEN=%s\n' "$(resolve_stride_api_url)" "$(resolve_stride_api_token)"
+  ) > "$RESOLVE_DIR/out.txt" 2>/dev/null
+  RESOLVE_OUT=$(grep '^URL=' "$RESOLVE_DIR/out.txt" || true)
+  assert_eq "8h: resolvers read .stride_auth.md (production token, not Local)" \
+    "URL=https://auth-file.example.com TOKEN=PROD_tok" "$RESOLVE_OUT"
+  rm -rf "$RESOLVE_DIR"
+
+  # 8i (D54): fallback — no .stride_auth.md → resolvers use the $COMMAND literals.
+  RESOLVE2_DIR=$(mktemp -d)
+  (
+    cd "$RESOLVE2_DIR" || exit 1
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    PROJECT_DIR="$RESOLVE2_DIR"
+    COMMAND='curl -X PATCH https://literal.example.com/api/tasks/9/complete -H "Authorization: Bearer LITERAL_tok"'
+    printf 'URL=%s TOKEN=%s\n' "$(resolve_stride_api_url)" "$(resolve_stride_api_token)"
+  ) > "$RESOLVE2_DIR/out.txt" 2>/dev/null
+  RESOLVE2_OUT=$(grep '^URL=' "$RESOLVE2_DIR/out.txt" || true)
+  assert_eq "8i: resolvers fall back to \$COMMAND literals when no auth file" \
+    "URL=https://literal.example.com TOKEN=LITERAL_tok" "$RESOLVE2_OUT"
+  rm -rf "$RESOLVE2_DIR"
 fi
 
 # ============================================================

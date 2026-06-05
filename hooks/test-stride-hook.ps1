@@ -669,6 +669,85 @@ try {
     }
 }
 
+# 7g (D54): variable-based completion command + .stride_auth.md. The documented
+# curl uses $STRIDE_API_URL / $STRIDE_API_TOKEN, so $Command has no literal
+# URL/token; the hook must resolve them from .stride_auth.md, preferring the
+# production "**API Token:**" line over "**Local API Token:**".
+$putVarProj = Join-Path $TmpDir 'put-var-project'
+New-Item -ItemType Directory -Path $putVarProj -Force | Out-Null
+Set-Content -Path (Join-Path $putVarProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $putVarProj '.stride-changed-files.json') `
+    -Value '[{"path":"foo.txt","diff":"unified patch body"}]' -Encoding UTF8
+Set-Content -Path (Join-Path $putVarProj '.stride-env-cache') `
+    -Value "TASK_ID=99`nTASK_BASE_REF=abc" -Encoding UTF8
+
+$putVarPort = 18878
+# Build .stride_auth.md from single-quoted lines so backticks stay literal.
+$putVarAuth = @(
+    '- **API URL:** `http://localhost:' + $putVarPort + '`'
+    '- **Local API Token:** `LOCAL_should_not_be_used`'
+    '- **API Token:** `PROD_token_7g`'
+)
+Set-Content -Path (Join-Path $putVarProj '.stride_auth.md') -Value $putVarAuth -Encoding UTF8
+
+$putVarFixture = Join-Path $TmpDir 'put-var-fixture.json'
+if (Test-Path $putVarFixture) { Remove-Item -Force $putVarFixture }
+
+$putVarListenerJob = Start-Job -ArgumentList $putVarPort, $putVarFixture -ScriptBlock {
+    param($Port, $Fixture)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        $ctx = $l.GetContext()
+        $req = $ctx.Request
+        $reader = [System.IO.StreamReader]::new($req.InputStream)
+        $body = $reader.ReadToEnd()
+        @{
+            Method = $req.HttpMethod
+            Path   = $req.Url.AbsolutePath
+            Auth   = $req.Headers['Authorization']
+            Body   = $body
+        } | ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+        $resp = $ctx.Response
+        $resp.StatusCode = 200
+        $resp.OutputStream.Close()
+    } catch {
+        # Listener tear-down errors are ignored.
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+}
+
+try {
+    $putVarCmd = "curl -X PATCH `$STRIDE_API_URL/api/tasks/99/complete -H `"Authorization: Bearer `$STRIDE_API_TOKEN`""
+    $putVarJson = "{`"tool_input`":{`"command`":`"$putVarCmd`"}}"
+    $r = Invoke-HookScript -InputJson $putVarJson -Phase 'pre' -ProjectDir $putVarProj
+    Assert-Exit "7g: hook exits 0 after variable-command PUT" 0 $r.ExitCode
+
+    Wait-Job $putVarListenerJob -Timeout 8 | Out-Null
+    Remove-Job $putVarListenerJob -Force -ErrorAction SilentlyContinue
+
+    if (Test-Path $putVarFixture) {
+        $record = Get-Content -Raw -Path $putVarFixture | ConvertFrom-Json
+        Assert-Contains "7g: variable-command PUT targets /changed_files" "/api/tasks/99/changed_files" $record.Path
+        Assert-Eq "7g: Bearer token resolved from .stride_auth.md (production, not Local)" "Bearer PROD_token_7g" $record.Auth
+    } else {
+        Write-Host "  FAIL: 7g: PUT did not arrive at listener (auth-file resolution failed)" -ForegroundColor Red
+        $script:FAIL++
+    }
+} finally {
+    if ($putVarListenerJob -and $putVarListenerJob.State -eq 'Running') {
+        Stop-Job $putVarListenerJob -ErrorAction SilentlyContinue
+        Remove-Job $putVarListenerJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # 7b: PUT failure (unreachable URL) does not propagate
 $putFailProj = Join-Path $TmpDir 'put-fail-project'
 New-Item -ItemType Directory -Path $putFailProj -Force | Out-Null

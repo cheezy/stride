@@ -148,21 +148,51 @@ if (Test-Path $EnvCache) {
     }
 }
 
+# Resolve the Stride API base URL for the changed_files upload. Primary source
+# is $ProjectDir\.stride_auth.md (the same file the agent reads) — its
+# `**API URL:** `<url>`` line — falling back to a literal URL in $Command.
+function Resolve-StrideApiUrl {
+    $auth = Join-Path $ProjectDir '.stride_auth.md'
+    $url = ''
+    if (Test-Path $auth) {
+        $line = Get-Content -Path $auth | Where-Object { $_ -match '\*\*API URL:\*\*' } | Select-Object -First 1
+        if ($line -and $line -match 'https?://[A-Za-z0-9._:/-]+') { $url = $Matches[0] }
+    }
+    if (-not $url -and $Command -match 'https?://[A-Za-z0-9._-]+(:[0-9]+)?') { $url = $Matches[0] }
+    return $url
+}
+
+# Resolve the Stride API bearer token for the changed_files upload. Primary
+# source is the production `**API Token:** `<token>`` line in
+# $ProjectDir\.stride_auth.md — deliberately NOT the `**Local API Token:**`
+# line (the `**API Token:**` pattern does not match `**Local API Token:**`) —
+# falling back to a literal `Bearer <token>` in $Command. Never logged.
+function Resolve-StrideApiToken {
+    $auth = Join-Path $ProjectDir '.stride_auth.md'
+    $token = ''
+    if (Test-Path $auth) {
+        $line = Get-Content -Path $auth | Where-Object { $_ -match '\*\*API Token:\*\*' } | Select-Object -First 1
+        if ($line -and $line -match '`([^`]+)`') { $token = $Matches[1] }
+    }
+    if (-not $token -and $Command -match 'Bearer\s+([A-Za-z0-9._+/=-]+)') { $token = $Matches[1] }
+    return $token
+}
+
 # Fire-and-forget upload of the per-file diff snapshot to the Stride server.
 # Mirror of stride-hook.sh's finalize_after_doing PUT path. URL and token are
-# parsed from the intercepted agent completion command in $Command — no new
-# env vars or auth file reads. Silently no-ops if any prerequisite is missing
-# (snapshot file, URL, token, TASK_ID, curl.exe) so behavior degrades to the
-# legacy on-disk-only snapshot.
+# resolved by Resolve-StrideApiUrl / Resolve-StrideApiToken — preferring
+# $ProjectDir\.stride_auth.md so the upload works whether the agent's
+# completion curl used literal values or shell variables ($STRIDE_API_URL /
+# $STRIDE_API_TOKEN), with the $Command literal extraction kept as a fallback.
+# Silently no-ops if any prerequisite is missing (snapshot file, URL, token,
+# TASK_ID) so behavior degrades to the legacy on-disk-only snapshot.
 function Invoke-FinalizeAfterDoing {
     if ($HookName -ne 'after_doing') { return }
     $snapshotPath = Join-Path $ProjectDir '.stride-changed-files.json'
     if (-not (Test-Path $snapshotPath)) { return }
 
-    $apiBase = ''
-    $token = ''
-    if ($Command -match 'https?://[A-Za-z0-9._-]+(:[0-9]+)?') { $apiBase = $Matches[0] }
-    if ($Command -match 'Bearer\s+([A-Za-z0-9._+/=-]+)') { $token = $Matches[1] }
+    $apiBase = Resolve-StrideApiUrl
+    $token = Resolve-StrideApiToken
 
     $taskId = [System.Environment]::GetEnvironmentVariable('TASK_ID', 'Process')
     if (-not $apiBase -or -not $token -or -not $taskId) { return }

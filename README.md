@@ -104,7 +104,7 @@ Breaks goals and large tasks into dependency-ordered child tasks. Uses scope ana
 
 A pre-completion code review agent dispatched after implementation but before running hooks. Validates the git diff against `acceptance_criteria`, detects `pitfalls` violations, checks `patterns_to_follow` compliance, and verifies `testing_strategy` alignment. Returns categorized issues (Critical/Important/Minor) with file and line references.
 
-The canonical `reviewer_result` JSON schema — `schema_version`, `summary`, `status`, `issue_counts`, `issues[]`, and `acceptance_criteria[]` with the `met`/`not_met` enum — is defined in [`agents/task-reviewer.md`](agents/task-reviewer.md) and is the schema of record for all six reviewer-variant prompts. Variant prompts cite that path; do not duplicate the schema elsewhere.
+The canonical `reviewer_result` JSON schema (`schema_version` `"1.2"`) — `summary`, `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]` with the `met`/`not_met` enum, `project_checks[]` (v1.18.0+), and the per-section `testing_strategy` / `patterns` / `pitfalls` verdict objects (`passed`/`failed`/`not_assessed`, v1.19.0+) — is defined in [`agents/task-reviewer.md`](agents/task-reviewer.md) and is the schema of record for all six reviewer-variant prompts. Variant prompts cite that path; do not duplicate the schema elsewhere. The full structured block is persisted verbatim as `reviewer_result` and rendered by the Kanban review queue (issue list, acceptance verdicts, code-review checks, and the three section-verdict tiles).
 
 ### stride:hook-diagnostician
 

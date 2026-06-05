@@ -2,6 +2,34 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.19.0] - 2026-06-05
+
+### Added
+
+- **`agents/task-reviewer.md`** (D58) — The reviewer agent now emits three new top-level per-section verdict objects in the structured JSON block: `testing_strategy`, `patterns`, and `pitfalls`, each `{ "status": "passed" | "failed" | "not_assessed", "note": "<one-line rationale>" }`. `"failed"` is used when a matching-category issue was raised (`testing` / `pattern` / `pitfall`) or the dimension was otherwise unmet; `"passed"` when the task supplied that metadata and it was satisfied; `"not_assessed"` when the task supplied none. A consistency rule requires every `"failed"` verdict to be backed by a matching-category `issues[]` entry (and vice-versa), so the review-queue per-section tiles always agree with the issue list. Review steps 2 (Pitfall Detection), 3 (Pattern Compliance), and 4 (Testing Strategy Alignment) each gain a "Record the … section verdict" instruction, and the worked example gains the three objects.
+
+### Fixed
+
+- **`hooks/stride-hook.sh`, `hooks/stride-hook.ps1`** (D54) — `finalize_after_doing` previously extracted the `/changed_files` upload URL and bearer token from the *literal* intercepted completion command (`$COMMAND`). The documented completion curl uses shell variables (`$STRIDE_API_URL` / `$STRIDE_API_TOKEN`), so the greps matched the variable names, the guard failed, and the per-file diff PUT was silently skipped — every completed task ended up with empty `changed_files`. New `resolve_stride_api_url` / `resolve_stride_api_token` helpers (and the PowerShell `Resolve-StrideApiUrl` / `Resolve-StrideApiToken` mirror) now read `$PROJECT_DIR/.stride_auth.md` as the primary source — the production `**API Token:**` line, never `**Local API Token:**` — and fall back to the `$COMMAND` literal extraction for back-compat. Fire-and-forget non-fatal semantics, the empty-creds guard, and the no-token-logging rule are all preserved. New hook tests (`test-stride-hook.sh` 8g/8h/8i; `test-stride-hook.ps1` 7g) cover the variable-command path.
+
+### Updated
+
+- **`agents/task-reviewer.md`** (D58) — `schema_version` bumped from `"1.1"` to `"1.2"` (schema-of-record preamble, step 7 field list, and worked example). The new section-verdict objects are additive top-level keys.
+- **`skills/stride-completing-tasks/SKILL.md`** (D57) — The completion contract now documents persisting the reviewer agent's **structured JSON block** verbatim as `reviewer_result` (`schema_version`, `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]`, and the new section verdicts) merged with the legacy summary fields (`dispatched`, `duration_ms`, `issues_found`, `acceptance_criteria_checked`) — instead of the thin issues-found envelope that stripped the issues, acceptance verdicts, and code-review checks the Kanban review queue renders. All three `reviewer_result` examples and the Explorer/Reviewer Result Schema section show the rich block; extraction is delegated to the `stride-workflow` "Extracting the structured review block" (Step 6); the schema itself is owned by `agents/task-reviewer.md` (cited, not redefined). The `dispatched: false` skip-form is unchanged.
+- **`skills/stride-workflow/SKILL.md`** (D58) — The Step 6 worked example bumps `schema_version` `"1.0"` → `"1.2"` and adds the section verdicts (the field-mapping list already enumerated them). Example payloads across the skills are aligned to `"1.2"`.
+
+### Backward compatibility
+
+Wire-shape additive only. The three section-verdict objects and the rich-block persistence are forward-compatible — the Kanban server stores `reviewer_result` as `:jsonb` and tolerates the new keys; older orchestrators that emit only the legacy envelope still validate, and the Kanban review queue (v2.x) derives the section tiles from `issues[]` categories when explicit section objects are absent. The hook fix changes only credential *resolution*; the upload remains fire-and-forget and the `$COMMAND` literal path is preserved for setups without `.stride_auth.md`.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` once the marketplace pin lands. No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required; the hook fix makes the existing variable-based completion curls upload diffs that were previously dropped. Reviews run by the updated agent populate the three section-verdict tiles automatically.
+
+### Source
+
+D57 (completion-skill rich block), D58 (reviewer section verdicts + `schema_version` `"1.2"`), D54 (hook changed_files credential resolution). Minor bump because D58 adds a new agent capability and bumps `schema_version`. The Kanban-server UI half of the rollout — deriving the section tiles, the status pill, and the panel hardening on the Review Queue — ships independently as defects D56 and D59.
+
 ## [1.18.0] - 2026-05-26
 
 ### Added

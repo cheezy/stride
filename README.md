@@ -110,6 +110,26 @@ The canonical `reviewer_result` JSON schema (`schema_version` `"1.2"`) — `summ
 
 Analyzes hook failure output and returns a prioritized fix plan. Parses compilation errors, test failures, security warnings, credo issues, format failures, and git failures with structured diagnosis per issue. Accepts both structured JSON from Claude Code hooks and raw text from legacy agent-executed hooks. Dispatched automatically when blocking hooks fail during the completion workflow. Claude Code only.
 
+## Commands
+
+Two slash commands create Stride work from existing project markdown. Both wrap the `stride-workflow` orchestrator (which dispatches the matching creation sub-skill) — they never call the creation sub-skills directly, and the orchestrator's activation marker and sub-skill gate still apply.
+
+### /stride:create-tasks
+
+```
+/stride:create-tasks [--dir <path>] [task description]
+```
+
+Create one or more work tasks (or defects). With `--dir <path>` — alias `--context`, and also accepting `--dir=<path>` — the command loads the `.md` files in that directory as a **read-only context bundle** and forwards it through `stride-workflow` to `stride-creating-tasks`, which mines it for `key_files`, `patterns_to_follow`, `acceptance_criteria` / `description`, and `pitfalls`. A `--dir` path that is set but missing is an error (non-zero exit); a directory with no `.md` files warns and continues. The context **augments** your interactive intent — it never overrides your confirmation or excuses a blank required field (including the four review_queue-scored fields). Only files inside `--dir` are read.
+
+### /stride:create-goals
+
+```
+/stride:create-goals [--dir <path>] [goal description]
+```
+
+The goal-creating sibling of `/stride:create-tasks`, with identical `--dir` / `--context` parsing and validation. Routes through `stride-workflow` to `stride-creating-goals`, producing a goal with nested tasks seeded from the context bundle. The batch `"goals"` root key and index-based dependency rules are unchanged.
+
 ## Automatic Hook Execution (Claude Code Hooks)
 
 When the Stride plugin is enabled, `.stride.md` hooks execute **automatically without permission prompts** via Claude Code's hook system. The plugin ships a `hooks/hooks.json` that registers PreToolUse and PostToolUse hooks on Bash commands, and a `hooks/stride-hook.sh` script that:

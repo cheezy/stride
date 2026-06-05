@@ -75,6 +75,30 @@ You do NOT need to invoke `stride-claiming-tasks`, `stride-subagent-workflow`, o
 
 **Note:** The individual skills (`stride-claiming-tasks`, `stride-subagent-workflow`, `stride-completing-tasks`) remain available for standalone use when needed -- for example, when resuming a partially completed task or when only one phase needs to be repeated. This orchestrator is the preferred entry point for new task work.
 
+## Context-Informed Creation (Command Entry Points)
+
+Two slash commands wrap this orchestrator as sanctioned entry points for creating work from existing markdown context (for example, a requirements doc, or a directory of design notes passed with `--dir`):
+
+| Command | Dispatches | Purpose |
+|---|---|---|
+| `/stride:create-tasks` | `stride-creating-tasks` | Create work tasks / defects informed by a context bundle |
+| `/stride:create-goals` | `stride-creating-goals` | Create a goal with nested tasks informed by a context bundle |
+
+Both commands **wrap the orchestrator — they do not invoke the creation sub-skills directly.** The flow is:
+
+1. The command enumerates the markdown files named by its `--dir` argument and assembles a **read-only context bundle** (the enumerated file contents) plus a **creation intent** (what the user wants created).
+2. The command hands that bundle and intent to this orchestrator.
+3. The orchestrator writes the activation marker (Step 0) exactly as it does for any other run, then **forwards the context bundle verbatim** to the dispatched creation sub-skill (`stride-creating-tasks` or `stride-creating-goals`).
+
+**Contract:**
+
+- The context bundle is **read-only** — the creation sub-skills consume it as reference material; they never edit the source markdown.
+- The bundle is forwarded **verbatim** — the orchestrator does not summarize, truncate, or reinterpret it before dispatch.
+- The **activation marker is still mandatory.** Because the commands route through the orchestrator, Step 0 writes the marker (see [Orchestrator Activation Marker](#orchestrator-activation-marker)) so the PreToolUse gate permits the `stride-creating-tasks` / `stride-creating-goals` dispatch — the same sub-skill set that gate governs. A command that skipped the marker would be blocked exactly like a direct user-prompt invocation.
+- These commands do **not** bypass or weaken the sub-skill STOP gate — they satisfy it the sanctioned way, by dispatching from inside the orchestrator.
+
+The task-field and batch-shape contracts the creation sub-skills enforce are **not** duplicated here — they live in `stride-creating-tasks` and `stride-creating-goals`.
+
 ## Platform Detection
 
 **How to determine which path to follow:**

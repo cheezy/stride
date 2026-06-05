@@ -2,6 +2,14 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.20.0] - 2026-06-05
+
+### Added
+
+- **`commands/create-tasks.md`** (W944) — New `/stride:create-tasks` slash command. Creates work tasks / defects, optionally seeded from a directory of project markdown via `--dir <path>` (alias `--context`; accepts both `--flag value` and `--flag=value`). It loads the `.md` files as a read-only context bundle and routes through the `stride-workflow` orchestrator, which dispatches `stride-creating-tasks` — it never invokes the creation sub-skill directly. A `--dir` path that is set but missing errors and exits non-zero; a directory with no `.md` files warns and continues.
+- **`commands/create-goals.md`** (W945) — New `/stride:create-goals` slash command, the goal-creating sibling of `/stride:create-tasks`. Same `--dir` / `--context` parsing and validation; routes through `stride-workflow` to dispatch `stride-creating-goals`, producing a goal with context-seeded nested tasks.
+- **Context-informed creation** (W941–W943) — `skills/stride-workflow/SKILL.md` gains a *Context-Informed Creation (Command Entry Points)* section documenting the two commands and the read-only context-bundle threading contract; `skills/stride-creating-tasks/SKILL.md` and `skills/stride-creating-goals/SKILL.md` each gain a *Consuming Provided Context* section mapping a forwarded markdown bundle onto task / goal fields. Context augments the user's intent and never silently overrides it; the activation-marker requirement, the sub-skill STOP gate, the four review_queue-scored fields, and the `"goals"` root-key / index-dependency rules are all unchanged.
+
 ## [1.19.0] - 2026-06-05
 
 ### Added

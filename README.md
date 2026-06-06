@@ -102,9 +102,9 @@ Breaks goals and large tasks into dependency-ordered child tasks. Uses scope ana
 
 ### stride:task-reviewer
 
-A pre-completion code review agent dispatched after implementation but before running hooks. Validates the git diff against `acceptance_criteria`, detects `pitfalls` violations, checks `patterns_to_follow` compliance, and verifies `testing_strategy` alignment. Returns categorized issues (Critical/Important/Minor) with file and line references.
+A pre-completion code review agent dispatched after implementation but before running hooks. Validates the git diff against `acceptance_criteria`, detects `pitfalls` violations, checks `patterns_to_follow` compliance, verifies `testing_strategy` alignment, and confirms the task's `security_considerations` were implemented. Returns categorized issues (Critical/Important/Minor) with file and line references.
 
-The canonical `reviewer_result` JSON schema (`schema_version` `"1.2"`) — `summary`, `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]` with the `met`/`not_met` enum, `project_checks[]` (v1.18.0+), and the per-section `testing_strategy` / `patterns` / `pitfalls` verdict objects (`passed`/`failed`/`not_assessed`, v1.19.0+) — is defined in [`agents/task-reviewer.md`](agents/task-reviewer.md) and is the schema of record for all six reviewer-variant prompts. Variant prompts cite that path; do not duplicate the schema elsewhere. The full structured block is persisted verbatim as `reviewer_result` and rendered by the Kanban review queue (issue list, acceptance verdicts, code-review checks, and the three section-verdict tiles).
+The canonical `reviewer_result` JSON schema (`schema_version` `"1.3"`) — `summary`, `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]` with the `met`/`not_met` enum, `project_checks[]` (v1.18.0+), and the per-section `testing_strategy` / `patterns` / `pitfalls` (v1.19.0+) / `security_considerations` (v1.21.0+) verdict objects (`passed`/`failed`/`not_assessed`) — is defined in [`agents/task-reviewer.md`](agents/task-reviewer.md) and is the schema of record for all six reviewer-variant prompts. Variant prompts cite that path; do not duplicate the schema elsewhere. The full structured block is persisted verbatim as `reviewer_result` and rendered by the Kanban review queue (issue list, acceptance verdicts, code-review checks, and the four section-verdict tiles).
 
 ### stride:hook-diagnostician
 
@@ -120,7 +120,7 @@ Two slash commands create Stride work from existing project markdown. Both wrap 
 /stride:create-tasks [--dir <path>] [task description]
 ```
 
-Create one or more work tasks (or defects). With `--dir <path>` — alias `--context`, and also accepting `--dir=<path>` — the command loads the `.md` files in that directory as a **read-only context bundle** and forwards it through `stride-workflow` to `stride-creating-tasks`, which mines it for `key_files`, `patterns_to_follow`, `acceptance_criteria` / `description`, and `pitfalls`. A `--dir` path that is set but missing is an error (non-zero exit); a directory with no `.md` files warns and continues. The context **augments** your interactive intent — it never overrides your confirmation or excuses a blank required field (including the four review_queue-scored fields). Only files inside `--dir` are read.
+Create one or more work tasks (or defects). With `--dir <path>` — alias `--context`, and also accepting `--dir=<path>` — the command loads the `.md` files in that directory as a **read-only context bundle** and forwards it through `stride-workflow` to `stride-creating-tasks`, which mines it for `key_files`, `patterns_to_follow`, `acceptance_criteria` / `description`, and `pitfalls`. A `--dir` path that is set but missing is an error (non-zero exit); a directory with no `.md` files warns and continues. The context **augments** your interactive intent — it never overrides your confirmation or excuses a blank required field (including the five review_queue-scored fields). Only files inside `--dir` are read.
 
 ### /stride:create-goals
 

@@ -2,6 +2,30 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.21.0] - 2026-06-06
+
+### Added
+
+- **`skills/stride-creating-tasks/SKILL.md`, `skills/stride-enriching-tasks/SKILL.md`, `skills/stride-creating-goals/SKILL.md`** (W999) — `security_considerations` is now a **first-class, review_queue-scored field**, elevated to parity with `testing_strategy`. Each skill's "⚠️ REVIEW QUEUE SCORING" callout now names **five** scored fields (was four) — `acceptance_criteria`, `testing_strategy`, `security_considerations`, `pitfalls`, `patterns_to_follow` — with the field shape documented (array of strings, matching the Kanban task field `{:array, :string}`), a worked example value, and matching pre-submission-checklist, red-flag, and rationalization-table rows. `stride-enriching-tasks` folds a security pass into Phase 2 Step 5 ("Identify risks and security → `pitfalls`, `security_considerations`") and bumps its checklist count 16 → 17. Purely additive; the unrelated "four-phase" enrichment-procedure references are unchanged.
+- **`agents/task-enricher.md`, `agents/task-decomposer.md`** (W1000) — Both decomposition/enrichment agents now derive and emit `security_considerations`. `task-enricher.md` folds a code-grounded security-analysis pass (input validation, authorization boundaries, secret handling, injection surfaces, data exposure) into Phase 2 Step 5, adds the checklist row / field-type reminder / array-shape guard / example value, and bumps its 16-item checklist references to 17. `task-decomposer.md` adds `security_considerations` to the required-fields table, the task template, and all four worked-example tasks with concrete values (authz, stored-XSS, atom-exhaustion, user-enumeration / rate-limiting).
+
+### Updated
+
+- **`agents/task-reviewer.md`** (W1001) — The reviewer agent now emits a fourth per-section verdict object, `security_considerations` (`{ "status": "passed" | "failed" | "not_assessed", "note": "<one-line rationale>" }`), alongside `testing_strategy` / `patterns` / `pitfalls`. A new review step 5, **Security Considerations Alignment**, gates whether the task's `security_considerations` were actually *implemented* (input validation, authz boundaries, secret handling, injection surfaces, data exposure; the explicit "None — …" case is honored). The `issues[]` `category` enum gains `"security"`, the consistency rule extends to `testing` / `pattern` / `pitfall` / `security`, and the review-queue tile-reading list adds `security_considerations.status`. `schema_version` is bumped `"1.2"` → `"1.3"` (schema-of-record preamble, step field list, and worked example); subsequent review steps renumber to 6/7/8.
+- **`skills/stride-completing-tasks/SKILL.md`, `skills/stride-workflow/SKILL.md`** (W1002) — Both completion-path skills carry the `security_considerations` verdict verbatim into `reviewer_result`. Every `reviewer_result` example pairs `security_considerations` with the other per-section verdicts (same `{status, note}` shape), the verbatim-copied-verdict lists and the "omit any key the agent did not emit" fallback rule now include it, and all example `schema_version` strings are aligned to `"1.3"`. The legacy-only fallback `reviewer_result` block is intentionally left untouched.
+
+### Backward compatibility
+
+Wire-shape additive only. The `security_considerations` verdict object is forward-compatible — the Kanban server stores `reviewer_result` as `:jsonb` and tolerates the new key; older orchestrators that omit it still validate, and the field is omitted (never sent as an empty placeholder) when a reviewer on an older `schema_version` does not emit it. The task INPUT field `security_considerations` already existed on the Kanban task schema; this release makes the plugin populate, verify, and report on it.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` once the marketplace pin lands. No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required. Tasks created/enriched/decomposed by the updated skills carry `security_considerations`, and reviews run by the updated agent populate the new section-verdict tile.
+
+### Source
+
+W999 (review_queue-scored field in creation/enrichment skills), W1000 (enricher/decomposer population), W1001 (reviewer section verdict + `schema_version` `"1.3"`), W1002 (verdict propagation through completion skills). Minor bump because W1001 adds a new agent capability and bumps `schema_version`, mirroring the 1.19.0 precedent. The Kanban-server UI half — rendering the security-considerations review result on the Review Queue — ships independently as goal G211.
+
 ## [1.20.0] - 2026-06-05
 
 ### Added

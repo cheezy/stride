@@ -2,6 +2,24 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.22.0] - 2026-06-07
+
+### Updated
+
+- **`hooks/stride-hook.sh`, `hooks/stride-hook.ps1`** (D61) — The `after_doing` hook now uploads the per-file diff snapshot to `/api/tasks/:id/changed_files` as a **transport-encoded envelope** — `{"changed_files":{"encoding":"base64","data":"<single-line-base64>"}}` — instead of the raw `{"changed_files":[...]}` array. An edge request filter (WAF) in front of the Stride server can misread a dense code diff as an attack payload and silently drop the upload, leaving `changed_files` empty in the review queue; base64-wrapping the body neutralizes that false positive while the server decodes it back to the identical list. The base64 is emitted single-line (wrap newlines stripped) so it is valid inside the JSON string. When `base64` is unavailable the hook **falls back** to the raw `{"changed_files":[...]}` shape (a bare top-level array would land at `params['_json']` and persist as NULL, so the object wrapper is preserved on both paths). The upload now captures the HTTP status and **warns to stderr on a non-2xx response** (`stride-hook: changed_files upload failed (HTTP <code>) for task <id>`) rather than discarding the result — the diff is still non-fatal to completion, so the hook warns rather than aborts, and the bearer token is never logged. The PowerShell mirror (`hooks/stride-hook.ps1`) applies the same encoding, fallback, and status-warning behavior via `[System.Convert]::ToBase64String` and `[Console]::Error.WriteLine`.
+
+### Backward compatibility
+
+Requires the Stride server (kanban) to accept the transport-encoded envelope (`base64` and `gzip+base64` encodings on `/changed_files`), which ships alongside this release. Against a server that predates envelope support, set environments where `base64` resolves still send the encoded shape; the raw-array fallback path remains byte-compatible with the prior hook for the no-`base64` case. The wire change is additive — no `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` once the marketplace pin lands. No configuration changes required.
+
+### Source
+
+D61 (edge-filter-safe transport encoding for the `changed_files` upload, hook status reporting, hook test coverage for the base64 / gzip+base64 / malformed / corrupt-gzip / decompression-bomb paths). The Kanban-server half — decoding the `base64` / `gzip+base64` envelope on `/changed_files` with bounded streaming inflate and size guards — ships independently in the kanban repo.
+
 ## [1.21.0] - 2026-06-06
 
 ### Added

@@ -2,6 +2,28 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.22.1] - 2026-06-08
+
+### Fixed
+
+- **`skills/stride-workflow/SKILL.md`** (D63) — The Step 6 "Extracting the structured review block" guidance built `reviewer_result` from a **hand-maintained enumerated copy-list** of structured keys, and that list omitted `project_checks`. As a result the reviewer agent's CODE-REVIEW.md per-bullet audit was silently dropped on completion and the Kanban review queue's "Code review" panel (gated on `reviewer_result["project_checks"]`) rendered nothing. The guidance is now a **verbatim passthrough**: copy the reviewer's entire parsed JSON object into `reviewer_result` and overlay only the legacy summary fields (`dispatched`, `duration_ms`, `summary`, `issues_found`, `acceptance_criteria_checked`) on top — so any key the schema gains later flows through automatically with no consumer edit. The fallback (no parseable JSON block) was inverted to a legacy-only *send* list so it no longer enumerates structured keys either.
+
+### Updated
+
+- **`agents/task-reviewer.md`, `skills/stride-completing-tasks/SKILL.md`** (W1049) — Added an explicit **consumption invariant** so the class of bug cannot recur: `agents/task-reviewer.md` is the single place the structured key-set is enumerated, and orchestrators/completion skills MUST persist the reviewer's emitted JSON block **verbatim** and MUST NOT maintain their own allow-list of keys to copy. `stride-completing-tasks` gains a completion-checklist item verifying `reviewer_result` carries the full structured block (incl. `project_checks`) and reinforces "passthrough verbatim; never re-enumerate" in its reviewer_result prose.
+
+### Backward compatibility
+
+Documentation/skill-instruction change only — no wire-shape, hook, `.stride.md`, `.stride_auth.md`, or `.gitignore` changes. `reviewer_result` is already stored as `:jsonb` by the Kanban server and the `project_checks[]` field already exists (v1.18.0+) and is already rendered by the review queue; this release simply stops the orchestrator from dropping it on the way out. Payloads produced by the prior enumerated guidance remain valid.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` once the marketplace pin lands. No configuration changes required.
+
+### Source
+
+D63 (verbatim-passthrough fix), W1049 (single-source-of-truth consumption invariant). The Kanban-repo half — a regression test asserting `reviewer_result.project_checks` round-trips and the review queue "Code review" panel renders — ships independently under W1050.
+
 ## [1.22.0] - 2026-06-07
 
 ### Updated

@@ -131,6 +131,7 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 - [ ] **Are you ready to run the `after_doing` hook (tests, linting)?** If no → fix any known issues first. The hook will fail if tests don't pass.
 - [ ] **Is `workflow_steps` included in the complete payload?** If no → add it now. The array is required on every completion. It must contain one entry for each of the six step names (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`) — see the stride-workflow skill for the schema.
 - [ ] **Are `explorer_result` and `reviewer_result` included?** If no → add them now. Both are required on every completion, either as a dispatched-subagent result or as a self-reported skip with a reason from the fixed enum. See the Explorer/Reviewer Result Schema section below.
+- [ ] **Does `reviewer_result` carry the reviewer's full structured block, verbatim?** If a `stride:task-reviewer` agent ran, `reviewer_result` must include the entire emitted JSON block — `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]`, and the section verdicts — copied verbatim (passthrough), not an enumerated subset. Never re-enumerate which keys to copy; the structured key-set is owned by `stride/agents/task-reviewer.md`. (A missing `project_checks` leaves the Review queue's Code review panel silently empty.)
 - [ ] **Per-file diffs.** No agent-side action is required on Stride server v1.16.0+ — the `after_doing` hook PUTs the snapshot to the server automatically. For older Stride deployments that still expect `changed_files` in the completion body, see the [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section below for the inline-cat pattern.
 
 **If ANY answer is NO → Go back and do it now. Do NOT proceed to completion.**
@@ -494,7 +495,11 @@ back-compat) when `dispatched` is `true`. If the reviewer emitted no parseable
 ` ```json ` fence, fall back to the legacy-only envelope and omit the structured
 keys — never invent them (see the `stride-workflow` Step 6 fallback).
 
-Copy exactly the keys the reviewer agent produced. An approved review still
+Copy exactly the keys the reviewer agent produced — passthrough verbatim; never
+maintain an enumerated allow-list of which structured keys to copy. The
+structured key-set is owned by `stride/agents/task-reviewer.md` (see its
+"Consumption invariant"); an enumerated copy-list in a consumer is what silently
+dropped `project_checks`. An approved review still
 emits `issues: []` and `project_checks: []` (the agent emits those arrays
 unconditionally), so the empty arrays in the examples above are real, not
 placeholders. But keys the agent did NOT emit — e.g. per-section

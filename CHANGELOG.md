@@ -2,6 +2,24 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.23.0] - 2026-06-08
+
+### Updated
+
+- **`agents/task-reviewer.md`** (W1057) — The `project_checks[]` per-entry `status` enum gains a third value, **`not_applicable`**, alongside `met` / `not_met`, and the reviewer is now required to **emit one entry for every top-level `CODE-REVIEW.md` bullet — never omit one**. Previously, with only `met` / `not_met` available, the reviewer silently dropped bullets that had no bearing on the diff under review (a small one-line fix surfaced only 2 of ~9 checks), so the Kanban review queue's "Code review" panel rendered a partial, ambiguous checklist. Now bullets that do not apply are marked `not_applicable` with a one-line reason in `evidence`; `not_applicable` is **approval-neutral** — it produces no paired `issues[]` entry and never contributes to `changes_requested` (only `not_met` does). `schema_version` bumps `"1.3"` → `"1.4"`, and the worked example demonstrates a `not_applicable` row. The example `schema_version` strings in `skills/stride-completing-tasks/SKILL.md` and `skills/stride-workflow/SKILL.md`, and the schema summary in `README.md`, were updated in lockstep so no stale `"1.3"` remains.
+
+### Backward compatibility
+
+Documentation/agent-prompt change only — no wire-shape, hook, `.stride.md`, `.stride_auth.md`, or `.gitignore` changes. The change is additive: `reviewer_result` is already stored as `:jsonb` by the Kanban server and persisted verbatim (v1.22.1), so the new `not_applicable` status value flows through with no consumer edit. Payloads from reviewers on the prior `"1.3"` schema (emitting only `met` / `not_met`) remain valid. The Kanban review-queue panel renders `not_applicable` as a neutral "N/A" pill (kanban-side W1058, ships independently).
+
+### Migration
+
+`/plugin update stride@stride-marketplace` once the marketplace pin lands. No configuration changes required.
+
+### Source
+
+W1057 (reviewer `not_applicable` status + full-checklist emission) under goal G219. The Kanban-repo half — the review-queue "N/A" pill rendering — ships independently under W1058.
+
 ## [1.22.1] - 2026-06-08
 
 ### Fixed

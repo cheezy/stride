@@ -278,7 +278,7 @@ Follow:
 
 Dispatch `stride:task-reviewer` agent with:
 - The git diff of all your changes
-- The task's `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, and `testing_strategy`
+- **Every review field the task supplies — NO EXCEPTIONS:** the task's `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `description`, `what`, and `why`. This list MUST match the reviewer agent's documented input contract (the "You will receive" line in `stride/agents/task-reviewer.md`) — pass every field the task carries, never a subset, never with a small-task or brevity discount. Omitting a supplied field (most often `security_considerations`) is the exact defect this prevents: a section the reviewer is never handed comes back `not_assessed` even though the task specified it.
 
 The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by `stride/agents/task-reviewer.md` — do not duplicate field definitions here.
 

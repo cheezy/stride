@@ -296,7 +296,26 @@ After the reviewer returns, extract the first fenced ```json block from its resp
 ```python
 import re, json
 m = re.search(r'```json\n(.*?)\n```', reviewer_response, re.DOTALL)
-structured = json.loads(m.group(1))  # the parsed schema
+structured = json.loads(m.group(1))  # the WHOLE parsed schema
+
+# Whole-object copy — carry EVERY section through, then overlay the legacy
+# fields. NEVER re-type or hand-pick keys; selecting a subset is exactly how
+# project_checks got truncated (3 of 26 reached the server).
+reviewer_result = dict(structured)
+reviewer_result.update({
+    "dispatched": True,
+    "duration_ms": wall_clock_ms,
+    "summary": structured["summary"],
+    "issues_found": sum(structured["issue_counts"].values()),
+    "acceptance_criteria_checked": len(structured["acceptance_criteria"]),
+})
+
+# MANDATORY self-check — run before EVERY /complete, NO EXCEPTIONS. A failure
+# here means you trimmed the output: fix the copy, never weaken the check.
+for section in structured:  # every section the reviewer produced must survive
+    assert section in reviewer_result, f"dropped review section: {section}"
+assert len(reviewer_result.get("project_checks", [])) == len(structured.get("project_checks", [])), \
+    "project_checks count must equal what the reviewer emitted — never trim or sub-select"
 ```
 
 **Field mapping into `reviewer_result`:**
@@ -306,7 +325,7 @@ structured = json.loads(m.group(1))  # the parsed schema
   - `issues_found` ← `sum(structured.issue_counts.values())` (sum only the recognized severity keys you receive; pass through any unknown severity keys verbatim inside the structured `issue_counts` object)
   - `acceptance_criteria_checked` ← `len(structured.acceptance_criteria)`
   - `dispatched: true`, `duration_ms: <wall-clock ms>` (as before)
-- Structured fields — **copy the reviewer's entire parsed JSON object verbatim** into `reviewer_result`, then overlay the legacy fields above on top. Do **not** maintain an allow-list of which structured keys to copy: whatever the agent emitted is persisted as-is, so any field the schema gains later flows through automatically (this is exactly how `project_checks` was being dropped — an enumerated copy-list silently omitted it). The structured key-set is owned by `stride/agents/task-reviewer.md`; passthrough it, never re-enumerate it here. Concretely, the reviewer currently emits `status`, `issue_counts`, `issues`, `acceptance_criteria`, `project_checks`, `testing_strategy`, `patterns`, `pitfalls`, `security_considerations`, and `schema_version` — but treat that as illustrative, not exhaustive. Because you copy the parsed JSON verbatim, keys the agent did not emit are simply absent (no empty placeholders to send).
+- Structured fields — **copy the reviewer's entire parsed JSON object verbatim** into `reviewer_result`, then overlay the legacy fields above on top. Do **not** maintain an allow-list of which structured keys to copy: whatever the agent emitted is persisted as-is, so any field the schema gains later flows through automatically (this is exactly how `project_checks` was being dropped — an enumerated copy-list silently omitted it). The structured key-set is owned by `stride/agents/task-reviewer.md`; passthrough it, never re-enumerate it here. Concretely, the reviewer currently emits `status`, `issue_counts`, `issues`, `acceptance_criteria`, `project_checks`, `testing_strategy`, `patterns`, `pitfalls`, `security_considerations`, and `schema_version` — but treat that as illustrative, not exhaustive. Because you copy the parsed JSON verbatim, keys the agent did not emit are simply absent (no empty placeholders to send). **Hand-typing, re-typing, or sub-selecting `reviewer_result` is FORBIDDEN — no exceptions, no small-task or brevity shortcut. The mechanical whole-object copy + mandatory self-check above is the only correct path; if the self-check fails, fix the copy, never the assertion.**
 
 **Worked example.** Given the reviewer response below (truncated for brevity)…
 

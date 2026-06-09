@@ -2,6 +2,30 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.24.0] - 2026-06-09
+
+### Changed — review reports must be delivered complete, NO EXCEPTIONS (G222)
+
+**Every part of a dispatched review report is now mandatory on every task completion — there are NO EXCEPTIONS.** All review information the task supplies — `security_considerations`, `testing_strategy`, `patterns_to_follow`, `pitfalls`, `acceptance_criteria` — must be passed to the reviewer, and the reviewer's entire structured output (every project check and every section verdict) must reach the server intact. Not for small tasks, not for trivial tasks, never with a promise to fix it later. This is the plugin-side source fix for the recurring defect where a task's security considerations came back **"not assessed"** and the project-checks list was silently **truncated** (3 of 26 reached the server). The Kanban server independently hard-rejects an incomplete or task-inconsistent report (goal G221); this release makes the plugin always *produce* a complete one.
+
+- **`skills/stride-workflow/SKILL.md`** (W1072) — The Code Review step's reviewer-dispatch instruction now passes **every** review field the task supplies (`acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `description`, `what`, `why`), matching the reviewer agent's documented input contract. It previously listed only four, so `security_considerations` was never handed to the reviewer and came back `not_assessed`.
+- **`agents/task-reviewer.md`** (W1073) — `not_assessed` is now reserved **strictly** for a section the task itself left empty; a task-supplied section MUST receive a real `passed`/`failed` verdict, and the reviewer is told it always receives every supplied field. Enum values and the failed-implies-issue consistency rule are unchanged.
+- **`skills/stride-workflow/SKILL.md`** + **`skills/stride-completing-tasks/SKILL.md`** (W1074) — The `reviewer_result` passthrough is now a mechanical **whole-object copy** with a mandatory self-check: every section the reviewer produced must be present, and the submitted `project_checks` count must equal the reviewer's. Hand-typing or sub-selecting the output is forbidden — no exceptions.
+- **`skills/stride-completing-tasks/SKILL.md`** (W1075) — A mandatory **pre-submission self-check hard gate** refuses to submit a thin or task-inconsistent report (section presence, project-checks completeness, no `not_assessed` for a task-supplied section — including security considerations). No small-task, trivial-task, or fix-it-later bypass.
+- **`skills/stride-subagent-workflow/SKILL.md`** + **`agents/task-reviewer.md`** (W1076) — Aligned the subagent-workflow dispatch doc to the full input list (it had kept the old shorter four-field set) and made the reviewer's input contract single-sourced, so no runtime path reintroduces the omission.
+
+### Backward compatibility
+
+Documentation/agent-prompt change only — no wire-shape, hook, `.stride.md`, `.stride_auth.md`, or `.gitignore` changes. The changes make the plugin always emit the complete `reviewer_result` the schema already defines (stored as `:jsonb` and persisted verbatim since v1.22.1). **Deliberate, accepted consequence:** a client that submits a thin or task-inconsistent dispatched review can no longer complete the task — that is the intended forcing function. Sibling-runtime variant prompts (Cursor / Windsurf / Continue / Codex / Gemini) live in their own repos and are out of scope for this release.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` once the marketplace pin lands. No configuration changes required.
+
+### Source
+
+Goal G222 (the plugin must always deliver complete review information — no exceptions): W1072 (pass every review field), W1073 (reserve `not_assessed` for genuinely-empty fields), W1074 (mechanical count-checked passthrough), W1075 (pre-submission self-check gate), W1076 (align the dispatch doc + input contract), W1077 (this release). The Kanban server-side enforcement half is goal G221 (shipped separately).
+
 ## [1.23.0] - 2026-06-08
 
 ### Updated

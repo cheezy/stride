@@ -498,6 +498,8 @@ When a blocking hook fails, dispatch `stride:hook-diagnostician` agent with the 
 
 ## Step 8: Complete the Task
 
+**FIRST run the mandatory pre-submission self-check** — the hard gate in `stride-completing-tasks` ("MANDATORY pre-submission self-check"). It must pass before you submit: every section the reviewer produced is present, the `project_checks` count equals the reviewer's, and no task-supplied section (especially `security_considerations`) comes back `not_assessed`. If it fails, re-run the reviewer with the full inputs or fix the passthrough — never submit a thin or task-inconsistent report (the Kanban server hard-rejects it anyway).
+
 Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 
 ```json

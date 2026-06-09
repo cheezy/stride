@@ -138,6 +138,16 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 
 Skipping these steps is not faster — it produces lower quality work that takes longer to fix. This checklist exists because agents consistently skipped these steps under pressure to deliver quickly.
 
+## ⚠️ MANDATORY pre-submission self-check (hard gate) ⚠️
+
+Run this **before every** `PATCH /api/tasks/:id/complete`. If ANY check fails, **DO NOT submit** — re-run `stride:task-reviewer` with the full task inputs (the orchestrator's reviewer-dispatch step passes every supplied field), or fix the passthrough, then re-check. There is **no bypass**: not for small tasks, not for trivial tasks, and never by submitting now with a note promising to fix it later.
+
+- [ ] **Every section present.** `reviewer_result` carries every section the reviewer emitted — the whole-object copy from "Extracting the structured review block" in the orchestrator. Nothing dropped.
+- [ ] **`project_checks` complete.** The submitted `project_checks` count equals the count the reviewer emitted — never trimmed or sub-selected.
+- [ ] **No `not_assessed` for a task-supplied section.** For each of `testing_strategy`, `patterns`, `pitfalls`, and `security_considerations`: if the **task** supplied that field, its verdict `status` is a real assessment (`passed`/`failed`), never `not_assessed` or absent. A task-supplied section coming back `not_assessed` means the reviewer was not handed it (fix the dispatch) or the verdict is wrong — re-run the reviewer; do not submit. **In particular: if the task carried `security_considerations`, `reviewer_result.security_considerations.status` MUST be `passed`/`failed`.**
+
+This gate is **not bypassable** by submitting a self-reported skip (`dispatched: false`) when a `stride:task-reviewer` agent actually ran — a dispatched review must pass all three checks. The self-check compares counts, keys, and status enums only; it never prints task content, diffs, or secrets. (The Kanban server now hard-rejects a report that fails any of these, so a failing self-check is also a failing completion — catch it here, before you submit.)
+
 ## The Complete Completion Process
 
 ### Claude Code (Automatic Hooks)

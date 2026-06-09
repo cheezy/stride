@@ -170,16 +170,13 @@ The Plan agent will return an ordered implementation plan. Follow this plan duri
 
 **When:** Task complexity is medium or large, OR task has 2+ key_files. Skip only for small tasks with 0-1 key_files.
 
-**What to do:** Dispatch the `stride:task-reviewer` agent, passing:
-- The git diff of all your changes
-- The task's `acceptance_criteria`
-- The task's `pitfalls` array
-- The task's `patterns_to_follow` text
-- The task's `testing_strategy` object
+**What to do:** Dispatch the `stride:task-reviewer` agent, passing the git diff AND **every review field the task supplies — NO EXCEPTIONS, never a subset:** `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `description`, `what`, and `why`. This input list is owned by the reviewer's contract — keep it in sync with the "You will receive" line in `stride/agents/task-reviewer.md` and the Code Review step in `stride-workflow`; do not maintain a shorter list here. Omitting a supplied field (most often `security_considerations`) is the D60 defect where a task's security considerations came back `not_assessed`.
 
 The reviewer will return either "Approved" or a list of issues categorized as Critical, Important, or Minor.
 
 **Capture the reviewer's output as `review_report`:** Save the full structured review output returned by the task-reviewer agent. You will include this as the `review_report` field in the completion API call (via `stride-completing-tasks`). Capture it regardless of whether the review found issues — an "Approved" report is still valuable for traceability. When the reviewer is skipped (small tasks with 0-1 key_files), simply omit `review_report` from the completion call.
+
+**Copy the whole structured block into `reviewer_result` — never a subset.** Beyond the prose `review_report`, the reviewer's structured JSON block must be carried into `reviewer_result` by a mechanical whole-object copy, then verified by the mandatory self-check before submission. The passthrough mechanics and the self-check (every section present; `project_checks` count equals the reviewer's; no `not_assessed` for a task-supplied section) are owned by `stride-workflow` ("Extracting the structured review block") and `stride-completing-tasks` ("MANDATORY pre-submission self-check") — follow them; do not re-enumerate or sub-select keys here.
 
 **If issues are found:**
 - Fix all Critical issues before proceeding

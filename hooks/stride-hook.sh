@@ -352,6 +352,19 @@ run_stride_section() {
   fi
 
   cd "$PROJECT_DIR"
+
+  # Early per-file diff snapshot (W1093) — the after_doing section runs the
+  # full quality gate, and the 120s hook timeout can kill this process
+  # mid-loop, silently losing the diff upload (how W1092 lost its diffs).
+  # Capture and PUT the snapshot BEFORE the first command executes; the
+  # post-loop call below is KEPT as a refresh once the gate succeeds. A bare
+  # call is safe: finalize_after_doing is idempotent, gates internally on the
+  # GLOBAL $HOOK_NAME (so the after_goal reuse of this function stays inert),
+  # emits nothing on stdout, and never returns non-zero — a degraded capture
+  # still writes a best-effort [] snapshot. Placed after the cd so
+  # capture_changed_files diffs $PROJECT_DIR's repo.
+  finalize_after_doing
+
   local _completed_file
   _completed_file=$(mktemp)
   local _start_secs
@@ -430,6 +443,8 @@ run_stride_section() {
   # Per-file diff snapshot (G148/W719) — no-op outside after_doing (gates on
   # the GLOBAL $HOOK_NAME). Calling run_stride_section for "after_goal" does
   # NOT re-trigger this because $HOOK_NAME stays at the primary hook's value.
+  # (W1093) This is the REFRESH of the early pre-loop snapshot — keep it: the
+  # gate's commands may modify files, and this re-captures the final tree.
   finalize_after_doing
 
   _end_secs=$(date +%s)

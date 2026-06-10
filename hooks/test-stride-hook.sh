@@ -1348,9 +1348,12 @@ CURLSTUB
   }
 
   # Extract the BODY section emitted by make_curl_stub from a fixture file.
-  # Reads the line(s) following 'BODY:' up to the next blank line or EOF.
+  # (W1093) after_doing now PUTs twice — an early pre-commands capture plus
+  # the post-commands refresh — so the fixture can hold two ARGS/BODY records.
+  # Capture stops at the next ARGS line and the LAST body wins: the refresh is
+  # the authoritative final upload that must match the on-disk snapshot.
   extract_body() {
-    awk '/^BODY:$/{flag=1; next} flag && /^$/{flag=0} flag' "$1"
+    awk '/^BODY:$/{flag=1; body=""; next} /^ARGS:/{flag=0} flag && /^$/{flag=0} flag{body = body $0 ORS} END{printf "%s", body}' "$1"
   }
 
   # Shared fixture: a git repo with one tracked change since BASE.
@@ -1360,10 +1363,14 @@ CURLSTUB
     git init -q
     git config user.email "test@test.local"
     git config user.name "Test"
+    # curl-call.txt is the stub recorder; it must be gitignored or the (W1093)
+    # post-commands refresh capture would pick it up as an untracked file and
+    # skew the snapshot the round-trip assertions compare against.
     cat > .gitignore << 'GITIGNORE'
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+curl-call.txt
 GITIGNORE
     echo "v1" > tracked.txt
     git add .gitignore tracked.txt > /dev/null
@@ -1400,6 +1407,12 @@ STRIDE
     # The stub's ARGS line includes "X PUT" (the "-" is recorded but assert_contains
     # via `grep -qF` treats a leading "-" as an option; use the un-dashed substring).
     assert_contains "8a: PUT call uses PUT method" "X PUT " "$PUT_CONTENTS"
+
+    # (W1093) after_doing PUTs twice: the early pre-commands capture plus the
+    # post-commands refresh. Exactly two recorded calls proves the early PUT
+    # was attempted before the section commands ran.
+    PUT_CALL_COUNT=$(grep -c '^ARGS:' "$PUT_FIXTURE")
+    assert_eq "8a: early capture + refresh make exactly two PUT calls" 2 "$PUT_CALL_COUNT"
 
     # D61: body must be a wrapped JSON object whose "changed_files" value is the
     # transport-encoded envelope {encoding: "base64", data: <string>} — NOT a
@@ -1520,10 +1533,12 @@ STRIDE
     git init -q
     git config user.email "test@test.local"
     git config user.name "Test"
+    # curl-call.txt gitignored for the same W1093 reason as setup_put_repo.
     cat > .gitignore << 'GITIGNORE'
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+curl-call.txt
 GITIGNORE
     echo "v1" > y.txt
     git add .gitignore y.txt > /dev/null
@@ -2182,6 +2197,233 @@ else
 
     rm -rf "$E2E_DIR"
   fi
+fi
+
+# ============================================================
+# Test Group 12: after_doing early snapshot capture (W1093)
+# ============================================================
+# run_stride_section must call finalize_after_doing BEFORE the command loop
+# when the GLOBAL HOOK_NAME is after_doing, so the 120s hook timeout cannot
+# kill the process before the diff snapshot is written. The post-loop call is
+# kept as a refresh. Network safety: TASK_ID is never set and no
+# .stride_auth.md exists in these fixtures, so finalize_after_doing skips the
+# curl PUT entirely (it requires TASK_ID plus a resolvable URL and token
+# before touching the network).
+echo ""
+echo "=== Test Group 12: after_doing early snapshot capture (W1093) ==="
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: jq missing — Group 12 requires jq for snapshot inspection"
+else
+  # Helper: seed a git repo whose working tree differs from the printed base
+  # ref by one tracked file (tracked.txt v1 -> v2). Prints the base ref.
+  w1093_seed_repo() {
+    local _dir="$1"
+    (
+      cd "$_dir" || exit 1
+      git init -q
+      git config user.email "test@test.local"
+      git config user.name "Test"
+      cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+early-snapshot.json
+GITIGNORE
+      echo "v1" > tracked.txt
+      git add .gitignore tracked.txt > /dev/null
+      git commit -q -m "v1"
+      git rev-parse HEAD
+      echo "v2" > tracked.txt
+      git add tracked.txt > /dev/null
+      git commit -q -m "v2"
+    )
+  }
+
+  # 12a: early-capture ordering — the FIRST section command finds
+  # .stride-changed-files.json already on disk and copies it aside.
+  W1093_DIR_A=$(mktemp -d)
+  W1093_BASE_A=$(w1093_seed_repo "$W1093_DIR_A")
+  cat > "$W1093_DIR_A/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+cp .stride-changed-files.json early-snapshot.json
+```
+STRIDE
+  W1093_OUT_A=$(
+    cd "$W1093_DIR_A" || exit 99
+    source "$HOOK_SCRIPT" 2>/dev/null
+    STRIDE_MD="$W1093_DIR_A/.stride.md"
+    PROJECT_DIR="$W1093_DIR_A"
+    HAS_JQ=true
+    HOOK_NAME="after_doing"
+    TASK_BASE_REF="$W1093_BASE_A"
+    run_stride_section "after_doing" 2>/dev/null
+  )
+  W1093_RC_A=$?
+  assert_exit "12a: after_doing section succeeds with early capture" 0 "$W1093_RC_A"
+  assert_contains "12a: structured success JSON emitted" '"status": "success"' "$W1093_OUT_A"
+  if jq -e 'type == "array" and length == 1 and .[0].path == "tracked.txt"' \
+    "$W1093_DIR_A/early-snapshot.json" > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: 12a: snapshot existed (populated) BEFORE first section command ran"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 12a: first section command did not find a populated snapshot"
+    FAIL=$((FAIL + 1))
+  fi
+  # stdout contract: the early capture must leak nothing onto stdout — the
+  # captured output must be exactly one JSON document (the success JSON).
+  if printf '%s' "$W1093_OUT_A" | jq -es 'length == 1 and .[0].hook == "after_doing"' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: 12a: stdout is exactly the structured success JSON (early capture is silent)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 12a: stdout contains more than the success JSON: $W1093_OUT_A"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$W1093_DIR_A"
+
+  # 12b: post-commands refresh — a section command modifies a tracked file;
+  # the final snapshot must include that change while the early copy must not.
+  W1093_DIR_B=$(mktemp -d)
+  W1093_BASE_B=$(w1093_seed_repo "$W1093_DIR_B")
+  cat > "$W1093_DIR_B/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+cp .stride-changed-files.json early-snapshot.json
+echo "v3" > tracked.txt
+```
+STRIDE
+  W1093_OUT_B=$(
+    cd "$W1093_DIR_B" || exit 99
+    source "$HOOK_SCRIPT" 2>/dev/null
+    STRIDE_MD="$W1093_DIR_B/.stride.md"
+    PROJECT_DIR="$W1093_DIR_B"
+    HAS_JQ=true
+    HOOK_NAME="after_doing"
+    TASK_BASE_REF="$W1093_BASE_B"
+    run_stride_section "after_doing" 2>/dev/null
+  )
+  W1093_RC_B=$?
+  assert_exit "12b: after_doing section with file-modifying command succeeds" 0 "$W1093_RC_B"
+  W1093_EARLY_DIFF=$(jq -r '.[] | select(.path == "tracked.txt") | .diff' \
+    "$W1093_DIR_B/early-snapshot.json" 2>/dev/null)
+  W1093_FINAL_DIFF=$(jq -r '.[] | select(.path == "tracked.txt") | .diff' \
+    "$W1093_DIR_B/.stride-changed-files.json" 2>/dev/null)
+  if printf '%s' "$W1093_EARLY_DIFF" | grep -qF '+v3'; then
+    echo -e "  ${RED}FAIL${RESET}: 12b: early snapshot already contains +v3 (capture not early)"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 12b: early snapshot predates the section command's change"
+    PASS=$((PASS + 1))
+  fi
+  if printf '%s' "$W1093_FINAL_DIFF" | grep -qF '+v3'; then
+    echo -e "  ${GREEN}PASS${RESET}: 12b: post-commands refresh re-captured the section command's change"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 12b: final snapshot missing +v3 (refresh removed or skipped)"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$W1093_DIR_B"
+
+  # 12c: GLOBAL HOOK_NAME gate — running the after_goal SECTION while the
+  # global HOOK_NAME is after_review must leave no snapshot (pitfall: the
+  # gate is $HOOK_NAME, not the _section argument). A real repo with a real
+  # base ref is seeded so the test can actually fail if the gate breaks.
+  W1093_DIR_C=$(mktemp -d)
+  W1093_BASE_C=$(w1093_seed_repo "$W1093_DIR_C")
+  cat > "$W1093_DIR_C/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "after_goal ran"
+```
+STRIDE
+  W1093_OUT_C=$(
+    cd "$W1093_DIR_C" || exit 99
+    source "$HOOK_SCRIPT" 2>/dev/null
+    STRIDE_MD="$W1093_DIR_C/.stride.md"
+    PROJECT_DIR="$W1093_DIR_C"
+    HAS_JQ=true
+    HOOK_NAME="after_review"
+    TASK_BASE_REF="$W1093_BASE_C"
+    run_stride_section "after_goal" 2>/dev/null
+  )
+  W1093_RC_C=$?
+  assert_exit "12c: after_goal section under HOOK_NAME=after_review succeeds" 0 "$W1093_RC_C"
+  assert_contains "12c: structured success JSON references after_goal" '"hook": "after_goal"' "$W1093_OUT_C"
+  if [ ! -f "$W1093_DIR_C/.stride-changed-files.json" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 12c: no snapshot written when HOOK_NAME is not after_doing"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 12c: snapshot written despite HOOK_NAME=after_review (gate broken)"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$W1093_DIR_C"
+
+  # 12d: failing section command — structured failed JSON and return 2 are
+  # preserved, with the early snapshot already on disk (the whole point of
+  # W1093: the snapshot survives a gate failure or timeout).
+  W1093_DIR_D=$(mktemp -d)
+  W1093_BASE_D=$(w1093_seed_repo "$W1093_DIR_D")
+  cat > "$W1093_DIR_D/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+bash -c 'exit 7'
+```
+STRIDE
+  W1093_OUT_D=$(
+    cd "$W1093_DIR_D" || exit 99
+    source "$HOOK_SCRIPT" 2>/dev/null
+    STRIDE_MD="$W1093_DIR_D/.stride.md"
+    PROJECT_DIR="$W1093_DIR_D"
+    HAS_JQ=true
+    HOOK_NAME="after_doing"
+    TASK_BASE_REF="$W1093_BASE_D"
+    run_stride_section "after_doing" 2>/dev/null
+  )
+  W1093_RC_D=$?
+  assert_exit "12d: failing after_doing command still returns 2" 2 "$W1093_RC_D"
+  assert_contains "12d: structured failed JSON emitted" '"status": "failed"' "$W1093_OUT_D"
+  assert_contains "12d: failed JSON carries exit_code 7" '"exit_code": 7' "$W1093_OUT_D"
+  if jq -e 'type == "array" and length == 1 and .[0].path == "tracked.txt"' \
+    "$W1093_DIR_D/.stride-changed-files.json" > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: 12d: early snapshot survives a failed quality gate"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 12d: snapshot missing or wrong after failed gate"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$W1093_DIR_D"
+
+  # 12e: best-effort — non-repo dir with TASK_BASE_REF unset must still write
+  # a [] snapshot and must NOT block the gate (early capture is never fatal).
+  W1093_DIR_E=$(mktemp -d)
+  cat > "$W1093_DIR_E/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+echo "gate ran"
+```
+STRIDE
+  W1093_OUT_E=$(
+    cd "$W1093_DIR_E" || exit 99
+    source "$HOOK_SCRIPT" 2>/dev/null
+    STRIDE_MD="$W1093_DIR_E/.stride.md"
+    PROJECT_DIR="$W1093_DIR_E"
+    HAS_JQ=true
+    HOOK_NAME="after_doing"
+    run_stride_section "after_doing" 2>/dev/null
+  )
+  W1093_RC_E=$?
+  assert_exit "12e: non-repo early capture does not block the gate" 0 "$W1093_RC_E"
+  assert_contains "12e: structured success JSON emitted" '"status": "success"' "$W1093_OUT_E"
+  if jq -e 'type == "array" and length == 0' \
+    "$W1093_DIR_E/.stride-changed-files.json" > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: 12e: degraded capture wrote best-effort [] snapshot"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 12e: expected [] snapshot in non-repo dir"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$W1093_DIR_E"
 fi
 
 # ============================================================

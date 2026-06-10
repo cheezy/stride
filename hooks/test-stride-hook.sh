@@ -1313,8 +1313,11 @@ if ! command -v jq > /dev/null 2>&1 || ! command -v git > /dev/null 2>&1; then
   echo "  SKIP: jq or git missing — Group 8 requires both"
 else
   # Helper to build the curl stub. Writes args + stdin into $1 and exits $2.
+  # Optional 4th arg mocks the HTTP code real `curl -w '%{http_code}'` would
+  # print to stdout (W1094 state-file tests); empty default prints nothing,
+  # keeping all pre-existing call sites byte-identical in behavior.
   make_curl_stub() {
-    local stub_dir="$1" fixture="$2" exit_code="${3:-0}"
+    local stub_dir="$1" fixture="$2" exit_code="${3:-0}" http_code="${4:-}"
     mkdir -p "$stub_dir"
     cat > "$stub_dir/curl" << CURLSTUB
 #!/usr/bin/env bash
@@ -1342,6 +1345,7 @@ for a in "\$@"; do
   esac
   prev="\$a"
 done
+printf '%s' '$http_code'
 exit $exit_code
 CURLSTUB
     chmod +x "$stub_dir/curl"
@@ -1365,11 +1369,13 @@ CURLSTUB
     git config user.name "Test"
     # curl-call.txt is the stub recorder; it must be gitignored or the (W1093)
     # post-commands refresh capture would pick it up as an untracked file and
-    # skew the snapshot the round-trip assertions compare against.
+    # skew the snapshot the round-trip assertions compare against. The W1094
+    # upload-state file needs the same treatment.
     cat > .gitignore << 'GITIGNORE'
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+.stride-diff-upload-state
 curl-call.txt
 GITIGNORE
     echo "v1" > tracked.txt
@@ -1495,6 +1501,7 @@ STRIDE
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+.stride-diff-upload-state
 GITIGNORE
     echo "v1" > x.txt
     git add .gitignore x.txt > /dev/null
@@ -1533,11 +1540,13 @@ STRIDE
     git init -q
     git config user.email "test@test.local"
     git config user.name "Test"
-    # curl-call.txt gitignored for the same W1093 reason as setup_put_repo.
+    # curl-call.txt gitignored for the same W1093 reason as setup_put_repo;
+    # the W1094 upload-state file likewise.
     cat > .gitignore << 'GITIGNORE'
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+.stride-diff-upload-state
 curl-call.txt
 GITIGNORE
     echo "v1" > y.txt
@@ -2228,6 +2237,7 @@ else
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+.stride-diff-upload-state
 early-snapshot.json
 GITIGNORE
       echo "v1" > tracked.txt
@@ -2424,6 +2434,250 @@ STRIDE
     FAIL=$((FAIL + 1))
   fi
   rm -rf "$W1093_DIR_E"
+fi
+
+# ============================================================
+# Test Group 13: changed_files upload self-heal (W1094)
+# ============================================================
+# finalize_after_doing records each PUT outcome in .stride-diff-upload-state
+# (task id + HTTP code only); the before_review path verifies that state on a
+# fresh PostToolUse budget and re-captures + re-PUTs when the state is
+# missing, names a different task, or recorded a non-2xx. The state file is
+# cleaned at the before_doing claim refresh and the after_review cleanup.
+# Network safety: every test stubs curl on PATH (or supplies no TASK_ID), so
+# no real network is reachable.
+echo ""
+echo "=== Test Group 13: changed_files upload self-heal (W1094) ==="
+
+if ! command -v jq > /dev/null 2>&1 || ! command -v git > /dev/null 2>&1; then
+  echo "  SKIP: jq or git missing — Group 13 requires both (reuses Group 8 helpers)"
+else
+  W1094_COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer tok\""}}'
+
+  # 13a: finalize_after_doing records task id + mocked 2xx in the state file
+  # after the pre-path PUTs, and the state file carries no credentials.
+  SH_DIR_A=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  SH_FIXTURE_A="$SH_DIR_A/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$SH_FIXTURE_A" 0 200
+  (
+    setup_put_repo "$SH_DIR_A" || exit 1
+    echo "$W1094_COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  if [ -f "$SH_DIR_A/.stride-diff-upload-state" ]; then
+    SH_STATE_A=$(cat "$SH_DIR_A/.stride-diff-upload-state")
+    assert_contains "13a: state file records the task id" "task_id=42" "$SH_STATE_A"
+    assert_contains "13a: state file records the mocked 2xx" "http_code=200" "$SH_STATE_A"
+    if echo "$SH_STATE_A" | grep -qE 'Bearer|https?://'; then
+      echo -e "  ${RED}FAIL${RESET}: 13a: state file leaked a credential or URL: $SH_STATE_A"
+      FAIL=$((FAIL + 1))
+    else
+      echo -e "  ${GREEN}PASS${RESET}: 13a: state file carries no token or URL"
+      PASS=$((PASS + 1))
+    fi
+  else
+    echo -e "  ${RED}FAIL${RESET}: 13a: state file was not written after the PUT attempt"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$SH_DIR_A" "$STUB_DIR"
+
+  # 13b: a non-2xx PUT outcome is recorded verbatim.
+  SH_DIR_B=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  make_curl_stub "$STUB_DIR" "$SH_DIR_B/curl-call.txt" 0 500
+  (
+    setup_put_repo "$SH_DIR_B" || exit 1
+    echo "$W1094_COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  SH_STATE_B=$(cat "$SH_DIR_B/.stride-diff-upload-state" 2>/dev/null)
+  assert_contains "13b: state file records the non-2xx code" "http_code=500" "$SH_STATE_B"
+  rm -rf "$SH_DIR_B" "$STUB_DIR"
+
+  # 13c: before_review retries when NO state file exists — re-captures the
+  # snapshot against TASK_BASE_REF and PUTs it.
+  SH_DIR_C=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  SH_FIXTURE_C="$SH_DIR_C/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$SH_FIXTURE_C" 0 200
+  (
+    setup_put_repo "$SH_DIR_C" || exit 1
+    echo "$W1094_COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  SH_RC_C=$?
+  assert_exit "13c: before_review with missing state exits 0" 0 "$SH_RC_C"
+  if [ -f "$SH_FIXTURE_C" ]; then
+    SH_CALLS_C=$(grep -c '^ARGS:' "$SH_FIXTURE_C")
+    assert_eq "13c: missing state triggers exactly one retry PUT" 1 "$SH_CALLS_C"
+    assert_contains "13c: retry PUT targets the changed_files route" \
+      "https://stride.example.com/api/tasks/42/changed_files" "$(cat "$SH_FIXTURE_C")"
+    assert_contains "13c: retry uses PUT method" "X PUT " "$(cat "$SH_FIXTURE_C")"
+  else
+    echo -e "  ${RED}FAIL${RESET}: 13c: no retry PUT was made for missing state"
+    FAIL=$((FAIL + 1))
+  fi
+  if jq -e 'type == "array" and length == 1 and .[0].path == "tracked.txt"' \
+    "$SH_DIR_C/.stride-changed-files.json" > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: 13c: retry re-captured the snapshot against TASK_BASE_REF"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 13c: retry did not re-capture the snapshot"
+    FAIL=$((FAIL + 1))
+  fi
+  SH_STATE_C=$(cat "$SH_DIR_C/.stride-diff-upload-state" 2>/dev/null)
+  assert_contains "13c: retry outcome recorded for the current task" "task_id=42" "$SH_STATE_C"
+  assert_contains "13c: retry outcome records the 2xx" "http_code=200" "$SH_STATE_C"
+  rm -rf "$SH_DIR_C" "$STUB_DIR"
+
+  # 13d: before_review does NOT re-upload when a 2xx is recorded for the
+  # current task — and leaves the on-disk snapshot untouched.
+  SH_DIR_D=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  SH_FIXTURE_D="$SH_DIR_D/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$SH_FIXTURE_D" 0 200
+  (
+    setup_put_repo "$SH_DIR_D" || exit 1
+    printf 'task_id=42\nhttp_code=200\n' > .stride-diff-upload-state
+    printf '[{"path":"stale.txt","diff":"marker"}]\n' > .stride-changed-files.json
+    echo "$W1094_COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  SH_RC_D=$?
+  assert_exit "13d: healthy-state before_review exits 0" 0 "$SH_RC_D"
+  if [ ! -f "$SH_FIXTURE_D" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 13d: no re-upload on a recorded 2xx for the current task"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 13d: re-uploaded despite healthy state: $(cat "$SH_FIXTURE_D")"
+    FAIL=$((FAIL + 1))
+  fi
+  if jq -e '.[0].path == "stale.txt"' "$SH_DIR_D/.stride-changed-files.json" > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: 13d: on-disk snapshot left untouched on healthy state"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 13d: snapshot was overwritten despite healthy state"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$SH_DIR_D" "$STUB_DIR"
+
+  # 13e: a state file naming a DIFFERENT task id triggers the retry.
+  SH_DIR_E=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  SH_FIXTURE_E="$SH_DIR_E/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$SH_FIXTURE_E" 0 200
+  (
+    setup_put_repo "$SH_DIR_E" || exit 1
+    printf 'task_id=41\nhttp_code=200\n' > .stride-diff-upload-state
+    echo "$W1094_COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  if [ -f "$SH_FIXTURE_E" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 13e: stale task id in state triggers the retry PUT"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 13e: no retry despite state naming a different task"
+    FAIL=$((FAIL + 1))
+  fi
+  SH_STATE_E=$(cat "$SH_DIR_E/.stride-diff-upload-state" 2>/dev/null)
+  assert_contains "13e: state rewritten for the current task" "task_id=42" "$SH_STATE_E"
+  rm -rf "$SH_DIR_E" "$STUB_DIR"
+
+  # 13f: a recorded non-2xx for the current task triggers the retry.
+  SH_DIR_F=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  SH_FIXTURE_F="$SH_DIR_F/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$SH_FIXTURE_F" 0 200
+  (
+    setup_put_repo "$SH_DIR_F" || exit 1
+    printf 'task_id=42\nhttp_code=503\n' > .stride-diff-upload-state
+    echo "$W1094_COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  if [ -f "$SH_FIXTURE_F" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 13f: recorded non-2xx triggers the retry PUT"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 13f: no retry despite recorded non-2xx"
+    FAIL=$((FAIL + 1))
+  fi
+  SH_STATE_F=$(cat "$SH_DIR_F/.stride-diff-upload-state" 2>/dev/null)
+  assert_contains "13f: state updated to the retry's 2xx" "http_code=200" "$SH_STATE_F"
+  rm -rf "$SH_DIR_F" "$STUB_DIR"
+
+  # 13g: a FAILING retry warns on stderr in finalize_after_doing's existing
+  # style and never fails the before_review hook.
+  SH_DIR_G=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  SH_ERR_G="$SH_DIR_G/stderr.txt"
+  make_curl_stub "$STUB_DIR" "$SH_DIR_G/curl-call.txt" 0 500
+  (
+    setup_put_repo "$SH_DIR_G" || exit 1
+    echo "$W1094_COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2> "$SH_ERR_G"
+  )
+  SH_RC_G=$?
+  assert_exit "13g: failed retry never fails the before_review hook" 0 "$SH_RC_G"
+  assert_contains "13g: failed retry warns in the existing stderr style" \
+    "changed_files upload failed (HTTP 500) for task 42" "$(cat "$SH_ERR_G" 2>/dev/null)"
+  SH_STATE_G=$(cat "$SH_DIR_G/.stride-diff-upload-state" 2>/dev/null)
+  assert_contains "13g: failed retry outcome recorded" "http_code=500" "$SH_STATE_G"
+  rm -rf "$SH_DIR_G" "$STUB_DIR"
+
+  # 13h: the before_doing claim refresh removes a stale state file.
+  SH_DIR_H=$(mktemp -d)
+  cat > "$SH_DIR_H/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "claimed"
+```
+STRIDE
+  printf 'task_id=41\nhttp_code=200\n' > "$SH_DIR_H/.stride-diff-upload-state"
+  SH_CLAIM_JSON='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":"{\"data\":{\"id\":42,\"identifier\":\"W42\",\"title\":\"T\",\"status\":\"in_progress\",\"complexity\":\"small\",\"priority\":\"low\"}}"}'
+  (
+    cd "$SH_DIR_H" || exit 1
+    echo "$SH_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  if [ ! -f "$SH_DIR_H/.stride-diff-upload-state" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 13h: claim refresh removes the previous task's upload state"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 13h: stale upload state survived the claim refresh"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$SH_DIR_H"
+
+  # 13i: the after_review cleanup removes the state file.
+  SH_DIR_I=$(mktemp -d)
+  cat > "$SH_DIR_I/.stride.md" << 'STRIDE'
+## after_review
+```bash
+echo "reviewed"
+```
+STRIDE
+  printf 'task_id=42\nhttp_code=200\n' > "$SH_DIR_I/.stride-diff-upload-state"
+  SH_REVIEW_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/mark_reviewed"}}'
+  (
+    cd "$SH_DIR_I" || exit 1
+    echo "$SH_REVIEW_JSON" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  if [ ! -f "$SH_DIR_I/.stride-diff-upload-state" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 13i: after_review cleanup removes the upload state"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 13i: upload state survived the after_review cleanup"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$SH_DIR_I"
+
+  # 13j: end-to-end pre then post — a healthy after_doing upload (early +
+  # refresh = exactly 2 PUTs) is NOT repeated by the before_review pass.
+  SH_DIR_J=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  SH_FIXTURE_J="$SH_DIR_J/curl-call.txt"
+  make_curl_stub "$STUB_DIR" "$SH_FIXTURE_J" 0 200
+  (
+    setup_put_repo "$SH_DIR_J" || exit 1
+    echo "$W1094_COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+    echo "$W1094_COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  SH_CALLS_J=$(grep -c '^ARGS:' "$SH_FIXTURE_J" 2>/dev/null)
+  assert_eq "13j: healthy pre-path upload is not repeated by before_review" 2 "$SH_CALLS_J"
+  rm -rf "$SH_DIR_J" "$STUB_DIR"
 fi
 
 # ============================================================

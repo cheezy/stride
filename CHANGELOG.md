@@ -2,6 +2,19 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.25.0] - 2026-06-10
+
+### Changed — the changed-files diff upload survives the after_doing timeout (W1093-W1096)
+
+The after_doing quality gate (tests with coverage, credo, sobelow, auto-commit) shares one hook timeout with the per-file diff upload that used to run only **after** every gate command succeeded. On a slow gate the timeout killed the process before the upload, silently losing the task's diffs (exactly how task W1092 lost its file diffs). This release defends in four layers:
+
+- **`hooks/stride-hook.sh`** (W1093) — `run_stride_section` now calls `finalize_after_doing` **before** the first after_doing section command executes (immediately after the command-list parse and `cd "$PROJECT_DIR"`), and KEEPS the existing post-commands call as a refresh so tree-mutating gate commands (formatters, gettext extraction) still surface in the final snapshot. The early call is gated internally on the GLOBAL `$HOOK_NAME`, so the `after_goal` reuse of `run_stride_section` stays inert; a degraded capture still writes a best-effort `[]` snapshot and never blocks the gate. New Test Group 12 (12a-12e) covers the ordering, stdout purity, the gate, failed-gate survival, and the non-repo path.
+- **`hooks/stride-hook.sh`** (W1094) — self-heal layer: `finalize_after_doing` records each PUT outcome in `$PROJECT_DIR/.stride-diff-upload-state` (task id + HTTP code ONLY — never the URL or bearer token), and the before_review hook — a fresh PostToolUse timeout budget — verifies that state, re-capturing against `TASK_BASE_REF` and re-PUTting when the state is missing, names a different task, or recorded a non-2xx. A healthy 2xx for the current task short-circuits before credential resolution (a successful after_doing upload is never repeated). The upload moved into a shared `upload_changed_files_snapshot` helper (same D61 base64 envelope, same stderr warning style). The state file is cleaned at the before_doing claim refresh and the after_review cleanup. New Test Group 13 (13a-13j).
+- **`hooks/stride-hook.ps1`** (W1095) — Windows parity: the same early upload, upload-state file, and before_review retry (`Invoke-ChangedFilesUpload` / `Write-DiffUploadState` / `Invoke-SelfHealChangedFilesUpload`), with the claim refresh and after_review cleanup now also clearing the snapshot and state (the ps1 script has no capture step, so a stale snapshot must never be re-uploaded under a new task id). Also repairs the ps1 test suite, which failed at baseline on pwsh 7.6: a reserved `$Input` parameter name, a StrictMode `.Count`-on-null crash that killed the run, `Start-Process -ArgumentList` argv mangling on Unix .NET that silently lost ALL section-command output (replaced with `ProcessStartInfo.ArgumentList` + concurrent `ReadToEndAsync` drains to avoid the stderr-pipe deadlock), hand-rolled invalid JSON in two tests that dropped the Bearer token, a listener-startup race, and stale pre-D61 raw-body assertions. New Test Group 9 (9a-9i); the ps1 suite is 131 assertions green, the bash suite 198.
+- **`hooks/hooks.json` + `README.md`** (W1096) — headroom: both Bash hook timeouts raised 120 → 300 seconds (the Skill-matcher gate stays at 10 seconds), with a new README subsection documenting the after_doing time budget as a shared ceiling, the kill behavior on timeout, and the trim-or-fork recommendation for slow gates.
+
+**`.gitignore` note:** projects should add `.stride-diff-upload-state` alongside `.stride-env-cache` and `.stride-changed-files.json` — all three are temp artifacts written between hook invocations.
+
 ## [1.24.0] - 2026-06-09
 
 ### Changed — review reports must be delivered complete, NO EXCEPTIONS (G222)

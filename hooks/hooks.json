@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stride-hook.sh post",
-            "timeout": 120
+            "timeout": 300
           }
         ]
       }
@@ -19,7 +19,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stride-hook.sh pre",
-            "timeout": 120
+            "timeout": 300
           }
         ]
       },

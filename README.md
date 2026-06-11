@@ -154,6 +154,14 @@ When the Stride plugin is enabled, `.stride.md` hooks execute **automatically wi
 
 **Note:** Add `.stride-env-cache` and `.stride-changed-files.json` to your `.gitignore` — both are temp files written between hook invocations. `.stride-env-cache` caches task metadata (including the base commit captured at claim time); `.stride-changed-files.json` holds the per-file diff snapshot captured at the end of `after_doing`. On Stride server v1.16.0+ the `after_doing` hook PUTs this snapshot to the server automatically (no agent action required); against older servers, agents inline-cat the file into the completion body (see `stride-completing-tasks` SKILL.md). Both files are cleaned up automatically after the `after_review` hook. **(v1.22.0+)** The automatic PUT sends a transport-encoded envelope — `{"changed_files":{"encoding":"base64","data":"<base64>"}}` — so an edge request filter (WAF) cannot misread a code diff as an attack and silently drop the upload; the server decodes it back to the identical list. When `base64` is unavailable the hook falls back to the raw `{"changed_files":[...]}` shape, and a non-2xx upload response is now surfaced as a stderr warning (non-fatal; the bearer token is never logged).
 
+### The `after_doing` time budget
+
+The two Bash hook entries in `hooks/hooks.json` carry a **300-second timeout** (the Skill-matcher gate stays at 10 seconds — it fires on every Skill invocation and must remain fast). The timeout is a **ceiling, not a guarantee**: the entire `after_doing` section — every command in your `.stride.md` quality gate (test suite with coverage, credo, sobelow, auto-commit) plus the plugin's own snapshot work — shares this one budget.
+
+When the budget is exceeded, Claude Code kills the hook process. With the early-capture fix (v1.25.0+) the per-file diffs are already uploaded before your gate commands start, so a timeout no longer loses them — but the structured success JSON, the post-command snapshot refresh, and any not-yet-run gate commands are still lost, and the completion call is blocked as if the gate had failed.
+
+If your project's quality gate runs close to the ceiling, either trim the `.stride.md` `## after_doing` section (move slow steps like a full coverage run into CI) or raise the `timeout` values further in a fork of the plugin.
+
 ## Configuration
 
 Before using Stride skills, you need two configuration files in your project root:

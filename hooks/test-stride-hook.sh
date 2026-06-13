@@ -1380,6 +1380,120 @@ NEW
     "+v3-uncommitted-on-top" \
     "$DEDUPE_DIFF"
   rm -rf "$DEDUPE_DIR"
+
+  # 7t (D67): the hook's OWN root artifacts (.stride-diff-upload-state and
+  # .stride-changed-files.json) are excluded from the snapshot when untracked,
+  # while a legitimate changed file is still captured. Output is captured via
+  # command substitution (not a redirect into the repo dir) so the output file
+  # itself never appears as an untracked entry in the snapshot.
+  EXCL_DIR=$(mktemp -d)
+  EXCL_OUTPUT=$(
+    cd "$EXCL_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > real.txt
+    git add real.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    echo "changed" > real.txt
+    # The hook's own untracked bookkeeping artifacts at the repo root.
+    printf 'task_id=42\nhttp_code=200\n' > .stride-diff-upload-state
+    printf '[]\n' > .stride-changed-files.json
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  EXCL_STATE=$(echo "$EXCL_OUTPUT" | jq -r '[.[] | select(.path == ".stride-diff-upload-state")] | length')
+  assert_eq "D67: untracked upload-state file excluded from snapshot" "0" "$EXCL_STATE"
+  EXCL_SNAP=$(echo "$EXCL_OUTPUT" | jq -r '[.[] | select(.path == ".stride-changed-files.json")] | length')
+  assert_eq "D67: snapshot file itself excluded from snapshot" "0" "$EXCL_SNAP"
+  EXCL_REAL=$(echo "$EXCL_OUTPUT" | jq -r '.[] | select(.path == "real.txt") | .path')
+  assert_eq "D67: legitimate changed file still captured" "real.txt" "$EXCL_REAL"
+  rm -rf "$EXCL_DIR"
+
+  # 7u (D67): a COMMITTED upload-state file that differs from base is still
+  # excluded — this is the after_doing auto-commit case that polluted W1098.
+  EXCL2_DIR=$(mktemp -d)
+  EXCL2_OUTPUT=$(
+    cd "$EXCL2_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    printf 'task_id=1\nhttp_code=200\n' > .stride-diff-upload-state
+    echo "v1" > real.txt
+    git add -A > /dev/null
+    git commit -q -m "v1 (state file committed)"
+    BASE=$(git rev-parse HEAD)
+    # Auto-commit case: both the state file and a real file change, then commit.
+    printf 'task_id=2\nhttp_code=200\n' > .stride-diff-upload-state
+    echo "v2" > real.txt
+    git add -A > /dev/null
+    git commit -q -m "v2"
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  EXCL2_STATE=$(echo "$EXCL2_OUTPUT" | jq -r '[.[] | select(.path == ".stride-diff-upload-state")] | length')
+  assert_eq "D67: committed+modified upload-state file excluded" "0" "$EXCL2_STATE"
+  EXCL2_REAL=$(echo "$EXCL2_OUTPUT" | jq -r '.[] | select(.path == "real.txt") | .path')
+  assert_eq "D67: real file still captured alongside excluded state file" "real.txt" "$EXCL2_REAL"
+  rm -rf "$EXCL2_DIR"
+
+  # 7v (D67): the exclusion is anchored to the repo ROOT — same-named files in a
+  # subdirectory belong to the user's project and must still be captured.
+  EXCL3_DIR=$(mktemp -d)
+  EXCL3_OUTPUT=$(
+    cd "$EXCL3_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > root.txt
+    git add root.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    mkdir -p sub
+    printf 'user data\n' > sub/.stride-diff-upload-state
+    printf 'user snapshot\n' > sub/.stride-changed-files.json
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  EXCL3_SUB1=$(echo "$EXCL3_OUTPUT" | jq -r '.[] | select(.path == "sub/.stride-diff-upload-state") | .path')
+  assert_eq "D67: same-named file in a subdirectory is still captured (state)" \
+    "sub/.stride-diff-upload-state" "$EXCL3_SUB1"
+  EXCL3_SUB2=$(echo "$EXCL3_OUTPUT" | jq -r '.[] | select(.path == "sub/.stride-changed-files.json") | .path')
+  assert_eq "D67: same-named file in a subdirectory is still captured (snapshot)" \
+    "sub/.stride-changed-files.json" "$EXCL3_SUB2"
+  rm -rf "$EXCL3_DIR"
+
+  # 7w (D67): when the hook artifacts are the ONLY changed paths, the snapshot
+  # is still a valid empty JSON array.
+  EXCL4_DIR=$(mktemp -d)
+  EXCL4_OUTPUT=$(
+    cd "$EXCL4_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > real.txt
+    git add real.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    # real.txt is unchanged; only the hook's own untracked artifacts appear.
+    printf 'task_id=9\nhttp_code=200\n' > .stride-diff-upload-state
+    printf '[]\n' > .stride-changed-files.json
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  if echo "$EXCL4_OUTPUT" | jq -e 'type == "array" and length == 0' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: D67: artifacts-only working tree yields a valid empty array"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: D67: expected empty array, got: $EXCL4_OUTPUT"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$EXCL4_DIR"
 fi
 
 # ============================================================

@@ -85,9 +85,18 @@ capture_changed_files() {
   # Combine; dedupe by path. Untracked entries should not overlap tracked
   # (git would report a path as one OR the other, not both), but the awk
   # `!seen` guard makes a single-entry-per-path invariant explicit.
+  #
+  # Exclude the hook's OWN bookkeeping artifacts (D67): the upload-state file
+  # and the on-disk snapshot live at the project/repo root and otherwise pass
+  # both nets — .stride-diff-upload-state as an untracked entry, and either of
+  # them as a tracked diff once a project's after_doing auto-commit has staged
+  # them. git's name-only/ls-files output is repo-root-relative, so the exact
+  # whole-line match anchors to the ROOT artifacts only; a same-named file in a
+  # subdirectory (e.g. sub/.stride-changed-files.json) has a path prefix and is
+  # still captured.
   local all_files
   all_files=$(printf '%s\n%s\n' "$tracked_files" "$untracked_files" \
-    | awk 'NF && !seen[$0]++')
+    | awk 'NF && $0 != ".stride-diff-upload-state" && $0 != ".stride-changed-files.json" && !seen[$0]++')
 
   if [ -z "$all_files" ]; then
     printf '[]\n'

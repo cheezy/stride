@@ -200,6 +200,33 @@ function Invoke-ChangedFilesUpload {
     $httpCode = '000'
     try {
         $bytes = [System.IO.File]::ReadAllBytes($snapshotPath)
+        # D67: defensively strip the hook's OWN root artifacts from the snapshot
+        # before upload. The bash capture already excludes them, but this ps1
+        # may PUT a snapshot produced by an older/unfiltered capture or one that
+        # was committed into the repo. Match only the exact repo-root paths — a
+        # same-named file in a subdirectory has a path prefix and is kept. Only
+        # re-encode when an artifact was actually dropped, so an already-clean
+        # snapshot uploads byte-for-byte as before; an unparseable snapshot
+        # falls through to the raw bytes unchanged.
+        try {
+            $entries = @([System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json)
+            $filtered = @($entries | Where-Object {
+                $_.path -ne '.stride-diff-upload-state' -and $_.path -ne '.stride-changed-files.json'
+            })
+            if ($filtered.Count -ne $entries.Count) {
+                # Pipe (not -InputObject) so an array is not double-wrapped into
+                # [[...]]; guard the empty case explicitly because piping zero
+                # items emits nothing rather than `[]`.
+                if ($filtered.Count -eq 0) {
+                    $filteredJson = '[]'
+                } else {
+                    $filteredJson = $filtered | ConvertTo-Json -Depth 10 -Compress -AsArray
+                }
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($filteredJson)
+            }
+        } catch {
+            # Snapshot not parseable as the expected array — keep the raw bytes.
+        }
         $b64 = [System.Convert]::ToBase64String($bytes)
         $body = @{ changed_files = @{ encoding = 'base64'; data = $b64 } } |
             ConvertTo-Json -Depth 5 -Compress

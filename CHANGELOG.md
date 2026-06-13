@@ -2,6 +2,29 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.27.0] - 2026-06-13
+
+### Fixed — the hook's own state artifacts no longer pollute the changed_files snapshot (D67)
+
+`capture_changed_files` built the per-file diff snapshot from tracked files that differ from base plus untracked-not-gitignored files. The hook's own bookkeeping artifacts passed both nets: `.stride-diff-upload-state` is written to the project root and (in consuming projects that don't gitignore it) shows up as an untracked entry, and once an `after_doing` auto-commit stages everything, every later task's diff against base includes it because its task id and status code change on every run. Task W1098 shipped with a state-file diff as the first entry of its `changed_files`; the snapshot file `.stride-changed-files.json` has the same exposure.
+
+- **`hooks/stride-hook.sh`** — `capture_changed_files` now excludes `.stride-diff-upload-state` and `.stride-changed-files.json` from the combined file list, in the same dedupe pass that already shaped it. The match is anchored to the exact repository-root paths (git's name-only / ls-files output is repo-root-relative), so a same-named file in a subdirectory of the user's project is still captured. The upload-state read/write and the before_review self-heal retry are untouched.
+- **`hooks/stride-hook.ps1`** — the PowerShell hook has no capture step (it only uploads the snapshot the bash hook produces), so the equivalent enforcement point is the upload: `Invoke-ChangedFilesUpload` now strips any root `.stride-diff-upload-state` / `.stride-changed-files.json` entry from the snapshot before PUT. It only re-encodes when an artifact is actually dropped, so an already-clean snapshot uploads byte-for-byte as before and an unparseable snapshot falls through to the raw bytes; this guards a snapshot produced by an older/unfiltered capture.
+- **`hooks/test-stride-hook.sh`** — new capture tests (7t–7w) cover an untracked state file, a committed-and-modified state file, the snapshot file itself, a same-named file in a subdirectory (still captured), and an artifacts-only working tree (valid empty array). The full bash suite passes.
+- **`README.md`** — the gitignore note now explains why `.stride-diff-upload-state` and `.stride-changed-files.json` should be gitignored (to keep them out of `after_doing` auto-commits) and documents the v1.27.0 capture-side backstop.
+
+### Backward compatibility
+
+No wire-shape, hook-timeout, `.stride.md`, or `.stride_auth.md` changes. The snapshot simply no longer contains the hook's own root artifacts; the upload envelope and all other fields are unchanged. The PowerShell upload is byte-identical for an already-clean snapshot.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` once the marketplace pin lands. No configuration changes required; gitignoring the two state files (already recommended) keeps them out of commits in the first place.
+
+### Source
+
+D67 (exclude the hook's own state artifacts from the uploaded changed_files snapshot; reference defect W1098).
+
 ## [1.26.0] - 2026-06-13
 
 ### Fixed — a passing after_doing gate no longer renders as a red hook error (D65)

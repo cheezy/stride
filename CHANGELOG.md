@@ -2,6 +2,26 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.28.0] - 2026-06-13
+
+### Fixed — the claim-time base ref is always refreshed, even for oversized claim responses (G224)
+
+The PostToolUse hook records `TASK_BASE_REF` (the HEAD commit at claim time) in `.stride-env-cache`, and the `after_doing` flow diffs the working tree against that ref to build the `changed_files` snapshot. The cache was only written when the hook could parse the claim response JSON out of `tool_response.stdout`. When the claim response is large (for example a task already carrying a previous attempt's `changed_files` snapshot, ~200KB+), Claude Code persists the tool output to a file and leaves only a "Full output saved to: …" notice in stdout. The hook then failed to parse the response, silently skipped the cache write, and a **stale** `TASK_BASE_REF` from a previous claim survived — so the completion's `changed_files` spanned every commit since that older claim. Production impact: task D60 was completed with a base ref recorded a day earlier under a different claim, so its review panel showed 27 changed files when the task touched 3.
+
+- **`hooks/stride-hook.sh`** (W1086) — the claim-parsing cascade gains a third shape: a **persisted-output file fallback** that recovers the API JSON from the "saved to" file (validated as an existing regular file and parsed with `jq` only — never sourced, eval'd, or executed; the path extraction tolerates spaces and a wrapping quote). The cache write is restructured so the base-ref refresh is **unconditional** on every detected claim: when no task JSON is obtainable from any source, the hook still rewrites `TASK_BASE_REF` to the current HEAD and clears `.stride-changed-files.json` / `.stride-diff-upload-state`, while preserving any existing `TASK_` identity lines so a later completion can still recover `TASK_ID`. It skips silently when HEAD is unresolvable (not a git repo).
+- **`hooks/stride-hook.ps1`** (W1087) — the same persisted-output fallback and unconditional claim-time base-ref refresh, ported to the PowerShell hook for Windows parity. The ps1 hook previously did not write `TASK_BASE_REF` at all; it now does, in both the parsed-response and base-ref-only paths. This port also fixes a pre-existing `Set-StrictMode -Version Latest` hazard: the raw-object response shape read `$response.data` on the stdout-wrapper object (which has no `data` property) and threw, aborting caching before the fallback could run — property access is now guarded via `PSObject.Properties.Name`.
+- **`hooks/test-stride-hook.sh`** — new Test Group 14 (14a–14i) covers inline JSON, persisted-file recovery, base-ref-only refresh, missing/non-JSON persisted file, the non-claim no-op, a non-git directory, an absent cache, and a spaced persisted path. The full bash suite passes (237 assertions).
+- **`hooks/test-stride-hook.ps1`** — new Test Group 10 (10a–10j) mirrors the bash group test-for-test (plus an id-only-payload parity case), introducing the ps1 suite's first git-backed fixtures via a `New-GitRepo` helper. The full PowerShell suite passes (172 assertions).
+- **`README.md`** — the env-cache subsection documents that the claim-time base ref is now refreshed on every claim, including the oversized/persisted-response path.
+
+### Backward compatibility
+
+No wire-shape, hook-timeout, `.stride.md`, or `.stride_auth.md` changes. A claim whose response parses inline behaves exactly as before; the new behavior only adds recovery paths for responses that previously left the cache stale.
+
+### Source
+
+G224 — W1086 (`stride-hook.sh`), W1087 (`stride-hook.ps1`). Also carries the previously-unreleased 1.26.0 (D65/D66) and 1.27.0 (D67) changes, which had not yet been tagged or published.
+
 ## [1.27.0] - 2026-06-13
 
 ### Fixed — the hook's own state artifacts no longer pollute the changed_files snapshot (D67)

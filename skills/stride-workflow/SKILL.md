@@ -280,6 +280,8 @@ Dispatch `stride:task-reviewer` agent with:
 - The git diff of all your changes
 - **Every review field the task supplies — NO EXCEPTIONS:** the task's `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `description`, `what`, and `why`. This list MUST match the reviewer agent's documented input contract (the "You will receive" line in `stride/agents/task-reviewer.md`) — pass every field the task carries, never a subset, never with a small-task or brevity discount. Omitting a supplied field (most often `security_considerations`) is the exact defect this prevents: a section the reviewer is never handed comes back `not_assessed` even though the task specified it.
 
+**Re-review and follow-up rounds — preserve the canonical criteria list.** When you re-dispatch the reviewer (or continue it) to re-verify after fixing issues from a `changes_requested` round, the follow-up dispatch prompt MUST pass the task's `acceptance_criteria` field **unchanged** and instruct the reviewer to keep its `acceptance_criteria` array **identical to the task's canonical list** — one entry per criterion line, verbatim and in the task's order, never split, merged, reworded, added, or dropped (the same 1:1 hard rule the reviewer schema enforces in `stride/agents/task-reviewer.md`). Never hand the re-review only the issues you fixed and let it re-derive the criteria: a re-review that re-enumerates the criteria in its own words corrupts the persisted count — this is exactly how a re-review round on task W1099 turned a 5-criterion task into a `6/5` review display.
+
 The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by `stride/agents/task-reviewer.md` — do not duplicate field definitions here.
 
 - **Fix all Critical issues** before proceeding
@@ -316,6 +318,15 @@ for section in structured:  # every section the reviewer produced must survive
     assert section in reviewer_result, f"dropped review section: {section}"
 assert len(reviewer_result.get("project_checks", [])) == len(structured.get("project_checks", [])), \
     "project_checks count must equal what the reviewer emitted — never trim or sub-select"
+
+# Acceptance-criteria 1:1 check — the reviewer's acceptance_criteria array length
+# MUST equal the task's own criterion-line count. A mismatch means the reviewer
+# split, merged, added, or dropped criteria (the W1099 6/5 defect). Re-run the
+# reviewer with the canonical task criteria — NEVER truncate or pad the array to
+# force the count to match.
+task_criterion_lines = [c for c in (task["acceptance_criteria"] or "").split("\n") if c.strip()]
+assert len(structured["acceptance_criteria"]) == len(task_criterion_lines), \
+    "acceptance_criteria count must equal the task's criterion-line count — re-run the reviewer, do not truncate or pad"
 ```
 
 **Field mapping into `reviewer_result`:**

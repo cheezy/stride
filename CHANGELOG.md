@@ -2,6 +2,34 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.26.0] - 2026-06-13
+
+### Fixed — a passing after_doing gate no longer renders as a red hook error (D65)
+
+`run_stride_section` (bash) and `Invoke-StrideSection` (PowerShell) used to `cat` each successful gate command's stdout/stderr to fd 2 / `Console.Error`, keeping stdout reserved for the structured JSON contract. But Claude Code renders **any** hook stderr under a red `PreToolUse:Bash hook error` label even on exit 0 (anthropics/claude-code 34713, 17088, 45761, 34859), so a fully passing quality gate displayed its own success output ("All checks passed!", "16 files already formatted") as a scary error — and that false label can be fed back into an agent's context, causing it to conclude the gate failed.
+
+- **`hooks/stride-hook.sh` + `hooks/stride-hook.ps1`** — the success branch no longer writes passing-command output to fd 2 / `Console.Error`. Each passing command's stdout/stderr is tail-truncated (the same 50-line cap the failure path already uses) and folded into a new `commands_output` array on the success JSON, so agents keep full visibility while stderr stays reserved for genuine failures. Output is encoded via `jq --arg` / `ConvertTo-Json`, so attacker-influenced command output cannot inject JSON fields. The failure branch is unchanged (structured failed JSON on stdout, failure message on stderr, exit 2), and the no-jq degraded bash path still emits no success JSON.
+- **`hooks/test-stride-hook.sh` + `hooks/test-stride-hook.ps1`** — new assertions cover the success-path stderr contract: a passing gate writes nothing to stderr and exits 0, its output lands in `commands_output`, and a passing command that writes only to stderr (the exact production trigger) is still kept off fd 2. The bash suite is 212 assertions green, the PowerShell suite 140.
+
+### Changed — the task-reviewer restates acceptance criteria verbatim, including on re-review (D66)
+
+On a follow-up re-review round, the `stride:task-reviewer` agent re-enumerated a task's acceptance criteria in its own words — splitting two criteria into four rows, adding an implementation detail as a new criterion, and folding others into prose. The mandated whole-object passthrough then persisted `acceptance_criteria_checked: 6` against a 5-criterion task, and the review page rendered a nonsensical `6/5`.
+
+- **`agents/task-reviewer.md`** — the `acceptance_criteria` array is now governed by a hard schema rule: exactly one entry per criterion line of the task's `acceptance_criteria` field, copied verbatim in the task's wording and order, never split, merged, reworded, added, or dropped. Extra observations belong in `issues` or the prose, never as additional criteria rows. The Acceptance Criteria Verification step references the rule.
+- **`skills/stride-workflow/SKILL.md`** — Step 6 gains a re-review/follow-up dispatch rule (pass the task's `acceptance_criteria` unchanged and require the reviewer to keep the array identical to the canonical list), and the extraction-time MANDATORY self-check gains an assertion that the reviewer's `acceptance_criteria` count equals the task's own criterion-line count — a mismatch re-runs the reviewer rather than truncating or padding.
+
+### Backward compatibility
+
+D65 changes the success-path output shape only: stderr is now empty on a passing gate and the success JSON gains a `commands_output` array (additive — existing consumers that read `commands_completed` / `status` / `duration_seconds` are unaffected). D66 is a documentation/agent-contract change with no wire-shape, hook, `.stride.md`, `.stride_auth.md`, or `.gitignore` changes.
+
+### Migration
+
+`/plugin update stride@stride-marketplace` once the marketplace pin lands. No configuration changes required.
+
+### Source
+
+D65 (passing-gate output kept off stderr) and D66 (verbatim acceptance-criteria restatement, including on re-review rounds; reference defect W1099).
+
 ## [1.25.0] - 2026-06-10
 
 ### Changed — the changed-files diff upload survives the after_doing timeout (W1093-W1096)

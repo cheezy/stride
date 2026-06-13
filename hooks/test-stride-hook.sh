@@ -580,7 +580,19 @@ EXIT_CODE=$?
 FAIL_STDERR=$(cat "$FAIL_STDERR_FILE")
 rm -f "$FAIL_STDERR_FILE"
 assert_exit "failing hook exits 2" 2 "$EXIT_CODE"
-assert_contains "failing hook ran step one" "step one passes" "$FAIL_STDERR"
+# The failure message stays on stderr — load-bearing for the PreToolUse
+# blocking semantic (exit 2 + stderr message).
+assert_contains "failing hook reports failure on stderr" "hook failed on command 2/3" "$FAIL_STDERR"
+# D65: the earlier PASSING command's output must NOT leak to stderr. Before the
+# fix, a successful command's stdout/stderr was catted to fd 2, which Claude
+# Code rendered under a false "PreToolUse:Bash hook error" label.
+if echo "$FAIL_STDERR" | grep -qF "step one passes"; then
+  echo -e "  ${RED}FAIL${RESET}: passing command output must not appear on stderr"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: passing command output kept off stderr"
+  PASS=$((PASS + 1))
+fi
 if echo "$FAIL_STDERR" | grep -qF "step three should not run"; then
   echo -e "  ${RED}FAIL${RESET}: should not run commands after failure"
   FAIL=$((FAIL + 1))
@@ -620,6 +632,76 @@ OUTPUT=$(echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PARTIAL_PROJ" bash "$HOOK_
 EXIT_CODE=$?
 assert_exit "missing section exits 0" 0 "$EXIT_CODE"
 assert_eq "missing section no output" "" "$OUTPUT"
+
+# 5k: D65 — a fully PASSING gate writes nothing to stderr; per-command output
+# is folded into the success JSON's commands_output on stdout instead. Capture
+# stdout and stderr separately to assert the new contract.
+OK_PROJ="$TMPDIR_TEST/ok-stderr-project"
+mkdir -p "$OK_PROJ"
+cat > "$OK_PROJ/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+echo "gate_line_one"
+echo "gate_line_two"
+```
+STRIDE
+OK_STDOUT_FILE=$(mktemp)
+OK_STDERR_FILE=$(mktemp)
+echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$OK_PROJ" bash "$HOOK_SCRIPT" pre >"$OK_STDOUT_FILE" 2>"$OK_STDERR_FILE"
+EXIT_CODE=$?
+OK_STDOUT=$(cat "$OK_STDOUT_FILE")
+OK_STDERR=$(cat "$OK_STDERR_FILE")
+rm -f "$OK_STDOUT_FILE" "$OK_STDERR_FILE"
+assert_exit "passing gate exits 0" 0 "$EXIT_CODE"
+assert_eq "passing gate writes nothing to stderr" "" "$OK_STDERR"
+if command -v jq > /dev/null 2>&1; then
+  assert_contains "passing gate emits commands_output" "commands_output" "$OK_STDOUT"
+  assert_contains "passing gate output folded into JSON (1)" "gate_line_one" "$OK_STDOUT"
+  assert_contains "passing gate output folded into JSON (2)" "gate_line_two" "$OK_STDOUT"
+  # stdout must be a single parseable JSON object with status success
+  if echo "$OK_STDOUT" | jq -e '.status == "success" and (.commands_output | type == "array")' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: success stdout is a single JSON object with commands_output array"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: success stdout not a valid JSON object: $OK_STDOUT"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  # No-jq degraded path: success emits no JSON at all and still writes nothing
+  # to stderr.
+  assert_eq "no-jq passing gate emits no stdout" "" "$OK_STDOUT"
+fi
+
+# 5l: D65 — a PASSING command that writes to STDERR (exit 0) is the exact
+# production trigger ("All checks passed!" was a passing gate's output). Its
+# stderr must NOT reach fd 2 (where Claude Code mislabels it); it must land in
+# the success JSON's commands_output[].stderr instead.
+STDERR_OK_PROJ="$TMPDIR_TEST/stderr-ok-project"
+mkdir -p "$STDERR_OK_PROJ"
+cat > "$STDERR_OK_PROJ/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+echo "compiling to stderr" >&2
+```
+STRIDE
+SO_STDOUT_FILE=$(mktemp)
+SO_STDERR_FILE=$(mktemp)
+echo "$COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$STDERR_OK_PROJ" bash "$HOOK_SCRIPT" pre >"$SO_STDOUT_FILE" 2>"$SO_STDERR_FILE"
+EXIT_CODE=$?
+SO_STDOUT=$(cat "$SO_STDOUT_FILE")
+SO_STDERR=$(cat "$SO_STDERR_FILE")
+rm -f "$SO_STDOUT_FILE" "$SO_STDERR_FILE"
+assert_exit "stderr-writing passing gate exits 0" 0 "$EXIT_CODE"
+assert_eq "stderr-writing passing gate writes nothing to fd 2" "" "$SO_STDERR"
+if command -v jq > /dev/null 2>&1; then
+  if echo "$SO_STDOUT" | jq -e '.commands_output[0].stderr | contains("compiling to stderr")' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: passing command's stderr folded into commands_output[].stderr"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: passing command's stderr not in commands_output: $SO_STDOUT"
+    FAIL=$((FAIL + 1))
+  fi
+fi
 
 # ============================================================
 # Test Group 6: Edge cases
@@ -1829,6 +1911,35 @@ STRIDE
   # below intentionally include that space so they match the rendered shape.
   assert_contains "9f: structured success JSON references after_goal" '"hook": "after_goal"' "$AG_OUTPUT_PRESENT"
   assert_contains "9f: structured success JSON has status:success" '"status": "success"' "$AG_OUTPUT_PRESENT"
+  # D65: the passing command's output is folded into commands_output on stdout
+  # rather than written to fd 2.
+  assert_contains "9f: success JSON carries commands_output" '"commands_output"' "$AG_OUTPUT_PRESENT"
+  assert_contains "9f: commands_output holds the passing command's stdout" 'after_goal ran' "$AG_OUTPUT_PRESENT"
+
+  # 9f2 (D65): a passing section writes NOTHING to fd 2 — capture stdout and
+  # stderr separately to prove command output no longer leaks to stderr.
+  AG_DIR_OK=$(mktemp -d)
+  cat > "$AG_DIR_OK/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "stderr_should_stay_empty"
+```
+STRIDE
+  AG_OK_STDERR_FILE=$(mktemp)
+  AG_OK_STDOUT=$(
+    cd "$AG_DIR_OK" || exit 99
+    source "$HOOK_SCRIPT" 2>/dev/null
+    STRIDE_MD="$AG_DIR_OK/.stride.md"
+    PROJECT_DIR="$AG_DIR_OK"
+    HAS_JQ=true
+    HOOK_NAME=""
+    run_stride_section "after_goal" 2>"$AG_OK_STDERR_FILE"
+  )
+  AG_OK_STDERR=$(cat "$AG_OK_STDERR_FILE")
+  rm -f "$AG_OK_STDERR_FILE"
+  rm -rf "$AG_DIR_OK"
+  assert_eq "9f2: passing section writes nothing to stderr" "" "$AG_OK_STDERR"
+  assert_contains "9f2: passing command output captured in stdout JSON" "stderr_should_stay_empty" "$AG_OK_STDOUT"
 
   # 9g: run_stride_section is a clean no-op when ## after_goal section is
   # missing (back-compat — older .stride.md files keep working). Returns 0

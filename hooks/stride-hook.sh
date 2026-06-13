@@ -445,14 +445,19 @@ run_stride_section() {
   # capture_changed_files diffs $PROJECT_DIR's repo.
   finalize_after_doing
 
-  local _completed_file
+  local _completed_file _output_file
   _completed_file=$(mktemp)
+  # Parallel to _completed_file: one JSON object per successful command holding
+  # its tail-truncated stdout/stderr, slurped into the success JSON's
+  # commands_output array (D65). Keeps passing-gate output off fd 2 so Claude
+  # Code does not render it under a false "PreToolUse:Bash hook error" label.
+  _output_file=$(mktemp)
   local _start_secs
   _start_secs=$(date +%s)
   local _cmd_index=0
   local _cmd_total=${#_cmd_list[@]}
   local _cmd_stdout_file _cmd_stderr_file _cmd_exit _cmd_stdout _cmd_stderr
-  local _remaining_file _completed_json _remaining_json _end_secs _duration _i
+  local _remaining_file _completed_json _remaining_json _output_json _end_secs _duration _i
 
   for _trimmed in "${_cmd_list[@]}"; do
     _cmd_stdout_file=$(mktemp)
@@ -468,8 +473,20 @@ run_stride_section() {
 
     if [ "$_cmd_exit" -eq 0 ]; then
       echo "$_trimmed" >> "$_completed_file"
-      cat "$_cmd_stdout_file" >&2
-      cat "$_cmd_stderr_file" >&2
+      # Do NOT cat the passing command's output to fd 2: Claude Code renders any
+      # hook stderr under a red "PreToolUse:Bash hook error" label even on exit
+      # 0 (D65). Instead capture a tail-truncated copy — same -50 cap as the
+      # failure path — into _output_file as a JSON object, folded into the
+      # success JSON's commands_output array below so agents keep visibility.
+      if [ "$HAS_JQ" = "true" ]; then
+        _cmd_stdout=$(tail -50 "$_cmd_stdout_file")
+        _cmd_stderr=$(tail -50 "$_cmd_stderr_file")
+        jq -n \
+          --arg command "$_trimmed" \
+          --arg stdout "$_cmd_stdout" \
+          --arg stderr "$_cmd_stderr" \
+          '{command: $command, stdout: $stdout, stderr: $stderr}' >> "$_output_file"
+      fi
     else
       _cmd_stdout=$(tail -50 "$_cmd_stdout_file")
       _cmd_stderr=$(tail -50 "$_cmd_stderr_file")
@@ -512,7 +529,7 @@ run_stride_section() {
 
       echo "Stride $_section hook failed on command $((_cmd_index + 1))/$_cmd_total: $_trimmed" >&2
       [ -n "$_cmd_stderr" ] && echo "$_cmd_stderr" >&2
-      rm -f "$_completed_file" "$_remaining_file"
+      rm -f "$_completed_file" "$_remaining_file" "$_output_file"
       return 2
     fi
 
@@ -532,20 +549,23 @@ run_stride_section() {
 
   if [ "$HAS_JQ" = "true" ]; then
     _completed_json=$(jq -R . < "$_completed_file" | jq -s . 2>/dev/null || echo "[]")
+    _output_json=$(jq -s . < "$_output_file" 2>/dev/null || echo "[]")
 
     jq -n \
       --arg hook "$_section" \
       --argjson duration "$_duration" \
       --argjson completed "$_completed_json" \
+      --argjson outputs "$_output_json" \
       '{
         hook: $hook,
         status: "success",
         commands_completed: $completed,
+        commands_output: $outputs,
         duration_seconds: $duration
       }'
   fi
 
-  rm -f "$_completed_file"
+  rm -f "$_completed_file" "$_output_file"
   return 0
 }
 

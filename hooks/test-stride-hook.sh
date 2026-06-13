@@ -2906,6 +2906,179 @@ STRIDE
 fi
 
 # ============================================================
+# Test Group 14: claim-time TASK_BASE_REF refresh + persisted-output
+# fallback (W1086)
+# ============================================================
+# A claim always opens a new task window. The hook must refresh TASK_BASE_REF
+# to current HEAD on every claim: from parseable stdout, from a persisted
+# output file when stdout only carries a "saved to" notice, and — when no JSON
+# is obtainable at all — by rewriting only the TASK_BASE_REF line while
+# preserving the existing TASK_ identity lines. Non-claim hooks never touch it.
+echo ""
+echo "=== Test Group 14: claim TASK_BASE_REF refresh (W1086) ==="
+
+if ! command -v jq > /dev/null 2>&1 || ! command -v git > /dev/null 2>&1; then
+  echo "  SKIP: jq or git missing — Group 14 requires both (reuses Group 8 helpers)"
+else
+  # 14a: inline stdout JSON (Claude Code wrapper) writes the full cache with
+  # TASK_BASE_REF equal to current HEAD.
+  BR_DIR_A=$(mktemp -d)
+  BR_CLAIM_A='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":42,\"identifier\":\"W42\",\"title\":\"Inline Task\",\"status\":\"in_progress\",\"complexity\":\"medium\",\"priority\":\"high\"}}","stderr":"","interrupted":false}}'
+  (
+    setup_put_repo "$BR_DIR_A" || exit 1
+    echo "$BR_CLAIM_A" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_HEAD_A=$(git -C "$BR_DIR_A" rev-parse HEAD)
+  BR_CACHE_A=$(cat "$BR_DIR_A/.stride-env-cache" 2>/dev/null)
+  assert_contains "14a: inline JSON writes the identifier" "TASK_IDENTIFIER='W42'" "$BR_CACHE_A"
+  assert_contains "14a: inline JSON sets TASK_BASE_REF to current HEAD" "TASK_BASE_REF='$BR_HEAD_A'" "$BR_CACHE_A"
+  rm -rf "$BR_DIR_A"
+
+  # 14b: a persisted-output notice pointing at a readable file containing the
+  # API JSON writes the full cache from the file content.
+  BR_DIR_B=$(mktemp -d)
+  BR_PERSIST_B=$(mktemp -d)
+  BR_FILE_B="$BR_PERSIST_B/persisted.json"
+  printf '{"data":{"id":77,"identifier":"W77","title":"Persisted Task","status":"in_progress","complexity":"medium","priority":"high"}}' > "$BR_FILE_B"
+  BR_CLAIM_B=$(printf '{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"Full output saved to: %s","stderr":"","interrupted":false}}' "$BR_FILE_B")
+  (
+    setup_put_repo "$BR_DIR_B" || exit 1
+    echo "$BR_CLAIM_B" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_HEAD_B=$(git -C "$BR_DIR_B" rev-parse HEAD)
+  BR_CACHE_B=$(cat "$BR_DIR_B/.stride-env-cache" 2>/dev/null)
+  assert_contains "14b: persisted file supplies the identifier" "TASK_IDENTIFIER='W77'" "$BR_CACHE_B"
+  assert_contains "14b: persisted file path sets TASK_BASE_REF to HEAD" "TASK_BASE_REF='$BR_HEAD_B'" "$BR_CACHE_B"
+  rm -rf "$BR_DIR_B" "$BR_PERSIST_B"
+
+  # 14c: garbage stdout with no persisted file refreshes only TASK_BASE_REF,
+  # preserves the prior TASK_ID line, and removes the stale snapshot.
+  BR_DIR_C=$(mktemp -d)
+  BR_CLAIM_C='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"this is not json at all","stderr":"","interrupted":false}}'
+  (
+    setup_put_repo "$BR_DIR_C" || exit 1
+    printf '[{"path":"stale.txt","diff":"x"}]\n' > .stride-changed-files.json
+    echo "$BR_CLAIM_C" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_HEAD_C=$(git -C "$BR_DIR_C" rev-parse HEAD)
+  BR_CACHE_C=$(cat "$BR_DIR_C/.stride-env-cache" 2>/dev/null)
+  assert_contains "14c: garbage stdout preserves the prior TASK_ID" "TASK_ID='42'" "$BR_CACHE_C"
+  assert_contains "14c: garbage stdout still refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF='$BR_HEAD_C'" "$BR_CACHE_C"
+  if [ ! -f "$BR_DIR_C/.stride-changed-files.json" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 14c: base-ref-only refresh removes the stale snapshot"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 14c: stale snapshot survived the base-ref-only refresh"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$BR_DIR_C"
+
+  # 14d: a persisted-output notice pointing at a missing file falls through to
+  # the base-ref-only refresh (prior TASK_ID preserved, TASK_BASE_REF = HEAD).
+  BR_DIR_D=$(mktemp -d)
+  BR_PERSIST_D=$(mktemp -d)
+  BR_CLAIM_D=$(printf '{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"Full output saved to: %s/does-not-exist.json","stderr":"","interrupted":false}}' "$BR_PERSIST_D")
+  (
+    setup_put_repo "$BR_DIR_D" || exit 1
+    echo "$BR_CLAIM_D" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_HEAD_D=$(git -C "$BR_DIR_D" rev-parse HEAD)
+  BR_CACHE_D=$(cat "$BR_DIR_D/.stride-env-cache" 2>/dev/null)
+  assert_contains "14d: missing persisted file preserves the prior TASK_ID" "TASK_ID='42'" "$BR_CACHE_D"
+  assert_contains "14d: missing persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF='$BR_HEAD_D'" "$BR_CACHE_D"
+  rm -rf "$BR_DIR_D" "$BR_PERSIST_D"
+
+  # 14e: a non-claim post invocation (complete URL) leaves TASK_BASE_REF
+  # untouched at the previously-recorded base ref.
+  BR_DIR_E=$(mktemp -d)
+  BR_COMPLETE_E='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete"}}'
+  (
+    setup_put_repo "$BR_DIR_E" || exit 1
+    echo "$BR_COMPLETE_E" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_BASE_E=$(grep -oE "TASK_BASE_REF='[^']*'" "$BR_DIR_E/.stride-env-cache" 2>/dev/null)
+  BR_PUTBASE_E=$(git -C "$BR_DIR_E" rev-parse HEAD~1)
+  assert_eq "14e: complete URL leaves TASK_BASE_REF at the prior base ref" "TASK_BASE_REF='$BR_PUTBASE_E'" "$BR_BASE_E"
+  rm -rf "$BR_DIR_E"
+
+  # 14f: garbage stdout in a non-git directory (rev-parse fails) never crashes
+  # the hook and writes no cache.
+  BR_DIR_F=$(mktemp -d)
+  cat > "$BR_DIR_F/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "claimed"
+```
+STRIDE
+  BR_CLAIM_F='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"not json","stderr":"","interrupted":false}}'
+  OUTPUT=$(echo "$BR_CLAIM_F" | CLAUDE_PROJECT_DIR="$BR_DIR_F" bash "$HOOK_SCRIPT" post 2>&1)
+  EXIT_CODE=$?
+  assert_exit "14f: garbage stdout in a non-git dir exits 0" 0 "$EXIT_CODE"
+  if [ ! -f "$BR_DIR_F/.stride-env-cache" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 14f: no cache written when HEAD is unresolvable"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 14f: cache written despite unresolvable HEAD"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$BR_DIR_F"
+
+  # 14g: a persisted file whose content is the harness preview text (not JSON)
+  # falls through to the base-ref-only refresh.
+  BR_DIR_G=$(mktemp -d)
+  BR_PERSIST_G=$(mktemp -d)
+  BR_FILE_G="$BR_PERSIST_G/preview.txt"
+  printf '... (output truncated for preview) ...\nnot valid json\n' > "$BR_FILE_G"
+  BR_CLAIM_G=$(printf '{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"Full output saved to: %s","stderr":"","interrupted":false}}' "$BR_FILE_G")
+  (
+    setup_put_repo "$BR_DIR_G" || exit 1
+    echo "$BR_CLAIM_G" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_HEAD_G=$(git -C "$BR_DIR_G" rev-parse HEAD)
+  BR_CACHE_G=$(cat "$BR_DIR_G/.stride-env-cache" 2>/dev/null)
+  assert_contains "14g: non-JSON persisted file preserves the prior TASK_ID" "TASK_ID='42'" "$BR_CACHE_G"
+  assert_contains "14g: non-JSON persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF='$BR_HEAD_G'" "$BR_CACHE_G"
+  rm -rf "$BR_DIR_G" "$BR_PERSIST_G"
+
+  # 14h: garbage stdout with NO pre-existing cache creates one containing only
+  # TASK_BASE_REF (no TASK_ identity lines to preserve).
+  BR_DIR_H=$(mktemp -d)
+  BR_CLAIM_H='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"garbage","stderr":"","interrupted":false}}'
+  (
+    setup_put_repo "$BR_DIR_H" || exit 1
+    rm -f .stride-env-cache
+    echo "$BR_CLAIM_H" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_HEAD_H=$(git -C "$BR_DIR_H" rev-parse HEAD)
+  BR_CACHE_H=$(cat "$BR_DIR_H/.stride-env-cache" 2>/dev/null)
+  assert_contains "14h: absent cache is created with TASK_BASE_REF at HEAD" "TASK_BASE_REF='$BR_HEAD_H'" "$BR_CACHE_H"
+  if echo "$BR_CACHE_H" | grep -q '^TASK_ID='; then
+    echo -e "  ${RED}FAIL${RESET}: 14h: invented a TASK_ID line with no source data"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 14h: no spurious TASK_ identity lines created"
+    PASS=$((PASS + 1))
+  fi
+  rm -rf "$BR_DIR_H"
+
+  # 14i: a persisted-output path containing spaces is recovered intact (the
+  # notice may also wrap it in quotes). Guards the bash/ps1 parity contract.
+  BR_DIR_I=$(mktemp -d)
+  BR_PERSIST_I=$(mktemp -d)/"with space dir"
+  mkdir -p "$BR_PERSIST_I"
+  BR_FILE_I="$BR_PERSIST_I/persisted.json"
+  printf '{"data":{"id":88,"identifier":"W88","title":"Spaced Task","status":"in_progress","complexity":"small","priority":"low"}}' > "$BR_FILE_I"
+  BR_CLAIM_I=$(printf '{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"Full output saved to: %s","stderr":"","interrupted":false}}' "$BR_FILE_I")
+  (
+    setup_put_repo "$BR_DIR_I" || exit 1
+    echo "$BR_CLAIM_I" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_CACHE_I=$(cat "$BR_DIR_I/.stride-env-cache" 2>/dev/null)
+  assert_contains "14i: persisted path with spaces is recovered" "TASK_IDENTIFIER='W88'" "$BR_CACHE_I"
+  rm -rf "$BR_DIR_I" "$BR_PERSIST_I"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

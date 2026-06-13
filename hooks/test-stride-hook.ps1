@@ -1448,6 +1448,223 @@ if (-not (Test-Path (Join-Path $shProjI '.stride-changed-files.json'))) {
 }
 
 # ============================================================
+# Test Group 10: claim-time TASK_BASE_REF refresh + persisted-output
+# fallback (W1087, mirrors test-stride-hook.sh Test Group 14 test-for-test)
+# ============================================================
+# A claim always opens a new task window. The hook must refresh TASK_BASE_REF
+# to current HEAD on every claim: from parseable stdout, from a persisted output
+# file when stdout only carries a "saved to" notice, and — when no JSON is
+# obtainable at all — by rewriting only the TASK_BASE_REF line while preserving
+# existing TASK_ identity lines. Non-claim hooks never touch it.
+Write-Host ""
+Write-Host "=== Test Group 10: claim TASK_BASE_REF refresh (W1087) ==="
+
+# Mirror of the bash setup_put_repo: a real two-commit git repo with the stride
+# state files gitignored, a pre-seeded cache carrying a STALE base ref (the v1
+# commit) and a TASK_ID line to prove preservation. The ps1 test suite had no
+# git-backed fixtures before this group.
+function New-GitRepo {
+    param([string]$Name)
+    $dir = Join-Path $TmpDir $Name
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    & git -C $dir init -q 2>$null | Out-Null
+    & git -C $dir config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $dir config user.name 'Test' 2>$null | Out-Null
+    & git -C $dir config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $dir '.gitignore') `
+        -Value ".stride.md`n.stride-env-cache`n.stride-changed-files.json`n.stride-diff-upload-state" -Encoding UTF8
+    Set-Content -Path (Join-Path $dir 'tracked.txt') -Value 'v1' -Encoding UTF8
+    & git -C $dir add .gitignore tracked.txt 2>$null | Out-Null
+    & git -C $dir commit -q -m 'v1' 2>$null | Out-Null
+    Set-Content -Path (Join-Path $dir 'tracked.txt') -Value 'v2' -Encoding UTF8
+    & git -C $dir add tracked.txt 2>$null | Out-Null
+    & git -C $dir commit -q -m 'v2' 2>$null | Out-Null
+    $putBase = (& git -C $dir rev-parse 'HEAD~1' | Out-String).Trim()
+    Set-Content -Path (Join-Path $dir '.stride-env-cache') -Value "TASK_ID=42`nTASK_BASE_REF=$putBase" -Encoding UTF8
+    Set-Content -Path (Join-Path $dir '.stride.md') -Value @'
+## before_doing
+```bash
+echo "claimed"
+```
+'@ -Encoding UTF8
+    return $dir
+}
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: git not available — Group 10 requires it" -ForegroundColor Yellow
+} else {
+    # 10a: inline stdout JSON (Claude Code wrapper) writes the full cache with
+    # TASK_BASE_REF equal to current HEAD.
+    $brA = New-GitRepo -Name 'g10-inline'
+    $headA = (& git -C $brA rev-parse HEAD | Out-String).Trim()
+    $claimA = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = '{"data":{"id":42,"identifier":"W42","title":"Inline Task","status":"in_progress","complexity":"medium","priority":"high"}}'; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimA -Phase 'post' -ProjectDir $brA
+    Assert-Exit "10a: inline JSON claim exits 0" 0 $r.ExitCode
+    $cacheA = Get-Content -Raw -Path (Join-Path $brA '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "10a: inline JSON writes the identifier" "TASK_IDENTIFIER=W42" $cacheA
+    Assert-Contains "10a: inline JSON sets TASK_BASE_REF to current HEAD" "TASK_BASE_REF=$headA" $cacheA
+
+    # 10b: a persisted-output notice pointing at a readable file containing the
+    # API JSON writes the full cache from the file content.
+    $brB = New-GitRepo -Name 'g10-persisted'
+    $headB = (& git -C $brB rev-parse HEAD | Out-String).Trim()
+    $persistDirB = Join-Path $TmpDir 'g10-persist-b'
+    New-Item -ItemType Directory -Path $persistDirB -Force | Out-Null
+    $persistFileB = Join-Path $persistDirB 'persisted.json'
+    Set-Content -Path $persistFileB -Value '{"data":{"id":77,"identifier":"W77","title":"Persisted Task","status":"in_progress","complexity":"medium","priority":"high"}}' -Encoding UTF8 -NoNewline
+    $claimB = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = "Full output saved to: $persistFileB"; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimB -Phase 'post' -ProjectDir $brB
+    Assert-Exit "10b: persisted-file claim exits 0" 0 $r.ExitCode
+    $cacheB = Get-Content -Raw -Path (Join-Path $brB '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "10b: persisted file supplies the identifier" "TASK_IDENTIFIER=W77" $cacheB
+    Assert-Contains "10b: persisted file path sets TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headB" $cacheB
+
+    # 10c: garbage stdout with no persisted file refreshes only TASK_BASE_REF,
+    # preserves the prior TASK_ID line, and removes the stale snapshot.
+    $brC = New-GitRepo -Name 'g10-garbage'
+    $headC = (& git -C $brC rev-parse HEAD | Out-String).Trim()
+    Set-Content -Path (Join-Path $brC '.stride-changed-files.json') -Value '[{"path":"stale.txt","diff":"x"}]' -Encoding UTF8
+    $claimC = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = 'this is not json at all'; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimC -Phase 'post' -ProjectDir $brC
+    Assert-Exit "10c: garbage-stdout claim exits 0" 0 $r.ExitCode
+    $cacheC = Get-Content -Raw -Path (Join-Path $brC '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "10c: garbage stdout preserves the prior TASK_ID" "TASK_ID=42" $cacheC
+    Assert-Contains "10c: garbage stdout still refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headC" $cacheC
+    if (-not (Test-Path (Join-Path $brC '.stride-changed-files.json'))) {
+        Write-Host "  PASS: 10c: base-ref-only refresh removes the stale snapshot" -ForegroundColor Green
+        $script:PASS++
+    } else {
+        Write-Host "  FAIL: 10c: stale snapshot survived the base-ref-only refresh" -ForegroundColor Red
+        $script:FAIL++
+    }
+
+    # 10d: a persisted-output notice pointing at a MISSING file falls through to
+    # the base-ref-only refresh (prior TASK_ID preserved, TASK_BASE_REF = HEAD).
+    $brD = New-GitRepo -Name 'g10-missing-file'
+    $headD = (& git -C $brD rev-parse HEAD | Out-String).Trim()
+    $claimD = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = "Full output saved to: $TmpDir/g10-does-not-exist.json"; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimD -Phase 'post' -ProjectDir $brD
+    Assert-Exit "10d: missing-persisted-file claim exits 0" 0 $r.ExitCode
+    $cacheD = Get-Content -Raw -Path (Join-Path $brD '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "10d: missing persisted file preserves the prior TASK_ID" "TASK_ID=42" $cacheD
+    Assert-Contains "10d: missing persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headD" $cacheD
+
+    # 10e: a non-claim post invocation (complete URL) leaves TASK_BASE_REF
+    # untouched at the previously-recorded base ref.
+    $brE = New-GitRepo -Name 'g10-noclaim'
+    $putBaseE = (& git -C $brE rev-parse 'HEAD~1' | Out-String).Trim()
+    $claimE = @{ tool_input = @{ command = 'curl -X PATCH http://127.0.0.1:1/api/tasks/42/complete' } } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimE -Phase 'post' -ProjectDir $brE
+    Assert-Exit "10e: complete URL exits 0" 0 $r.ExitCode
+    $cacheE = Get-Content -Raw -Path (Join-Path $brE '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "10e: complete URL leaves TASK_BASE_REF at the prior base ref" "TASK_BASE_REF=$putBaseE" $cacheE
+
+    # 10f: garbage stdout in a NON-git directory (rev-parse fails) never crashes
+    # the hook and writes no cache.
+    $brF = Join-Path $TmpDir 'g10-nongit'
+    New-Item -ItemType Directory -Path $brF -Force | Out-Null
+    Set-Content -Path (Join-Path $brF '.stride.md') -Value @'
+## before_doing
+```bash
+echo "claimed"
+```
+'@ -Encoding UTF8
+    $claimF = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = 'not json'; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimF -Phase 'post' -ProjectDir $brF
+    Assert-Exit "10f: garbage stdout in a non-git dir exits 0" 0 $r.ExitCode
+    if (-not (Test-Path (Join-Path $brF '.stride-env-cache'))) {
+        Write-Host "  PASS: 10f: no cache written when HEAD is unresolvable" -ForegroundColor Green
+        $script:PASS++
+    } else {
+        Write-Host "  FAIL: 10f: cache written despite unresolvable HEAD" -ForegroundColor Red
+        $script:FAIL++
+    }
+
+    # 10g: a persisted file whose content is harness preview text (not JSON)
+    # falls through to the base-ref-only refresh.
+    $brG = New-GitRepo -Name 'g10-nonjson-file'
+    $headG = (& git -C $brG rev-parse HEAD | Out-String).Trim()
+    $persistDirG = Join-Path $TmpDir 'g10-persist-g'
+    New-Item -ItemType Directory -Path $persistDirG -Force | Out-Null
+    $persistFileG = Join-Path $persistDirG 'preview.txt'
+    Set-Content -Path $persistFileG -Value "... (output truncated for preview) ...`nnot valid json" -Encoding UTF8
+    $claimG = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = "Full output saved to: $persistFileG"; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimG -Phase 'post' -ProjectDir $brG
+    Assert-Exit "10g: non-JSON-persisted-file claim exits 0" 0 $r.ExitCode
+    $cacheG = Get-Content -Raw -Path (Join-Path $brG '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "10g: non-JSON persisted file preserves the prior TASK_ID" "TASK_ID=42" $cacheG
+    Assert-Contains "10g: non-JSON persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headG" $cacheG
+
+    # 10h: garbage stdout with NO pre-existing cache creates one containing only
+    # TASK_BASE_REF (no TASK_ identity lines to preserve).
+    $brH = New-GitRepo -Name 'g10-absent-cache'
+    Remove-Item -Force (Join-Path $brH '.stride-env-cache') -ErrorAction SilentlyContinue
+    $headH = (& git -C $brH rev-parse HEAD | Out-String).Trim()
+    $claimH = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = 'garbage'; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimH -Phase 'post' -ProjectDir $brH
+    Assert-Exit "10h: absent-cache claim exits 0" 0 $r.ExitCode
+    $cacheH = Get-Content -Raw -Path (Join-Path $brH '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "10h: absent cache is created with TASK_BASE_REF at HEAD" "TASK_BASE_REF=$headH" $cacheH
+    Assert-NotContains "10h: no spurious TASK_ID line created" "TASK_ID=" $cacheH
+
+    # 10i: a persisted-output path containing spaces is recovered intact. Guards
+    # the bash/ps1 parity contract (W1086 test 14i).
+    $brI = New-GitRepo -Name 'g10-spaced-path'
+    $persistDirI = Join-Path $TmpDir 'g10 persist with space'
+    New-Item -ItemType Directory -Path $persistDirI -Force | Out-Null
+    $persistFileI = Join-Path $persistDirI 'persisted.json'
+    Set-Content -Path $persistFileI -Value '{"data":{"id":88,"identifier":"W88","title":"Spaced Task","status":"in_progress","complexity":"small","priority":"low"}}' -Encoding UTF8 -NoNewline
+    $claimI = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = "Full output saved to: $persistFileI"; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimI -Phase 'post' -ProjectDir $brI
+    Assert-Exit "10i: spaced-path claim exits 0" 0 $r.ExitCode
+    $cacheI = Get-Content -Raw -Path (Join-Path $brI '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "10i: persisted path with spaces is recovered" "TASK_IDENTIFIER=W88" $cacheI
+
+    # 10j: an id-only persisted payload (no {"data":...} envelope) caches its
+    # identity lines instead of throwing under StrictMode and falling through —
+    # parity with the bash reference, whose two independent probes handle it.
+    $brJ = New-GitRepo -Name 'g10-id-only'
+    $headJ = (& git -C $brJ rev-parse HEAD | Out-String).Trim()
+    $persistDirJ = Join-Path $TmpDir 'g10-persist-j'
+    New-Item -ItemType Directory -Path $persistDirJ -Force | Out-Null
+    $persistFileJ = Join-Path $persistDirJ 'persisted.json'
+    Set-Content -Path $persistFileJ -Value '{"id":99,"identifier":"W99","title":"Id Only","status":"in_progress","complexity":"small","priority":"low"}' -Encoding UTF8 -NoNewline
+    $claimJ = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = "Full output saved to: $persistFileJ"; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimJ -Phase 'post' -ProjectDir $brJ
+    Assert-Exit "10j: id-only persisted payload claim exits 0" 0 $r.ExitCode
+    $cacheJ = Get-Content -Raw -Path (Join-Path $brJ '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "10j: id-only persisted payload caches the identifier" "TASK_IDENTIFIER=W99" $cacheJ
+    Assert-Contains "10j: id-only persisted payload sets TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headJ" $cacheJ
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

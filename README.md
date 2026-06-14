@@ -1,23 +1,51 @@
 # Stride
 
-Task lifecycle skills for [Stride](https://www.stridelikeaboss.com) kanban — a task management platform designed for AI agents.
+Drive the full [Stride](https://www.stridelikeaboss.com) kanban task lifecycle from Claude Code — claim, explore, review, and complete tasks, with automatic lifecycle hooks. Stride is a task management platform designed for AI agents.
 
 > **Security:** for what the plugin runs on your machine, what data leaves it,
 > and how your API token is handled, see **[SECURITY.md](SECURITY.md)**.
 
+> **External service:** this plugin talks to your Stride server —
+> `https://www.stridelikeaboss.com` by default — over HTTPS, authenticated with
+> a bearer token you supply. It contacts no other host. See
+> [SECURITY.md](SECURITY.md) for exactly what is sent.
+
 ## Installation
 
-Add the Stride marketplace to Claude Code:
+**From the community plugin directory** (once the listing is approved):
+
+```
+/plugin install stride@claude-community
+```
+
+**From the Stride marketplace** (available today):
 
 ```
 /plugin marketplace add cheezy/stride-marketplace
-```
-
-Then install the Stride plugin:
-
-```
 /plugin install stride@stride-marketplace
 ```
+
+## Prerequisites
+
+- A **Stride account and API token** from [stridelikeaboss.com](https://www.stridelikeaboss.com).
+- Two files in your project root: **`.stride_auth.md`** (your API URL + token —
+  **never commit it**) and **`.stride.md`** (your lifecycle hook commands). See
+  [Configuration](#configuration) below for the exact format.
+
+## What's in this plugin
+
+- **7 skills** — `stride-workflow` (the recommended orchestrator), plus
+  `stride-claiming-tasks`, `stride-completing-tasks`, `stride-creating-tasks`,
+  `stride-creating-goals`, `stride-enriching-tasks`, and
+  `stride-subagent-workflow`.
+- **5 subagents** (Claude Code) — `task-explorer`, `task-enricher`,
+  `task-decomposer`, `task-reviewer`, and `hook-diagnostician`.
+- **2 slash commands** — `/stride:create-tasks` and `/stride:create-goals`.
+- **Hooks** — `hooks/hooks.json` wiring plus `stride-hook.sh` and
+  `stride-skill-gate.sh` (with `.ps1` equivalents) for automatic lifecycle hook
+  execution and the sub-skill gate.
+
+Each component is detailed below.
 
 ## Mandatory Skill Chain
 
@@ -98,6 +126,10 @@ stride:stride-creating-goals          ← BEFORE calling POST /api/tasks/batch (
 ### stride:task-explorer
 
 A read-only codebase exploration agent dispatched after claiming a task. Reads every file listed in `key_files`, finds related test files, searches for patterns referenced in `patterns_to_follow`, navigates to `where_context`, and returns a structured summary so the primary agent can start coding with full context.
+
+### stride:task-enricher
+
+Explores the codebase to fill in a sparse task *before* it is claimed — discovers `key_files`, `patterns_to_follow`, `testing_strategy`, `verification_steps`, `security_considerations`, `pitfalls`, and a complexity estimate, and returns a single enriched-task JSON object that the orchestrator PATCHes onto the existing task. It never rewrites the human-authored title, type, or description. Claude Code only.
 
 ### stride:task-decomposer
 

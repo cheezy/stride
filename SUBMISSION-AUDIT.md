@@ -62,6 +62,45 @@ or hook execution is flagged here for the security-doc task:
 - No real tokens, `.stride_auth.md`, or `.env` content appears in this audit, per
   the task's security constraint.
 
+## Credential-hygiene audit (W1130) — ALL CLEAR
+
+Full sweep of the `stride/` plugin repo for bundled secrets and credential
+handling. **No leak found; no rotation or history remediation required.**
+
+| Check | Method | Result |
+|-------|--------|--------|
+| No secret files tracked | `git ls-files \| grep -Ei 'auth\|secret\|token\|\.env\|\.pem\|\.key'` | ✅ none tracked |
+| No hardcoded credentials | `grep -RInE 'stride_(dev\|prod)_…\|Bearer …' hooks skills commands agents` | ✅ only an obvious `Bearer token123` **test placeholder** against `example.com` in `hooks/test-stride-hook.sh` — not a real credential |
+| No real token in history | `git log --all -S 'stride_dev_'` | ✅ no commit ever added/removed a `stride_dev_` literal |
+| Hook tests pass clean | `bash test-stride-hook.sh` / `test-stride-skill-gate.sh` | ✅ 237/237 and 16/16 passed |
+| User docs warn against committing creds | `README.md` § `.stride_auth.md` | ✅ states "never commit this file"; token shown as `your-token-here` placeholder |
+
+### Credential-sourcing model (verified in `hooks/stride-hook.sh`)
+
+The token and API base URL are resolved at runtime from **user-local sources
+only** — never hardcoded:
+
+1. **Primary:** `$PROJECT_DIR/.stride_auth.md` — deliberately the prod
+   `**API Token:**` line, explicitly **not** the `**Local API Token:**` line.
+2. **Fallback:** the `Bearer <token>` value parsed out of the intercepted
+   completion `curl` command (`$COMMAND`).
+3. **Env override:** `$STRIDE_API_URL` / `$STRIDE_API_TOKEN`.
+
+`hooks/stride-skill-gate.sh` has **zero** credential handling — it is purely the
+orchestrator-marker gate (no token, no network calls).
+
+### Least privilege & external dependency
+
+The hooks call only the Stride **task-lifecycle** endpoints
+(`/api/tasks/claim`, `/api/tasks/:id/complete`, `/mark_reviewed`,
+`/api/tasks/:id/changed_files`) against the single external dependency
+**`stridelikeaboss.com`**. No broader scope is requested. These facts are
+forwarded to the W1131 security document.
+
+**W1130 verdict:** credential hygiene is clean. Audit findings #1 and #2 were
+resolved by W1129; finding #6 (this sweep) is now closed with no remediation
+needed.
+
 ## Baseline conclusion
 
 The submission's **hard validation gate is already green.** The remaining work in

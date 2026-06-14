@@ -2,6 +2,9 @@
 
 Task lifecycle skills for [Stride](https://www.stridelikeaboss.com) kanban — a task management platform designed for AI agents.
 
+> **Security:** for what the plugin runs on your machine, what data leaves it,
+> and how your API token is handled, see **[SECURITY.md](SECURITY.md)**.
+
 ## Installation
 
 Add the Stride marketplace to Claude Code:

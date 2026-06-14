@@ -84,7 +84,10 @@ only** — never hardcoded:
    `**API Token:**` line, explicitly **not** the `**Local API Token:**` line.
 2. **Fallback:** the `Bearer <token>` value parsed out of the intercepted
    completion `curl` command (`$COMMAND`).
-3. **Env override:** `$STRIDE_API_URL` / `$STRIDE_API_TOKEN`.
+
+The resolver reads `.stride_auth.md` first precisely so the upload works
+regardless of whether the agent's completion curl used literal values or shell
+variables; the script itself does **not** read process environment variables.
 
 `hooks/stride-skill-gate.sh` has **zero** credential handling — it is purely the
 orchestrator-marker gate (no token, no network calls).

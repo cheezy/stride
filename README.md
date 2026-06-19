@@ -107,7 +107,7 @@ stride:stride-creating-goals          ← BEFORE calling POST /api/tasks/batch (
 
 ### stride-creating-tasks
 
-**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings).
+**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings). Also documents the optional `technical_details` field — a free-form JSON object (no fixed keys) for any extra technical context; it is optional everywhere and is not one of the five review_queue-scored fields.
 
 ### stride-creating-goals
 

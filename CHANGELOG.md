@@ -2,6 +2,27 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.29.0] - 2026-06-19
+
+### Added — the `technical_details` task field is now documented across the plugin (G225)
+
+`technical_details` is an **optional, free-form JSON object** a task may carry to hold any additional technical context that does not fit the structured fields — data shapes, gotchas, key decisions, reference links. Unlike `testing_strategy`, it has **no fixed keys**: a task author or enricher uses whatever keys best describe the work, and leaves it as `{}` when there is nothing substantive to record. It is **not** one of the five review_queue-scored fields (`acceptance_criteria`, `testing_strategy`, `security_considerations`, `pitfalls`, `patterns_to_follow`), so a blank value is never a scoring gap. The plugin previously had no documentation for this field; agents now have one consistent definition to follow.
+
+- **`skills/stride-creating-tasks/SKILL.md`** (W1179) — documents `technical_details` in the Field Quick Reference table, the complete-task example, and the Embedded Object Formats section (as a free-form object, explicitly contrasted with `testing_strategy`, which has fixed `valid_keys`).
+- **`skills/stride-creating-goals/SKILL.md`** (W1179) — notes that nested tasks MAY carry an optional free-form `technical_details` object and that it is not a review_queue-scored field.
+- **`agents/task-enricher.md` + `skills/stride-enriching-tasks/SKILL.md`** (W1180) — add `technical_details` to the enrichment guidance as an optional field the enricher MAY populate from discovered context — never fabricated, left as `{}` otherwise — with a no-secrets reminder since the object is free-form.
+- **`agents/task-decomposer.md`** (W1180) — notes that a decomposed task MAY include an optional `technical_details` object.
+- **`skills/stride-workflow/SKILL.md`** (W1181) — adds `technical_details` to the Step 1 task-field review list (optional free-form context; not a scored field).
+- **`agents/task-explorer.md`** (W1181) — the explorer folds any recorded `technical_details` into its summary so implementation benefits from it.
+
+### Backward compatibility
+
+Documentation-only. No wire-shape, hook, `.stride.md`, or `.stride_auth.md` changes; `technical_details` is optional everywhere it appears and is never added to any scored-field set. Tasks that omit it behave exactly as before.
+
+### Source
+
+G225 — W1179 (creation contracts), W1180 (enrichment + decomposition), W1181 (workflow + exploration), W1182 (this release entry + version bump). The gh release and `marketplace.json` update are a separate, human-triggered release step.
+
 ## [1.28.0] - 2026-06-13
 
 ### Fixed — the claim-time base ref is always refreshed, even for oversized claim responses (G224)

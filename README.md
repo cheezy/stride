@@ -107,11 +107,11 @@ stride:stride-creating-goals          ← BEFORE calling POST /api/tasks/batch (
 
 ### stride-creating-tasks
 
-**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings). Also documents the optional `technical_details` field — a free-form JSON object (no fixed keys) for any extra technical context; it is optional everywhere and is not one of the five review_queue-scored fields.
+**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings). Also documents the optional `technical_details` field — a free-form JSON object (no fixed keys) for any extra technical context; it is optional everywhere and is not one of the five review_queue-scored fields. (v1.30.0+) documents the optional `created_by_agent` field — set it to the plugin's own agent name (the same value sent as `agent_name` on claim/complete) so the `/agents` feed attributes the creating agent; it is create-only and forbidden on `PATCH`.
 
 ### stride-creating-goals
 
-**MANDATORY** before batch creation or goal creation. Contains the only correct batch format — root key must be `"goals"` not `"tasks"`. Most common API error when skipped.
+**MANDATORY** before batch creation or goal creation. Contains the only correct batch format — root key must be `"goals"` not `"tasks"`. Most common API error when skipped. (v1.30.0+) documents `created_by_agent` on the batch goal — set once on the goal; the server propagates it to every nested child task.
 
 ### stride-enriching-tasks
 

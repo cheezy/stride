@@ -108,6 +108,7 @@ Use BEFORE calling:
       "type": "goal",
       "complexity": "large",
       "priority": "high",
+      "created_by_agent": "Claude Opus 4.6",
       "description": "Implement complete user authentication",
       "tasks": [
         {
@@ -126,6 +127,8 @@ Use BEFORE calling:
   ]
 }
 ```
+
+Set `created_by_agent` on **the goal** to the plugin's own agent name — **the exact same value you send as `agent_name` on claim and complete** (here, `"Claude Opus 4.6"`; use the plain agent name, never the `ai_agent:<model>` token form). The server **propagates the goal's `created_by_agent` to every nested child task**, so you do not repeat it on each task — set it once on the goal and the whole tree is attributed to the creating agent in the `/agents` activity feed. Like everywhere else, `created_by_agent` is accepted **only on create**; it is forbidden on `PATCH` and cannot be backfilled.
 
 **WRONG - Will fail with 422 error:**
 ```json

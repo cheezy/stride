@@ -50,25 +50,26 @@ directory path).
 | **Individual author (this case)** | Console plugin submission — `platform.claude.com/plugins/submit` |
 | Teams / Enterprise | claude.ai admin directory — `claude.ai/admin-settings/directory/submissions/plugins/new` |
 
-> ⚠️ **Verify before submitting.** These URLs come from product research on
-> 2026-06-14 and were not re-confirmed against a live page at package time.
-> Open the Console and confirm the current submission entry point before
-> relying on the exact path. (Pitfall: don't record a submission URL without
-> verifying it is current.)
+> ✅ **Verified.** The individual-author Console path
+> (`platform.claude.com/plugins/submit`) has been confirmed against the live
+> page and is the correct submission entry point.
 
 ## Open follow-ups before clicking submit
 
-1. **🔴 BLOCKER — push the plugin repo.** The 5 G234 commits (`f3b5860`,
-   `5ffe5aa`, `5386de2`, `bf058c4`, `0ac311c`) are committed **locally only**.
-   The directory pulls from the **public** repo, so these must be pushed to
-   `github.com/cheezy/stride` (and the marketplace pin updated if you submit via
-   the marketplace) **before** the listing will reflect this work. *Not yet
-   pushed — awaiting your go-ahead.*
-2. **🟡 Non-blocking — trim the marketplace blurb.** The `plugins[].description`
-   in the separate `cheezy/stride-marketplace` repo is an oversized
-   changelog-style paragraph (audit finding #3). It lives outside this plugin
-   repo (out of G234 scope) but reads poorly as a catalog blurb — worth trimming
-   in the marketplace repo before the listing goes live.
+1. **✅ RESOLVED — plugin repo pushed.** The 5 G234 commits (`f3b5860`,
+   `5ffe5aa`, `5386de2`, `bf058c4`, `0ac311c`) are now on `origin/main` at
+   `github.com/cheezy/stride` (verified: local `main` is 0 ahead / 0 behind after
+   a fresh fetch). The marketplace pin has also advanced to **stride 1.30.0**
+   (commit `ffab240`).
+2. **✅ RESOLVED — marketplace blurb trimmed.** The `plugins[].description` for
+   `stride` in `cheezy/stride-marketplace` is now a clean one-line catalog blurb
+   (commit `5212c3a`, pushed): *"Drive the full Stride kanban task lifecycle from
+   Claude Code — claiming, completing, creating and enriching tasks and goals,
+   workflow orchestration, subagent dispatch, and automatic lifecycle hook
+   execution."*
+3. **✅ RESOLVED — submission URL confirmed.** The individual-author Console
+   path (`platform.claude.com/plugins/submit`) has been verified against the live
+   page and is the correct submission entry point.
 
 ## Credential rotation
 
@@ -79,8 +80,10 @@ blocks this submission.
 ## Go / No-Go
 
 **Validation, manifest, security doc, README, and credential hygiene are all
-GREEN.** The only hard blocker is operational, not content: **the plugin repo
-must be pushed public** (item 1). Once pushed, the package is ready to submit.
+GREEN.** All three operational follow-ups are now resolved: the plugin repo is
+pushed public (item 1), the marketplace blurb is trimmed (item 2), and the
+submission URL is confirmed (item 3). **No blockers remain — the package is
+ready to submit.**
 
 **This goal ends here. The submission form is intentionally NOT submitted** —
 that is the user's call.

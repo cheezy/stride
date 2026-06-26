@@ -2,6 +2,12 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.30.1] - 2026-06-26
+
+### Changed
+
+- **Repository housekeeping only — no runtime change.** Updated the internal `SUBMISSION-READINESS.md` go/no-go tracking doc to mark all directory-submission follow-ups resolved (repo pushed, listing blurb trimmed, repository URL confirmed). No skill, agent, command, hook, `.stride.md`, or `.stride_auth.md` change; the shipped plugin behavior is byte-for-byte identical to v1.30.0.
+
 ## [1.30.0] - 2026-06-20
 
 ### Added — creation skills now stamp `created_by_agent` so the `/agents` feed attributes the creating agent (G254 / W1228)

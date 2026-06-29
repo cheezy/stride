@@ -63,3 +63,7 @@ Skill(skill: "stride-workflow",
 ```
 
 Do NOT invoke `stride-creating-goals` yourself. The orchestrator is the only sanctioned path — it satisfies the sub-skill STOP gate by dispatching from inside itself, and it forwards the context bundle to the sub-skill, which mines it per its **Consuming Provided Context** section (populating both goal-level fields and each nested task). The context **augments** the user's interactive intent; it never silently overrides the user's confirmation, never relaxes the `"goals"` root-key or index-dependency rules, and never excuses leaving a required field (including the four review_queue-scored fields on every nested task) blank.
+
+## Terminal state
+
+This command's terminal state is **the goal and its tasks created** — not built. After the orchestrator dispatches `stride-creating-goals` and the goal/tasks are created, it reports the new `G###` / `W###` identifiers and **stops**. It does not claim, start, or implement any of the work, and it does not continue into a build loop. Newly created tasks land in the **Backlog** and become claimable only after a human promotes them to Ready. Building a created task is a separate, explicitly-invoked action — a fresh request to work the task, which re-enters the `stride-workflow` orchestrator. See the orchestrator's **Creation Terminal State** section.

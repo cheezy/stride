@@ -2,6 +2,22 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.32.0] - 2026-07-01
+
+### Added — `API Notes & Limitations` section in the workflow orchestrator skill (G286 / W1416)
+
+Two recurring API gotchas were undocumented, and agents kept rediscovering them the hard way: attempting to move a task to a different goal via `PATCH` (impossible — `parent_id` is creation-only and there is no DELETE endpoint), and calling the hosted API from an HTTP library whose default User-Agent the edge rejects.
+
+- **`skills/stride-workflow/SKILL.md`** — Added an **API Notes & Limitations** section directly after **API Authorization** documenting: (a) tasks cannot be reparented and there is no DELETE endpoint — moving a task between goals or removing it is a human board-UI action, never to be worked around by recreating the task as a supersede; (b) raw HTTP calls must use curl or a curl/browser-like `User-Agent`, because the hosted API edge returns `403` with `error code: 1010` to default library User-Agents (e.g. `python-urllib`).
+
+### Backward compatibility
+
+Documentation/skill-text only. No wire-shape, hook, `.stride.md`, or `.stride_auth.md` changes. No skill logic changed.
+
+### Source
+
+G286 — W1416 (canonical wording; the five port plugins mirror it).
+
 ## [1.31.0] - 2026-06-29
 
 ### Added — `create-tasks`/`create-goals` now have an explicit terminal state, plus a Backlog claim-fail guard (G284 / W1400)

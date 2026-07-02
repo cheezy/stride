@@ -2154,6 +2154,133 @@ if ($durMatch.Success -and [long]$durMatch.Groups[1].Value -ge 0 -and [long]$dur
 }
 
 # ============================================================
+# Test Group 13: backslash line continuation (W1456)
+# ============================================================
+Write-Host ""
+Write-Host "=== Test Group 13: backslash line continuation (W1456) ==="
+
+$contClaimJson = '{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}'
+
+# 13a: The canonical multi-line gh pr create example parses into ONE command.
+$ghBin = Join-Path $TmpDir 'g13-fake-bin'
+New-Item -ItemType Directory -Path $ghBin -Force | Out-Null
+Set-Content -Path (Join-Path $ghBin 'gh') -Value @'
+#!/bin/sh
+echo "gh-argc:$#"
+'@ -Encoding UTF8
+bash -c "chmod +x '$ghBin/gh'"
+$contProj = Join-Path $TmpDir 'g13-continuation'
+New-Item -ItemType Directory -Path $contProj -Force | Out-Null
+Set-Content -Path (Join-Path $contProj '.stride.md') -Value @'
+## before_doing
+```bash
+gh pr create \
+  --title "$TASK_IDENTIFIER: $TASK_TITLE" \
+  --body "Implements $TASK_IDENTIFIER."
+```
+'@ -Encoding UTF8
+$savedPath = $env:PATH
+$env:PATH = "${ghBin}:$($env:PATH)"
+try {
+    $r = Invoke-HookScript -InputJson $contClaimJson -Phase 'post' -ProjectDir $contProj
+} finally {
+    $env:PATH = $savedPath
+}
+Assert-Exit "13a: docs gh example exits 0" 0 $r.ExitCode
+Assert-Contains "13a: gh received all six arguments in one invocation" "gh-argc:6" $r.Stdout
+$contParsed = $null
+try { $contParsed = $r.Stdout | ConvertFrom-Json } catch { $contParsed = $null }
+if ($contParsed -and @($contParsed.commands_completed).Count -eq 1) {
+    Write-Host "  PASS: 13a: the three physical lines joined into ONE command" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 13a: expected 1 completed command, got: $(if ($contParsed) { @($contParsed.commands_completed).Count } else { 'unparseable' })" -ForegroundColor Red
+    $script:FAIL++
+}
+
+# 13b: Trailing backslash on the section's last line still runs the command.
+$tailProj = Join-Path $TmpDir 'g13-tail'
+New-Item -ItemType Directory -Path $tailProj -Force | Out-Null
+Set-Content -Path (Join-Path $tailProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo tail\
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson $contClaimJson -Phase 'post' -ProjectDir $tailProj
+Assert-Exit "13b: trailing backslash at section end exits 0" 0 $r.ExitCode
+Assert-Contains "13b: the command still ran" "tail" $r.Stdout
+
+# 13c: Escaped and quoted backslashes do not trigger joining.
+$quoteProj = Join-Path $TmpDir 'g13-quoted'
+New-Item -ItemType Directory -Path $quoteProj -Force | Out-Null
+Set-Content -Path (Join-Path $quoteProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo x\\
+echo second
+echo 'lit \'
+echo third
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson $contClaimJson -Phase 'post' -ProjectDir $quoteProj
+Assert-Exit "13c: escaped/quoted backslash fixture exits 0" 0 $r.ExitCode
+$contParsed = $null
+try { $contParsed = $r.Stdout | ConvertFrom-Json } catch { $contParsed = $null }
+if ($contParsed -and @($contParsed.commands_completed).Count -eq 4) {
+    Write-Host "  PASS: 13c: four physical lines stay four separate commands" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 13c: expected 4 completed commands, got: $(if ($contParsed) { @($contParsed.commands_completed).Count } else { 'unparseable' })" -ForegroundColor Red
+    $script:FAIL++
+}
+Assert-Contains "13c: quoted-literal-backslash command ran separately" "third" $r.Stdout
+
+# 13d: Continuation across three physical lines joins into one command.
+$tripleProj = Join-Path $TmpDir 'g13-triple'
+New-Item -ItemType Directory -Path $tripleProj -Force | Out-Null
+Set-Content -Path (Join-Path $tripleProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo a \
+b \
+c
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson $contClaimJson -Phase 'post' -ProjectDir $tripleProj
+Assert-Exit "13d: three-line continuation exits 0" 0 $r.ExitCode
+Assert-Contains "13d: joined command output intact" "a b c" $r.Stdout
+
+# 13e: A standalone comment line ending in a backslash is inert — the
+# following command must still run (comments never continue in shell).
+$commentBsProj = Join-Path $TmpDir 'g13-comment-backslash'
+New-Item -ItemType Directory -Path $commentBsProj -Force | Out-Null
+Set-Content -Path (Join-Path $commentBsProj '.stride.md') -Value @'
+## before_doing
+```bash
+# reminder about C:\temp\
+echo survives
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson $contClaimJson -Phase 'post' -ProjectDir $commentBsProj
+Assert-Exit "13e: comment ending in backslash exits 0" 0 $r.ExitCode
+Assert-Contains "13e: the command after the comment still runs" "survives" $r.Stdout
+
+# 13f: DECIDED behavior parity — a backslash at end of line inside an
+# unclosed single quote is literal (no join) and fails loudly.
+$unclosedProj = Join-Path $TmpDir 'g13-unclosed-quote'
+New-Item -ItemType Directory -Path $unclosedProj -Force | Out-Null
+Set-Content -Path (Join-Path $unclosedProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo 'one \
+two'
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson $contClaimJson -Phase 'post' -ProjectDir $unclosedProj
+Assert-Exit "13f: backslash inside unclosed single quote does not join (fails loudly)" 2 $r.ExitCode
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

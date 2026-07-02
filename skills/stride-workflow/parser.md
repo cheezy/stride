@@ -26,6 +26,18 @@ The parser applies these rules uniformly to every recognized section:
 4. **Missing section is a no-op.** If the requested section is absent, the parser yields an empty command list. The hook bridge exits cleanly (exit 0) — it is **not** an error.
 5. **Comment and blank lines inside the fence are skipped.** Lines whose first non-whitespace character is `#`, and lines that are empty after trimming, are filtered out of the executable command list.
 
+## Line Execution Model (Logical Lines)
+
+The fenced body executes as **one command per logical line**:
+
+1. **Backslash continuation joins physical lines.** A physical line ending in an **unquoted, unescaped** backslash continues onto the next physical line — the backslash-newline pair is removed and the lines join into one logical line, per normal shell semantics. Continuation may span any number of physical lines.
+2. **Quoting is respected.** A backslash inside single quotes is a literal character and does **not** trigger joining (multi-line single-quoted strings remain unsupported — the one-logical-line model stays). A trailing `\\` is an escaped backslash — the command ends there, no join. Inside double quotes and outside quotes, a trailing backslash continues the line. Quote state carries across joined lines.
+3. **Comment and blank skipping applies to logical lines, after joining.** A `#` at the start of a continuation's next physical line is joined into the command (where the shell treats it as a trailing comment) — it does not break the continuation. Only logical lines whose first non-whitespace character is `#`, or that are blank after trimming, are skipped. **Comments themselves never continue:** `#` lexes to end-of-line in shell, so a trailing backslash on a standalone comment line is inert and cannot swallow the next command.
+4. **A trailing backslash on the section's last line never hangs or drops the command** — the accumulated logical line executes with the continuation marker stripped.
+5. **Each logical line runs as a single command** in its own shell child; commands do not share `cd` or variable state (see hook-execution.md's "Each Line Runs in a Fresh Shell").
+
+This makes the canonical multi-line examples in the workflow skill and hook-execution.md (e.g. `gh pr create \` with continued `--title`/`--body` arguments) parse and execute as one command.
+
 These rules apply to all five sections, including `## after_goal`. The parser itself is section-name-agnostic — it matches whatever name the caller passed in `$HOOK_NAME` — so adding `after_goal` to the recognized list is documentation only; no code change is required in `stride-hook.sh`.
 
 ## Back-Compatibility

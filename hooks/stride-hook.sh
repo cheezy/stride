@@ -432,6 +432,44 @@ resolve_section_budget() {
   printf '%s' "$_budget"
 }
 
+# (W1456) Shell-semantics line-continuation check. Returns 0 when the
+# LOGICAL line ends in a backslash that escapes the newline — i.e. the
+# backslash is unescaped and not inside single quotes. Mirrors real shell
+# rules: outside quotes and inside double quotes, backslash-newline is a
+# continuation; inside single quotes a backslash is a literal character;
+# `\\` at end of line is an escaped backslash, not a continuation. Callers
+# pass the accumulated logical line so quote state carries across joins.
+line_continues() {
+  # NOTE: _len must be declared in a SEPARATE local statement — the words
+  # of a single `local a=$1 b=${#a}` command are expanded before any
+  # assignment lands, so ${#_line} would read the (unset) outer variable
+  # and abort under `set -u`.
+  local _line="$1"
+  local _i=0 _len=${#_line} _state="none" _c
+  while [ "$_i" -lt "$_len" ]; do
+    _c="${_line:_i:1}"
+    if [ "$_state" = "single" ]; then
+      [ "$_c" = "'" ] && _state="none"
+      _i=$((_i + 1))
+    elif [ "$_c" = "\\" ]; then
+      # Backslash escapes the next char; with no next char it escapes the
+      # newline — that IS the continuation marker.
+      [ $((_i + 1)) -eq "$_len" ] && return 0
+      _i=$((_i + 2))
+    elif [ "$_state" = "double" ]; then
+      [ "$_c" = '"' ] && _state="none"
+      _i=$((_i + 1))
+    else
+      case "$_c" in
+        "'") _state="single" ;;
+        '"') _state="double" ;;
+      esac
+      _i=$((_i + 1))
+    fi
+  done
+  return 1
+}
+
 # (W1455) Portable millisecond clock. GNU date supports %N (nanoseconds);
 # BSD/macOS date prints a literal trailing 'N', so probe once and fall back
 # to perl Time::HiRes (ships with macOS), then to whole-second granularity
@@ -592,14 +630,48 @@ run_stride_section() {
   fi
 
   local _cmd _trimmed
-  local _cmd_list
+  local _cmd_list _pending
   _cmd_list=()
+  _pending=""
+  # (W1456) Physical lines are joined into LOGICAL lines first: a line
+  # ending in an unquoted, unescaped backslash continues onto the next
+  # physical line (the backslash-newline pair is removed, per shell
+  # semantics). Trimming and comment/blank skipping apply to logical
+  # lines AFTER joining — a `#` on a continuation line is part of the
+  # joined command (where the shell treats it as a trailing comment),
+  # never a skip. One command per logical line remains the model.
   while IFS= read -r _cmd; do
+    _cmd="${_cmd%$'\r'}"
+    if [ -n "$_pending" ]; then
+      _cmd="${_pending}${_cmd}"
+      _pending=""
+    else
+      # Comments never continue: `#` lexes to end-of-line in shell, so a
+      # trailing backslash on a standalone comment line is inert — skip the
+      # line here so it cannot swallow the next command. (A `#` on a
+      # continuation body line still joins, handled above.)
+      case "${_cmd#"${_cmd%%[![:space:]]*}"}" in
+        \#*) continue ;;
+      esac
+    fi
+    if line_continues "$_cmd"; then
+      _pending="${_cmd%\\}"
+      continue
+    fi
     _trimmed="${_cmd#"${_cmd%%[![:space:]]*}"}"
     [ -z "$_trimmed" ] && continue
     case "$_trimmed" in \#*) continue ;; esac
     _cmd_list+=("$_trimmed")
   done <<< "$_commands"
+  # A trailing backslash on the section's last line: emit the accumulated
+  # command with the continuation marker already stripped — never hang or
+  # drop it.
+  if [ -n "$_pending" ]; then
+    _trimmed="${_pending#"${_pending%%[![:space:]]*}"}"
+    if [ -n "$_trimmed" ]; then
+      case "$_trimmed" in \#*) : ;; *) _cmd_list+=("$_trimmed") ;; esac
+    fi
+  fi
 
   if [ ${#_cmd_list[@]} -eq 0 ]; then
     finalize_after_doing

@@ -658,6 +658,38 @@ function Invoke-SelfHealChangedFilesUpload {
 # global `$HookName`. Reuses Invoke-FinalizeAfterDoing which gates
 # internally on the GLOBAL `$HookName`, so calling this for "after_goal"
 # does NOT re-trigger the after_doing snapshot PUT.
+# (W1456) Shell-semantics line-continuation check for the bash-section
+# parser — mirror of line_continues in stride-hook.sh. Returns $true when
+# the LOGICAL line ends in a backslash that escapes the newline: unescaped
+# and not inside single quotes. Inside single quotes a backslash is a
+# literal character; a trailing `\\` is an escaped backslash, not a
+# continuation. Callers pass the accumulated logical line so quote state
+# carries across joins.
+function Test-LineContinues {
+    param([string]$Line)
+
+    $i = 0
+    $state = 'none'
+    while ($i -lt $Line.Length) {
+        $c = $Line[$i]
+        if ($state -eq 'single') {
+            if ($c -eq "'") { $state = 'none' }
+            $i++
+        } elseif ($c -eq '\') {
+            if (($i + 1) -eq $Line.Length) { return $true }
+            $i += 2
+        } elseif ($state -eq 'double') {
+            if ($c -eq '"') { $state = 'none' }
+            $i++
+        } else {
+            if ($c -eq "'") { $state = 'single' }
+            elseif ($c -eq '"') { $state = 'double' }
+            $i++
+        }
+    }
+    return $false
+}
+
 function Invoke-StrideSection {
     param([string]$Section)
 
@@ -699,12 +731,39 @@ function Invoke-StrideSection {
         return 0
     }
 
+    # (W1456) Join backslash-continued physical lines into logical lines
+    # first (the backslash-newline pair is removed, per shell semantics);
+    # trimming and comment/blank skipping apply to logical lines AFTER
+    # joining. Mirror of the stride-hook.sh loop.
     $secCmdList = @()
+    $secPending = ''
     foreach ($cmd in ($secCommands -split "`n")) {
+        $cmd = $cmd.TrimEnd("`r")
+        if ($secPending) {
+            $cmd = $secPending + $cmd
+            $secPending = ''
+        } else {
+            # Comments never continue: '#' lexes to end-of-line in shell,
+            # so a trailing backslash on a standalone comment line is inert
+            # — skip it here so it cannot swallow the next command.
+            if ($cmd.TrimStart().StartsWith('#')) { continue }
+        }
+        if (Test-LineContinues -Line $cmd) {
+            $secPending = $cmd.Substring(0, $cmd.Length - 1)
+            continue
+        }
         $trimmedCmd = $cmd.TrimStart()
         if (-not $trimmedCmd) { continue }
         if ($trimmedCmd.StartsWith('#')) { continue }
         $secCmdList += $trimmedCmd
+    }
+    # Trailing backslash on the section's last line — emit the accumulated
+    # command with the marker already stripped; never hang or drop it.
+    if ($secPending) {
+        $trimmedCmd = $secPending.TrimStart()
+        if ($trimmedCmd -and -not $trimmedCmd.StartsWith('#')) {
+            $secCmdList += $trimmedCmd
+        }
     }
 
     if ($secCmdList.Count -eq 0) {

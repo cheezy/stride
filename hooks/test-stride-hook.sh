@@ -3760,6 +3760,155 @@ else
 fi
 
 # ============================================================
+echo ""
+echo "=== Test Group 17: backslash line continuation (W1456) ==="
+
+CONT_CLAIM_JSON='{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}'
+
+# 17a: The canonical multi-line gh pr create example from the workflow skill
+# parses into ONE command and executes as one command.
+GH_BIN="$TMPDIR_TEST/fake-bin"
+mkdir -p "$GH_BIN"
+cat > "$GH_BIN/gh" << 'FAKEGH'
+#!/bin/sh
+echo "gh-argc:$#"
+FAKEGH
+chmod +x "$GH_BIN/gh"
+CONT_PROJ="$TMPDIR_TEST/continuation-project"
+mkdir -p "$CONT_PROJ"
+cat > "$CONT_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+gh pr create \
+  --title "$TASK_IDENTIFIER: $TASK_TITLE" \
+  --body "Implements $TASK_IDENTIFIER."
+```
+STRIDE
+OUTPUT=$(echo "$CONT_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$CONT_PROJ" PATH="$GH_BIN:$PATH" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "17a: docs gh example exits 0" 0 "$EXIT_CODE"
+assert_contains "17a: gh received all six arguments in one invocation" "gh-argc:6" "$OUTPUT"
+CONT_LEN=$(echo "$OUTPUT" | jq '.commands_completed | length' 2>/dev/null)
+assert_eq "17a: the three physical lines joined into ONE command" "1" "$CONT_LEN"
+
+# 17b: A trailing backslash on the section's last line neither hangs nor
+# drops the command.
+TAIL_PROJ="$TMPDIR_TEST/tail-backslash-project"
+mkdir -p "$TAIL_PROJ"
+cat > "$TAIL_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo tail\
+```
+STRIDE
+OUTPUT=$(echo "$CONT_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$TAIL_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "17b: trailing backslash at section end exits 0" 0 "$EXIT_CODE"
+assert_contains "17b: the command still ran" "tail" "$OUTPUT"
+
+# 17c: Escaped and quoted backslashes do not trigger joining.
+QUOTE_PROJ="$TMPDIR_TEST/quoted-backslash-project"
+mkdir -p "$QUOTE_PROJ"
+cat > "$QUOTE_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo x\\
+echo second
+echo 'lit \'
+echo third
+```
+STRIDE
+OUTPUT=$(echo "$CONT_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$QUOTE_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "17c: escaped/quoted backslash fixture exits 0" 0 "$EXIT_CODE"
+CONT_LEN=$(echo "$OUTPUT" | jq '.commands_completed | length' 2>/dev/null)
+assert_eq "17c: four physical lines stay four separate commands" "4" "$CONT_LEN"
+assert_contains "17c: escaped backslash command ran separately" "second" "$OUTPUT"
+assert_contains "17c: quoted-literal-backslash command ran separately" "third" "$OUTPUT"
+
+# 17c2: DECIDED behavior — a backslash at end of line INSIDE an unclosed
+# single quote is literal (no join), so the malformed one-line command
+# fails loudly rather than being silently mangled by a naive join.
+UNCLOSED_PROJ="$TMPDIR_TEST/unclosed-quote-project"
+mkdir -p "$UNCLOSED_PROJ"
+cat > "$UNCLOSED_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo 'one \
+two'
+```
+STRIDE
+OUTPUT=$(echo "$CONT_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$UNCLOSED_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "17c2: backslash inside unclosed single quote does not join (command fails loudly)" 2 "$EXIT_CODE"
+
+# 17d: Continuation across three physical lines joins into one command.
+TRIPLE_PROJ="$TMPDIR_TEST/triple-continuation-project"
+mkdir -p "$TRIPLE_PROJ"
+cat > "$TRIPLE_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo a \
+b \
+c
+```
+STRIDE
+OUTPUT=$(echo "$CONT_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$TRIPLE_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "17d: three-line continuation exits 0" 0 "$EXIT_CODE"
+CONT_LEN=$(echo "$OUTPUT" | jq '.commands_completed | length' 2>/dev/null)
+assert_eq "17d: three physical lines joined into ONE command" "1" "$CONT_LEN"
+assert_contains "17d: joined command output intact" "a b c" "$OUTPUT"
+
+# 17e: A comment-looking line between continued lines is JOINED (logical-line
+# comment semantics), not treated as a comment break.
+COMMENT_PROJ="$TMPDIR_TEST/comment-continuation-project"
+mkdir -p "$COMMENT_PROJ"
+cat > "$COMMENT_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo foo \
+# joined trailing comment
+echo bar
+```
+STRIDE
+OUTPUT=$(echo "$CONT_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$COMMENT_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "17e: comment between continued lines exits 0" 0 "$EXIT_CODE"
+CONT_LEN=$(echo "$OUTPUT" | jq '.commands_completed | length' 2>/dev/null)
+assert_eq "17e: two logical commands (comment joined into the first)" "2" "$CONT_LEN"
+assert_contains "17e: first command ran with the shell-comment tail dropped" "foo" "$OUTPUT"
+assert_contains "17e: second command ran normally" "bar" "$OUTPUT"
+
+# 17g: A standalone comment line ending in a backslash is inert — comments
+# never continue in shell, so the following command must still run.
+COMMENT_BS_PROJ="$TMPDIR_TEST/comment-backslash-project"
+mkdir -p "$COMMENT_BS_PROJ"
+cat > "$COMMENT_BS_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+# reminder about C:\temp\
+echo survives
+```
+STRIDE
+OUTPUT=$(echo "$CONT_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$COMMENT_BS_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "17g: comment ending in backslash exits 0" 0 "$EXIT_CODE"
+CONT_LEN=$(echo "$OUTPUT" | jq '.commands_completed | length' 2>/dev/null)
+assert_eq "17g: the command after the comment still runs (not swallowed)" "1" "$CONT_LEN"
+assert_contains "17g: command output present" "survives" "$OUTPUT"
+
+# 17f: CRLF line endings before the backslash are stripped, so continuation
+# still joins on Windows-authored .stride.md files.
+CRLF_CONT_PROJ="$TMPDIR_TEST/crlf-continuation-project"
+mkdir -p "$CRLF_CONT_PROJ"
+printf '## before_doing\r\n```bash\r\necho crlf \\\r\njoined\r\n```\r\n' > "$CRLF_CONT_PROJ/.stride.md"
+OUTPUT=$(echo "$CONT_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$CRLF_CONT_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "17f: CRLF continuation exits 0" 0 "$EXIT_CODE"
+assert_contains "17f: CRLF lines joined into one command" "crlf joined" "$OUTPUT"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

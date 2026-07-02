@@ -1,7 +1,7 @@
 ---
 name: hook-diagnostician
 description: |
-  Use this agent when a Stride hook (before_doing, after_doing, before_review, after_review) fails during task lifecycle. The agent parses the hook output, identifies failure patterns, categorizes issues by severity, and returns a prioritized fix plan. Accepts both structured JSON from Claude Code hooks (stride-hook.sh) and raw text output from legacy agent-executed hooks. Examples: <example>Context: The after_doing hook failed with test failures and credo warnings. user: "after_doing hook failed with exit code 1 — here's the output" assistant: "Let me dispatch the hook-diagnostician to analyze the failures and prioritize fixes" <commentary>The hook produced mixed output from multiple tools. The diagnostician parses each tool's output separately and returns a prioritized fix order.</commentary></example> <example>Context: The before_doing hook failed during git pull with merge conflicts. user: "before_doing hook failed — got merge conflicts on pull" assistant: "I'll use the hook-diagnostician to analyze the conflicts and recommend a resolution approach" <commentary>Git failures need different handling than tool failures. The diagnostician identifies the conflict files and suggests resolution strategy.</commentary></example>
+  Use this agent when a Stride hook (before_doing, after_doing, before_review, after_review, after_goal) fails during the task or goal lifecycle. The agent parses the hook output, identifies failure patterns, categorizes issues by severity, and returns a prioritized fix plan. Accepts both structured JSON from Claude Code hooks (stride-hook.sh) and raw text output from legacy agent-executed hooks. Examples: <example>Context: The after_doing hook failed with test failures and credo warnings. user: "after_doing hook failed with exit code 1 — here's the output" assistant: "Let me dispatch the hook-diagnostician to analyze the failures and prioritize fixes" <commentary>The hook produced mixed output from multiple tools. The diagnostician parses each tool's output separately and returns a prioritized fix order.</commentary></example> <example>Context: The before_doing hook failed during git pull with merge conflicts. user: "before_doing hook failed — got merge conflicts on pull" assistant: "I'll use the hook-diagnostician to analyze the conflicts and recommend a resolution approach" <commentary>Git failures need different handling than tool failures. The diagnostician identifies the conflict files and suggests resolution strategy.</commentary></example>
 model: sonnet
 ---
 
@@ -277,6 +277,7 @@ Suggested fix: Resolve conflicts in listed files. Open each file, find <<<< mark
 - after_doing: 120,000 ms
 - before_review: 60,000 ms
 - after_review: 60,000 ms
+- after_goal: 60,000 ms
 
 **When timeout detected:**
 ```
@@ -289,6 +290,16 @@ Suggested fix: Check which command is slow. Common causes:
   - Compilation: Full recompile needed — check for changed dependencies
   - Infinite loop: Check recent code changes for loops without termination
 ```
+
+## after_goal Failure Guidance
+
+`after_goal` is the fifth blocking hook (60s budget). It fires after the parent goal's final child task completes, and its failure semantics differ from the four task-scoped hooks:
+
+- **A failed after_goal does NOT roll back or block the child task** — the task that triggered it is already complete. The failure is recorded on the parent goal's `after_goal_attempts` audit log and the **goal stays In Progress** instead of transitioning to Done.
+- **The failure is re-triggerable.** After the underlying issue is fixed, the agent re-runs the `## after_goal` section and POSTs the fresh result to `PATCH /api/tasks/:goal_id/after_goal`. A `2xx` with `exit_code: 0` then flips the goal to Done.
+- **The goal id for the retry comes from the goal-level env vars** — `GOAL_ID` (falling back to the completed child's `parent_id` when the server omits it) and `GOAL_IDENTIFIER`, which the executor exports for the after_goal section. Include the resolved goal id in your fix plan so the dispatching agent knows exactly which goal to re-trigger.
+
+Diagnose the failed command itself with the same Failure Pattern Catalog above — after_goal bodies are ordinary shell commands (PR creation, notifications, smoke tests), so git failures, network errors, and timeouts all apply. Your fix plan should end with the retry instruction rather than "re-run the hook" alone, since the retry path is the after_goal PATCH, not a task-lifecycle hook re-fire.
 
 ## Multi-Tool Output Parsing
 

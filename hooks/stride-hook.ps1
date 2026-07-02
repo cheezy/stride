@@ -28,6 +28,59 @@ $EnvCache = Join-Path $ProjectDir '.stride-env-cache'
 # KEY='' entries on each section child's environment.
 $StrideEmptyEnvKeys = @()
 
+# (W1457) Record the claim-time dirty baseline: every path already modified
+# (vs the fresh TASK_BASE_REF) or untracked at claim time, with its current
+# blob hash, one "<hash> <path>" line each. The upload filter consults this
+# to exclude pre-existing unrelated edits from completion snapshots unless
+# the file changed again after claim (hash differs -> included). Persisted
+# on disk (claim and completion can happen in different sessions), cleaned
+# up with the other hook artifacts. Best-effort: failure leaves an absent
+# baseline, which the filter treats as "no exclusion".
+function Write-DirtyBaseline {
+    param([string]$BaseRef)
+    $blFile = Join-Path $ProjectDir '.stride-dirty-baseline'
+    Remove-Item -Force $blFile -ErrorAction SilentlyContinue
+    if (-not $BaseRef) { return }
+    try {
+        $tracked = @(& git -C $ProjectDir diff --name-only $BaseRef 2>$null)
+        if ($LASTEXITCODE -ne 0) { $tracked = @() }
+        $untracked = @(& git -C $ProjectDir ls-files --others --exclude-standard 2>$null)
+        if ($LASTEXITCODE -ne 0) { $untracked = @() }
+        $paths = @(($tracked + $untracked) | Where-Object { $_ } | Select-Object -Unique)
+        if ($paths.Count -eq 0) { return }
+        $lines = @()
+        foreach ($p in $paths) {
+            $full = Join-Path $ProjectDir $p
+            if (Test-Path -LiteralPath $full -PathType Leaf) {
+                $h = (& git -C $ProjectDir hash-object -- $p 2>$null | Out-String).Trim()
+                if ($LASTEXITCODE -ne 0 -or -not $h) { $h = 'unhashable' }
+            } else {
+                $h = 'absent'
+            }
+            $lines += "$h $p"
+        }
+        Set-Content -Path $blFile -Value $lines -Encoding UTF8
+    } catch {
+        # Best-effort — an absent baseline just means no exclusion.
+    }
+}
+
+# (W1457) Load the dirty baseline as a path->hash map; $null when absent.
+function Read-DirtyBaseline {
+    $blFile = Join-Path $ProjectDir '.stride-dirty-baseline'
+    if (-not (Test-Path -LiteralPath $blFile -PathType Leaf)) { return $null }
+    $map = @{}
+    try {
+        foreach ($line in Get-Content -Path $blFile -Encoding UTF8) {
+            if ($line -match '^(\S+) (.+)$') { $map[$Matches[2]] = $Matches[1] }
+        }
+    } catch {
+        return $null
+    }
+    if ($map.Count -eq 0) { return $null }
+    return $map
+}
+
 # Exit early if no phase argument or no .stride.md
 if (-not $Phase) { exit 0 }
 if (-not (Test-Path $StrideMd)) { exit 0 }
@@ -207,6 +260,9 @@ if ($HookName -eq 'before_doing') {
                 # the new task's id.
                 Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
                 Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+                # (W1457) Snapshot the pre-existing dirty paths so unrelated
+                # edits that predate this claim never reach the uploaded diff.
+                Write-DirtyBaseline -BaseRef $baseRef
             } elseif ($baseRef) {
                 # (W1086/W1087) No parseable response and no usable persisted
                 # file. A claim still opens a new task window, so unconditionally
@@ -222,6 +278,9 @@ if ($HookName -eq 'before_doing') {
                 $newLines | Set-Content -Path $EnvCache -Encoding UTF8
                 Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
                 Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+                # (W1457) Same dirty-baseline snapshot as the parsed-response
+                # path — the claim window opened regardless.
+                Write-DirtyBaseline -BaseRef $baseRef
             }
         }
     } catch {
@@ -521,8 +580,32 @@ function Invoke-ChangedFilesUpload {
         # falls through to the raw bytes unchanged.
         try {
             $entries = @([System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json)
+            # (W1457) Hard name exclusions (.stride.md, .stride_auth.md — the
+            # auth file must NEVER be uploaded — and the baseline artifact),
+            # plus the claim-time dirty-baseline exclusion: entries whose path
+            # was already dirty at claim AND whose file is hash-identical now
+            # are pre-existing unrelated edits, not task work. Hash mismatch,
+            # deletion, or unhashable -> keep (include when in doubt).
+            $dirtyBaseline = Read-DirtyBaseline
             $filtered = @($entries | Where-Object {
-                $_.path -ne '.stride-diff-upload-state' -and $_.path -ne '.stride-changed-files.json'
+                if ($_.path -eq '.stride-diff-upload-state' -or
+                    $_.path -eq '.stride-changed-files.json' -or
+                    $_.path -eq '.stride-dirty-baseline' -or
+                    $_.path -eq '.stride.md' -or
+                    $_.path -eq '.stride_auth.md') { return $false }
+                if ($dirtyBaseline -and $dirtyBaseline.ContainsKey($_.path)) {
+                    $blHash = $dirtyBaseline[$_.path]
+                    if ($blHash -eq 'unhashable') { return $true }
+                    $full = Join-Path $ProjectDir $_.path
+                    if (Test-Path -LiteralPath $full -PathType Leaf) {
+                        $curHash = (& git -C $ProjectDir hash-object -- $_.path 2>$null | Out-String).Trim()
+                        if ($LASTEXITCODE -ne 0 -or -not $curHash) { return $true }
+                    } else {
+                        $curHash = 'absent'
+                    }
+                    return ($curHash -ne $blHash)
+                }
+                return $true
             })
             if ($filtered.Count -ne $entries.Count) {
                 # Pipe (not -InputObject) so an array is not double-wrapped into
@@ -1053,6 +1136,7 @@ if ($HookName -eq 'after_review') {
     }
     Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
     Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+    Remove-Item -Force (Join-Path $ProjectDir '.stride-dirty-baseline') -ErrorAction SilentlyContinue
 }
 
 exit 0

@@ -94,9 +94,13 @@ capture_changed_files() {
   # whole-line match anchors to the ROOT artifacts only; a same-named file in a
   # subdirectory (e.g. sub/.stride-changed-files.json) has a path prefix and is
   # still captured.
+  # (W1457) Also hard-exclude by name: .stride.md (the hook script itself,
+  # routinely dirty in working repos), .stride_auth.md (credentials — must
+  # NEVER be uploaded, tracked, untracked, or edited), and the claim-time
+  # dirty-baseline state file (a hook artifact like the two above).
   local all_files
   all_files=$(printf '%s\n%s\n' "$tracked_files" "$untracked_files" \
-    | awk 'NF && $0 != ".stride-diff-upload-state" && $0 != ".stride-changed-files.json" && !seen[$0]++')
+    | awk 'NF && $0 != ".stride-diff-upload-state" && $0 != ".stride-changed-files.json" && $0 != ".stride-dirty-baseline" && $0 != ".stride.md" && $0 != ".stride_auth.md" && !seen[$0]++')
 
   if [ -z "$all_files" ]; then
     printf '[]\n'
@@ -112,9 +116,37 @@ capture_changed_files() {
   local jsonl_file
   jsonl_file=$(mktemp)
 
+  # (W1457) Claim-time dirty baseline: paths that were already modified or
+  # untracked when the task was claimed are excluded from the snapshot
+  # UNLESS the file changed again after claim (blob hash differs). When in
+  # doubt — unhashable, deleted-after-claim, hash mismatch — include: one
+  # extra diff beats silently losing task work. A missing/empty baseline
+  # (older claim, non-git dir) falls back to the unfiltered behavior.
+  local _baseline_file="${PROJECT_DIR:-.}/.stride-dirty-baseline"
+
   local file
   while IFS= read -r file; do
     [ -z "$file" ] && continue
+
+    if [ -s "$_baseline_file" ]; then
+      local _bl _bl_hash _bl_path _cur_hash _bl_excluded=0
+      while IFS= read -r _bl; do
+        _bl_hash="${_bl%% *}"
+        _bl_path="${_bl#* }"
+        if [ "$_bl_path" = "$file" ]; then
+          if [ -f "$file" ]; then
+            _cur_hash=$(git hash-object -- "$file" 2>/dev/null || echo "unhashable-now")
+          else
+            _cur_hash="absent"
+          fi
+          if [ "$_cur_hash" = "$_bl_hash" ] && [ "$_bl_hash" != "unhashable" ]; then
+            _bl_excluded=1
+          fi
+          break
+        fi
+      done < "$_baseline_file"
+      [ "$_bl_excluded" -eq 1 ] && continue
+    fi
 
     # Determine whether this path is in the untracked list (membership lookup,
     # not just empty check — tracked_files and untracked_files were merged
@@ -198,6 +230,38 @@ ${trunc_marker}"
     printf '[]\n'
   fi
   rm -f "$jsonl_file"
+}
+
+# (W1457) Record the claim-time dirty baseline: every path already modified
+# (vs the fresh TASK_BASE_REF) or untracked at claim time, with its current
+# blob hash, one `<hash> <path>` line each. capture_changed_files consults
+# this to exclude pre-existing unrelated edits from completion snapshots —
+# unless the file changes again after claim (hash differs → included).
+# Persisted on disk (claim and completion can happen in different sessions)
+# and cleaned up with the other hook artifacts. Best-effort: any failure
+# leaves an absent/empty baseline, which capture treats as "no exclusion".
+record_dirty_baseline() {
+  local _base="$1"
+  local _bl_file="$PROJECT_DIR/.stride-dirty-baseline"
+  rm -f "$_bl_file" 2>/dev/null || true
+  command -v git > /dev/null 2>&1 || return 0
+  [ -n "$_base" ] || return 0
+  local _paths _p _h
+  _paths=$( (cd "$PROJECT_DIR" 2>/dev/null && {
+    git diff --name-only "$_base" 2>/dev/null
+    git ls-files --others --exclude-standard 2>/dev/null
+  } | awk 'NF && !seen[$0]++') || true )
+  [ -n "$_paths" ] || return 0
+  while IFS= read -r _p; do
+    [ -z "$_p" ] && continue
+    if [ -f "$PROJECT_DIR/$_p" ]; then
+      _h=$( (cd "$PROJECT_DIR" && git hash-object -- "$_p") 2>/dev/null || echo "unhashable")
+    else
+      _h="absent"
+    fi
+    printf '%s %s\n' "$_h" "$_p" >> "$_bl_file" 2>/dev/null || true
+  done <<< "$_paths"
+  return 0
 }
 
 # Helper: resolve the Stride API base URL for the changed_files upload.
@@ -1182,6 +1246,9 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
     # (W1094) Clear the previous task's upload state — a stale 2xx would
     # suppress the before_review self-heal retry for the new task.
     rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+    # (W1457) Snapshot the pre-existing dirty paths so unrelated edits that
+    # predate this claim never appear in the completion snapshot.
+    record_dirty_baseline "$_base_ref"
   else
     # (W1086) No parseable response and no usable persisted file. A claim
     # always opens a new task window, so unconditionally refresh TASK_BASE_REF
@@ -1203,6 +1270,9 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
       fi
       rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
       rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+      # (W1457) Same dirty-baseline snapshot as the parsed-response path —
+      # the claim window opened even though the response was unparseable.
+      record_dirty_baseline "$_base_ref"
     fi
   fi
 fi
@@ -1288,6 +1358,7 @@ if [ "$HOOK_NAME" = "after_review" ]; then
   fi
   rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
   rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+  rm -f "$PROJECT_DIR/.stride-dirty-baseline" 2>/dev/null || true
 fi
 
 exit 0

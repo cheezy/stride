@@ -2281,6 +2281,129 @@ $r = Invoke-HookScript -InputJson $contClaimJson -Phase 'post' -ProjectDir $uncl
 Assert-Exit "13f: backslash inside unclosed single quote does not join (fails loudly)" 2 $r.ExitCode
 
 # ============================================================
+# Test Group 14: claim-time dirty baseline (W1457)
+# ============================================================
+Write-Host ""
+Write-Host "=== Test Group 14: claim-time dirty baseline (W1457) ==="
+
+# 14a: A claim through the hook script writes the dirty baseline.
+$blProj = New-GitRepo -Name 'g14-baseline'
+Set-Content -Path (Join-Path $blProj 'dirty.txt') -Value 'committed' -Encoding UTF8
+& git -C $blProj add . 2>$null | Out-Null
+& git -C $blProj commit -q -m 'add dirty.txt' 2>$null | Out-Null
+Add-Content -Path (Join-Path $blProj 'dirty.txt') -Value 'edited before claim' -Encoding UTF8
+$blClaim = @{
+    tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+    tool_response = @{ stdout = '{"data":{"id":99,"identifier":"W99","title":"T","status":"in_progress","complexity":"small","priority":"low"}}'; stderr = ''; interrupted = $false }
+} | ConvertTo-Json -Compress
+$r = Invoke-HookScript -InputJson $blClaim -Phase 'post' -ProjectDir $blProj
+Assert-Exit "14a: claim with dirty tree exits 0" 0 $r.ExitCode
+$blContent = Get-Content -Raw -Path (Join-Path $blProj '.stride-dirty-baseline') -ErrorAction SilentlyContinue
+Assert-Contains "14a: claim wrote the dirty baseline" "dirty.txt" $blContent
+
+# 14b: The upload filter drops claim-dirty unchanged entries and the two
+# dot-files, keeps task work and re-modified entries.
+$blUpProj = New-GitRepo -Name 'g14-upload'
+Set-Content -Path (Join-Path $blUpProj 'pre.txt') -Value 'one' -Encoding UTF8
+Set-Content -Path (Join-Path $blUpProj 'remod.txt') -Value 'two' -Encoding UTF8
+& git -C $blUpProj add . 2>$null | Out-Null
+& git -C $blUpProj commit -q -m 'seed' 2>$null | Out-Null
+Add-Content -Path (Join-Path $blUpProj 'pre.txt') -Value 'dirty at claim' -Encoding UTF8
+Add-Content -Path (Join-Path $blUpProj 'remod.txt') -Value 'dirty at claim' -Encoding UTF8
+$preHash = (& git -C $blUpProj hash-object -- 'pre.txt' | Out-String).Trim()
+$remodHash = (& git -C $blUpProj hash-object -- 'remod.txt' | Out-String).Trim()
+Set-Content -Path (Join-Path $blUpProj '.stride-dirty-baseline') -Value @(
+    "$preHash pre.txt"
+    "$remodHash remod.txt"
+) -Encoding UTF8
+# remod.txt is modified AGAIN after the baseline; pre.txt stays as-claimed.
+Add-Content -Path (Join-Path $blUpProj 'remod.txt') -Value 'task edit' -Encoding UTF8
+Set-Content -Path (Join-Path $blUpProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $blUpProj '.stride-changed-files.json') `
+    -Value '[{"path":"pre.txt","diff":"pre-existing"},{"path":"remod.txt","diff":"re-modified"},{"path":"work.txt","diff":"task work"},{"path":".stride_auth.md","diff":"SECRET"},{"path":".stride.md","diff":"hook file"}]' -Encoding UTF8
+Set-Content -Path (Join-Path $blUpProj '.stride-env-cache') `
+    -Value "TASK_ID=99`nTASK_BASE_REF=abc" -Encoding UTF8
+
+$blPort = 18877
+$blFixture = Join-Path $TmpDir 'baseline-put-fixture.json'
+if (Test-Path $blFixture) { Remove-Item -Force $blFixture }
+
+$blListenerJob = Start-Job -ArgumentList $blPort, $blFixture -ScriptBlock {
+    param($Port, $Fixture)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        $ctx = $l.GetContext()
+        $req = $ctx.Request
+        $reader = [System.IO.StreamReader]::new($req.InputStream)
+        $body = $reader.ReadToEnd()
+        @{ Body = $body } | ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+        $resp = $ctx.Response
+        $resp.StatusCode = 200
+        $resp.OutputStream.Close()
+    } catch {
+        # Listener tear-down errors are ignored.
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+}
+
+try {
+    $null = Wait-ForListener -Port $blPort
+    $blCmd = "curl -X PATCH http://localhost:$blPort/api/tasks/99/complete -H `"Authorization: Bearer test_token_bl`""
+    $blJson = @{ tool_input = @{ command = $blCmd } } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $blJson -Phase 'pre' -ProjectDir $blUpProj
+    Assert-Exit "14b: hook exits 0 after baseline-filtered PUT" 0 $r.ExitCode
+
+    Wait-Job $blListenerJob -Timeout 8 | Out-Null
+    Remove-Job $blListenerJob -Force -ErrorAction SilentlyContinue
+
+    if (Test-Path $blFixture) {
+        $record = Get-Content -Raw -Path $blFixture | ConvertFrom-Json
+        $parsedBody = $record.Body | ConvertFrom-Json
+        $decoded = [System.Convert]::FromBase64String($parsedBody.changed_files.data)
+        $decodedText = [System.Text.Encoding]::UTF8.GetString($decoded)
+        $entries = @($decodedText | ConvertFrom-Json)
+        $paths = @($entries | ForEach-Object { $_.path })
+        if ($paths -contains 'work.txt' -and $paths -contains 'remod.txt') {
+            Write-Host "  PASS: 14b: task work and re-modified file survive the filter" -ForegroundColor Green
+            $script:PASS++
+        } else {
+            Write-Host "  FAIL: 14b: expected work.txt + remod.txt, got: $($paths -join ', ')" -ForegroundColor Red
+            $script:FAIL++
+        }
+        if ($paths -notcontains 'pre.txt') {
+            Write-Host "  PASS: 14b: claim-dirty unchanged file stripped from PUT body" -ForegroundColor Green
+            $script:PASS++
+        } else {
+            Write-Host "  FAIL: 14b: claim-dirty unchanged pre.txt leaked into PUT body" -ForegroundColor Red
+            $script:FAIL++
+        }
+        if ($paths -notcontains '.stride_auth.md' -and $paths -notcontains '.stride.md') {
+            Write-Host "  PASS: 14b: auth and hook dot-files never uploaded" -ForegroundColor Green
+            $script:PASS++
+        } else {
+            Write-Host "  FAIL: 14b: dot-file leaked into PUT body: $($paths -join ', ')" -ForegroundColor Red
+            $script:FAIL++
+        }
+    } else {
+        Write-Host "  FAIL: 14b: baseline-filtered PUT did not arrive at listener" -ForegroundColor Red
+        $script:FAIL++
+    }
+} finally {
+    if ($blListenerJob -and $blListenerJob.State -eq 'Running') {
+        Stop-Job $blListenerJob -ErrorAction SilentlyContinue
+        Remove-Job $blListenerJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

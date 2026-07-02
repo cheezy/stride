@@ -3909,6 +3909,108 @@ assert_exit "17f: CRLF continuation exits 0" 0 "$EXIT_CODE"
 assert_contains "17f: CRLF lines joined into one command" "crlf joined" "$OUTPUT"
 
 # ============================================================
+echo ""
+echo "=== Test Group 18: claim-time dirty baseline (W1457) ==="
+
+if command -v git > /dev/null 2>&1 && command -v jq > /dev/null 2>&1; then
+  BL_DIR=$(mktemp -d)
+  (
+    cd "$BL_DIR" || exit 1
+    git init -q .
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    printf 'one\n' > pre.txt
+    printf 'keep\n' > work.txt
+    printf 'del\n' > gone.txt
+    git add . > /dev/null
+    git commit -q -m "initial"
+    git rev-parse HEAD > base.ref
+
+    # Pre-claim state: pre.txt and gone.txt dirty, auth file untracked.
+    printf 'pre-existing edit\n' >> pre.txt
+    printf 'gone-dirty\n' >> gone.txt
+    printf 'secret token\n' > .stride_auth.md
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    PROJECT_DIR="$PWD"
+    record_dirty_baseline "$(cat base.ref)"
+    cp .stride-dirty-baseline baseline.copy 2>/dev/null || true
+
+    # Task work: touch work.txt, delete the claim-dirty gone.txt.
+    printf 'task edit\n' >> work.txt
+    rm -f gone.txt
+    capture_changed_files "$(cat base.ref)" > snap1.json 2>/dev/null
+
+    # Re-modify the claim-dirty file during the task.
+    printf 'task also touched\n' >> pre.txt
+    capture_changed_files "$(cat base.ref)" > snap2.json 2>/dev/null
+
+    # Baseline missing (older claim) falls back to current behavior.
+    rm -f .stride-dirty-baseline
+    capture_changed_files "$(cat base.ref)" > snap3.json 2>/dev/null
+  )
+  SNAP1_PATHS=$(jq -r '.[].path' "$BL_DIR/snap1.json" 2>/dev/null)
+  SNAP2_PATHS=$(jq -r '.[].path' "$BL_DIR/snap2.json" 2>/dev/null)
+  SNAP3_PATHS=$(jq -r '.[].path' "$BL_DIR/snap3.json" 2>/dev/null)
+  BASELINE_COPY=$(cat "$BL_DIR/baseline.copy" 2>/dev/null)
+
+  assert_contains "18: baseline records the claim-dirty file" "pre.txt" "$BASELINE_COPY"
+  assert_contains "18a: task-modified file appears in the snapshot" "work.txt" "$SNAP1_PATHS"
+  if echo "$SNAP1_PATHS" | grep -qx "pre.txt"; then
+    echo -e "  ${RED}FAIL${RESET}: 18a: claim-dirty untouched file must NOT appear in the snapshot"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 18a: claim-dirty untouched file excluded from the snapshot"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "18b: claim-dirty file RE-modified during the task IS included" "pre.txt" "$SNAP2_PATHS"
+  for _snap_label in 1 2 3; do
+    eval "_paths=\$SNAP${_snap_label}_PATHS"
+    if echo "$_paths" | grep -q "stride_auth"; then
+      echo -e "  ${RED}FAIL${RESET}: 18c: .stride_auth.md leaked into snapshot $_snap_label"
+      FAIL=$((FAIL + 1))
+    else
+      echo -e "  ${GREEN}PASS${RESET}: 18c: .stride_auth.md absent from snapshot $_snap_label"
+      PASS=$((PASS + 1))
+    fi
+  done
+  if echo "$SNAP1_PATHS" | grep -q "stride-dirty-baseline"; then
+    echo -e "  ${RED}FAIL${RESET}: 18d: the baseline artifact leaked into the snapshot"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 18d: the baseline artifact never appears in the snapshot"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "18e: baseline missing falls back to including the dirty file" "pre.txt" "$SNAP3_PATHS"
+  assert_contains "18f: file dirty at claim then DELETED during task is included" "gone.txt" "$SNAP1_PATHS"
+  rm -rf "$BL_DIR"
+
+  # 18g: End-to-end — a claim through the hook script writes the baseline.
+  E2E_DIR=$(mktemp -d)
+  (
+    cd "$E2E_DIR" || exit 1
+    git init -q .
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    printf 'committed\n' > dirty.txt
+    git add . > /dev/null
+    git commit -q -m "initial"
+    printf 'edited before claim\n' >> dirty.txt
+    printf '## before_doing\n```bash\n```\n' > .stride.md
+  )
+  E2E_CLAIM='{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}'
+  OUTPUT=$(echo "$E2E_CLAIM" | CLAUDE_PROJECT_DIR="$E2E_DIR" bash "$HOOK_SCRIPT" post 2>&1)
+  EXIT_CODE=$?
+  assert_exit "18g: claim with dirty tree exits 0" 0 "$EXIT_CODE"
+  E2E_BASELINE=$(cat "$E2E_DIR/.stride-dirty-baseline" 2>/dev/null)
+  assert_contains "18g: claim wrote the dirty baseline" "dirty.txt" "$E2E_BASELINE"
+  rm -rf "$E2E_DIR"
+else
+  echo "  SKIP: git or jq not available"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

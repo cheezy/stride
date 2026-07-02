@@ -2112,6 +2112,33 @@ STRIDE
   assert_contains "9h: structured failed JSON references after_goal" '"hook": "after_goal"' "$AG_OUTPUT_FAIL"
   assert_contains "9h: structured failed JSON has status:failed" '"status": "failed"' "$AG_OUTPUT_FAIL"
   assert_contains "9h: structured failed JSON carries non-zero exit_code" '"exit_code": 7' "$AG_OUTPUT_FAIL"
+
+  # 9i (W1453): extract_hook_env prints only the matching hook entry's env as
+  # escaped assignment lines, drops non-identifier keys, and honors the
+  # singular `.hook` claim-response shape.
+  EHE_PAYLOAD='{"data":{"id":99},"hooks":[{"name":"before_review","env":{"NOPE":"x"}},{"name":"after_goal","env":{"GOAL_ID":"7","BAD;KEY":"evil","HOOK_NAME":"after_goal"}}]}'
+  EHE_OUT=$(
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    extract_hook_env "$EHE_PAYLOAD" "after_goal"
+  )
+  assert_contains "9i: extract_hook_env emits the matching entry's env" "GOAL_ID='7'" "$EHE_OUT"
+  if printf '%s\n' "$EHE_OUT" | grep -qE "NOPE|BAD|HOOK_NAME"; then
+    echo -e "  ${RED}FAIL${RESET}: 9i: extract_hook_env leaked another entry's env or a denied key"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 9i: other entries' env, invalid keys, and HOOK_NAME are dropped"
+    PASS=$((PASS + 1))
+  fi
+
+  EHE_SINGULAR='{"data":{"id":99},"hook":{"name":"before_doing","env":{"BOARD_NAME":"Stride Development"}}}'
+  EHE_OUT_S=$(
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    extract_hook_env "$EHE_SINGULAR" "before_doing"
+  )
+  assert_contains "9i: singular .hook claim shape is honored" \
+    "BOARD_NAME='Stride Development'" "$EHE_OUT_S"
 fi
 
 # ============================================================
@@ -2291,6 +2318,276 @@ STRIDE
   assert_exit "10e: end-to-end after_goal on mark_reviewed exits 0" 0 "$AG_E2E_RC_MR"
   assert_contains "10e: mark_reviewed runs after_review" "after_review_ran" "$AG_E2E_OUT_MR"
   assert_contains "10e: mark_reviewed runs after_goal" "after_goal_ran" "$AG_E2E_OUT_MR"
+
+  # --- W1453: server-supplied hook env forwarding ---
+
+  # Helper: like ag_e2e_input but takes the FULL inner API JSON so fixtures
+  # can carry `env` objects on hook entries and `parent_id` in data.
+  ag_e2e_input_full() {
+    local primary_command="$1"
+    local inner_json="$2"
+    jq -nc \
+      --arg cmd "$primary_command" \
+      --arg inner "$inner_json" \
+      '{tool_input: {command: $cmd}, tool_response: {stdout: $inner}}'
+  }
+
+  # Helper: a fresh project whose ## after_goal section echoes the env vars
+  # under test. $1 = directory name suffix.
+  ag_env_project() {
+    local _dir="$TMPDIR_TEST/after-goal-env-$1"
+    mkdir -p "$_dir"
+    cat > "$_dir/.stride.md" << 'STRIDE'
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_review
+```bash
+echo "after_review_ran"
+```
+
+## after_goal
+```bash
+echo "gid=[$GOAL_ID] gident=[$GOAL_IDENTIFIER] gtitle=[$GOAL_TITLE] tid=[$TASK_ID] hn=[$HOOK_NAME]"
+```
+STRIDE
+    printf '%s' "$_dir"
+  }
+
+  # 10f: server-supplied GOAL_* env on the after_goal entry is exported to
+  # the section and appended to the env cache for the follow-up PATCH.
+  AG_ENV_PROJ_F=$(ag_env_project "supplied")
+  AG_ENV_INNER_F=$(jq -nc '{data: {id: 99, parent_id: 55}, hooks: [
+    {"name":"before_review"},
+    {"name":"after_goal","env":{"GOAL_ID":"7","GOAL_IDENTIFIER":"G7","GOAL_TITLE":"Goal Seven"}}
+  ]}')
+  AG_ENV_INPUT_F=$(ag_e2e_input_full \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" "$AG_ENV_INNER_F")
+  AG_ENV_OUT_F=$(echo "$AG_ENV_INPUT_F" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_F" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  AG_ENV_RC_F=$?
+  assert_exit "10f: server-supplied GOAL_* env exits 0" 0 "$AG_ENV_RC_F"
+  assert_contains "10f: section sees server-supplied GOAL_ID" "gid=[7]" "$AG_ENV_OUT_F"
+  assert_contains "10f: section sees server-supplied GOAL_IDENTIFIER" "gident=[G7]" "$AG_ENV_OUT_F"
+  AG_ENV_CACHE_F=$(cat "$AG_ENV_PROJ_F/.stride-env-cache" 2>/dev/null || echo "")
+  assert_contains "10f: env cache carries GOAL_ID for the follow-up PATCH" \
+    "GOAL_ID='7'" "$AG_ENV_CACHE_F"
+  assert_contains "10f: env cache carries GOAL_IDENTIFIER" \
+    "GOAL_IDENTIFIER='G7'" "$AG_ENV_CACHE_F"
+
+  # 10g: after_goal entry with NO env object — omitted GOAL_* keys export as
+  # empty strings (never an error) and GOAL_ID falls back to data.parent_id.
+  AG_ENV_PROJ_G=$(ag_env_project "fallback")
+  AG_ENV_INNER_G=$(jq -nc '{data: {id: 99, parent_id: 55}, hooks: [
+    {"name":"before_review"},
+    {"name":"after_goal"}
+  ]}')
+  AG_ENV_INPUT_G=$(ag_e2e_input_full \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" "$AG_ENV_INNER_G")
+  AG_ENV_OUT_G=$(echo "$AG_ENV_INPUT_G" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_G" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  AG_ENV_RC_G=$?
+  assert_exit "10g: no-env after_goal entry exits 0" 0 "$AG_ENV_RC_G"
+  assert_contains "10g: GOAL_ID falls back to data.parent_id" "gid=[55]" "$AG_ENV_OUT_G"
+  assert_contains "10g: omitted GOAL_IDENTIFIER exports as empty string" \
+    "gident=[]" "$AG_ENV_OUT_G"
+  assert_contains "10g: omitted GOAL_TITLE exports as empty string" \
+    "gtitle=[]" "$AG_ENV_OUT_G"
+
+  # 10g-2: env present but GOAL_ID empty — the fallback also fires.
+  AG_ENV_PROJ_G2=$(ag_env_project "fallback-empty")
+  AG_ENV_INNER_G2=$(jq -nc '{data: {id: 99, parent_id: 55}, hooks: [
+    {"name":"before_review"},
+    {"name":"after_goal","env":{"GOAL_ID":"","GOAL_IDENTIFIER":"G55"}}
+  ]}')
+  AG_ENV_INPUT_G2=$(ag_e2e_input_full \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" "$AG_ENV_INNER_G2")
+  AG_ENV_OUT_G2=$(echo "$AG_ENV_INPUT_G2" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_G2" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  assert_contains "10g-2: empty server GOAL_ID falls back to parent_id" \
+    "gid=[55]" "$AG_ENV_OUT_G2"
+  assert_contains "10g-2: supplied GOAL_IDENTIFIER survives the fallback" \
+    "gident=[G55]" "$AG_ENV_OUT_G2"
+
+  # 10h: precedence — server-supplied keys override stale cached values;
+  # keys the server does not supply keep their cached values.
+  AG_ENV_PROJ_H=$(ag_env_project "precedence")
+  printf "TASK_ID='42'\n" > "$AG_ENV_PROJ_H/.stride-env-cache"
+  AG_ENV_INNER_H=$(jq -nc '{data: {id: 99, parent_id: 55}, hooks: [
+    {"name":"before_review"},
+    {"name":"after_goal","env":{"GOAL_ID":"7","TASK_ID":"99"}}
+  ]}')
+  AG_ENV_INPUT_H=$(ag_e2e_input_full \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" "$AG_ENV_INNER_H")
+  AG_ENV_OUT_H=$(echo "$AG_ENV_INPUT_H" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_H" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  assert_contains "10h: server-supplied TASK_ID overrides the stale cached value" \
+    "tid=[99]" "$AG_ENV_OUT_H"
+  assert_contains "10h: GOAL_ID exported alongside" "gid=[7]" "$AG_ENV_OUT_H"
+
+  AG_ENV_PROJ_H2=$(ag_env_project "precedence-keep")
+  printf "TASK_ID='42'\n" > "$AG_ENV_PROJ_H2/.stride-env-cache"
+  AG_ENV_INNER_H2=$(jq -nc '{data: {id: 99, parent_id: 55}, hooks: [
+    {"name":"before_review"},
+    {"name":"after_goal","env":{"GOAL_ID":"7"}}
+  ]}')
+  AG_ENV_INPUT_H2=$(ag_e2e_input_full \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" "$AG_ENV_INNER_H2")
+  AG_ENV_OUT_H2=$(echo "$AG_ENV_INPUT_H2" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_H2" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  assert_contains "10h: unsupplied keys keep their cached values" \
+    "tid=[42]" "$AG_ENV_OUT_H2"
+
+  # 10i: injection safety — a crafted value cannot escape the single-quoting
+  # and a non-identifier key is dropped, never executed.
+  AG_ENV_PROJ_I=$(ag_env_project "injection")
+  AG_PWNED="$TMPDIR_TEST/after-goal-env-pwned"
+  rm -f "$AG_PWNED"
+  AG_ENV_INNER_I=$(jq -nc --arg evil "x'; touch $AG_PWNED; echo 'y" --arg pwned "touch $AG_PWNED" \
+    '{data: {id: 99, parent_id: 55}, hooks: [
+      {"name":"before_review"},
+      {"name":"after_goal","env":{"GOAL_ID":"7","GOAL_TITLE":$evil,"BAD;KEY":$pwned}}
+    ]}')
+  AG_ENV_INPUT_I=$(ag_e2e_input_full \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" "$AG_ENV_INNER_I")
+  AG_ENV_OUT_I=$(echo "$AG_ENV_INPUT_I" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_I" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  AG_ENV_RC_I=$?
+  assert_exit "10i: crafted env values exit 0" 0 "$AG_ENV_RC_I"
+  if [ -e "$AG_PWNED" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 10i: crafted env value executed a command (pwned file exists)"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 10i: crafted env value never executes (no pwned file)"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "10i: crafted value arrives literally in the section" \
+    "gtitle=[x'; touch" "$AG_ENV_OUT_I"
+
+  # 10j: cleanup deferral — when after_goal rides the mark_reviewed response,
+  # the env cache survives (the agent still needs GOAL_ID for the follow-up
+  # PATCH); the diff snapshot artifacts are still removed.
+  AG_ENV_PROJ_J=$(ag_env_project "cleanup-defer")
+  printf "TASK_ID='42'\n" > "$AG_ENV_PROJ_J/.stride-env-cache"
+  echo '[]' > "$AG_ENV_PROJ_J/.stride-changed-files.json"
+  AG_ENV_INNER_J=$(jq -nc '{data: {id: 99, parent_id: 55}, hooks: [
+    {"name":"after_review"},
+    {"name":"after_goal","env":{"GOAL_ID":"7"}}
+  ]}')
+  AG_ENV_INPUT_J=$(ag_e2e_input_full \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed" "$AG_ENV_INNER_J")
+  AG_ENV_OUT_J=$(echo "$AG_ENV_INPUT_J" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_J" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  AG_ENV_RC_J=$?
+  assert_exit "10j: mark_reviewed with after_goal exits 0" 0 "$AG_ENV_RC_J"
+  if [ -f "$AG_ENV_PROJ_J/.stride-env-cache" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 10j: env cache survives mark_reviewed when after_goal rode it"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 10j: env cache should survive for the follow-up after_goal PATCH"
+    FAIL=$((FAIL + 1))
+  fi
+  AG_ENV_CACHE_J=$(cat "$AG_ENV_PROJ_J/.stride-env-cache" 2>/dev/null || echo "")
+  assert_contains "10j: surviving cache carries GOAL_ID" "GOAL_ID='7'" "$AG_ENV_CACHE_J"
+  if [ -f "$AG_ENV_PROJ_J/.stride-changed-files.json" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 10j: diff snapshot should still be removed on mark_reviewed"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 10j: diff snapshot still removed on mark_reviewed"
+    PASS=$((PASS + 1))
+  fi
+
+  # 10j-2: mark_reviewed WITHOUT after_goal keeps the existing cleanup.
+  AG_ENV_PROJ_J2=$(ag_env_project "cleanup-normal")
+  printf "TASK_ID='42'\n" > "$AG_ENV_PROJ_J2/.stride-env-cache"
+  AG_ENV_INNER_J2=$(jq -nc '{data: {id: 99}, hooks: [{"name":"after_review"}]}')
+  AG_ENV_INPUT_J2=$(ag_e2e_input_full \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed" "$AG_ENV_INNER_J2")
+  echo "$AG_ENV_INPUT_J2" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_J2" \
+    bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  if [ -f "$AG_ENV_PROJ_J2/.stride-env-cache" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 10j-2: mark_reviewed without after_goal should still delete the cache"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 10j-2: mark_reviewed without after_goal still deletes the cache"
+    PASS=$((PASS + 1))
+  fi
+
+  # 10k: HOOK_NAME containment — a server-sent HOOK_NAME is never cached (a
+  # cached line would misroute later invocations), yet the section observes
+  # HOOK_NAME=after_goal from the executor's explicit set/restore.
+  AG_ENV_PROJ_K=$(ag_env_project "hookname")
+  AG_ENV_INNER_K=$(jq -nc '{data: {id: 99, parent_id: 55}, hooks: [
+    {"name":"before_review"},
+    {"name":"after_goal","env":{"GOAL_ID":"7","HOOK_NAME":"after_goal"}}
+  ]}')
+  AG_ENV_INPUT_K=$(ag_e2e_input_full \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" "$AG_ENV_INNER_K")
+  AG_ENV_OUT_K=$(echo "$AG_ENV_INPUT_K" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_K" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  assert_contains "10k: section observes HOOK_NAME=after_goal" "hn=[after_goal]" "$AG_ENV_OUT_K"
+  AG_ENV_CACHE_K=$(cat "$AG_ENV_PROJ_K/.stride-env-cache" 2>/dev/null || echo "")
+  if printf '%s\n' "$AG_ENV_CACHE_K" | grep -q '^HOOK_NAME='; then
+    echo -e "  ${RED}FAIL${RESET}: 10k: HOOK_NAME must never be written to the env cache"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 10k: HOOK_NAME never written to the env cache"
+    PASS=$((PASS + 1))
+  fi
+
+  # 10l: env value with an embedded newline survives quoting end-to-end, the
+  # cache still sources cleanly, and omitted-key defaults still apply even
+  # when the multi-line value's continuation could look like a KEY= line.
+  # ${GOAL_IDENTIFIER?unset} hard-fails the section if the key were deleted
+  # instead of defined-but-empty.
+  AG_ENV_PROJ_L="$TMPDIR_TEST/after-goal-env-newline"
+  mkdir -p "$AG_ENV_PROJ_L"
+  cat > "$AG_ENV_PROJ_L/.stride.md" << 'STRIDE'
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_goal
+```bash
+echo "gtitle=[$GOAL_TITLE] gident=[${GOAL_IDENTIFIER?unset}]"
+```
+STRIDE
+  AG_NL_VALUE="line1
+GOAL_IDENTIFIER=sneaky
+line3"
+  AG_ENV_INNER_L=$(jq -nc --arg title "$AG_NL_VALUE" '{data: {id: 99, parent_id: 55}, hooks: [
+    {"name":"before_review"},
+    {"name":"after_goal","env":{"GOAL_ID":"7","GOAL_TITLE":$title}}
+  ]}')
+  AG_ENV_INPUT_L=$(ag_e2e_input_full \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" "$AG_ENV_INNER_L")
+  AG_ENV_OUT_L=$(echo "$AG_ENV_INPUT_L" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_L" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  AG_ENV_RC_L=$?
+  assert_exit "10l: embedded-newline env value exits 0" 0 "$AG_ENV_RC_L"
+  assert_contains "10l: newline value's first line reaches the section" \
+    "gtitle=[line1" "$AG_ENV_OUT_L"
+  assert_contains "10l: newline value's last line reaches the section intact" \
+    "line3]" "$AG_ENV_OUT_L"
+  assert_contains "10l: omitted GOAL_IDENTIFIER is defined-but-empty despite the decoy line" \
+    "gident=[]" "$AG_ENV_OUT_L"
+  if echo "$AG_ENV_OUT_L" | grep -qF '"status": "failed"'; then
+    echo -e "  ${RED}FAIL${RESET}: 10l: after_goal section must not fail on the newline fixture"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 10l: after_goal section succeeds on the newline fixture"
+    PASS=$((PASS + 1))
+  fi
+  AG_TITLE_L=$(
+    set -a
+    . "$AG_ENV_PROJ_L/.stride-env-cache" 2>/dev/null
+    set +a
+    printf '%s' "${GOAL_TITLE:-}"
+  )
+  assert_contains "10l: cache round-trips the embedded newline value" "line3" "$AG_TITLE_L"
 fi
 
 # ============================================================
@@ -3076,6 +3373,27 @@ STRIDE
   BR_CACHE_I=$(cat "$BR_DIR_I/.stride-env-cache" 2>/dev/null)
   assert_contains "14i: persisted path with spaces is recovered" "TASK_IDENTIFIER='W88'" "$BR_CACHE_I"
   rm -rf "$BR_DIR_I" "$BR_PERSIST_I"
+
+  # 14j (W1453): the claim cache writer escapes embedded single quotes and
+  # dollar signs so a crafted title round-trips through the set -a sourcing
+  # without any shell interpretation.
+  BR_DIR_J=$(mktemp -d)
+  BR_INNER_J=$(jq -nc '{data: {id: 43, identifier: "W43", title: "It'"'"'s $HOME tricky", status: "in_progress", complexity: "small", priority: "low"}}')
+  BR_CLAIM_J=$(jq -nc --arg inner "$BR_INNER_J" \
+    '{tool_input: {command: "curl -X POST https://stride.example.com/api/tasks/claim"}, tool_response: {stdout: $inner, stderr: "", interrupted: false}}')
+  (
+    setup_put_repo "$BR_DIR_J" || exit 1
+    echo "$BR_CLAIM_J" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_TITLE_J=$(
+    set -a
+    . "$BR_DIR_J/.stride-env-cache" 2>/dev/null
+    set +a
+    printf '%s' "$TASK_TITLE"
+  )
+  assert_eq "14j: quoted title round-trips through the env cache unexecuted" \
+    "It's \$HOME tricky" "$BR_TITLE_J"
+  rm -rf "$BR_DIR_J"
 fi
 
 # ============================================================

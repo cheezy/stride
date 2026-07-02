@@ -1136,6 +1136,280 @@ Assert-Exit "8e: end-to-end after_goal on mark_reviewed exits 0" 0 $r.ExitCode
 Assert-Contains "8e: mark_reviewed runs after_review" "after_review_ran" $r.Stdout
 Assert-Contains "8e: mark_reviewed runs after_goal" "after_goal_ran" $r.Stdout
 
+# --- W1453: server-supplied hook env forwarding (mirrors bash 10f-10k) ---
+
+# Helper: like Build-AfterGoalInput but takes the full inner object so
+# fixtures can carry `env` objects on hook entries and `parent_id` in data.
+function Build-AfterGoalInputFull {
+    param(
+        [string]$PrimaryCommand,
+        $Inner
+    )
+    $innerJson = ($Inner | ConvertTo-Json -Depth 8 -Compress)
+    return (@{
+        tool_input    = @{ command = $PrimaryCommand }
+        tool_response = @{ stdout = $innerJson }
+    } | ConvertTo-Json -Depth 8 -Compress)
+}
+
+# Helper: a fresh project whose ## after_goal section echoes the env vars
+# under test (bash -c children inherit the Process-scoped env).
+function New-AfterGoalEnvProject {
+    param([string]$Suffix)
+    $dir = Join-Path $TmpDir "after-goal-env-$Suffix"
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    Set-Content -Path (Join-Path $dir '.stride.md') -Value @'
+## before_review
+```bash
+echo "gid=[$GOAL_ID] gident=[$GOAL_IDENTIFIER] gtitle=[$GOAL_TITLE] tid=[$TASK_ID] hn=[$HOOK_NAME]" > /dev/null; echo "before_review_ran"
+```
+
+## after_review
+```bash
+echo "after_review_ran"
+```
+
+## after_goal
+```bash
+echo "gid=[$GOAL_ID] gident=[$GOAL_IDENTIFIER] gtitle=[$GOAL_TITLE] tid=[$TASK_ID] hn=[$HOOK_NAME]"
+```
+'@ -Encoding UTF8
+    return $dir
+}
+
+# 8f: server-supplied GOAL_* env on the after_goal entry is exported to the
+# section and appended to the env cache for the follow-up PATCH.
+$agEnvProjF = New-AfterGoalEnvProject -Suffix 'supplied'
+$agEnvInputF = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -Inner @{
+        data  = @{ id = 99; parent_id = 55 }
+        hooks = @(
+            @{ name = 'before_review' }
+            @{ name = 'after_goal'; env = @{ GOAL_ID = '7'; GOAL_IDENTIFIER = 'G7'; GOAL_TITLE = 'Goal Seven' } }
+        )
+    }
+$r = Invoke-HookScript -InputJson $agEnvInputF -Phase 'post' -ProjectDir $agEnvProjF
+Assert-Exit "8f: server-supplied GOAL_* env exits 0" 0 $r.ExitCode
+Assert-Contains "8f: section sees server-supplied GOAL_ID" "gid=[7]" $r.Stdout
+Assert-Contains "8f: section sees server-supplied GOAL_IDENTIFIER" "gident=[G7]" $r.Stdout
+$agEnvCacheF = ''
+if (Test-Path (Join-Path $agEnvProjF '.stride-env-cache')) {
+    $agEnvCacheF = Get-Content (Join-Path $agEnvProjF '.stride-env-cache') -Raw -Encoding UTF8
+}
+Assert-Contains "8f: env cache carries GOAL_ID for the follow-up PATCH" "GOAL_ID=7" $agEnvCacheF
+Assert-Contains "8f: env cache carries GOAL_IDENTIFIER" "GOAL_IDENTIFIER=G7" $agEnvCacheF
+
+# 8g: after_goal entry with NO env object — omitted GOAL_* keys export as
+# empty strings (never an error) and GOAL_ID falls back to data.parent_id.
+$agEnvProjG = New-AfterGoalEnvProject -Suffix 'fallback'
+$agEnvInputG = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -Inner @{
+        data  = @{ id = 99; parent_id = 55 }
+        hooks = @(
+            @{ name = 'before_review' }
+            @{ name = 'after_goal' }
+        )
+    }
+$r = Invoke-HookScript -InputJson $agEnvInputG -Phase 'post' -ProjectDir $agEnvProjG
+Assert-Exit "8g: no-env after_goal entry exits 0" 0 $r.ExitCode
+Assert-Contains "8g: GOAL_ID falls back to data.parent_id" "gid=[55]" $r.Stdout
+Assert-Contains "8g: omitted GOAL_IDENTIFIER exports as empty string" "gident=[]" $r.Stdout
+Assert-Contains "8g: omitted GOAL_TITLE exports as empty string" "gtitle=[]" $r.Stdout
+
+# 8g-2: env present but GOAL_ID empty — the fallback also fires.
+$agEnvProjG2 = New-AfterGoalEnvProject -Suffix 'fallback-empty'
+$agEnvInputG2 = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -Inner @{
+        data  = @{ id = 99; parent_id = 55 }
+        hooks = @(
+            @{ name = 'before_review' }
+            @{ name = 'after_goal'; env = @{ GOAL_ID = ''; GOAL_IDENTIFIER = 'G55' } }
+        )
+    }
+$r = Invoke-HookScript -InputJson $agEnvInputG2 -Phase 'post' -ProjectDir $agEnvProjG2
+Assert-Contains "8g-2: empty server GOAL_ID falls back to parent_id" "gid=[55]" $r.Stdout
+Assert-Contains "8g-2: supplied GOAL_IDENTIFIER survives the fallback" "gident=[G55]" $r.Stdout
+
+# 8h: precedence — server-supplied keys override stale cached values; keys
+# the server does not supply keep their cached values.
+$agEnvProjH = New-AfterGoalEnvProject -Suffix 'precedence'
+Set-Content -Path (Join-Path $agEnvProjH '.stride-env-cache') -Value 'TASK_ID=42' -Encoding UTF8
+$agEnvInputH = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -Inner @{
+        data  = @{ id = 99; parent_id = 55 }
+        hooks = @(
+            @{ name = 'before_review' }
+            @{ name = 'after_goal'; env = @{ GOAL_ID = '7'; TASK_ID = '99' } }
+        )
+    }
+$r = Invoke-HookScript -InputJson $agEnvInputH -Phase 'post' -ProjectDir $agEnvProjH
+Assert-Contains "8h: server-supplied TASK_ID overrides the stale cached value" "tid=[99]" $r.Stdout
+Assert-Contains "8h: GOAL_ID exported alongside" "gid=[7]" $r.Stdout
+
+$agEnvProjH2 = New-AfterGoalEnvProject -Suffix 'precedence-keep'
+Set-Content -Path (Join-Path $agEnvProjH2 '.stride-env-cache') -Value 'TASK_ID=42' -Encoding UTF8
+$agEnvInputH2 = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -Inner @{
+        data  = @{ id = 99; parent_id = 55 }
+        hooks = @(
+            @{ name = 'before_review' }
+            @{ name = 'after_goal'; env = @{ GOAL_ID = '7' } }
+        )
+    }
+$r = Invoke-HookScript -InputJson $agEnvInputH2 -Phase 'post' -ProjectDir $agEnvProjH2
+Assert-Contains "8h: unsupplied keys keep their cached values" "tid=[42]" $r.Stdout
+
+# 8i: injection safety — a crafted value arrives literally (no shell parsing
+# on the export path) and a non-identifier key is dropped, never executed.
+$agEnvProjI = New-AfterGoalEnvProject -Suffix 'injection'
+$agPwned = Join-Path $TmpDir 'after-goal-env-pwned'
+Remove-Item -Force $agPwned -ErrorAction SilentlyContinue
+$agEnvInputI = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -Inner @{
+        data  = @{ id = 99; parent_id = 55 }
+        hooks = @(
+            @{ name = 'before_review' }
+            @{ name = 'after_goal'; env = @{ GOAL_ID = '7'; GOAL_TITLE = "x'; touch $agPwned; echo 'y"; 'BAD;KEY' = "touch $agPwned" } }
+        )
+    }
+$r = Invoke-HookScript -InputJson $agEnvInputI -Phase 'post' -ProjectDir $agEnvProjI
+Assert-Exit "8i: crafted env values exit 0" 0 $r.ExitCode
+if (Test-Path $agPwned) {
+    Write-Host "  FAIL: 8i: crafted env value executed a command (pwned file exists)" -ForegroundColor Red
+    $script:Fail++
+} else {
+    Write-Host "  PASS: 8i: crafted env value never executes (no pwned file)" -ForegroundColor Green
+    $script:Pass++
+}
+Assert-Contains "8i: crafted value arrives literally in the section" "gtitle=[x'; touch" $r.Stdout
+
+# 8j: cleanup deferral — when after_goal rides the mark_reviewed response,
+# the env cache survives (the agent still needs GOAL_ID for the follow-up
+# PATCH); the diff snapshot artifacts are still removed.
+$agEnvProjJ = New-AfterGoalEnvProject -Suffix 'cleanup-defer'
+Set-Content -Path (Join-Path $agEnvProjJ '.stride-env-cache') -Value 'TASK_ID=42' -Encoding UTF8
+Set-Content -Path (Join-Path $agEnvProjJ '.stride-changed-files.json') -Value '[]' -Encoding UTF8
+$agEnvInputJ = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed' `
+    -Inner @{
+        data  = @{ id = 99; parent_id = 55 }
+        hooks = @(
+            @{ name = 'after_review' }
+            @{ name = 'after_goal'; env = @{ GOAL_ID = '7' } }
+        )
+    }
+$r = Invoke-HookScript -InputJson $agEnvInputJ -Phase 'post' -ProjectDir $agEnvProjJ
+Assert-Exit "8j: mark_reviewed with after_goal exits 0" 0 $r.ExitCode
+if (Test-Path (Join-Path $agEnvProjJ '.stride-env-cache')) {
+    Write-Host "  PASS: 8j: env cache survives mark_reviewed when after_goal rode it" -ForegroundColor Green
+    $script:Pass++
+} else {
+    Write-Host "  FAIL: 8j: env cache should survive for the follow-up after_goal PATCH" -ForegroundColor Red
+    $script:Fail++
+}
+$agEnvCacheJ = ''
+if (Test-Path (Join-Path $agEnvProjJ '.stride-env-cache')) {
+    $agEnvCacheJ = Get-Content (Join-Path $agEnvProjJ '.stride-env-cache') -Raw -Encoding UTF8
+}
+Assert-Contains "8j: surviving cache carries GOAL_ID" "GOAL_ID=7" $agEnvCacheJ
+if (Test-Path (Join-Path $agEnvProjJ '.stride-changed-files.json')) {
+    Write-Host "  FAIL: 8j: diff snapshot should still be removed on mark_reviewed" -ForegroundColor Red
+    $script:Fail++
+} else {
+    Write-Host "  PASS: 8j: diff snapshot still removed on mark_reviewed" -ForegroundColor Green
+    $script:Pass++
+}
+
+# 8j-2: mark_reviewed WITHOUT after_goal keeps the existing cleanup.
+$agEnvProjJ2 = New-AfterGoalEnvProject -Suffix 'cleanup-normal'
+Set-Content -Path (Join-Path $agEnvProjJ2 '.stride-env-cache') -Value 'TASK_ID=42' -Encoding UTF8
+$agEnvInputJ2 = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed' `
+    -Inner @{
+        data  = @{ id = 99 }
+        hooks = @(@{ name = 'after_review' })
+    }
+$null = Invoke-HookScript -InputJson $agEnvInputJ2 -Phase 'post' -ProjectDir $agEnvProjJ2
+if (Test-Path (Join-Path $agEnvProjJ2 '.stride-env-cache')) {
+    Write-Host "  FAIL: 8j-2: mark_reviewed without after_goal should still delete the cache" -ForegroundColor Red
+    $script:Fail++
+} else {
+    Write-Host "  PASS: 8j-2: mark_reviewed without after_goal still deletes the cache" -ForegroundColor Green
+    $script:Pass++
+}
+
+# 8k: HOOK_NAME containment — a server-sent HOOK_NAME is never cached (a
+# cached line would misroute later invocations), yet the section observes
+# HOOK_NAME=after_goal from the executor's explicit set/restore.
+$agEnvProjK = New-AfterGoalEnvProject -Suffix 'hookname'
+$agEnvInputK = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -Inner @{
+        data  = @{ id = 99; parent_id = 55 }
+        hooks = @(
+            @{ name = 'before_review' }
+            @{ name = 'after_goal'; env = @{ GOAL_ID = '7'; HOOK_NAME = 'after_goal' } }
+        )
+    }
+$r = Invoke-HookScript -InputJson $agEnvInputK -Phase 'post' -ProjectDir $agEnvProjK
+Assert-Contains "8k: section observes HOOK_NAME=after_goal" "hn=[after_goal]" $r.Stdout
+$agEnvCacheK = @()
+if (Test-Path (Join-Path $agEnvProjK '.stride-env-cache')) {
+    $agEnvCacheK = @(Get-Content (Join-Path $agEnvProjK '.stride-env-cache') -Encoding UTF8)
+}
+if (@($agEnvCacheK | Where-Object { $_ -match '^HOOK_NAME=' }).Count -gt 0) {
+    Write-Host "  FAIL: 8k: HOOK_NAME must never be written to the env cache" -ForegroundColor Red
+    $script:Fail++
+} else {
+    Write-Host "  PASS: 8k: HOOK_NAME never written to the env cache" -ForegroundColor Green
+    $script:Pass++
+}
+
+# 8l: env value with an embedded newline reaches the section exactly (the
+# process env keeps the raw value; only the line-based cache copy collapses
+# it), and omitted keys are defined-but-empty in the section child even
+# though .NET deletes empty Process env vars — ${GOAL_IDENTIFIER?unset}
+# hard-fails the section if the key were missing.
+$agEnvProjL = Join-Path $TmpDir 'after-goal-env-newline'
+New-Item -ItemType Directory -Path $agEnvProjL -Force | Out-Null
+Set-Content -Path (Join-Path $agEnvProjL '.stride.md') -Value @'
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_goal
+```bash
+echo "gtitle=[$GOAL_TITLE] gident=[${GOAL_IDENTIFIER?unset}]"
+```
+'@ -Encoding UTF8
+$agEnvInputL = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -Inner @{
+        data  = @{ id = 99; parent_id = 55 }
+        hooks = @(
+            @{ name = 'before_review' }
+            @{ name = 'after_goal'; env = @{ GOAL_ID = '7'; GOAL_TITLE = "line1`nline3" } }
+        )
+    }
+$r = Invoke-HookScript -InputJson $agEnvInputL -Phase 'post' -ProjectDir $agEnvProjL
+Assert-Exit "8l: embedded-newline env value exits 0" 0 $r.ExitCode
+Assert-Contains "8l: newline value's first line reaches the section" "gtitle=[line1" $r.Stdout
+Assert-Contains "8l: newline value's last line reaches the section intact" "line3]" $r.Stdout
+Assert-Contains "8l: omitted GOAL_IDENTIFIER is defined-but-empty in the section child" "gident=[]" $r.Stdout
+Assert-NotContains "8l: after_goal section must not fail on the newline fixture" '"status":"failed"' $r.Stdout
+$agEnvCacheL = ''
+if (Test-Path (Join-Path $agEnvProjL '.stride-env-cache')) {
+    $agEnvCacheL = Get-Content (Join-Path $agEnvProjL '.stride-env-cache') -Raw -Encoding UTF8
+}
+Assert-Contains "8l: cached copy collapses the newline to a space" "GOAL_TITLE=line1 line3" $agEnvCacheL
+
 # ============================================================
 # Test Group 9: early upload + before_review self-heal (W1095,
 # mirrors test-stride-hook.sh Groups 12 and 13)

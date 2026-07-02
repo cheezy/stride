@@ -502,7 +502,7 @@ The server populates `hook.env` and the executor forwards every key into the chi
 | `TASK_STATUS`, `TASK_COMPLEXITY`, `TASK_PRIORITY`, `TASK_NEEDS_REVIEW` | ✓ | — |
 | `GOAL_ID`, `GOAL_IDENTIFIER`, `GOAL_TITLE`, `GOAL_DESCRIPTION` | — | ✓ |
 
-Server-supplied values are the single source of truth — the executor does not invent, derive, or look up any of these client-side. A key the server omits is exported as an empty string (defined-but-empty), never raised as an error. The complete forwarding contract — including the back-compat grace-window path that bypasses `## after_goal` entirely when no agent reports — lives in [hook-execution.md](hook-execution.md).
+Server-supplied values are the single source of truth — the executor does not invent, derive, or look up any of these client-side, with one response-local exception: when the server omits `GOAL_ID` (or sends it empty) on the `after_goal` entry, the executor derives it from the completed task's `parent_id` in the same response payload. Any other key the server omits is exported as an empty string (defined-but-empty), never raised as an error. The complete forwarding contract — including the back-compat grace-window path that bypasses `## after_goal` entirely when no agent reports — lives in [hook-execution.md](hook-execution.md).
 
 ### Canonical Hook Examples
 

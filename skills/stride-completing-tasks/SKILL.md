@@ -441,7 +441,7 @@ legacy summary fields (`issues_found`, `acceptance_criteria_checked`,
 `summary`). Do NOT send only the thin legacy envelope — it strips the issues,
 acceptance verdicts, and code-review checks the reviewer produced. Extract the
 fenced ` ```json ` block per the **`stride-workflow` skill, "Extracting the
-structured review block" (Step 6)**; the block's schema is owned by
+structured review block" (Step 5)**; the block's schema is owned by
 `stride/agents/task-reviewer.md`. The reviewer's full prose+JSON response is
 saved separately as `review_report`.
 
@@ -495,7 +495,7 @@ verbatim and **merged** with the dispatch telemetry plus the derived legacy
 summary fields. The structured fields are what the Kanban review queue renders
 (issue list, acceptance verdicts, code-review checks); omitting them strips the
 review down to a count with no detail. Extract the fenced ` ```json ` block per
-the `stride-workflow` skill's "Extracting the structured review block" (Step 6)
+the `stride-workflow` skill's "Extracting the structured review block" (Step 5)
 — that section owns the legacy↔structured field mapping (e.g. `issues_found =
 sum(issue_counts)`, `acceptance_criteria_checked = len(acceptance_criteria)`).
 The structured block's schema itself is owned by
@@ -503,7 +503,7 @@ The structured block's schema itself is owned by
 `acceptance_criteria_checked` and `issues_found` integers remain required (for
 back-compat) when `dispatched` is `true`. If the reviewer emitted no parseable
 ` ```json ` fence, fall back to the legacy-only envelope and omit the structured
-keys — never invent them (see the `stride-workflow` Step 6 fallback).
+keys — never invent them (see the `stride-workflow` Step 5 fallback).
 
 Copy exactly the keys the reviewer agent produced — passthrough verbatim; never
 maintain an enumerated allow-list of which structured keys to copy. The
@@ -515,7 +515,7 @@ unconditionally), so the empty arrays in the examples above are real, not
 placeholders. But keys the agent did NOT emit — e.g. per-section
 `testing_strategy`/`patterns`/`pitfalls`/`security_considerations` verdicts on schema versions that don't
 produce them — must be omitted entirely, not sent as empty placeholders (per
-`stride-workflow` Step 6).
+`stride-workflow` Step 5).
 
 ### Shape 2 — self-reported skip (for decision-matrix skips or no-subagent platforms)
 
@@ -784,7 +784,7 @@ REQUIRED BODY: {
 reviewer_result (dispatched) = the task-reviewer agent's fenced ```json block
 (schema_version/status/issue_counts/issues[]/acceptance_criteria[]/project_checks[]/testing_strategy/patterns/pitfalls/security_considerations)
 merged with dispatched:true + duration_ms + derived legacy issues_found/acceptance_criteria_checked.
-See stride-workflow Step 6 for extraction; schema owned by stride/agents/task-reviewer.md.
+See stride-workflow Step 5 for extraction; schema owned by stride/agents/task-reviewer.md.
 
 SKIP FORM for explorer_result / reviewer_result (when subagent not dispatched):
   {"dispatched": false, "reason": "<enum>", "summary": "<40+ non-whitespace chars>"}
@@ -1011,11 +1011,11 @@ The API response may include a `skills_update_required` field when your skills a
 
 ## Arriving from stride-workflow
 
-If you are following the `stride:stride-workflow` orchestrator, you arrive here at **Step 7-8** with all prerequisites already satisfied:
+If you are following the `stride:stride-workflow` orchestrator, you arrive here at **Step 6-7** with all prerequisites already satisfied:
 - Task was claimed with proper before_doing hook (Step 2)
 - Codebase was explored and patterns identified (Step 3)
 - Implementation is complete (Step 4)
-- Code review was performed against acceptance criteria (Step 6)
+- Code review was performed against acceptance criteria (Step 5)
 
 **You can proceed directly to hook execution and completion.** The orchestrator has already guided you through all prior steps.
 

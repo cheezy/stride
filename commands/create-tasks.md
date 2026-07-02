@@ -6,7 +6,7 @@ argument-hint: "[--dir <path>] [task description]"
 
 # /stride:create-tasks
 
-Create one or more Stride work tasks (or defects), optionally informed by a directory of project markdown. This command is a thin surface: it parses `$ARGUMENTS`, optionally loads a read-only markdown **context bundle** from `--dir`, then routes through the **`stride-workflow`** orchestrator, which dispatches the `stride-creating-tasks` sub-skill. The task-field contract — required fields, the four review_queue-scored fields, and the embedded-object formats — lives in `skills/stride-creating-tasks/SKILL.md` and is enforced there.
+Create one or more Stride work tasks (or defects), optionally informed by a directory of project markdown. This command is a thin surface: it parses `$ARGUMENTS`, optionally loads a read-only markdown **context bundle** from `--dir`, then routes through the **`stride-workflow`** orchestrator, which dispatches the `stride-creating-tasks` sub-skill. The task-field contract — required fields, the five review_queue-scored fields, and the embedded-object formats — lives in `skills/stride-creating-tasks/SKILL.md` and is enforced there.
 
 **This command never invokes `stride-creating-tasks` directly** — the sub-skill gate would block that. It always goes through `stride-workflow`, which writes the activation marker that permits the dispatch.
 
@@ -60,7 +60,7 @@ Skill(skill: "stride-workflow",
       args: "intent=create-tasks; description=<INTENT>; context_dir=<CONTEXT_DIR>; context_bundle=<CONTEXT_BUNDLE>")
 ```
 
-Do NOT invoke `stride-creating-tasks` yourself. The orchestrator is the only sanctioned path — it satisfies the sub-skill STOP gate by dispatching from inside itself, and it forwards the context bundle to the sub-skill, which mines it per its **Consuming Provided Context** section. The context **augments** the user's interactive intent; it never silently overrides the user's confirmation, and it never excuses leaving a required field (including the four review_queue-scored fields) blank.
+Do NOT invoke `stride-creating-tasks` yourself. The orchestrator is the only sanctioned path — it satisfies the sub-skill STOP gate by dispatching from inside itself, and it forwards the context bundle to the sub-skill, which mines it per its **Consuming Provided Context** section. The context **augments** the user's interactive intent; it never silently overrides the user's confirmation, and it never excuses leaving a required field (including the five review_queue-scored fields) blank.
 
 ## Terminal state
 

@@ -345,7 +345,7 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
   -H "Authorization: Bearer $STRIDE_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d "$(jq -n \
-    --arg agent_name 'Claude Sonnet 4.5' \
+    --arg agent_name 'Claude Opus 4.6' \
     --arg notes 'All tests passing. PR #123 created.' \
     --arg summary 'Brief one-line summary for tracking.' \
     --arg complexity 'small' \
@@ -379,7 +379,7 @@ match the `--arg` substitutions above):
 
 ```json
 {
-  "agent_name": "Claude Sonnet 4.5",
+  "agent_name": "Claude Opus 4.6",
   "time_spent_minutes": 45,
   "completion_notes": "All tests passing. PR #123 created.",
   "completion_summary": "Brief one-line summary for tracking.",

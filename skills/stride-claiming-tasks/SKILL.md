@@ -364,7 +364,7 @@ After before_doing hook succeeds, call the claim endpoint:
 POST /api/tasks/claim
 {
   "identifier": "W47",
-  "agent_name": "Claude Sonnet 4.5",
+  "agent_name": "Claude Opus 4.6",
   "before_doing_result": {
     "exit_code": 0,
     "output": "Already up to date.\nResolving Hex dependencies...\nAll dependencies are up to date",

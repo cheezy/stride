@@ -108,7 +108,7 @@ The task-field and batch-shape contracts the creation sub-skills enforce are **n
 
 **When the orchestrator is entered with a creation intent — `intent=create-tasks` or `intent=create-goals` (the two commands above) — its terminal state is "work created," NOT "work built."** After the dispatched creation sub-skill returns and the goal/tasks are created:
 
-1. **Report** the created identifiers (the `G###` / `W###` values from the API response) to the user.
+1. **Report** the created identifiers (the `G###` / `W###` / `D###` values from the API response) to the user.
 2. **Clear** the orchestrator activation marker — the create path never reaches Step 9, so clear it here:
    ```bash
    rm -f "$CLAUDE_PROJECT_DIR/.stride/.orchestrator_active"
@@ -202,7 +202,7 @@ Review the returned task completely:
 
 #### Other Environments: Invoke the Enrichment Skill
 
-1. Invoke `stride-enriching-tasks` and walk through its Manual Walkthrough Phases (Phase 1 intent parse → Phase 2 codebase exploration → Phase 3 complexity → Phase 4 16-item checklist).
+1. Invoke `stride-enriching-tasks` and walk through its Manual Walkthrough Phases (Phase 1 intent parse → Phase 2 codebase exploration → Phase 3 complexity → Phase 4 17-item checklist).
 2. Submit the assembled JSON via `PATCH /api/tasks/:id` per the API Integration block in that skill.
 
 ---
@@ -628,7 +628,7 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 
 When the just-completed task is the **final child of a parent goal**, the server bundles a fifth `after_goal` entry in the response of `/complete` (when `needs_review=false`) or `/mark_reviewed` (when `needs_review=true`), alongside the primary hooks. The plugin's hook script auto-detects this entry and executes the local `## after_goal` section as a blocking hook (same shape as `after_doing` / `before_review`).
 
-The hook captures `{exit_code, output, duration_ms}` and emits the structured result on stdout. To flip the parent goal to Done, the agent must then POST that result:
+The hook captures `{exit_code, output, duration_ms}` and emits the structured result on stdout. To flip the parent goal to Done, the agent must then PATCH that result:
 
 ```bash
 curl -X PATCH "$STRIDE_API_URL/api/tasks/$GOAL_ID/after_goal" \
@@ -641,8 +641,8 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$GOAL_ID/after_goal" \
 
 **Back-compat (matters for agent runtimes that predate this feature):**
 
-- If `.stride.md` has no `## after_goal` section, the hook script silently no-ops — no JSON is emitted, no POST is needed. The server's grace-window worker (configured per board, typically a few minutes) will promote the goal to Done automatically.
-- If the agent doesn't POST the result at all (older plugin versions, scripted environments), the same grace-window worker covers the gap. The goal transitions to Done after the wait expires, with `after_goal_status: :succeeded` and a synthetic attempt tagged `source: "after_goal_grace_worker"` in the audit log.
+- If `.stride.md` has no `## after_goal` section, the hook script silently no-ops — no JSON is emitted, no PATCH is needed. The server's grace-window worker (configured per board, typically a few minutes) will promote the goal to Done automatically.
+- If the agent doesn't PATCH the result at all (older plugin versions, scripted environments), the same grace-window worker covers the gap. The goal transitions to Done after the wait expires, with `after_goal_status: :succeeded` and a synthetic attempt tagged `source: "after_goal_grace_worker"` in the audit log.
 - The `## after_goal` hook is general-purpose — Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses. See Step 7's "Canonical Hook Examples" for shape references.
 
 ### Clearing the Orchestrator Activation Marker

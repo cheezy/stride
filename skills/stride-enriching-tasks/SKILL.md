@@ -289,7 +289,7 @@ The following shows a defect task after enrichment. `title`, `type`, and `descri
 - "I'll just fill in the required fields with placeholders"
 - "Exploring the codebase takes too long, I'll guess"
 - "The human can add details later"
-- "This is a simple task, it doesn't need all 15 fields"
+- "This is a simple task, it doesn't need all 17 fields"
 - "I'll leave `acceptance_criteria` blank — the implementing agent will figure out 'done'"
 - "`testing_strategy` doesn't apply to this enrichment — empty object is fine"
 - "`security_considerations` is the reviewer's job — I'll ship an empty array"

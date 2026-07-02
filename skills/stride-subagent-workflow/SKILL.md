@@ -94,7 +94,7 @@ Provide the agent with:
 - The task's `title`, `type`, and `description` (the agent must NOT modify these — only read them)
 - Any `priority` or `dependencies` the human specified
 
-The enricher will return a single JSON object containing the enriched fields: `key_files`, `patterns_to_follow`, `testing_strategy`, `verification_steps`, `pitfalls`, `acceptance_criteria`, `complexity`, `why`, `what`, `where_context`. The agent does NOT call the Stride API itself.
+The enricher will return a single JSON object containing the enriched fields: `key_files`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `verification_steps`, `pitfalls`, `acceptance_criteria`, `complexity`, `why`, `what`, `where_context`. The agent does NOT call the Stride API itself.
 
 **After enrichment:**
 1. Submit the returned JSON via `PATCH /api/tasks/:id` to populate the missing fields on the existing task

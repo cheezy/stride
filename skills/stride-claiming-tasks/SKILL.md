@@ -350,7 +350,7 @@ This claiming skill remains available for standalone use (e.g., resuming a parti
 If you are using this skill standalone (not via the orchestrator), invoke the next skill in sequence:
 
 1. **`stride:stride-subagent-workflow`** (Claude Code only) — Check the decision matrix to determine if you need the explorer, planner, or reviewer. Invoke BEFORE implementation.
-2. **`stride:stride-completing-tasks`** — Invoke WHEN implementation is done. Contains the exact API format for completion (required fields: `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result`).
+2. **`stride:stride-completing-tasks`** — Invoke WHEN implementation is done. Owns the completion contract: its Completion Request Field Reference table is the authoritative required-field set (including `explorer_result`, `reviewer_result`, and `workflow_steps`, which the API rejects requests without) — do not rely on any field list duplicated elsewhere.
 
 **FORBIDDEN:** Completing a task without invoking `stride:stride-completing-tasks`. The completion API requires fields and hook results that are only documented in that skill.
 

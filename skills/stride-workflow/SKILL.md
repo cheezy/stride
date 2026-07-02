@@ -471,6 +471,8 @@ Include placeholder hook results in the request body:
 "before_review_result": {"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}
 ```
 
+**Real durations when visible (W1455):** the executor's stdout JSON reports the measured `duration_ms` (with `duration_seconds` kept as a deprecated alias for one release). The PreToolUse `after_doing` output is shown to you before the completion curl runs — copy its `duration_ms` into `after_doing_result` instead of the `0` placeholder when you can see it. `before_review` fires only AFTER the curl, so its real duration is never available at request time — `0` remains the documented fallback there, and everywhere the hook output is not visible to you.
+
 If `after_doing` fails (PreToolUse returns exit 2), fix the issue and retry the curl. The hooks fire again automatically.
 
 ### Other Environments (manual hooks)

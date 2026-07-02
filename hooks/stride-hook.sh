@@ -432,6 +432,51 @@ resolve_section_budget() {
   printf '%s' "$_budget"
 }
 
+# (W1455) Portable millisecond clock. GNU date supports %N (nanoseconds);
+# BSD/macOS date prints a literal trailing 'N', so probe once and fall back
+# to perl Time::HiRes (ships with macOS), then to whole-second granularity
+# times 1000. STRIDE_HOOK_TIME_SOURCE forces the source for tests:
+# ns|perl|seconds.
+STRIDE_TIME_SOURCE_RESOLVED=""
+resolve_time_source() {
+  if [ -z "$STRIDE_TIME_SOURCE_RESOLVED" ]; then
+    case "${STRIDE_HOOK_TIME_SOURCE:-}" in
+      ns|perl|seconds) STRIDE_TIME_SOURCE_RESOLVED="${STRIDE_HOOK_TIME_SOURCE}" ;;
+      *)
+        if [[ "$(date +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+          STRIDE_TIME_SOURCE_RESOLVED="ns"
+        elif command -v perl >/dev/null 2>&1 && \
+             [[ "$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000' 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+          STRIDE_TIME_SOURCE_RESOLVED="perl"
+        else
+          STRIDE_TIME_SOURCE_RESOLVED="seconds"
+        fi ;;
+    esac
+  fi
+  printf '%s' "$STRIDE_TIME_SOURCE_RESOLVED"
+}
+
+# Current wall-clock time in integer milliseconds via the resolved source.
+# Callers invoke this through $(now_ms), a subshell — so the cache only
+# helps when the PARENT shell warmed it first (run_stride_section does)
+# and the subshell inherits the resolved value.
+now_ms() {
+  resolve_time_source > /dev/null
+  case "$STRIDE_TIME_SOURCE_RESOLVED" in
+    ns)
+      local _ns
+      _ns=$(date +%s%N)
+      printf '%s' $(( _ns / 1000000 ))
+      ;;
+    perl)
+      perl -MTime::HiRes=time -e 'printf "%d", time()*1000'
+      ;;
+    *)
+      printf '%s' $(( $(date +%s) * 1000 ))
+      ;;
+  esac
+}
+
 # Probe for a usable timeout utility once and cache the answer.
 # STRIDE_HOOK_TIMEOUT_TOOL forces the choice for tests: timeout|gtimeout|none
 # ("none" selects the built-in watchdog). The probe is functional (-k needs
@@ -582,8 +627,14 @@ run_stride_section() {
   # commands_output array (D65). Keeps passing-gate output off fd 2 so Claude
   # Code does not render it under a false "PreToolUse:Bash hook error" label.
   _output_file=$(mktemp)
-  local _start_secs
+  local _start_secs _start_ms
   _start_secs=$(date +%s)
+  # (W1455) Millisecond wall clock for duration_ms reporting; the seconds
+  # clock above stays the budget-bookkeeping source (whole-second math).
+  # Warm the time-source cache in THIS shell first — $(now_ms) runs in a
+  # subshell, so without this the probe would repeat on every call.
+  resolve_time_source > /dev/null
+  _start_ms=$(now_ms)
   local _cmd_index=0
   local _cmd_total=${#_cmd_list[@]}
   local _cmd_stdout_file _cmd_stderr_file _cmd_exit _cmd_stdout _cmd_stderr
@@ -703,14 +754,23 @@ run_stride_section() {
 
   _end_secs=$(date +%s)
   _duration=$((_end_secs - _start_secs))
+  # (W1455) duration_ms is the hook-execution.md contract field. Guard
+  # against clock weirdness — never emit a negative duration.
+  local _duration_ms
+  _duration_ms=$(( $(now_ms) - _start_ms ))
+  [ "$_duration_ms" -lt 0 ] && _duration_ms=0
 
   if [ "$HAS_JQ" = "true" ]; then
     _completed_json=$(jq -R . < "$_completed_file" | jq -s . 2>/dev/null || echo "[]")
     _output_json=$(jq -s . < "$_output_file" 2>/dev/null || echo "[]")
 
+    # duration_seconds is DEPRECATED in favor of duration_ms (the
+    # hook-execution.md field name) — kept for one release for any
+    # consumer still parsing it.
     jq -n \
       --arg hook "$_section" \
       --argjson duration "$_duration" \
+      --argjson duration_ms "$_duration_ms" \
       --argjson completed "$_completed_json" \
       --argjson outputs "$_output_json" \
       '{
@@ -718,6 +778,7 @@ run_stride_section() {
         status: "success",
         commands_completed: $completed,
         commands_output: $outputs,
+        duration_ms: $duration_ms,
         duration_seconds: $duration
       }'
   fi

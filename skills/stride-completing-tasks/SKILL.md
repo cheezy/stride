@@ -79,7 +79,7 @@ When the user initiates a Stride workflow, they have **already granted blanket p
 1. **DO NOT** read `.stride.md` and manually execute hook commands via Bash tool calls
 2. **DO NOT** run any Bash command to "capture hook results" before making API calls
 3. **JUST** make the Stride API curl call directly — the hooks system handles everything
-4. Include `after_doing_result` and `before_review_result` in the complete request body with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}` — the actual hook execution happens automatically via PreToolUse/PostToolUse
+4. Include `after_doing_result` and `before_review_result` in the complete request body with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}` — the actual hook execution happens automatically via PreToolUse/PostToolUse. When the PreToolUse `after_doing` stdout JSON is visible to you, copy its real `duration_ms` into `after_doing_result` instead of the `0` placeholder (W1455); `before_review` fires after the curl, so its `duration_ms` stays `0`
 
 **If the automatic hooks fail:** The PreToolUse hook returns exit code 2 with structured JSON describing the failure (e.g., test failures, linting errors). Claude Code will present this to you. Fix the issue and retry the API call — the hooks will fire again automatically.
 
@@ -154,7 +154,7 @@ This gate is **not bypassable** by submitting a self-reported skip (`dispatched:
 
 1. **Finish your work** - All implementation complete
 2. **Pre-completion code review (Claude Code Only)** - If the task meets the `stride-subagent-workflow` skill's decision matrix for code review (medium+ complexity OR 2+ key_files), dispatch the `stride:task-reviewer` agent. Fix any Critical or Important issues. Save the reviewer's output to include as `review_report` in the completion request.
-3. **Call `PATCH /api/tasks/:id/complete` directly** - Include `after_doing_result` and `before_review_result` with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}`. The hooks.json system will:
+3. **Call `PATCH /api/tasks/:id/complete` directly** - Include `after_doing_result` and `before_review_result` with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}` — copying the real `duration_ms` from the PreToolUse `after_doing` stdout JSON when it is visible to you (`0` stays the documented fallback; `before_review` fires after the curl so its duration is never known at request time). The hooks.json system will:
    - PreToolUse: automatically execute `.stride.md` `## after_doing` BEFORE the curl runs (blocks if it fails)
    - PostToolUse: automatically execute `.stride.md` `## before_review` AFTER the curl succeeds
 4. **If PreToolUse hook fails (after_doing):** Claude Code reports the failure. Fix the issue (test failures, lint errors, etc.) and retry the curl call.

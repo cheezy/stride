@@ -2106,6 +2106,54 @@ if (-not (Test-Path $orphanPidFile)) {
 }
 
 # ============================================================
+# Test Group 12: duration_ms reporting (W1455)
+# ============================================================
+Write-Host ""
+Write-Host "=== Test Group 12: duration_ms reporting (W1455) ==="
+
+# 12a: A hook sleeping ~1s reports duration_ms of plausible magnitude,
+# alongside the deprecated duration_seconds.
+$durProj = Join-Path $TmpDir 'g12-duration'
+New-Item -ItemType Directory -Path $durProj -Force | Out-Null
+Set-Content -Path (Join-Path $durProj '.stride.md') -Value @'
+## before_doing
+```bash
+sleep 1
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}' -Phase 'post' -ProjectDir $durProj
+Assert-Exit "12a: sleeping hook exits 0" 0 $r.ExitCode
+Assert-Contains "12a: success JSON still carries deprecated duration_seconds" '"duration_seconds"' $r.Stdout
+$durMatch = [regex]::Match($r.Stdout, '"duration_ms":(\d+)')
+if ($durMatch.Success -and [long]$durMatch.Groups[1].Value -ge 900 -and [long]$durMatch.Groups[1].Value -le 5000) {
+    Write-Host "  PASS: 12a: duration_ms is a plausible integer ($($durMatch.Groups[1].Value)ms for a 1s sleep)" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 12a: expected duration_ms in 900..5000, got: '$($durMatch.Groups[1].Value)'" -ForegroundColor Red
+    $script:FAIL++
+}
+
+# 12b: A sub-second hook body reports a small non-negative duration_ms.
+$fastProj = Join-Path $TmpDir 'g12-fast'
+New-Item -ItemType Directory -Path $fastProj -Force | Out-Null
+Set-Content -Path (Join-Path $fastProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo "instant"
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}' -Phase 'post' -ProjectDir $fastProj
+Assert-Exit "12b: instant hook exits 0" 0 $r.ExitCode
+$durMatch = [regex]::Match($r.Stdout, '"duration_ms":(\d+)')
+if ($durMatch.Success -and [long]$durMatch.Groups[1].Value -ge 0 -and [long]$durMatch.Groups[1].Value -le 5000) {
+    Write-Host "  PASS: 12b: sub-second hook reports non-negative duration_ms ($($durMatch.Groups[1].Value)ms)" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 12b: expected non-negative duration_ms, got: '$($durMatch.Groups[1].Value)'" -ForegroundColor Red
+    $script:FAIL++
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

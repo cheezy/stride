@@ -732,6 +732,9 @@ function Invoke-StrideSection {
     # error" label.
     $secCmdOutputs = @()
     $secStartTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    # (W1455) Millisecond wall clock for duration_ms reporting; the seconds
+    # clock above stays the budget-bookkeeping source.
+    $secStartMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $secCmdIndex = 0
     $secCmdTotal = $secCmdList.Count
     # (W1454) Section-level budget: each command gets the REMAINING budget so
@@ -892,12 +895,18 @@ function Invoke-StrideSection {
 
     $secEndTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $secDuration = $secEndTime - $secStartTime
+    # (W1455) duration_ms is the hook-execution.md contract field; never
+    # negative. duration_seconds is DEPRECATED — kept for one release for
+    # any consumer still parsing it.
+    $secDurationMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $secStartMs
+    if ($secDurationMs -lt 0) { $secDurationMs = 0 }
 
     $successResult = [ordered]@{
         hook               = $Section
         status             = 'success'
         commands_completed = $secCompletedCmds
         commands_output    = $secCmdOutputs
+        duration_ms        = $secDurationMs
         duration_seconds   = $secDuration
     }
     # See the failure-path note above: route JSON to the host stdout so it

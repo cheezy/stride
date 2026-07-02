@@ -3668,6 +3668,98 @@ STRIDE
 done
 
 # ============================================================
+echo ""
+echo "=== Test Group 16: duration_ms reporting (W1455) ==="
+
+# 16a: A hook sleeping ~1s reports duration_ms as an integer of plausible
+# magnitude (900..5000), alongside the deprecated duration_seconds.
+DUR_PROJ="$TMPDIR_TEST/duration-project"
+mkdir -p "$DUR_PROJ"
+cat > "$DUR_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+sleep 1
+```
+STRIDE
+DUR_CLAIM_JSON='{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}'
+OUTPUT=$(echo "$DUR_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$DUR_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "16a: sleeping hook exits 0" 0 "$EXIT_CODE"
+assert_contains "16a: success JSON still carries deprecated duration_seconds" '"duration_seconds"' "$OUTPUT"
+DUR_MS=$(echo "$OUTPUT" | grep -o '"duration_ms": [0-9]*' | head -1 | grep -o '[0-9]*$')
+if [ -n "$DUR_MS" ] && [ "$DUR_MS" -ge 900 ] && [ "$DUR_MS" -le 5000 ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 16a: duration_ms is a plausible integer (${DUR_MS}ms for a 1s sleep)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 16a: expected duration_ms in 900..5000, got: '${DUR_MS}'"
+  FAIL=$((FAIL + 1))
+fi
+
+# 16b: The seconds fallback (BSD date without %N and no perl) still emits
+# duration_ms — as a whole-second multiple of 1000.
+OUTPUT=$(echo "$DUR_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$DUR_PROJ" STRIDE_HOOK_TIME_SOURCE=seconds bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "16b: fallback time source exits 0" 0 "$EXIT_CODE"
+DUR_MS=$(echo "$OUTPUT" | grep -o '"duration_ms": [0-9]*' | head -1 | grep -o '[0-9]*$')
+if [ -n "$DUR_MS" ] && [ "$DUR_MS" -ge 1000 ] && [ "$DUR_MS" -le 5000 ] && [ $((DUR_MS % 1000)) -eq 0 ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 16b: fallback duration_ms is a multiple of 1000 (${DUR_MS}ms)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 16b: expected a 1000-multiple in 1000..5000, got: '${DUR_MS}'"
+  FAIL=$((FAIL + 1))
+fi
+
+# 16c: A sub-second hook body reports a small non-negative duration_ms.
+FAST_PROJ="$TMPDIR_TEST/duration-fast-project"
+mkdir -p "$FAST_PROJ"
+cat > "$FAST_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "instant"
+```
+STRIDE
+OUTPUT=$(echo "$DUR_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$FAST_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "16c: instant hook exits 0" 0 "$EXIT_CODE"
+DUR_MS=$(echo "$OUTPUT" | grep -o '"duration_ms": [0-9]*' | head -1 | grep -o '[0-9]*$')
+if [ -n "$DUR_MS" ] && [ "$DUR_MS" -ge 0 ] && [ "$DUR_MS" -le 5000 ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 16c: sub-second hook reports non-negative duration_ms (${DUR_MS}ms)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 16c: expected non-negative duration_ms, got: '${DUR_MS}'"
+  FAIL=$((FAIL + 1))
+fi
+
+# 16d: now_ms unit checks (sourced) — every source yields a plausible epoch
+# value and the seconds source is a multiple of 1000.
+NOW_MS_NS=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  now_ms
+)
+if [ -n "$NOW_MS_NS" ] && [ "$NOW_MS_NS" -gt 1000000000000 ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 16d: now_ms yields an epoch-milliseconds value"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 16d: now_ms yielded '$NOW_MS_NS'"
+  FAIL=$((FAIL + 1))
+fi
+NOW_MS_SEC=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  STRIDE_HOOK_TIME_SOURCE=seconds
+  STRIDE_TIME_SOURCE_RESOLVED=""
+  now_ms
+)
+if [ -n "$NOW_MS_SEC" ] && [ $((NOW_MS_SEC % 1000)) -eq 0 ] && [ "$NOW_MS_SEC" -gt 1000000000000 ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 16d: seconds source yields a 1000-multiple epoch value"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 16d: seconds source yielded '$NOW_MS_SEC'"
+  FAIL=$((FAIL + 1))
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

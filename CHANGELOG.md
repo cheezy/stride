@@ -2,6 +2,40 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.33.0] - 2026-07-02
+
+### Added / Fixed — Hook executor hardening + documentation accuracy sweep (G287 / W1449–W1458)
+
+Four functional hook-executor changes and a documentation accuracy pass, shipped together. All executor changes land in BOTH `hooks/stride-hook.sh` and `hooks/stride-hook.ps1` with matching test fixtures (suites now at 350 bash / 246 PowerShell assertions).
+
+**Hook executor changes:**
+
+- **Server-supplied hook env forwarding (W1453)** — the executor parses the hook entry's `env` block from the intercepted API response and exports every key into the section's environment, so `## after_goal` receives `GOAL_ID` / `GOAL_IDENTIFIER` / `GOAL_TITLE` / `GOAL_DESCRIPTION` (with a response-local `parent_id` fallback for `GOAL_ID`). Keys the server omits export as defined-but-empty.
+- **Per-hook timeouts enforced (W1454)** — each `.stride.md` command now runs as a fresh `bash -c` child under its section's documented budget (before_doing 60s, after_doing 120s, before_review 60s, after_review 60s, after_goal 60s; server-supplied `timeout` values take precedence; everything clamps under the 300s hooks.json outer ceiling). The budget spans the SECTION: each command gets the remaining budget. Timeouts kill the whole process group (no orphaned children keep running with the exported env), report exit 124 with a message naming the hook and budget, and emit `timed_out` + `budget_seconds` in the failure JSON. macOS without GNU coreutils degrades to a built-in watchdog — never to unenforced budgets. NOTE: commands no longer share shell state across lines (`cd`/variables) — see the fresh-shell contract in `hook-execution.md`.
+- **Real `duration_ms` telemetry (W1455)** — the success JSON now reports measured wall-clock `duration_ms` (portable clock: `date +%s%N` → perl `Time::HiRes` → seconds×1000 fallback; `duration_seconds` kept one release as a deprecated alias). Agents should copy the visible PreToolUse `after_doing` duration into `after_doing_result` instead of the `0` placeholder.
+- **Backslash line continuation in the section parser (W1456)** — a line ending in an unquoted, unescaped backslash joins with the next physical line per shell semantics, so the docs' canonical multi-line `gh pr create` example now runs as one command. Quote-aware: single-quoted backslashes stay literal, trailing `\\` is an escaped backslash, comments never continue. The logical-line model is documented in `parser.md`.
+- **Claim-time dirty-baseline snapshot guard (W1457)** — the claim records every already-modified/untracked path (with blob hashes) to `.stride-dirty-baseline`; completion snapshots exclude paths that were dirty at claim and are hash-identical at capture, so pre-existing unrelated edits no longer pollute every task's `changed_files` (files re-modified during the task are still included — when in doubt, include). Additionally `.stride.md` and `.stride_auth.md` are hard-excluded by name from every snapshot and upload — the auth file can never be uploaded under any circumstances. Add `.stride-dirty-baseline` to `.gitignore` alongside the other hook artifacts.
+
+**Documentation accuracy fixes:**
+
+- **W1449** — cross-file contract inconsistencies fixed across skills, commands, and agent docs.
+- **W1450** — stale "ALL 5 required completion fields" claims in the README and claiming skill replaced with pointers to the completing skill's Completion Request Field Reference table (which also requires `explorer_result`, `reviewer_result`, `workflow_steps`); the README subagent list now names all five agents including `task-enricher`.
+- **W1451** — the `hook-diagnostician` agent definition now covers `after_goal` (five-hook scope, 60s timeout row, goal-stays-In-Progress retry guidance via the `GOAL_*` env vars).
+- **W1452** — the workflow skill's step numbering is contiguous again (Steps 6–9 renumbered to 5–8 across headings, flowchart, quick-reference cards, telemetry table, marker lifecycle, and every cross-reference).
+- **W1458** — the changed-files capture docs now match the executor: credentials resolve from `.stride_auth.md` FIRST with curl fallback, the PUT body is the base64 transport envelope (owned by `docs/diff-contract.md`), a new Limitations note covers nested-repo invisibility (put subrepo commit hashes in `completion_notes`), and the dirty-baseline exclusion is described.
+
+### Port parity
+
+The five port plugins (`stride-codex`, `stride-gemini`, `stride-opencode`, `stride-copilot`, `stride-pi`) do **not** yet mirror these changes — port parity is follow-up work.
+
+### Backward compatibility
+
+`.stride.md` files keep working unmodified. Two behavioral notes: (1) hook commands now run in fresh shells per logical line — a `cd` on one line no longer affects the next (join with `&&` on one line, or use backslash continuation); (2) hook sections that exceed their documented budget now FAIL with exit 124 instead of silently consuming the 300s harness ceiling. `duration_seconds` remains alongside `duration_ms` for one release.
+
+### Source
+
+G287 — W1449–W1458 (canonical; port parity is follow-up).
+
 ## [1.32.0] - 2026-07-01
 
 ### Added — `API Notes & Limitations` section in the workflow orchestrator skill (G286 / W1416)

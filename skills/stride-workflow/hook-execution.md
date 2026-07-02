@@ -80,6 +80,10 @@ DURATION_MS=$(( $(date +%s%3N) - START ))
 
 The exact form differs per platform (`Stop-Process` on PowerShell, `gtimeout` on macOS without GNU coreutils), but the contract is identical: wall-clock duration is measured around the wait, stdout and stderr are merged, and the child's exit status propagates verbatim.
 
+### Each Line Runs in a Fresh Shell
+
+Every command line in a hook section executes as its own `bash -c` child (this is what makes the per-line kill-on-budget possible). Shell state does NOT persist across lines: a `cd` on one line does not change the directory of the next, and a plain variable assignment on one line is not visible to the next. Every line starts in the project directory with the exported hook environment (`TASK_*` / `GOAL_*`, the server-supplied hook env, `HOOK_NAME`). Hook authors needing compound state should join the steps on a single line (`cd subdir && make test`).
+
 ### Result Shape
 
 The executor reports `after_goal` to the server using the same `{exit_code, output, duration_ms}` shape as every other blocking hook:

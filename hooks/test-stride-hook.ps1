@@ -1939,6 +1939,173 @@ echo "claimed"
 }
 
 # ============================================================
+# Test Group 11: per-hook command timeouts (W1454)
+# ============================================================
+Write-Host ""
+Write-Host "=== Test Group 11: per-hook command timeouts (W1454) ==="
+
+$claimJson11 = '{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}'
+
+# 11a: A command exceeding the budget is killed (tree kill) and reported as a
+# blocking failure naming the hook and budget.
+$toProj = Join-Path $TmpDir 'g11-timeout-project'
+New-Item -ItemType Directory -Path $toProj -Force | Out-Null
+Set-Content -Path (Join-Path $toProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo "started"
+sleep 30
+touch should_not_exist.txt
+```
+'@ -Encoding UTF8
+$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = '1'
+try {
+    $toStart = [DateTimeOffset]::UtcNow
+    $r = Invoke-HookScript -InputJson $claimJson11 -Phase 'post' -ProjectDir $toProj
+    $toWall = ([DateTimeOffset]::UtcNow - $toStart).TotalSeconds
+} finally {
+    Remove-Item Env:STRIDE_HOOK_TIMEOUT_OVERRIDE -ErrorAction SilentlyContinue
+}
+Assert-Exit "11a: timed-out hook exits 2 (blocking failure)" 2 $r.ExitCode
+Assert-Contains "11a: stderr names the hook and budget" "Stride before_doing hook command 2/3 timed out after 1s budget" $r.Stderr
+Assert-Contains "11a: failure JSON marks timed_out" '"timed_out":true' $r.Stdout
+Assert-Contains "11a: failure JSON carries exit 124" '"exit_code":124' $r.Stdout
+Assert-Contains "11a: failure JSON carries the budget" '"budget_seconds":1' $r.Stdout
+if (Test-Path (Join-Path $toProj 'should_not_exist.txt')) {
+    Write-Host "  FAIL: 11a: commands after the timeout must not run" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 11a: commands after the timeout do not run" -ForegroundColor Green
+    $script:PASS++
+}
+if ($toWall -lt 20) {
+    Write-Host "  PASS: 11a: killed promptly ($([int]$toWall)s wall clock)" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 11a: expected prompt kill, took $([int]$toWall)s" -ForegroundColor Red
+    $script:FAIL++
+}
+
+# 11b: Commands within the budget are unaffected.
+$wbProj = Join-Path $TmpDir 'g11-within-budget'
+New-Item -ItemType Directory -Path $wbProj -Force | Out-Null
+Set-Content -Path (Join-Path $wbProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo "fast one"
+echo "fast two"
+```
+'@ -Encoding UTF8
+$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = '30'
+try {
+    $r = Invoke-HookScript -InputJson $claimJson11 -Phase 'post' -ProjectDir $wbProj
+} finally {
+    Remove-Item Env:STRIDE_HOOK_TIMEOUT_OVERRIDE -ErrorAction SilentlyContinue
+}
+Assert-Exit "11b: within-budget hook exits 0" 0 $r.ExitCode
+Assert-Contains "11b: success JSON emitted" '"status":"success"' $r.Stdout
+Assert-Contains "11b: both commands completed" 'fast two' $r.Stdout
+
+# 11c: Server-supplied timeout (ms) takes precedence over the documented
+# default — enforced end-to-end with no env override set.
+$srvProj = Join-Path $TmpDir 'g11-server-timeout'
+New-Item -ItemType Directory -Path $srvProj -Force | Out-Null
+Set-Content -Path (Join-Path $srvProj '.stride.md') -Value @'
+## before_review
+```bash
+sleep 30
+```
+'@ -Encoding UTF8
+$srvInner = '{"data":{"id":99},"hooks":[{"name":"before_review","timeout":1000}]}'
+$srvJson = @{
+    tool_input = @{ command = 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' }
+    tool_response = @{ stdout = $srvInner; stderr = ''; interrupted = $false }
+} | ConvertTo-Json -Compress
+$srvStart = [DateTimeOffset]::UtcNow
+$r = Invoke-HookScript -InputJson $srvJson -Phase 'post' -ProjectDir $srvProj
+$srvWall = ([DateTimeOffset]::UtcNow - $srvStart).TotalSeconds
+Assert-Exit "11c: server 1000ms timeout enforced end-to-end (exit 2)" 2 $r.ExitCode
+Assert-Contains "11c: stderr names the server-derived 1s budget" "timed out after 1s budget" $r.Stderr
+if ($srvWall -lt 20) {
+    Write-Host "  PASS: 11c: killed on the server budget ($([int]$srvWall)s wall clock)" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 11c: expected kill near 1s, took $([int]$srvWall)s" -ForegroundColor Red
+    $script:FAIL++
+}
+
+# 11d: The budget spans the whole section — a later command only gets what
+# the earlier commands left over.
+$spanProj = Join-Path $TmpDir 'g11-span'
+New-Item -ItemType Directory -Path $spanProj -Force | Out-Null
+Set-Content -Path (Join-Path $spanProj '.stride.md') -Value @'
+## before_doing
+```bash
+sleep 2
+sleep 30
+```
+'@ -Encoding UTF8
+$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = '4'
+try {
+    $spanStart = [DateTimeOffset]::UtcNow
+    $r = Invoke-HookScript -InputJson $claimJson11 -Phase 'post' -ProjectDir $spanProj
+    $spanWall = ([DateTimeOffset]::UtcNow - $spanStart).TotalSeconds
+} finally {
+    Remove-Item Env:STRIDE_HOOK_TIMEOUT_OVERRIDE -ErrorAction SilentlyContinue
+}
+Assert-Exit "11d: section-budget overrun exits 2" 2 $r.ExitCode
+Assert-Contains "11d: the SECOND command is the one killed" '"command_index":1' $r.Stdout
+Assert-Contains "11d: failure JSON marks timed_out" '"timed_out":true' $r.Stdout
+Assert-Contains "11d: budget reported is the section budget" '"budget_seconds":4' $r.Stdout
+if ($spanWall -lt 15) {
+    Write-Host "  PASS: 11d: section killed near its 4s budget ($([int]$spanWall)s wall clock)" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 11d: expected kill near 4s, took $([int]$spanWall)s" -ForegroundColor Red
+    $script:FAIL++
+}
+
+# 11e: Kill($true) terminates the whole process tree — a child spawned by the
+# hung command must not survive the kill.
+$orphanProj = Join-Path $TmpDir 'g11-orphan'
+New-Item -ItemType Directory -Path $orphanProj -Force | Out-Null
+Set-Content -Path (Join-Path $orphanProj '.stride.md') -Value @'
+## before_doing
+```bash
+sleep 30 & echo $! > orphan.pid; wait
+```
+'@ -Encoding UTF8
+$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = '1'
+try {
+    $r = Invoke-HookScript -InputJson $claimJson11 -Phase 'post' -ProjectDir $orphanProj
+} finally {
+    Remove-Item Env:STRIDE_HOOK_TIMEOUT_OVERRIDE -ErrorAction SilentlyContinue
+}
+Assert-Exit "11e: orphan fixture times out (exit 2)" 2 $r.ExitCode
+$orphanPidFile = Join-Path $orphanProj 'orphan.pid'
+if (-not (Test-Path $orphanPidFile)) {
+    Write-Host "  FAIL: 11e: fixture never wrote orphan.pid" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    $orphanPid = (Get-Content $orphanPidFile -Raw).Trim()
+    $orphanDead = $false
+    foreach ($attempt in 1..6) {
+        $alive = $null
+        try { $alive = Get-Process -Id ([int]$orphanPid) -ErrorAction Stop } catch { $alive = $null }
+        if ($null -eq $alive) { $orphanDead = $true; break }
+        Start-Sleep -Seconds 1
+    }
+    if ($orphanDead) {
+        Write-Host "  PASS: 11e: process tree killed — no orphaned child" -ForegroundColor Green
+        $script:PASS++
+    } else {
+        Write-Host "  FAIL: 11e: orphan $orphanPid survived the kill" -ForegroundColor Red
+        $script:FAIL++
+        try { Stop-Process -Id ([int]$orphanPid) -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

@@ -377,6 +377,127 @@ self_heal_changed_files_upload() {
   return 0
 }
 
+# --- Per-hook command timeouts (W1454) ---
+# parser.md's budget table is the contract: before_doing 60s, after_doing
+# 120s, before_review 60s, after_review 60s, after_goal 60s. The budget is
+# per SECTION (wall clock across all its commands), not per command — each
+# command is wrapped with the REMAINING budget so a section can never exceed
+# its table value regardless of command count, keeping every inner budget
+# under the 300s hooks.json outer ceiling.
+
+# Documented per-section budget in seconds.
+default_budget_for_section() {
+  case "$1" in
+    after_doing) printf '120' ;;
+    *)           printf '60'  ;;
+  esac
+}
+
+# Server-supplied timeout (milliseconds) for the named hook entry — jq
+# sibling of extract_hook_env, selecting `.timeout` instead of `.env`.
+# No jq or no payload → prints nothing (documented defaults apply),
+# mirroring extract_hook_env's jq-gated no-fallback design.
+extract_hook_timeout_ms() {
+  local _payload="$1" _name="$2"
+  [ "${HAS_JQ:-false}" = "true" ] || return 0
+  [ -n "$_payload" ] || return 0
+  printf '%s' "$_payload" | jq -r --arg name "$_name" '
+    ((.hooks // []) + (if (has("hook") and (.hook | type == "object")) then [.hook] else [] end)
+     | map(select(type == "object" and .name == $name))
+     | (first // {}) | .timeout
+    ) | select(type == "number") | floor
+  ' 2>/dev/null || true
+}
+
+# Resolve the section budget in seconds. Precedence:
+#   STRIDE_HOOK_TIMEOUT_OVERRIDE (integer seconds; test/ops escape hatch)
+#   > server hook-entry timeout (ms, rounded up to whole seconds)
+#   > documented default.
+# Clamped to 290s so no inner budget can reach the 300s hooks.json outer
+# ceiling (dormant for spec-compliant 60-120s server values). after_doing
+# runs at PRE phase — no tool_response exists yet, so it always resolves
+# to the documented 120s default.
+resolve_section_budget() {
+  local _section="$1" _budget="" _ms=""
+  if [[ "${STRIDE_HOOK_TIMEOUT_OVERRIDE:-}" =~ ^[0-9]+$ ]] && [ "${STRIDE_HOOK_TIMEOUT_OVERRIDE}" -gt 0 ]; then
+    _budget="$STRIDE_HOOK_TIMEOUT_OVERRIDE"
+  else
+    _ms=$(extract_hook_timeout_ms "${RESPONSE_PAYLOAD:-}" "$_section")
+    if [[ "$_ms" =~ ^[0-9]+$ ]] && [ "$_ms" -gt 0 ]; then
+      _budget=$(( (_ms + 999) / 1000 ))
+    fi
+  fi
+  [ -z "$_budget" ] && _budget=$(default_budget_for_section "$_section")
+  [ "$_budget" -gt 290 ] && _budget=290
+  printf '%s' "$_budget"
+}
+
+# Probe for a usable timeout utility once and cache the answer.
+# STRIDE_HOOK_TIMEOUT_TOOL forces the choice for tests: timeout|gtimeout|none
+# ("none" selects the built-in watchdog). The probe is functional (-k needs
+# GNU/FreeBSD semantics), so a BusyBox `timeout` lacking -k falls through.
+STRIDE_TIMEOUT_TOOL_RESOLVED=""
+resolve_timeout_tool() {
+  if [ -z "$STRIDE_TIMEOUT_TOOL_RESOLVED" ]; then
+    case "${STRIDE_HOOK_TIMEOUT_TOOL:-}" in
+      none)             STRIDE_TIMEOUT_TOOL_RESOLVED="watchdog" ;;
+      timeout|gtimeout) STRIDE_TIMEOUT_TOOL_RESOLVED="${STRIDE_HOOK_TIMEOUT_TOOL}" ;;
+      *)
+        if command -v timeout >/dev/null 2>&1 && timeout -k 1 1 true >/dev/null 2>&1; then
+          STRIDE_TIMEOUT_TOOL_RESOLVED="timeout"
+        elif command -v gtimeout >/dev/null 2>&1 && gtimeout -k 1 1 true >/dev/null 2>&1; then
+          STRIDE_TIMEOUT_TOOL_RESOLVED="gtimeout"
+        else
+          STRIDE_TIMEOUT_TOOL_RESOLVED="watchdog"
+        fi ;;
+    esac
+  fi
+  printf '%s' "$STRIDE_TIMEOUT_TOOL_RESOLVED"
+}
+
+# Run one command as a fresh `bash -c` child under a seconds budget. Sets
+# RWB_EXIT / RWB_TIMED_OUT for the caller. timeout's default (non
+# --foreground) mode runs the child in its own process group and signals the
+# whole group, so a hung command's children die with it — the security
+# contract for killed hooks. The watchdog fallback (stock macOS: no GNU
+# coreutils) gets the same via `set -m` (own pgid for the background job)
+# plus kill -- -pgid, TERM then KILL after a 2s grace, synthesizing the
+# conventional exit 124.
+RWB_EXIT=0
+RWB_TIMED_OUT=false
+run_with_budget() {
+  local _secs="$1" _out="$2" _err="$3" _cmd="$4" _tool _pid _deadline
+  RWB_TIMED_OUT=false
+  _tool=$(resolve_timeout_tool)
+  if [ "$_tool" = "timeout" ] || [ "$_tool" = "gtimeout" ]; then
+    "$_tool" -k 5 "$_secs" bash -c "$_cmd" > "$_out" 2> "$_err" < /dev/null
+    RWB_EXIT=$?
+    # Known GNU-timeout ambiguity: a command that genuinely exits 124 within
+    # budget is indistinguishable from a timeout kill here (the watchdog
+    # branch below only flags on actual deadline expiry). Accepted — 124 is
+    # the documented timeout convention, so hook commands should not use it.
+    [ "$RWB_EXIT" -eq 124 ] && RWB_TIMED_OUT=true
+  else
+    set -m
+    bash -c "$_cmd" > "$_out" 2> "$_err" < /dev/null &
+    _pid=$!
+    set +m
+    _deadline=$(( $(date +%s) + _secs ))
+    while kill -0 "$_pid" 2>/dev/null && [ "$(date +%s)" -lt "$_deadline" ]; do
+      sleep 0.2
+    done
+    if kill -0 "$_pid" 2>/dev/null; then
+      RWB_TIMED_OUT=true
+      kill -TERM -- "-$_pid" 2>/dev/null || kill -TERM "$_pid" 2>/dev/null || true
+      sleep 2
+      kill -KILL -- "-$_pid" 2>/dev/null || kill -KILL "$_pid" 2>/dev/null || true
+    fi
+    wait "$_pid" 2>/dev/null
+    RWB_EXIT=$?
+    [ "$RWB_TIMED_OUT" = "true" ] && RWB_EXIT=124
+  fi
+}
+
 # --- Parse and execute one .stride.md hook section ---
 # Takes a single section name (e.g. "before_doing", "after_goal") and:
 #   1. Parses the first `## <section>` block from .stride.md (first-wins,
@@ -467,18 +588,36 @@ run_stride_section() {
   local _cmd_total=${#_cmd_list[@]}
   local _cmd_stdout_file _cmd_stderr_file _cmd_exit _cmd_stdout _cmd_stderr
   local _remaining_file _completed_json _remaining_json _output_json _end_secs _duration _i
+  local _section_budget _remaining _elapsed _timed_out
+  _section_budget=$(resolve_section_budget "$_section")
 
   for _trimmed in "${_cmd_list[@]}"; do
     _cmd_stdout_file=$(mktemp)
     _cmd_stderr_file=$(mktemp)
 
-    # Relax `set -u` and `pipefail` for the user's command so that a reference
-    # to an unset env var doesn't silently abort the eval before the actual
-    # command runs. The hook script's strictness re-engages immediately after.
-    set +uo pipefail
-    eval "$_trimmed" > "$_cmd_stdout_file" 2> "$_cmd_stderr_file"
-    _cmd_exit=$?
-    set -uo pipefail
+    _elapsed=$(( $(date +%s) - _start_secs ))
+    _remaining=$(( _section_budget - _elapsed ))
+    _timed_out=false
+    if [ "$_remaining" -le 0 ]; then
+      # Earlier commands consumed the whole section budget — do not start.
+      _cmd_exit=124
+      _timed_out=true
+      : > "$_cmd_stdout_file"
+      printf '%ss section budget exhausted before this command started\n' \
+        "$_section_budget" > "$_cmd_stderr_file"
+    else
+      # (W1454) Each command runs as a fresh `bash -c` child so it can be
+      # killed when the section budget expires. Same-shell eval persistence
+      # (cd/vars carrying across .stride.md lines) is intentionally gone —
+      # the PowerShell executor never had it, so no cross-platform hook could
+      # rely on it — and all documented env (TASK_*, GOAL_*, HOOK_NAME,
+      # server hook env) is exported and survives into the child. The old
+      # `set +uo pipefail` relaxation is unneeded: the child is a fresh bash
+      # with default options.
+      run_with_budget "$_remaining" "$_cmd_stdout_file" "$_cmd_stderr_file" "$_trimmed"
+      _cmd_exit=$RWB_EXIT
+      _timed_out=$RWB_TIMED_OUT
+    fi
 
     if [ "$_cmd_exit" -eq 0 ]; then
       echo "$_trimmed" >> "$_completed_file"
@@ -517,6 +656,8 @@ run_stride_section() {
           --arg failed "$_trimmed" \
           --argjson index "$_cmd_index" \
           --argjson exit_code "$_cmd_exit" \
+          --argjson timed_out "$_timed_out" \
+          --argjson budget "$_section_budget" \
           --arg stdout "$_cmd_stdout" \
           --arg stderr "$_cmd_stderr" \
           --argjson completed "$_completed_json" \
@@ -527,16 +668,22 @@ run_stride_section() {
             failed_command: $failed,
             command_index: $index,
             exit_code: $exit_code,
+            timed_out: $timed_out,
+            budget_seconds: $budget,
             stdout: $stdout,
             stderr: $stderr,
             commands_completed: $completed,
             commands_remaining: $remaining
           }'
       else
-        echo "HOOK=$_section STATUS=failed COMMAND=$_trimmed EXIT=$_cmd_exit"
+        echo "HOOK=$_section STATUS=failed COMMAND=$_trimmed EXIT=$_cmd_exit TIMED_OUT=$_timed_out BUDGET=$_section_budget"
       fi
 
-      echo "Stride $_section hook failed on command $((_cmd_index + 1))/$_cmd_total: $_trimmed" >&2
+      if [ "$_timed_out" = "true" ]; then
+        echo "Stride $_section hook command $((_cmd_index + 1))/$_cmd_total timed out after ${_section_budget}s budget: $_trimmed" >&2
+      else
+        echo "Stride $_section hook failed on command $((_cmd_index + 1))/$_cmd_total: $_trimmed" >&2
+      fi
       [ -n "$_cmd_stderr" ] && echo "$_cmd_stderr" >&2
       rm -f "$_completed_file" "$_remaining_file" "$_output_file"
       return 2
@@ -815,6 +962,10 @@ esac
 if [ -z "$HOOK_NAME" ]; then
   exit 0
 fi
+# (W1454) Commands now run as `bash -c` children rather than in-shell eval,
+# so the documented "section observes $HOOK_NAME" contract needs the export
+# (the after_goal route already exports its override).
+export HOOK_NAME
 
 # --- Environment variable caching ---
 # After a successful claim (before_doing), extract task metadata from the API

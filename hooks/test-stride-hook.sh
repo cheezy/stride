@@ -3397,6 +3397,277 @@ STRIDE
 fi
 
 # ============================================================
+echo ""
+echo "=== Test Group 15: per-hook command timeouts (W1454) ==="
+
+# 15a: A command exceeding the budget is killed and reported as a blocking
+# failure naming the hook and budget (uses the auto-probed timeout tool).
+TO_PROJ="$TMPDIR_TEST/timeout-project"
+mkdir -p "$TO_PROJ"
+cat > "$TO_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "started"
+sleep 30
+touch should_not_exist.txt
+```
+STRIDE
+TO_CLAIM_JSON='{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}'
+TO_STDERR_FILE=$(mktemp)
+TO_START=$(date +%s)
+OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$TO_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=1 bash "$HOOK_SCRIPT" post 2>"$TO_STDERR_FILE")
+EXIT_CODE=$?
+TO_WALL=$(( $(date +%s) - TO_START ))
+TO_STDERR=$(cat "$TO_STDERR_FILE")
+rm -f "$TO_STDERR_FILE"
+assert_exit "15a: timed-out hook exits 2 (blocking failure)" 2 "$EXIT_CODE"
+assert_contains "15a: stderr names the hook and budget" \
+  "Stride before_doing hook command 2/3 timed out after 1s budget" "$TO_STDERR"
+assert_contains "15a: failure JSON marks timed_out" '"timed_out": true' "$OUTPUT"
+assert_contains "15a: failure JSON carries exit 124" '"exit_code": 124' "$OUTPUT"
+assert_contains "15a: failure JSON carries the budget" '"budget_seconds": 1' "$OUTPUT"
+if [ -f "$TO_PROJ/should_not_exist.txt" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 15a: commands after the timeout must not run"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 15a: commands after the timeout do not run"
+  PASS=$((PASS + 1))
+fi
+if [ "$TO_WALL" -lt 20 ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 15a: killed promptly (${TO_WALL}s wall clock)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 15a: expected prompt kill, took ${TO_WALL}s"
+  FAIL=$((FAIL + 1))
+fi
+
+# 15b: Commands within the budget are unaffected.
+WB_PROJ="$TMPDIR_TEST/within-budget-project"
+mkdir -p "$WB_PROJ"
+cat > "$WB_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "fast one"
+echo "fast two"
+```
+STRIDE
+OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$WB_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=30 bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "15b: within-budget hook exits 0" 0 "$EXIT_CODE"
+assert_contains "15b: success JSON emitted" '"status": "success"' "$OUTPUT"
+assert_contains "15b: both commands completed" "fast two" "$OUTPUT"
+
+# 15c: The watchdog fallback (no timeout utility) still enforces the budget.
+TO_STDERR_FILE=$(mktemp)
+TO_START=$(date +%s)
+OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$TO_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=1 STRIDE_HOOK_TIMEOUT_TOOL=none bash "$HOOK_SCRIPT" post 2>"$TO_STDERR_FILE")
+EXIT_CODE=$?
+TO_WALL=$(( $(date +%s) - TO_START ))
+TO_STDERR=$(cat "$TO_STDERR_FILE")
+rm -f "$TO_STDERR_FILE"
+assert_exit "15c: watchdog fallback kills on budget (exit 2)" 2 "$EXIT_CODE"
+assert_contains "15c: watchdog reports timeout naming hook and budget" \
+  "timed out after 1s budget" "$TO_STDERR"
+assert_contains "15c: watchdog synthesizes exit 124" '"exit_code": 124' "$OUTPUT"
+if [ "$TO_WALL" -lt 20 ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 15c: watchdog killed promptly (${TO_WALL}s wall clock)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 15c: watchdog expected prompt kill, took ${TO_WALL}s"
+  FAIL=$((FAIL + 1))
+fi
+
+# 15c2: The watchdog fallback does not fail healthy hooks.
+OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$WB_PROJ" STRIDE_HOOK_TIMEOUT_TOOL=none bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "15c2: watchdog leaves healthy hooks untouched (exit 0)" 0 "$EXIT_CODE"
+assert_contains "15c2: healthy hook succeeds under watchdog" '"status": "success"' "$OUTPUT"
+
+# 15d: Budget resolution unit tests (sourced functions).
+if command -v jq > /dev/null 2>&1; then
+  BUDGET_SRV=$(
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    HAS_JQ=true
+    RESPONSE_PAYLOAD='{"data":{},"hooks":[{"name":"before_review","timeout":90000}]}'
+    resolve_section_budget before_review
+  )
+  assert_eq "15d: server 90000ms overrides the 60s default" "90" "$BUDGET_SRV"
+
+  BUDGET_SINGULAR=$(
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    HAS_JQ=true
+    RESPONSE_PAYLOAD='{"data":{},"hook":{"name":"before_doing","timeout":30000}}'
+    resolve_section_budget before_doing
+  )
+  assert_eq "15d: singular claim-shape hook entry honored" "30" "$BUDGET_SINGULAR"
+
+  BUDGET_DEFAULT_BR=$(
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    HAS_JQ=true
+    RESPONSE_PAYLOAD=""
+    resolve_section_budget before_review
+  )
+  assert_eq "15d: empty payload falls back to the 60s default" "60" "$BUDGET_DEFAULT_BR"
+
+  BUDGET_DEFAULT_AD=$(
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    HAS_JQ=true
+    RESPONSE_PAYLOAD=""
+    resolve_section_budget after_doing
+  )
+  assert_eq "15d: after_doing default is 120s" "120" "$BUDGET_DEFAULT_AD"
+
+  BUDGET_ENV_WINS=$(
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    HAS_JQ=true
+    RESPONSE_PAYLOAD='{"data":{},"hooks":[{"name":"before_review","timeout":90000}]}'
+    STRIDE_HOOK_TIMEOUT_OVERRIDE=5
+    resolve_section_budget before_review
+  )
+  assert_eq "15d: env override beats the server value" "5" "$BUDGET_ENV_WINS"
+
+  BUDGET_CLAMPED=$(
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    HAS_JQ=true
+    RESPONSE_PAYLOAD='{"data":{},"hooks":[{"name":"before_review","timeout":999000000}]}'
+    resolve_section_budget before_review
+  )
+  assert_eq "15d: oversized server value clamps to 290s under the outer ceiling" "290" "$BUDGET_CLAMPED"
+
+  BUDGET_NO_JQ=$(
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    HAS_JQ=false
+    RESPONSE_PAYLOAD='{"data":{},"hooks":[{"name":"before_review","timeout":90000}]}'
+    resolve_section_budget before_review
+  )
+  assert_eq "15d: no jq degrades to the documented default" "60" "$BUDGET_NO_JQ"
+fi
+
+# 15d2: Server-supplied timeout enforced end-to-end (no env override).
+if command -v jq > /dev/null 2>&1; then
+  SRV_PROJ="$TMPDIR_TEST/server-timeout-project"
+  mkdir -p "$SRV_PROJ"
+  cat > "$SRV_PROJ/.stride.md" << 'STRIDE'
+## before_review
+```bash
+sleep 30
+```
+STRIDE
+  SRV_INNER='{"data":{"id":99},"hooks":[{"name":"before_review","timeout":1000}]}'
+  SRV_JSON=$(jq -nc --arg inner "$SRV_INNER" \
+    '{tool_input: {command: "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete"}, tool_response: {stdout: $inner, stderr: "", interrupted: false}}')
+  SRV_STDERR_FILE=$(mktemp)
+  SRV_START=$(date +%s)
+  OUTPUT=$(echo "$SRV_JSON" | CLAUDE_PROJECT_DIR="$SRV_PROJ" bash "$HOOK_SCRIPT" post 2>"$SRV_STDERR_FILE")
+  EXIT_CODE=$?
+  SRV_WALL=$(( $(date +%s) - SRV_START ))
+  SRV_STDERR=$(cat "$SRV_STDERR_FILE")
+  rm -f "$SRV_STDERR_FILE"
+  assert_exit "15d2: server 1000ms timeout enforced end-to-end (exit 2)" 2 "$EXIT_CODE"
+  assert_contains "15d2: stderr names the server-derived 1s budget" \
+    "timed out after 1s budget" "$SRV_STDERR"
+  if [ "$SRV_WALL" -lt 20 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 15d2: killed on the server budget (${SRV_WALL}s wall clock)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 15d2: expected kill near 1s, took ${SRV_WALL}s"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+# 15e: The budget spans the whole section — a later command only gets what
+# the earlier commands left over.
+SPAN_PROJ="$TMPDIR_TEST/span-project"
+mkdir -p "$SPAN_PROJ"
+cat > "$SPAN_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+sleep 2
+sleep 30
+```
+STRIDE
+SPAN_STDERR_FILE=$(mktemp)
+SPAN_START=$(date +%s)
+OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$SPAN_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=4 bash "$HOOK_SCRIPT" post 2>"$SPAN_STDERR_FILE")
+EXIT_CODE=$?
+SPAN_WALL=$(( $(date +%s) - SPAN_START ))
+SPAN_STDERR=$(cat "$SPAN_STDERR_FILE")
+rm -f "$SPAN_STDERR_FILE"
+assert_exit "15e: section-budget overrun exits 2" 2 "$EXIT_CODE"
+assert_contains "15e: the SECOND command is the one killed" '"command_index": 1' "$OUTPUT"
+assert_contains "15e: failure JSON marks timed_out" '"timed_out": true' "$OUTPUT"
+assert_contains "15e: budget reported is the section budget" '"budget_seconds": 4' "$OUTPUT"
+if [ "$SPAN_WALL" -lt 15 ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 15e: section killed near its 4s budget (${SPAN_WALL}s wall clock)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 15e: expected kill near 4s, took ${SPAN_WALL}s"
+  FAIL=$((FAIL + 1))
+fi
+
+# 15f: The probe degrades to the watchdog when no timeout utility exists.
+TOOL_RESOLVED=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  PATH="/nonexistent"
+  STRIDE_TIMEOUT_TOOL_RESOLVED=""
+  unset STRIDE_HOOK_TIMEOUT_TOOL 2>/dev/null || true
+  resolve_timeout_tool
+)
+assert_eq "15f: missing timeout utility resolves to the watchdog" "watchdog" "$TOOL_RESOLVED"
+
+# 15g: Killing a timed-out command terminates its whole process group —
+# a child spawned by the hung command must not survive the kill.
+for TOOL_MODE in "" "none"; do
+  ORPHAN_PROJ="$TMPDIR_TEST/orphan-project-${TOOL_MODE:-auto}"
+  mkdir -p "$ORPHAN_PROJ"
+  cat > "$ORPHAN_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+sleep 30 & echo $! > orphan.pid; wait
+```
+STRIDE
+  if [ -n "$TOOL_MODE" ]; then
+    OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$ORPHAN_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=1 STRIDE_HOOK_TIMEOUT_TOOL="$TOOL_MODE" bash "$HOOK_SCRIPT" post 2>&1)
+  else
+    OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$ORPHAN_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=1 bash "$HOOK_SCRIPT" post 2>&1)
+  fi
+  EXIT_CODE=$?
+  ORPHAN_LABEL="15g(${TOOL_MODE:-auto})"
+  assert_exit "$ORPHAN_LABEL: orphan fixture times out (exit 2)" 2 "$EXIT_CODE"
+  ORPHAN_PID=$(cat "$ORPHAN_PROJ/orphan.pid" 2>/dev/null || echo "")
+  if [ -z "$ORPHAN_PID" ]; then
+    echo -e "  ${RED}FAIL${RESET}: $ORPHAN_LABEL: fixture never wrote orphan.pid"
+    FAIL=$((FAIL + 1))
+  else
+    # Give TERM->KILL escalation a moment to settle, then require death.
+    ORPHAN_DEAD=false
+    for _ in 1 2 3 4 5 6; do
+      if ! kill -0 "$ORPHAN_PID" 2>/dev/null; then
+        ORPHAN_DEAD=true
+        break
+      fi
+      sleep 1
+    done
+    if [ "$ORPHAN_DEAD" = "true" ]; then
+      echo -e "  ${GREEN}PASS${RESET}: $ORPHAN_LABEL: process group killed — no orphaned child"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: $ORPHAN_LABEL: orphan $ORPHAN_PID survived the kill"
+      FAIL=$((FAIL + 1))
+      kill -KILL "$ORPHAN_PID" 2>/dev/null || true
+    fi
+  fi
+done
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

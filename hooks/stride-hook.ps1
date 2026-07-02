@@ -330,6 +330,65 @@ function Get-HookEnvFromPayload {
     return $envMap
 }
 
+# (W1454) Server-supplied timeout (milliseconds) for the named hook entry —
+# sibling of Get-HookEnvFromPayload, selecting `timeout` instead of `env`.
+# Returns [long] milliseconds, or $null when absent/invalid (documented
+# defaults apply).
+function Get-HookTimeoutMsFromPayload {
+    param($Payload, [string]$HookEntryName)
+
+    if ($null -eq $Payload) { return $null }
+
+    $payloadProps = $Payload.PSObject.Properties.Name
+    $entries = @()
+    if (($payloadProps -contains 'hooks') -and $Payload.hooks) {
+        $entries += @($Payload.hooks)
+    }
+    if (($payloadProps -contains 'hook') -and $Payload.hook -is [PSCustomObject]) {
+        $entries += $Payload.hook
+    }
+
+    foreach ($entry in $entries) {
+        if (-not ($entry -is [PSCustomObject])) { continue }
+        if ($entry.PSObject.Properties.Name -notcontains 'name') { continue }
+        if ($entry.name -ne $HookEntryName) { continue }
+        if ($entry.PSObject.Properties.Name -notcontains 'timeout') { return $null }
+        $t = $entry.timeout
+        if ($t -is [int] -or $t -is [long] -or $t -is [double]) {
+            $ms = [long][math]::Floor([double]$t)
+            if ($ms -gt 0) { return $ms }
+        }
+        return $null
+    }
+    return $null
+}
+
+# (W1454) Resolve the section budget in seconds. Precedence:
+#   STRIDE_HOOK_TIMEOUT_OVERRIDE (integer seconds; test/ops escape hatch)
+#   > server hook-entry timeout (ms, rounded up to whole seconds)
+#   > documented default (before_doing 60, after_doing 120, before_review 60,
+#     after_review 60, after_goal 60 — parser.md's table).
+# Clamped to 290s so no inner budget can reach the 300s hooks.json outer
+# ceiling. after_doing runs at PRE phase — no tool_response exists yet, so it
+# always resolves to the documented 120s default.
+function Resolve-SectionBudget {
+    param([string]$Section)
+
+    $budget = [long]0
+    $override = [System.Environment]::GetEnvironmentVariable('STRIDE_HOOK_TIMEOUT_OVERRIDE', 'Process')
+    if ($override -and $override -match '^\d+$' -and [long]$override -gt 0) {
+        $budget = [long]$override
+    } else {
+        $ms = Get-HookTimeoutMsFromPayload -Payload $script:responsePayload -HookEntryName $Section
+        if ($ms) { $budget = [long][math]::Ceiling($ms / 1000.0) }
+    }
+    if ($budget -le 0) {
+        $budget = if ($Section -eq 'after_doing') { 120 } else { 60 }
+    }
+    if ($budget -gt 290) { $budget = 290 }
+    return [int]$budget
+}
+
 # Export a map into the Process environment (inherited by the bash -c
 # children that run sections) and append it to the env cache, best-effort,
 # so the values survive for follow-up agent commands. The cache loader is
@@ -675,45 +734,72 @@ function Invoke-StrideSection {
     $secStartTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $secCmdIndex = 0
     $secCmdTotal = $secCmdList.Count
+    # (W1454) Section-level budget: each command gets the REMAINING budget so
+    # the whole section can never exceed its documented table value.
+    $secBudget = Resolve-SectionBudget -Section $Section
 
     foreach ($execTrimmed in $secCmdList) {
         $secStdoutFile = [System.IO.Path]::GetTempFileName()
         $secStderrFile = [System.IO.Path]::GetTempFileName()
 
         try {
-            # ProcessStartInfo.ArgumentList passes each element as an exact
-            # argv entry on every platform. Start-Process -ArgumentList must
-            # NOT be used here: it joins the elements into a single string,
-            # which .NET on Unix re-splits on whitespace, so a multi-word
-            # command reaches bash -c mangled and its output is lost.
-            $secPsi = [System.Diagnostics.ProcessStartInfo]::new()
-            $secPsi.FileName = 'bash'
-            $secPsi.ArgumentList.Add('-c')
-            $secPsi.ArgumentList.Add($execTrimmed)
-            $secPsi.RedirectStandardOutput = $true
-            $secPsi.RedirectStandardError = $true
-            $secPsi.UseShellExecute = $false
-            $secPsi.WorkingDirectory = (Get-Location).Path
-            # (W1453) Re-add empty-valued keys the Process env block cannot
-            # hold, so user commands see them defined-but-empty per the
-            # hook-execution.md contract (prevents ${VAR?} / set -u aborts).
-            foreach ($emptyKey in $script:StrideEmptyEnvKeys) {
-                $secPsi.Environment[$emptyKey] = ''
-            }
-            $proc = [System.Diagnostics.Process]::Start($secPsi)
-            # Drain both pipes concurrently: a synchronous ReadToEnd on
-            # stdout would deadlock if the child fills the stderr pipe
-            # buffer (~64KB) while its stdout is still open — gate commands
-            # like `mix compile` can emit that much warning text.
-            $secOutTask = $proc.StandardOutput.ReadToEndAsync()
-            $secErrTask = $proc.StandardError.ReadToEndAsync()
-            $proc.WaitForExit()
-            $secProcStdout = $secOutTask.Result
-            $secProcStderr = $secErrTask.Result
-            Set-Content -Path $secStdoutFile -Value $secProcStdout -Encoding UTF8 -NoNewline
-            Set-Content -Path $secStderrFile -Value $secProcStderr -Encoding UTF8 -NoNewline
+            $secTimedOut = $false
+            $secCmdExit = 0
+            $secElapsed = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $secStartTime
+            $secRemainingSec = $secBudget - $secElapsed
 
-            if ($proc.ExitCode -eq 0) {
+            if ($secRemainingSec -le 0) {
+                # Earlier commands consumed the whole section budget — do not
+                # start this one.
+                $secTimedOut = $true
+                $secCmdExit = 124
+                Set-Content -Path $secStderrFile -Value "${secBudget}s section budget exhausted before this command started" -Encoding UTF8 -NoNewline
+            } else {
+                # ProcessStartInfo.ArgumentList passes each element as an exact
+                # argv entry on every platform. Start-Process -ArgumentList must
+                # NOT be used here: it joins the elements into a single string,
+                # which .NET on Unix re-splits on whitespace, so a multi-word
+                # command reaches bash -c mangled and its output is lost.
+                $secPsi = [System.Diagnostics.ProcessStartInfo]::new()
+                $secPsi.FileName = 'bash'
+                $secPsi.ArgumentList.Add('-c')
+                $secPsi.ArgumentList.Add($execTrimmed)
+                $secPsi.RedirectStandardOutput = $true
+                $secPsi.RedirectStandardError = $true
+                $secPsi.UseShellExecute = $false
+                $secPsi.WorkingDirectory = (Get-Location).Path
+                # (W1453) Re-add empty-valued keys the Process env block cannot
+                # hold, so user commands see them defined-but-empty per the
+                # hook-execution.md contract (prevents ${VAR?} / set -u aborts).
+                foreach ($emptyKey in $script:StrideEmptyEnvKeys) {
+                    $secPsi.Environment[$emptyKey] = ''
+                }
+                $proc = [System.Diagnostics.Process]::Start($secPsi)
+                # Drain both pipes concurrently: a synchronous ReadToEnd on
+                # stdout would deadlock if the child fills the stderr pipe
+                # buffer (~64KB) while its stdout is still open — gate commands
+                # like `mix compile` can emit that much warning text.
+                $secOutTask = $proc.StandardOutput.ReadToEndAsync()
+                $secErrTask = $proc.StandardError.ReadToEndAsync()
+                # (W1454) Bounded wait on the remaining section budget. On
+                # expiry, Kill($true) terminates the ENTIRE process tree so a
+                # hung command's children cannot keep running with the
+                # exported env, then synthesize the conventional exit 124.
+                if (-not $proc.WaitForExit([int]($secRemainingSec * 1000))) {
+                    $secTimedOut = $true
+                    try { $proc.Kill($true) } catch { }
+                    $proc.WaitForExit()
+                }
+                # Bounded drain: the pipes close when the tree is killed; the
+                # 5s guard covers a detached grandchild holding a pipe open.
+                $secProcStdout = if ($secOutTask.Wait(5000)) { $secOutTask.Result } else { '' }
+                $secProcStderr = if ($secErrTask.Wait(5000)) { $secErrTask.Result } else { '' }
+                Set-Content -Path $secStdoutFile -Value $secProcStdout -Encoding UTF8 -NoNewline
+                Set-Content -Path $secStderrFile -Value $secProcStderr -Encoding UTF8 -NoNewline
+                $secCmdExit = if ($secTimedOut) { 124 } else { $proc.ExitCode }
+            }
+
+            if ($secCmdExit -eq 0) {
                 $secCompletedCmds += $execTrimmed
                 # Do NOT write the passing command's output to Console.Error:
                 # Claude Code renders any hook stderr under a red
@@ -740,7 +826,6 @@ function Invoke-StrideSection {
                     stderr  = $secOkStderr
                 }
             } else {
-                $secCmdExit = $proc.ExitCode
                 $secCmdStdout = ''
                 $secCmdStderr = ''
                 if (Test-Path $secStdoutFile) {
@@ -768,6 +853,8 @@ function Invoke-StrideSection {
                     failed_command    = $execTrimmed
                     command_index     = $secCmdIndex
                     exit_code         = $secCmdExit
+                    timed_out         = [bool]$secTimedOut
+                    budget_seconds    = $secBudget
                     stdout            = $secCmdStdout
                     stderr            = $secCmdStderr
                     commands_completed = $secCompletedCmds
@@ -780,7 +867,11 @@ function Invoke-StrideSection {
                 # and breaking the `-ne 0` check on every success path.
                 [Console]::Out.WriteLine(($failureResult | ConvertTo-Json -Depth 5 -Compress))
 
-                [Console]::Error.WriteLine("Stride $Section hook failed on command $($secCmdIndex + 1)/$($secCmdTotal): $execTrimmed")
+                if ($secTimedOut) {
+                    [Console]::Error.WriteLine("Stride $Section hook command $($secCmdIndex + 1)/$($secCmdTotal) timed out after ${secBudget}s budget: $execTrimmed")
+                } else {
+                    [Console]::Error.WriteLine("Stride $Section hook failed on command $($secCmdIndex + 1)/$($secCmdTotal): $execTrimmed")
+                }
                 if ($secCmdStderr) { [Console]::Error.WriteLine($secCmdStderr) }
 
                 return 2

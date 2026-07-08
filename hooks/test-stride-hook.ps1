@@ -2404,6 +2404,194 @@ try {
 }
 
 # ============================================================
+# Test Group 15: canonical response file + D119 fresh call
+# (mirrors test-stride-hook.sh D118/W1609 Group 9 + D119 Group 19)
+# ============================================================
+Write-Host ""
+Write-Host "=== Test Group 15: canonical file + D119 fresh call ==="
+
+# Listener that answers GET /api/tasks/:id/after_goal_status with a JSON body
+# and logs the hit to a fixture file. $Armed toggles after_goal_armed.
+function Start-AfterGoalStatusListener {
+    param([int]$Port, [string]$Fixture, [bool]$Armed = $true)
+    Start-Job -ArgumentList $Port, $Fixture, $Armed -ScriptBlock {
+        param($Port, $Fixture, $Armed)
+        $l = [System.Net.HttpListener]::new()
+        $l.Prefixes.Add("http://localhost:$Port/")
+        try {
+            $l.Start()
+            $ctx = $l.GetContext()
+            $req = $ctx.Request
+            @{ Method = $req.HttpMethod; Path = $req.Url.AbsolutePath } |
+                ConvertTo-Json -Compress | Add-Content -Path $Fixture -Encoding UTF8
+            if ($Armed) {
+                $bodyStr = '{"after_goal_armed":true,"goal_id":55,"goal_identifier":"G7","env":{"GOAL_ID":"55","GOAL_IDENTIFIER":"G7","GOAL_TITLE":"Goal Seven","HOOK_NAME":"after_goal"}}'
+            } else {
+                $bodyStr = '{"after_goal_armed":false,"goal_id":null,"goal_identifier":null,"env":{}}'
+            }
+            $buf = [System.Text.Encoding]::UTF8.GetBytes($bodyStr)
+            $ctx.Response.StatusCode = 200
+            $ctx.Response.ContentType = 'application/json'
+            $ctx.Response.OutputStream.Write($buf, 0, $buf.Length)
+            $ctx.Response.OutputStream.Close()
+        } catch {
+            # Listener tear-down errors are ignored.
+        } finally {
+            if ($l.IsListening) { $l.Stop() }
+        }
+    }
+}
+
+# Project whose ## after_goal echoes GOAL_IDENTIFIER; env cache pre-seeds TASK_ID.
+function New-D119Project {
+    param([string]$Suffix)
+    $dir = Join-Path $TmpDir "d119-$Suffix"
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    Set-Content -Path (Join-Path $dir '.stride.md') -Value @'
+## after_goal
+```bash
+echo "after_goal_ran for $GOAL_IDENTIFIER"
+```
+'@ -Encoding UTF8
+    Set-Content -Path (Join-Path $dir '.stride-env-cache') -Value 'TASK_ID=42' -Encoding UTF8
+    return $dir
+}
+
+# 15a (D118): a truncated /complete stdout with a present canonical response file
+# carrying after_goal -> the section runs from the file (fast path), no fresh call.
+$d15aProj = New-D119Project -Suffix 'file-fastpath'
+New-Item -ItemType Directory -Path (Join-Path $d15aProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $d15aProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":42},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G9"}}]}' -Encoding UTF8 -NoNewline
+$d15aInput = @{
+    tool_input    = @{ command = 'curl -X PATCH https://stridelikeaboss.com/api/tasks/42/complete -H "Authorization: Bearer tok"' }
+    tool_response = @{ stdout = '{"data":{"id":42},"hoo' }
+} | ConvertTo-Json -Compress
+$r = Invoke-HookScript -InputJson $d15aInput -Phase 'post' -ProjectDir $d15aProj
+Assert-Exit "15a: truncated stdout + canonical file exits 0" 0 $r.ExitCode
+Assert-Contains "15a: after_goal runs from the canonical file (G9)" "after_goal_ran for G9" $r.Stdout
+
+# 15b (W1609): a claim with truncated stdout + present canonical file recovers
+# the full task JSON from the file into the env cache (TASK_IDENTIFIER).
+$d15bProj = Join-Path $TmpDir 'd119-claim-file'
+New-Item -ItemType Directory -Path $d15bProj -Force | Out-Null
+Set-Content -Path (Join-Path $d15bProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo "claimed"
+```
+'@ -Encoding UTF8
+New-Item -ItemType Directory -Path (Join-Path $d15bProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $d15bProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":609,"identifier":"W609","title":"File Task","status":"in_progress","complexity":"medium","priority":"high"}}' -Encoding UTF8 -NoNewline
+$d15bInput = @{
+    tool_input    = @{ command = 'curl -X POST https://stridelikeaboss.com/api/tasks/claim' }
+    tool_response = @{ stdout = '{"data":{"id":609,"identif' }
+} | ConvertTo-Json -Compress
+$r = Invoke-HookScript -InputJson $d15bInput -Phase 'post' -ProjectDir $d15bProj
+$d15bCache = ''
+if (Test-Path (Join-Path $d15bProj '.stride-env-cache')) {
+    $d15bCache = Get-Content (Join-Path $d15bProj '.stride-env-cache') -Raw -Encoding UTF8
+}
+Assert-Contains "15b: truncated claim recovers identifier from the canonical file" "TASK_IDENTIFIER=W609" $d15bCache
+
+# 15c (W1609): a valid claim stdout is captured to the canonical response file.
+$d15cProj = Join-Path $TmpDir 'd119-capture'
+New-Item -ItemType Directory -Path $d15cProj -Force | Out-Null
+Set-Content -Path (Join-Path $d15cProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo "claimed"
+```
+'@ -Encoding UTF8
+$d15cInput = @{
+    tool_input    = @{ command = 'curl -X POST https://stridelikeaboss.com/api/tasks/claim' }
+    tool_response = @{ stdout = '{"data":{"id":610,"identifier":"W610","title":"Cap","status":"in_progress","complexity":"small","priority":"low"}}' }
+} | ConvertTo-Json -Compress
+$r = Invoke-HookScript -InputJson $d15cInput -Phase 'post' -ProjectDir $d15cProj
+$d15cFile = ''
+if (Test-Path (Join-Path $d15cProj '.stride/.last-api-response.json')) {
+    $d15cFile = Get-Content (Join-Path $d15cProj '.stride/.last-api-response.json') -Raw -Encoding UTF8
+}
+Assert-Contains "15c: valid claim stdout captured to the canonical file" '"identifier":"W610"' $d15cFile
+
+# 15d (D119): truncated stdout + NO file + armed endpoint -> fresh call runs after_goal.
+$d15dPort = 18901
+$d15dFixture = Join-Path $TmpDir 'd119-armed-fixture.txt'
+$d15dProj = New-D119Project -Suffix 'fresh-armed'
+$d15dJob = Start-AfterGoalStatusListener -Port $d15dPort -Fixture $d15dFixture -Armed $true
+try {
+    $null = Wait-ForListener -Port $d15dPort
+    $d15dInput = @{
+        tool_input    = @{ command = "curl -X PATCH http://localhost:$d15dPort/api/tasks/42/complete -H `"Authorization: Bearer tok`"" }
+        tool_response = @{ stdout = '{"data":{"id":42},"hoo' }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $d15dInput -Phase 'post' -ProjectDir $d15dProj
+    Assert-Exit "15d: hook-initiated after_goal exits 0" 0 $r.ExitCode
+    Assert-Contains "15d: fresh call ran after_goal with endpoint GOAL_IDENTIFIER" "after_goal_ran for G7" $r.Stdout
+} finally {
+    Wait-Job $d15dJob -Timeout 8 | Out-Null
+    Remove-Job $d15dJob -Force -ErrorAction SilentlyContinue
+}
+$d15dHit = Get-Content -Raw -Path $d15dFixture -ErrorAction SilentlyContinue
+Assert-Contains "15d: the after_goal_status endpoint was called" "after_goal_status" ([string]$d15dHit)
+
+# 15e (D119): armed=false -> after_goal does NOT run.
+$d15ePort = 18902
+$d15eFixture = Join-Path $TmpDir 'd119-notarmed-fixture.txt'
+$d15eProj = New-D119Project -Suffix 'fresh-notarmed'
+$d15eJob = Start-AfterGoalStatusListener -Port $d15ePort -Fixture $d15eFixture -Armed $false
+try {
+    $null = Wait-ForListener -Port $d15ePort
+    $d15eInput = @{
+        tool_input    = @{ command = "curl -X PATCH http://localhost:$d15ePort/api/tasks/42/complete -H `"Authorization: Bearer tok`"" }
+        tool_response = @{ stdout = '{"data":{"id":42},"hoo' }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $d15eInput -Phase 'post' -ProjectDir $d15eProj
+    Assert-Exit "15e: armed=false exits 0" 0 $r.ExitCode
+    Assert-NotContains "15e: armed=false does not run after_goal" "after_goal_ran" $r.Stdout
+} finally {
+    Wait-Job $d15eJob -Timeout 8 | Out-Null
+    Remove-Job $d15eJob -Force -ErrorAction SilentlyContinue
+}
+
+# 15f (D119 de-dup): a present canonical file (fast path) runs the section once
+# and the fresh endpoint is NOT called.
+$d15fPort = 18903
+$d15fFixture = Join-Path $TmpDir 'd119-dedup-fixture.txt'
+$d15fProj = New-D119Project -Suffix 'dedup'
+New-Item -ItemType Directory -Path (Join-Path $d15fProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $d15fProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":42},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G9"}}]}' -Encoding UTF8 -NoNewline
+$d15fJob = Start-AfterGoalStatusListener -Port $d15fPort -Fixture $d15fFixture -Armed $true
+try {
+    $null = Wait-ForListener -Port $d15fPort
+    $d15fInput = @{
+        tool_input    = @{ command = "curl -X PATCH http://localhost:$d15fPort/api/tasks/42/complete -H `"Authorization: Bearer tok`"" }
+        tool_response = @{ stdout = '{"data":{"id":42},"hoo' }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $d15fInput -Phase 'post' -ProjectDir $d15fProj
+    Assert-Contains "15f: fast path runs after_goal from the file (G9)" "after_goal_ran for G9" $r.Stdout
+    $d15fRuns = ([regex]::Matches($r.Stdout, 'ran for G9')).Count
+    Assert-Eq "15f: after_goal ran exactly once (de-dup)" 1 $d15fRuns
+} finally {
+    Stop-Job $d15fJob -ErrorAction SilentlyContinue
+    Remove-Job $d15fJob -Force -ErrorAction SilentlyContinue
+}
+$d15fHit = Get-Content -Raw -Path $d15fFixture -ErrorAction SilentlyContinue
+Assert-NotContains "15f: fast path short-circuits the fresh call (endpoint not hit)" "after_goal_status" ([string]$d15fHit)
+
+# 15g (D119): unreachable endpoint -> clean no-op, exit 0, section not run.
+$d15gProj = New-D119Project -Suffix 'unreachable'
+$d15gInput = @{
+    tool_input    = @{ command = 'curl -X PATCH http://localhost:18904/api/tasks/42/complete -H "Authorization: Bearer tok"' }
+    tool_response = @{ stdout = '{"data":{"id":42},"hoo' }
+} | ConvertTo-Json -Compress
+$r = Invoke-HookScript -InputJson $d15gInput -Phase 'post' -ProjectDir $d15gProj
+Assert-Exit "15g: unreachable endpoint still exits 0" 0 $r.ExitCode
+Assert-NotContains "15g: unreachable endpoint does not run after_goal" "after_goal_ran" $r.Stdout
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

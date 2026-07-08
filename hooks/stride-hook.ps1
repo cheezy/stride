@@ -19,6 +19,11 @@ $Phase = if ($args.Count -gt 0) { $args[0] } else { '' }
 $ProjectDir = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } else { '.' }
 $StrideMd = Join-Path $ProjectDir '.stride.md'
 $EnvCache = Join-Path $ProjectDir '.stride-env-cache'
+# (D118) Canonical API-response snapshot. When present, after_goal detection,
+# env forwarding, and the claim env-cache refresh prefer it over the harness-
+# truncatable tool_response.stdout. Best-effort fast path only — the reliability
+# guarantee is D119's hook-initiated fresh call.
+$ResponseFile = Join-Path $ProjectDir '.stride/.last-api-response.json'
 
 # (W1453) Keys exported with an empty value. .NET's SetEnvironmentVariable
 # DELETES a Process env var when handed '', so the defined-but-empty contract
@@ -81,6 +86,59 @@ function Read-DirtyBaseline {
     return $map
 }
 
+# (D118) Read the canonical API-response snapshot. Returns the parsed object
+# when the file exists and holds valid JSON, else $null so callers fall back to
+# the tool_response parse. Defined ahead of the claim env-cache block and
+# Get-ResponsePayload so both can prefer the file. Best-effort fast path — the
+# reliability guarantee is D119's hook-initiated fresh call.
+function Read-CanonicalResponse {
+    if (-not $ResponseFile) { return $null }
+    if (-not (Test-Path -LiteralPath $ResponseFile -PathType Leaf)) { return $null }
+    $content = $null
+    try { $content = Get-Content -LiteralPath $ResponseFile -Raw -ErrorAction Stop } catch { return $null }
+    if (-not $content) { return $null }
+    try { return ($content | ConvertFrom-Json) } catch { return $null }
+}
+
+# (W1609) Capture THIS call's API response to the canonical file so the file-
+# first resolver and the claim env-cache refresh read the CURRENT call's data
+# rather than a stale prior-call file. Only complete, valid JSON is written — a
+# truncated stdout leaves any out-of-band copy intact so a value written by a
+# curl passthrough (or a later phase) survives. Best-effort; never throws.
+function Save-CanonicalResponse {
+    param([string]$InputJson)
+    if (-not $ResponseFile) { return }
+    if (-not $InputJson) { return }
+    $parsed = $null
+    try { $parsed = $InputJson | ConvertFrom-Json } catch { return }
+    if ($null -eq $parsed) { return }
+    if ($parsed.PSObject.Properties.Name -notcontains 'tool_response') { return }
+    $resp = $parsed.tool_response
+    if (-not $resp) { return }
+
+    $payloadStr = $null
+    if ($resp -is [PSCustomObject] -and $resp.PSObject.Properties.Name -contains 'stdout') {
+        $payloadStr = [string]$resp.stdout
+    } elseif ($resp -is [string]) {
+        $payloadStr = $resp
+    } elseif ($resp -is [PSCustomObject]) {
+        try { $payloadStr = ($resp | ConvertTo-Json -Depth 100 -Compress) } catch { return }
+    }
+    if (-not $payloadStr) { return }
+    # A truncated blob must never overwrite a good file — only persist valid JSON.
+    try { $null = $payloadStr | ConvertFrom-Json } catch { return }
+
+    try {
+        $dir = Split-Path -Parent $ResponseFile
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        Set-Content -LiteralPath $ResponseFile -Value $payloadStr -NoNewline -Encoding UTF8
+    } catch {
+        # Best-effort — an unwritten file just falls back to the stdout parse.
+    }
+}
+
 # Exit early if no phase argument or no .stride.md
 if (-not $Phase) { exit 0 }
 if (-not (Test-Path $StrideMd)) { exit 0 }
@@ -132,6 +190,14 @@ switch ($Phase) {
 # Not a Stride API call — exit cleanly
 if (-not $HookName) { exit 0 }
 
+# (W1609) Persist THIS call's response to the canonical file before the claim
+# env-cache refresh reads it, so a valid current stdout overwrites any stale
+# prior-call file (no staleness regression) and a truncated stdout leaves an
+# out-of-band copy intact.
+if ($Phase -eq 'post') {
+    Save-CanonicalResponse -InputJson $Input
+}
+
 # --- Environment variable caching ---
 # After a successful claim (before_doing), extract task metadata from the API
 # response and cache it. All subsequent hooks load the cache so .stride.md
@@ -139,10 +205,25 @@ if (-not $HookName) { exit 0 }
 
 if ($HookName -eq 'before_doing') {
     try {
+        $taskJson = $null
+
+        # (D118/W1609) Fast path — prefer the untruncated canonical response
+        # file. Falls through to the tool_response parse below when it is absent
+        # or does not carry a task object.
+        $canon = Read-CanonicalResponse
+        if ($null -ne $canon) {
+            $canonProps = $canon.PSObject.Properties.Name
+            if (($canonProps -contains 'data') -and $canon.data -and
+                ($canon.data.PSObject.Properties.Name -contains 'id') -and $canon.data.id) {
+                $taskJson = $canon.data
+            } elseif (($canonProps -contains 'id') -and $canon.id) {
+                $taskJson = $canon
+            }
+        }
+
         $json = $Input | ConvertFrom-Json
         $response = $json.tool_response
-        if ($response) {
-            $taskJson = $null
+        if (-not $taskJson -and $response) {
 
             # Shape 1: Claude Code Bash tool wraps API JSON inside tool_response.stdout
             # — peel that layer first before parsing.
@@ -229,59 +310,59 @@ if ($HookName -eq 'before_doing') {
                     }
                 }
             }
+        }
 
-            # (W1087) Compute the claim-time base ref once. A claim always opens a
-            # new task window, so TASK_BASE_REF must be refreshed on every claim.
-            # An empty result (not a git repo / git absent) is tolerated and must
-            # never throw — existing non-git env-cache tests rely on this.
+        # (W1087) Compute the claim-time base ref once. A claim always opens a
+        # new task window, so TASK_BASE_REF must be refreshed on every claim.
+        # An empty result (not a git repo / git absent) is tolerated and must
+        # never throw — existing non-git env-cache tests rely on this.
+        $baseRef = ''
+        try {
+            $rev = & git -C $ProjectDir rev-parse HEAD 2>$null
+            if ($LASTEXITCODE -eq 0 -and $rev) { $baseRef = ($rev | Out-String).Trim() }
+        } catch {
             $baseRef = ''
-            try {
-                $rev = & git -C $ProjectDir rev-parse HEAD 2>$null
-                if ($LASTEXITCODE -eq 0 -and $rev) { $baseRef = ($rev | Out-String).Trim() }
-            } catch {
-                $baseRef = ''
-            }
+        }
 
-            if ($taskJson) {
-                $cacheLines = @(
-                    "TASK_ID=$($taskJson.id)"
-                    "TASK_IDENTIFIER=$($taskJson.identifier)"
-                    "TASK_TITLE=$($taskJson.title)"
-                    "TASK_STATUS=$($taskJson.status)"
-                    "TASK_COMPLEXITY=$($taskJson.complexity)"
-                    "TASK_PRIORITY=$($taskJson.priority)"
-                    "TASK_BASE_REF=$baseRef"
-                )
-                $cacheLines | Set-Content -Path $EnvCache -Encoding UTF8
-                # (W1095, mirrors the bash claim-refresh) Clear the previous
-                # task's snapshot and upload state — a stale 2xx would
-                # suppress the before_review self-heal retry for the new
-                # task, and a stale snapshot must never be re-uploaded under
-                # the new task's id.
-                Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
-                Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
-                # (W1457) Snapshot the pre-existing dirty paths so unrelated
-                # edits that predate this claim never reach the uploaded diff.
-                Write-DirtyBaseline -BaseRef $baseRef
-            } elseif ($baseRef) {
-                # (W1086/W1087) No parseable response and no usable persisted
-                # file. A claim still opens a new task window, so unconditionally
-                # refresh TASK_BASE_REF to current HEAD and clear the stale
-                # per-file snapshot — otherwise a base ref recorded under a
-                # previous claim survives. Existing TASK_ identity lines are
-                # preserved so a later completion can still recover TASK_ID.
-                $preserved = @()
-                if (Test-Path $EnvCache) {
-                    $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' })
-                }
-                $newLines = $preserved + "TASK_BASE_REF=$baseRef"
-                $newLines | Set-Content -Path $EnvCache -Encoding UTF8
-                Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
-                Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
-                # (W1457) Same dirty-baseline snapshot as the parsed-response
-                # path — the claim window opened regardless.
-                Write-DirtyBaseline -BaseRef $baseRef
+        if ($taskJson) {
+            $cacheLines = @(
+                "TASK_ID=$($taskJson.id)"
+                "TASK_IDENTIFIER=$($taskJson.identifier)"
+                "TASK_TITLE=$($taskJson.title)"
+                "TASK_STATUS=$($taskJson.status)"
+                "TASK_COMPLEXITY=$($taskJson.complexity)"
+                "TASK_PRIORITY=$($taskJson.priority)"
+                "TASK_BASE_REF=$baseRef"
+            )
+            $cacheLines | Set-Content -Path $EnvCache -Encoding UTF8
+            # (W1095, mirrors the bash claim-refresh) Clear the previous
+            # task's snapshot and upload state — a stale 2xx would
+            # suppress the before_review self-heal retry for the new
+            # task, and a stale snapshot must never be re-uploaded under
+            # the new task's id.
+            Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
+            Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+            # (W1457) Snapshot the pre-existing dirty paths so unrelated
+            # edits that predate this claim never reach the uploaded diff.
+            Write-DirtyBaseline -BaseRef $baseRef
+        } elseif ($baseRef) {
+            # (W1086/W1087) No parseable response and no usable persisted
+            # file. A claim still opens a new task window, so unconditionally
+            # refresh TASK_BASE_REF to current HEAD and clear the stale
+            # per-file snapshot — otherwise a base ref recorded under a
+            # previous claim survives. Existing TASK_ identity lines are
+            # preserved so a later completion can still recover TASK_ID.
+            $preserved = @()
+            if (Test-Path $EnvCache) {
+                $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' })
             }
+            $newLines = $preserved + "TASK_BASE_REF=$baseRef"
+            $newLines | Set-Content -Path $EnvCache -Encoding UTF8
+            Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
+            Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+            # (W1457) Same dirty-baseline snapshot as the parsed-response
+            # path — the claim window opened regardless.
+            Write-DirtyBaseline -BaseRef $baseRef
         }
     } catch {
         # Caching failure is non-fatal
@@ -316,6 +397,10 @@ if (Test-Path $EnvCache) {
 function Get-ResponsePayload {
     param([string]$InputJson)
 
+    # (D118) Fast path — prefer the untruncated canonical response file.
+    $fromFile = Read-CanonicalResponse
+    if ($null -ne $fromFile) { return $fromFile }
+
     if (-not $InputJson) { return $null }
 
     try {
@@ -331,19 +416,46 @@ function Get-ResponsePayload {
 
     $payload = $null
 
-    # Shape 1: {"stdout":"<json>"} wrap (Claude Code Bash tool)
     if ($resp -is [PSCustomObject] -and $resp.PSObject.Properties.Name -contains 'stdout') {
+        # Shape 1: {"stdout":"<json>"} wrap (Claude Code Bash tool). A truncated
+        # stdout fails to parse and MUST resolve to $null (not the wrapper) so
+        # the D119 fresh call fires — hence elseif, never a fall-through to the
+        # raw-object shape below.
         try { $payload = $resp.stdout | ConvertFrom-Json } catch { $payload = $null }
-    }
-
-    # Shape 2: tool_response is itself a JSON-encoded string
-    if ($null -eq $payload -and $resp -is [string]) {
+    } elseif ($resp -is [string]) {
+        # Shape 2: tool_response is itself a JSON-encoded string.
         try { $payload = $resp | ConvertFrom-Json } catch { $payload = $null }
+    } elseif ($resp -is [PSCustomObject]) {
+        # Shape 3: raw API JSON object directly (other harnesses).
+        $payload = $resp
     }
 
-    # Shape 3: raw API JSON object directly
-    if ($null -eq $payload -and $resp -is [PSCustomObject]) {
-        $payload = $resp
+    # (W1086) Shape 4: persisted-output file fallback. When the response is
+    # large, Claude Code writes the tool output to a file and leaves only a
+    # "Full output saved to: <path>" notice in stdout. Recover the API JSON by
+    # reading that file — an existing regular file parsed with ConvertFrom-Json
+    # only; never invoked, dot-sourced, or written.
+    if ($null -eq $payload) {
+        $notice = $null
+        if ($resp -is [PSCustomObject] -and $resp.PSObject.Properties.Name -contains 'stdout') {
+            $notice = [string]$resp.stdout
+        } elseif ($resp -is [string]) {
+            $notice = $resp
+        }
+        if ($notice -and ($notice -imatch 'saved to')) {
+            $noticeLine = ($notice -split "`n" | Where-Object { $_ -imatch 'saved to' } | Select-Object -First 1)
+            if ($noticeLine) {
+                $persistPath = '/' + ($noticeLine -replace '^[^/]*/', '')
+                $persistPath = ($persistPath.TrimEnd()) -replace '"$', ''
+                if (Test-Path -LiteralPath $persistPath -PathType Leaf) {
+                    try {
+                        $payload = (Get-Content -LiteralPath $persistPath -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json)
+                    } catch {
+                        $payload = $null
+                    }
+                }
+            }
+        }
     }
 
     return $payload
@@ -593,6 +705,10 @@ function Invoke-ChangedFilesUpload {
                     $_.path -eq '.stride-dirty-baseline' -or
                     $_.path -eq '.stride.md' -or
                     $_.path -eq '.stride_auth.md') { return $false }
+                # (W1609) Hard-exclude the whole root .stride/ state directory
+                # (orchestrator marker, the .last-api-response.json capture) —
+                # mirrors stride-hook.sh's `$0 !~ /^\.stride\//`.
+                if ($_.path -match '^\.stride/') { return $false }
                 if ($dirtyBaseline -and $dirtyBaseline.ContainsKey($_.path)) {
                     $blHash = $dirtyBaseline[$_.path]
                     if ($blHash -eq 'unhashable') { return $true }
@@ -1066,24 +1182,114 @@ function Invoke-StrideSection {
 # Mirrors stride-hook.sh:response_has_after_goal — both scripts must agree
 # on detection so Windows + Unix agents behave identically (pitfall:
 # behavioral drift between .sh and .ps1).
-function Test-AfterGoalInResponse {
-    param([string]$InputJson)
+# Pure predicate on an ALREADY-resolved payload object: does it carry an
+# after_goal hook entry? Single-sourced so Test-AfterGoalInResponse and
+# Invoke-AfterGoalRouting share one detection (mirrors bash payload_has_after_goal).
+function Test-PayloadHasAfterGoal {
+    param($Payload)
 
-    # (W1453) The three payload shapes live in Get-ResponsePayload now —
-    # detection and env extraction must agree on the peeling logic.
-    $payload = Get-ResponsePayload -InputJson $InputJson
+    if ($null -eq $Payload) { return $false }
+    if (-not ($Payload.PSObject.Properties.Name -contains 'hooks')) { return $false }
+    if ($null -eq $Payload.hooks) { return $false }
 
-    if ($null -eq $payload) { return $false }
-    if (-not ($payload.PSObject.Properties.Name -contains 'hooks')) { return $false }
-    if ($null -eq $payload.hooks) { return $false }
-
-    foreach ($entry in @($payload.hooks)) {
+    foreach ($entry in @($Payload.hooks)) {
         if ($entry -and ($entry.PSObject.Properties.Name -contains 'name') -and $entry.name -eq 'after_goal') {
             return $true
         }
     }
 
     return $false
+}
+
+function Test-AfterGoalInResponse {
+    param([string]$InputJson)
+
+    # (W1453/D118) The payload shapes and the canonical-file fast path live in
+    # Get-ResponsePayload now — detection and env extraction must agree.
+    Test-PayloadHasAfterGoal -Payload (Get-ResponsePayload -InputJson $InputJson)
+}
+
+# --- After-goal execution (shared by the D118 fast path and the D119 fresh call) ---
+# Export GOAL_* from the given payload and run the local ## after_goal section as
+# a blocking hook, restoring HOOK_NAME afterward. Centralised so both detection
+# paths run the section identically — and, because Invoke-AfterGoalRouting calls
+# exactly one path, exactly once (de-dup). Mirrors bash run_after_goal_section.
+function Invoke-AfterGoalSection {
+    param($Payload)
+    $script:afterGoalRouted = $true
+    Set-AfterGoalEnv -Payload $Payload
+    $savedHookNameEnv = [System.Environment]::GetEnvironmentVariable('HOOK_NAME', 'Process')
+    [System.Environment]::SetEnvironmentVariable('HOOK_NAME', 'after_goal', 'Process')
+    $null = Invoke-StrideSection -Section 'after_goal'
+    [System.Environment]::SetEnvironmentVariable('HOOK_NAME', $savedHookNameEnv, 'Process')
+}
+
+# (D119) Reliability guarantee. Detect after_goal via a fresh, hook-initiated
+# GET /api/tasks/:id/after_goal_status (W1613's compact endpoint). An HTTP call
+# the hook makes itself is NOT subject to the Bash-tool output truncation that
+# can gut the agent-handed /complete response, and needs zero agent cooperation.
+# Runs ## after_goal from the endpoint's compact GOAL_* env when after_goal_armed
+# is true. Best-effort: a missing prerequisite (TASK_ID/URL/token) or an
+# unreachable / non-JSON endpoint degrades to a clean no-op — the server's grace-
+# window worker still completes the goal. Never logs the token.
+function Invoke-AfterGoalDetectionViaApi {
+    $taskId = [System.Environment]::GetEnvironmentVariable('TASK_ID', 'Process')
+    if (-not $taskId) { return }
+
+    $apiBase = Resolve-StrideApiUrl
+    $token = Resolve-StrideApiToken
+    if (-not $apiBase -or -not $token) { return }
+
+    $resp = $null
+    try {
+        $resp = Invoke-WebRequest `
+            -Uri "$apiBase/api/tasks/$taskId/after_goal_status" `
+            -Method Get `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 10
+    } catch {
+        return
+    }
+    if ($null -eq $resp) { return }
+
+    $status = $null
+    try { $status = $resp.Content | ConvertFrom-Json } catch { return }
+    if ($null -eq $status) { return }
+
+    $armed = $false
+    if (($status.PSObject.Properties.Name -contains 'after_goal_armed') -and $status.after_goal_armed) {
+        $armed = $true
+    }
+    if (-not $armed) { return }
+
+    # Wrap the endpoint's flat env into the after_goal-hook-entry shape
+    # Set-AfterGoalEnv consumes; carry goal_id as data.parent_id so the GOAL_ID
+    # parent-id fallback still applies if the env omits it.
+    $envObj = if ($status.PSObject.Properties.Name -contains 'env') { $status.env } else { [PSCustomObject]@{} }
+    $goalId = if ($status.PSObject.Properties.Name -contains 'goal_id') { $status.goal_id } else { $null }
+    $payload = [PSCustomObject]@{
+        hooks = @([PSCustomObject]@{ name = 'after_goal'; env = $envObj })
+        data  = [PSCustomObject]@{ parent_id = $goalId }
+    }
+
+    Invoke-AfterGoalSection -Payload $payload
+}
+
+# --- After-goal routing (W504 / D118 / D119) ---
+# Two mutually-exclusive paths so ## after_goal runs at most once:
+#   * Fast path (D118): a resolved (complete) payload answers definitively —
+#     armed runs the section; parseable-but-absent means definitively not armed.
+#   * Reliability guarantee (D119): a $null payload (truncated/absent/unparseable
+#     handed response) triggers the hook-initiated fresh call.
+function Invoke-AfterGoalRouting {
+    param($Payload)
+
+    if ($null -ne $Payload) {
+        if (Test-PayloadHasAfterGoal -Payload $Payload) { Invoke-AfterGoalSection -Payload $Payload }
+        return
+    }
+
+    Invoke-AfterGoalDetectionViaApi
 }
 
 # (W1094 parity, ported in W1095) Verify-and-retry the changed_files upload
@@ -1099,28 +1305,19 @@ if ($primaryRc -ne 0) {
     exit $primaryRc
 }
 
-# --- After-goal routing (W505 / mirrors stride-hook.sh W504) ---
-# When the server bundles an `after_goal` entry in the response of /complete
-# or /mark_reviewed (last-child-of-goal case), run the local `## after_goal`
-# section as a blocking hook. Missing `## after_goal` in .stride.md is a
-# clean no-op (back-compat). A non-zero exit is surfaced via the same
-# structured JSON shape as the primary hook; we do NOT propagate it as a
-# non-zero script exit because the primary curl already succeeded — the
-# failure is captured in the structured stdout for the agent to forward
-# via PATCH /api/tasks/:goal_id/after_goal.
+# --- After-goal routing (W505 / mirrors stride-hook.sh W504 / D118 / D119) ---
+# When completing the last child of a goal, run the local `## after_goal`
+# section as a blocking hook. Detection prefers the handed response when it is
+# complete (D118 fast path via the file-first $responsePayload) and otherwise
+# falls back to a fresh, hook-initiated GET /api/tasks/:id/after_goal_status that
+# is immune to harness truncation (D119 — the reliability guarantee).
+# Invoke-AfterGoalRouting keeps the two paths mutually exclusive so the section
+# runs at most once. Missing `## after_goal` in .stride.md is a clean no-op; the
+# server's grace-window worker still covers goal completion when neither path
+# can detect it. A non-zero section exit is surfaced via the structured JSON
+# shape, never as a non-zero script exit (the primary curl already succeeded).
 if ($Phase -eq 'post' -and ($Command -match '/api/tasks/[^/]+/(complete|mark_reviewed)')) {
-    if (Test-AfterGoalInResponse -InputJson $Input) {
-        $afterGoalRouted = $true
-        # (W1453) Export GOAL_* (server-supplied, with the parent-id fallback
-        # for GOAL_ID) before the section runs. The section observes
-        # HOOK_NAME=after_goal per the documented contract; the prior value
-        # is restored afterwards.
-        Set-AfterGoalEnv -Payload $responsePayload
-        $savedHookNameEnv = [System.Environment]::GetEnvironmentVariable('HOOK_NAME', 'Process')
-        [System.Environment]::SetEnvironmentVariable('HOOK_NAME', 'after_goal', 'Process')
-        $null = Invoke-StrideSection -Section 'after_goal'
-        [System.Environment]::SetEnvironmentVariable('HOOK_NAME', $savedHookNameEnv, 'Process')
-    }
+    Invoke-AfterGoalRouting -Payload $responsePayload
 }
 
 # Clean up env cache, per-file diff snapshot, and upload state after the

@@ -2260,6 +2260,23 @@ STRIDE
   )
   assert_contains "9q: extract_response_payload falls back to stdout payload" '"after_goal"' "$RF_PAYLOAD_STDOUT"
 
+  # 9r (W1609): the shared resolver recovers the W1086 persisted-output file when
+  # stdout carries only a "Full output saved to: <path>" notice (no canonical file).
+  rm -f "$RF_FILE"
+  RF_PERSIST_DIR=$(mktemp -d)
+  RF_PERSIST_FILE="$RF_PERSIST_DIR/persisted.json"
+  printf '{"data":{"id":88},"hooks":[{"name":"after_goal"}]}' > "$RF_PERSIST_FILE"
+  RF_NOTICE_INPUT=$(jq -nc --arg s "Full output saved to: $RF_PERSIST_FILE" \
+    '{tool_input:{command:"curl"},tool_response:{stdout:$s}}')
+  RF_PAYLOAD_PERSIST=$(
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    RESPONSE_FILE="$RF_FILE"
+    extract_response_payload "$RF_NOTICE_INPUT"
+  )
+  assert_contains "9r: resolver recovers the W1086 persisted-output file via notice" '"after_goal"' "$RF_PAYLOAD_PERSIST"
+  rm -rf "$RF_PERSIST_DIR"
+
   rm -f "$RF_FILE"
 fi
 
@@ -2710,6 +2727,28 @@ line3"
     printf '%s' "${GOAL_TITLE:-}"
   )
   assert_contains "10l: cache round-trips the embedded newline value" "line3" "$AG_TITLE_L"
+
+  # 10m (W1609): a /complete whose tool_response.stdout is truncated mid-JSON but
+  # which has a present canonical response file carrying the after_goal entry
+  # still routes into ## after_goal AND exports the server-supplied GOAL_* env
+  # from the file — end-to-end proof that after_goal detection and
+  # export_after_goal_env both read file-first under a truncated stdout.
+  AG_ENV_PROJ_M=$(ag_env_project "w1609-file")
+  mkdir -p "$AG_ENV_PROJ_M/.stride"
+  jq -nc '{data: {id: 99, parent_id: 55}, hooks: [
+    {"name":"before_review"},
+    {"name":"after_goal","env":{"GOAL_ID":"7","GOAL_IDENTIFIER":"G7","GOAL_TITLE":"Goal Seven"}}
+  ]}' > "$AG_ENV_PROJ_M/.stride/.last-api-response.json"
+  # Deliberately truncated stdout (invalid JSON) — the file must be the source.
+  AG_ENV_INPUT_M=$(jq -nc --arg s '{"data":{"id":99,"parent' \
+    '{tool_input:{command:"curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete"},tool_response:{stdout:$s}}')
+  AG_ENV_OUT_M=$(echo "$AG_ENV_INPUT_M" | CLAUDE_PROJECT_DIR="$AG_ENV_PROJ_M" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  assert_contains "10m: truncated /complete stdout still runs after_goal via the canonical file" \
+    "gident=[G7]" "$AG_ENV_OUT_M"
+  AG_ENV_CACHE_M=$(cat "$AG_ENV_PROJ_M/.stride-env-cache" 2>/dev/null || echo "")
+  assert_contains "10m: env cache carries GOAL_ID from the canonical file for the follow-up PATCH" \
+    "GOAL_ID='7'" "$AG_ENV_CACHE_M"
 fi
 
 # ============================================================
@@ -3516,6 +3555,85 @@ STRIDE
   assert_eq "14j: quoted title round-trips through the env cache unexecuted" \
     "It's \$HOME tricky" "$BR_TITLE_J"
   rm -rf "$BR_DIR_J"
+
+  # 14k (W1609): a claim whose stdout is truncated mid-JSON but which has a
+  # present canonical response file recovers the FULL task JSON from the file —
+  # TASK_IDENTIFIER comes from the file and TASK_BASE_REF is refreshed to HEAD.
+  # This is the sibling-truncation fix: without the shared file-first resolver
+  # the claim would degrade to a base-ref-only refresh and lose task identity.
+  BR_DIR_K=$(mktemp -d)
+  BR_CLAIM_K='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":609,\"identif","stderr":"","interrupted":false}}'
+  (
+    setup_put_repo "$BR_DIR_K" || exit 1
+    mkdir -p .stride
+    printf '{"data":{"id":609,"identifier":"W609","title":"File Task","status":"in_progress","complexity":"medium","priority":"high"}}' > .stride/.last-api-response.json
+    echo "$BR_CLAIM_K" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_HEAD_K=$(git -C "$BR_DIR_K" rev-parse HEAD)
+  BR_CACHE_K=$(cat "$BR_DIR_K/.stride-env-cache" 2>/dev/null)
+  assert_contains "14k: truncated claim recovers the identifier from the canonical file" "TASK_IDENTIFIER='W609'" "$BR_CACHE_K"
+  assert_contains "14k: truncated claim still refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF='$BR_HEAD_K'" "$BR_CACHE_K"
+  rm -rf "$BR_DIR_K"
+
+  # 14l (W1609): a valid claim stdout is captured to the canonical response file
+  # so later lifecycle hooks (whose own stdout the harness may truncate) can read it.
+  BR_DIR_L=$(mktemp -d)
+  BR_CLAIM_L='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":610,\"identifier\":\"W610\",\"title\":\"Cap Task\",\"status\":\"in_progress\",\"complexity\":\"small\",\"priority\":\"low\"}}","stderr":"","interrupted":false}}'
+  (
+    setup_put_repo "$BR_DIR_L" || exit 1
+    echo "$BR_CLAIM_L" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_RESP_L=$(cat "$BR_DIR_L/.stride/.last-api-response.json" 2>/dev/null)
+  assert_contains "14l: valid claim stdout is captured to the canonical response file" '"identifier":"W610"' "$BR_RESP_L"
+  rm -rf "$BR_DIR_L"
+
+  # 14m (W1609): a stale canonical file from a prior call does NOT shadow a valid
+  # current claim stdout — the capture overwrites it first, so the env cache
+  # reflects the CURRENT claim, not the stale file (no staleness regression).
+  BR_DIR_M=$(mktemp -d)
+  BR_CLAIM_M='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":611,\"identifier\":\"W611\",\"title\":\"Fresh\",\"status\":\"in_progress\",\"complexity\":\"small\",\"priority\":\"low\"}}","stderr":"","interrupted":false}}'
+  (
+    setup_put_repo "$BR_DIR_M" || exit 1
+    mkdir -p .stride
+    printf '{"data":{"id":999,"identifier":"W999","title":"Stale","status":"in_progress","complexity":"large","priority":"high"}}' > .stride/.last-api-response.json
+    echo "$BR_CLAIM_M" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  BR_CACHE_M=$(cat "$BR_DIR_M/.stride-env-cache" 2>/dev/null)
+  assert_contains "14m: current valid claim overwrites the stale canonical file" "TASK_IDENTIFIER='W611'" "$BR_CACHE_M"
+  if echo "$BR_CACHE_M" | grep -q "W999"; then
+    echo -e "  ${RED}FAIL${RESET}: 14m: stale file's identifier leaked into the env cache"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 14m: stale identifier did not leak into the env cache"
+    PASS=$((PASS + 1))
+  fi
+  rm -rf "$BR_DIR_M"
+
+  # 14n (W1609): capture_changed_files never includes anything under the root
+  # .stride/ state dir (the canonical response file and orchestrator marker live
+  # there) even in a repo that forgot to gitignore it — a real change is still captured.
+  CF_DIR=$(mktemp -d)
+  CF_OUT=$(
+    cd "$CF_DIR" || exit 99
+    git init -q; git config user.email t@t.local; git config user.name t
+    echo base > a.txt; git add a.txt; git commit -qm base > /dev/null 2>&1
+    CF_BASE=$(git rev-parse HEAD)
+    echo changed > a.txt
+    mkdir -p .stride; printf '{"data":{"id":1}}' > .stride/.last-api-response.json
+    source "$HOOK_SCRIPT" 2>/dev/null
+    PROJECT_DIR="$CF_DIR"
+    HAS_JQ=true
+    capture_changed_files "$CF_BASE" 2>/dev/null
+  )
+  if echo "$CF_OUT" | grep -q 'last-api-response.json'; then
+    echo -e "  ${RED}FAIL${RESET}: 14n: .stride/ file leaked into changed_files"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 14n: .stride/ state dir excluded from changed_files"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "14n: a real changed file is still captured" "a.txt" "$CF_OUT"
+  rm -rf "$CF_DIR"
 fi
 
 # ============================================================

@@ -102,9 +102,14 @@ capture_changed_files() {
   # routinely dirty in working repos), .stride_auth.md (credentials — must
   # NEVER be uploaded, tracked, untracked, or edited), and the claim-time
   # dirty-baseline state file (a hook artifact like the two above).
+  # (W1609) Hard-exclude the whole root-level .stride/ state directory — it
+  # holds hook-internal artifacts (the orchestrator marker, the canonical
+  # .last-api-response.json capture) that are gitignored in real projects but
+  # must never appear in a task's changed_files even in repos that forgot to
+  # ignore them.
   local all_files
   all_files=$(printf '%s\n%s\n' "$tracked_files" "$untracked_files" \
-    | awk 'NF && $0 != ".stride-diff-upload-state" && $0 != ".stride-changed-files.json" && $0 != ".stride-dirty-baseline" && $0 != ".stride.md" && $0 != ".stride_auth.md" && !seen[$0]++')
+    | awk 'NF && $0 != ".stride-diff-upload-state" && $0 != ".stride-changed-files.json" && $0 != ".stride-dirty-baseline" && $0 != ".stride.md" && $0 != ".stride_auth.md" && $0 !~ /^\.stride\// && !seen[$0]++')
 
   if [ -z "$all_files" ]; then
     printf '[]\n'
@@ -952,6 +957,58 @@ read_canonical_response() {
   printf '%s' "$_content"
 }
 
+# (W1609) Capture the current API response to the canonical file. The hook is a
+# PostToolUse observer, so the freshest untruncated data it can persist is THIS
+# call's tool_response.stdout when it parses as complete JSON. Writing it keeps
+# $RESPONSE_FILE current for the file-first resolver below: the claim env-cache
+# refresh and after_goal detection then read the CURRENT call's data instead of
+# a stale prior-call file. When the current stdout is itself truncated the file
+# is left untouched, so a value written out-of-band (a `curl ... | tee
+# "$RESPONSE_FILE"` / `--output` passthrough on the completion/claim/
+# mark_reviewed curls, or a future PreToolUse capture) survives as the
+# best-effort source. Only complete, valid JSON is ever written — a truncated
+# blob must never overwrite a good file. Gated on $HAS_JQ.
+# (W1609) Unwrap the API payload string from a hook input's .tool_response: the
+# Claude Code Bash tool wraps it as {"stdout":"<json>"}, other harnesses carry
+# the API JSON directly. Prints the unwrapped payload (possibly truncated), or
+# nothing. Single-sourced so the read side (extract_response_payload) and the
+# write side (capture_canonical_response) share one unwrap and cannot diverge.
+unwrap_tool_response() {
+  local _hook_input="$1"
+  local _response _payload
+
+  [ "${HAS_JQ:-false}" = "true" ] || return 0
+  [ -n "$_hook_input" ] || return 0
+
+  _response=$(echo "$_hook_input" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
+  [ -n "$_response" ] || return 0
+
+  if echo "$_response" | jq -e 'type == "object" and has("stdout")' > /dev/null 2>&1; then
+    _payload=$(echo "$_response" | jq -r '.stdout // ""' 2>/dev/null)
+  else
+    _payload="$_response"
+  fi
+
+  printf '%s' "$_payload"
+}
+
+capture_canonical_response() {
+  local _hook_input="$1"
+  local _payload
+
+  [ "${HAS_JQ:-false}" = "true" ] || return 0
+  [ -n "${RESPONSE_FILE:-}" ] || return 0
+
+  _payload=$(unwrap_tool_response "$_hook_input")
+  [ -n "$_payload" ] || return 0
+  # Only persist a COMPLETE, valid API JSON — a truncated blob must never
+  # overwrite a good (e.g. curl-tee'd) canonical file.
+  echo "$_payload" | jq -e . > /dev/null 2>&1 || return 0
+
+  mkdir -p "$(dirname "$RESPONSE_FILE")" 2>/dev/null || return 0
+  printf '%s' "$_payload" > "$RESPONSE_FILE" 2>/dev/null || true
+}
+
 # --- After-goal detection (W504) ---
 # Inspects the response payload for an `after_goal` entry in the response's
 # `hooks` array. The server bundles after_goal alongside before_review (post +
@@ -960,32 +1017,18 @@ read_canonical_response() {
 # payload, 1 otherwise. Gated on $HAS_JQ — environments without jq cannot parse
 # the response and degrade cleanly to "no after_goal detected".
 #
-# (D118) Payload source order: the canonical response file first (survives
-# harness truncation), then the tool_response.stdout parse as the fallback.
+# (D118/W1609) Payload source order is owned by the single shared resolver
+# extract_response_payload: canonical response file first (survives harness
+# truncation), then the tool_response.stdout unwrap, then the W1086 persisted-
+# output file. Delegating here keeps after_goal detection, env forwarding, and
+# the claim env-cache refresh on ONE resolver so they can never diverge.
 response_has_after_goal() {
   local _hook_input="$1"
-  local _response _payload
+  local _payload
 
   [ "$HAS_JQ" = "true" ] || return 1
 
-  # (D118) Fast path — prefer the untruncated canonical response file.
-  _payload=$(read_canonical_response)
-
-  if [ -z "$_payload" ]; then
-    [ -n "$_hook_input" ] || return 1
-
-    _response=$(echo "$_hook_input" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
-    [ -n "$_response" ] || return 1
-
-    # tool_response may be wrapped as {"stdout":"<json>"} (Claude Code Bash tool)
-    # or the raw API JSON directly (other harnesses).
-    if echo "$_response" | jq -e 'type == "object" and has("stdout")' > /dev/null 2>&1; then
-      _payload=$(echo "$_response" | jq -r '.stdout // ""' 2>/dev/null)
-    else
-      _payload="$_response"
-    fi
-  fi
-
+  _payload=$(extract_response_payload "$_hook_input")
   [ -n "$_payload" ] || return 1
 
   echo "$_payload" \
@@ -1016,12 +1059,19 @@ sq_escape() {
 # the API JSON as {"stdout":"<json>"} (Bash tool) or carry it directly (other
 # harnesses). Prints the payload JSON, or nothing when unparseable/no jq.
 #
-# (D118) Prefers the canonical response file over tool_response.stdout when it
-# is present and valid, so env forwarding (via $RESPONSE_PAYLOAD) survives a
-# harness-truncated stdout the same way after_goal detection does.
+# (D118/W1609) The single shared response resolver. Source order:
+#   1. the canonical response file (survives harness truncation) — D118
+#   2. tool_response.stdout, unwrapped from the Claude Code {"stdout":...} shape
+#      or taken raw (other harnesses), when it is complete valid JSON
+#   3. the W1086 persisted-output file named by a "Full output saved to: <path>"
+#      stdout notice, when stdout was too large to inline
+# Falls back to the best-effort (possibly truncated) stdout blob as a last
+# resort; callers jq-guard their own use, so a truncated blob degrades cleanly.
+# Reused by response_has_after_goal, the env-forwarding path, AND the claim
+# env-cache/TASK_BASE_REF refresh so none of them can diverge (W1609 pitfall).
 extract_response_payload() {
   local _hook_input="$1"
-  local _response _payload
+  local _payload _notice _persist_line _persist_path _persist_json
 
   [ "$HAS_JQ" = "true" ] || return 0
 
@@ -1032,17 +1082,40 @@ extract_response_payload() {
     return 0
   fi
 
-  [ -n "$_hook_input" ] || return 0
+  # Unwrap the current call's stdout payload (shared with capture_canonical_response).
+  _payload=$(unwrap_tool_response "$_hook_input")
+  [ -n "$_payload" ] || return 0
 
-  _response=$(echo "$_hook_input" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
-  [ -n "$_response" ] || return 0
-
-  if echo "$_response" | jq -e 'type == "object" and has("stdout")' > /dev/null 2>&1; then
-    _payload=$(echo "$_response" | jq -r '.stdout // ""' 2>/dev/null)
-  else
-    _payload="$_response"
+  # Use the stdout payload when it is complete, valid JSON.
+  if echo "$_payload" | jq -e . > /dev/null 2>&1; then
+    printf '%s' "$_payload"
+    return 0
   fi
 
+  # (W1086) Shape 3: persisted-output file fallback. When the response is large,
+  # Claude Code writes the tool output to a file and leaves only a notice —
+  # "Full output saved to: <absolute path>" — in stdout. Recover the API JSON by
+  # reading that file. The path is harness-controlled, so require an existing
+  # regular file and parse it with jq only — never source, eval, or write to it.
+  # _payload is guaranteed non-empty here (the early return above), and for the
+  # non-wrapped harness shape it already holds the raw stdout notice.
+  _notice="$_payload"
+  if printf '%s' "$_notice" | grep -qi 'saved to'; then
+    # Keep the path from its first "/" to end of the notice line so a path
+    # containing spaces survives; tolerate the notice wrapping it in quotes.
+    _persist_line=$(printf '%s\n' "$_notice" | grep -i 'saved to' | head -1)
+    _persist_path="/${_persist_line#*/}"
+    _persist_path="${_persist_path%\"}"
+    if [ -n "$_persist_line" ] && [ -f "$_persist_path" ]; then
+      _persist_json=$(cat "$_persist_path" 2>/dev/null || echo "")
+      if [ -n "$_persist_json" ] && echo "$_persist_json" | jq -e . > /dev/null 2>&1; then
+        printf '%s' "$_persist_json"
+        return 0
+      fi
+    fi
+  fi
+
+  # Best-effort last resort: whatever we unwrapped (possibly truncated).
   printf '%s' "$_payload"
 }
 
@@ -1213,64 +1286,36 @@ fi
 # (the after_goal route already exports its override).
 export HOOK_NAME
 
+# (W1609) Persist THIS call's response to the canonical file before the claim
+# env-cache refresh and env forwarding read it, so both resolve the current
+# call's data (file-first) rather than a stale prior-call file. A no-op when the
+# stdout is truncated (leaves any out-of-band tee/--output copy intact) or when
+# this is a pre-phase call with no tool_response yet.
+if [ "$PHASE" = "post" ]; then
+  capture_canonical_response "$INPUT"
+fi
+
 # --- Environment variable caching ---
 # After a successful claim (before_doing), extract task metadata from the API
 # response and cache it. All subsequent hooks load the cache so .stride.md
 # commands can reference $TASK_IDENTIFIER, $TASK_TITLE, etc.
 
 if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
-  RESPONSE=$(echo "$INPUT" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
+  # (W1609) Resolve the claim response through the ONE shared resolver
+  # (extract_response_payload): canonical response file first, then the
+  # tool_response.stdout unwrap, then the W1086 persisted-output file. This is
+  # the same resolver after_goal detection and env forwarding use, so a
+  # harness-truncated claim stdout no longer diverges — when a canonical
+  # response file is present (the capture above, a curl tee, or D119) the full
+  # task JSON is recovered and TASK_BASE_REF / the changed_files scope stay
+  # correct instead of silently degrading to a stale base ref.
+  _claim_payload=$(extract_response_payload "$INPUT")
   TASK_JSON=""
-  INNER=""
-
-  if [ -n "$RESPONSE" ]; then
-    # Claude Code wraps Bash tool output as {"stdout":"<json>","stderr":"...",...}
-    # so the API JSON we want lives inside .tool_response.stdout as a string.
-    # Other harnesses may pass the API JSON directly. Try both shapes, then a
-    # persisted-output file fallback for oversized responses.
-
-    # Shape 1: {"stdout":"<json>"} — Claude Code Bash tool
-    if echo "$RESPONSE" | jq -e 'type == "object" and has("stdout")' > /dev/null 2>&1; then
-      INNER=$(echo "$RESPONSE" | jq -r '.stdout // ""' 2>/dev/null)
-      if [ -n "$INNER" ] && echo "$INNER" | jq -e '.data.id' > /dev/null 2>&1; then
-        TASK_JSON=$(echo "$INNER" | jq -c '.data' 2>/dev/null)
-      elif [ -n "$INNER" ] && echo "$INNER" | jq -e '.id' > /dev/null 2>&1; then
-        TASK_JSON="$INNER"
-      fi
-    fi
-
-    # Shape 2: raw API JSON directly in tool_response (other harnesses)
-    if [ -z "$TASK_JSON" ] && echo "$RESPONSE" | jq -e '.data.id' > /dev/null 2>&1; then
-      TASK_JSON=$(echo "$RESPONSE" | jq -c '.data' 2>/dev/null)
-    elif [ -z "$TASK_JSON" ] && echo "$RESPONSE" | jq -e '.id' > /dev/null 2>&1; then
-      TASK_JSON="$RESPONSE"
-    fi
-
-    # Shape 3: persisted-output file fallback (W1086). When the claim response
-    # is large (e.g. a task already carrying a previous attempt's changed_files
-    # snapshot), Claude Code writes the tool output to a file and leaves only a
-    # notice — "Full output saved to: <absolute path>" — in stdout. Recover the
-    # API JSON by reading that file. The path is harness-controlled, so we
-    # require it to be an existing regular file and parse it with jq only —
-    # never source, eval, execute, or write to it.
-    if [ -z "$TASK_JSON" ]; then
-      _notice="$INNER"
-      [ -z "$_notice" ] && _notice="$RESPONSE"
-      if printf '%s' "$_notice" | grep -qi 'saved to'; then
-        # Keep the path from its first "/" to end of the notice line so a path
-        # containing spaces survives; tolerate the notice wrapping it in quotes.
-        _persist_line=$(printf '%s\n' "$_notice" | grep -i 'saved to' | head -1)
-        _persist_path="/${_persist_line#*/}"
-        _persist_path="${_persist_path%\"}"
-        if [ -n "$_persist_line" ] && [ -f "$_persist_path" ]; then
-          _persist_json=$(cat "$_persist_path" 2>/dev/null || echo "")
-          if [ -n "$_persist_json" ] && echo "$_persist_json" | jq -e '.data.id' > /dev/null 2>&1; then
-            TASK_JSON=$(echo "$_persist_json" | jq -c '.data' 2>/dev/null)
-          elif [ -n "$_persist_json" ] && echo "$_persist_json" | jq -e '.id' > /dev/null 2>&1; then
-            TASK_JSON="$_persist_json"
-          fi
-        fi
-      fi
+  if [ -n "$_claim_payload" ]; then
+    if echo "$_claim_payload" | jq -e '.data.id' > /dev/null 2>&1; then
+      TASK_JSON=$(echo "$_claim_payload" | jq -c '.data' 2>/dev/null)
+    elif echo "$_claim_payload" | jq -e '.id' > /dev/null 2>&1; then
+      TASK_JSON="$_claim_payload"
     fi
   fi
 

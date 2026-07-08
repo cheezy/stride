@@ -17,6 +17,10 @@ PHASE="${1:-}"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
 STRIDE_MD="$PROJECT_DIR/.stride.md"
 ENV_CACHE="$PROJECT_DIR/.stride-env-cache"
+# (D118) Canonical API-response snapshot. When present, after_goal detection and
+# env extraction prefer it over the harness-truncatable tool_response.stdout.
+# Best-effort fast path only — the reliability guarantee is D119's fresh call.
+RESPONSE_FILE="$PROJECT_DIR/.stride/.last-api-response.json"
 
 # --- Platform detection: delegate to PowerShell on native Windows ---
 # Git Bash (OSTYPE=msys*) and WSL have full bash — run directly.
@@ -923,30 +927,63 @@ run_stride_section() {
   return 0
 }
 
+# --- Canonical response-file fast path (D118) ---
+# The harness can truncate a large /complete tool_response.stdout mid-JSON,
+# which silently breaks after_goal detection and env extraction. When the agent
+# (or a PreToolUse capture) has written the full API response to the canonical
+# file ($RESPONSE_FILE), prefer it over the truncatable stdout. Prints the
+# file's JSON when it is present AND parses as valid JSON; prints nothing
+# otherwise so the caller falls back to the tool_response.stdout parse. Gated on
+# $HAS_JQ — the validity check needs jq, and a garbage/truncated file must never
+# shadow the stdout fallback. Best-effort only: a stale-but-valid file is used
+# as-is (D119's fresh call is the reliability guarantee, not this fast path).
+read_canonical_response() {
+  [ "${HAS_JQ:-false}" = "true" ] || return 0
+  [ -n "${RESPONSE_FILE:-}" ] || return 0
+  [ -f "$RESPONSE_FILE" ] || return 0
+
+  local _content
+  _content=$(cat "$RESPONSE_FILE" 2>/dev/null) || return 0
+  [ -n "$_content" ] || return 0
+
+  # Validate before trusting it — a truncated/garbage file must fall through.
+  echo "$_content" | jq -e . > /dev/null 2>&1 || return 0
+
+  printf '%s' "$_content"
+}
+
 # --- After-goal detection (W504) ---
-# Inspects the tool_response payload for an `after_goal` entry in the
-# response's `hooks` array. The server bundles after_goal alongside
-# before_review (post + /complete) or after_review (post + /mark_reviewed)
-# when the completing task is the last child of a parent goal. Returns 0
-# when after_goal is present in the payload, 1 otherwise. Gated on $HAS_JQ
-# — environments without jq cannot parse the response and degrade cleanly
-# to "no after_goal detected".
+# Inspects the response payload for an `after_goal` entry in the response's
+# `hooks` array. The server bundles after_goal alongside before_review (post +
+# /complete) or after_review (post + /mark_reviewed) when the completing task is
+# the last child of a parent goal. Returns 0 when after_goal is present in the
+# payload, 1 otherwise. Gated on $HAS_JQ — environments without jq cannot parse
+# the response and degrade cleanly to "no after_goal detected".
+#
+# (D118) Payload source order: the canonical response file first (survives
+# harness truncation), then the tool_response.stdout parse as the fallback.
 response_has_after_goal() {
   local _hook_input="$1"
   local _response _payload
 
   [ "$HAS_JQ" = "true" ] || return 1
-  [ -n "$_hook_input" ] || return 1
 
-  _response=$(echo "$_hook_input" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
-  [ -n "$_response" ] || return 1
+  # (D118) Fast path — prefer the untruncated canonical response file.
+  _payload=$(read_canonical_response)
 
-  # tool_response may be wrapped as {"stdout":"<json>"} (Claude Code Bash tool)
-  # or the raw API JSON directly (other harnesses).
-  if echo "$_response" | jq -e 'type == "object" and has("stdout")' > /dev/null 2>&1; then
-    _payload=$(echo "$_response" | jq -r '.stdout // ""' 2>/dev/null)
-  else
-    _payload="$_response"
+  if [ -z "$_payload" ]; then
+    [ -n "$_hook_input" ] || return 1
+
+    _response=$(echo "$_hook_input" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
+    [ -n "$_response" ] || return 1
+
+    # tool_response may be wrapped as {"stdout":"<json>"} (Claude Code Bash tool)
+    # or the raw API JSON directly (other harnesses).
+    if echo "$_response" | jq -e 'type == "object" and has("stdout")' > /dev/null 2>&1; then
+      _payload=$(echo "$_response" | jq -r '.stdout // ""' 2>/dev/null)
+    else
+      _payload="$_response"
+    fi
   fi
 
   [ -n "$_payload" ] || return 1
@@ -978,11 +1015,23 @@ sq_escape() {
 # Peel the API payload out of Claude Code hook input: .tool_response may wrap
 # the API JSON as {"stdout":"<json>"} (Bash tool) or carry it directly (other
 # harnesses). Prints the payload JSON, or nothing when unparseable/no jq.
+#
+# (D118) Prefers the canonical response file over tool_response.stdout when it
+# is present and valid, so env forwarding (via $RESPONSE_PAYLOAD) survives a
+# harness-truncated stdout the same way after_goal detection does.
 extract_response_payload() {
   local _hook_input="$1"
   local _response _payload
 
   [ "$HAS_JQ" = "true" ] || return 0
+
+  # (D118) Fast path — prefer the untruncated canonical response file.
+  _payload=$(read_canonical_response)
+  if [ -n "$_payload" ]; then
+    printf '%s' "$_payload"
+    return 0
+  fi
+
   [ -n "$_hook_input" ] || return 0
 
   _response=$(echo "$_hook_input" | jq -r '.tool_response // ""' 2>/dev/null || echo "")

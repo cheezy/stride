@@ -2139,6 +2139,128 @@ STRIDE
   )
   assert_contains "9i: singular .hook claim shape is honored" \
     "BOARD_NAME='Stride Development'" "$EHE_OUT_S"
+
+  # ----------------------------------------------------------
+  # D118: canonical response-file fast path for after_goal detection
+  # ----------------------------------------------------------
+  # The harness truncates large /complete tool_response.stdout mid-JSON, so
+  # response_has_after_goal / extract_response_payload must prefer a canonical
+  # response file ($PROJECT_DIR/.stride/.last-api-response.json) when present
+  # and fall back to tool_response.stdout otherwise. Tests override
+  # $RESPONSE_FILE in the subshell (the script computes it from $PROJECT_DIR at
+  # source time; overriding it post-source is the function-level seam).
+  RF_DIR="$TMPDIR_TEST/d118-respfile"
+  RF_FILE="$RF_DIR/.stride/.last-api-response.json"
+  mkdir -p "$RF_DIR/.stride"
+
+  # Full, valid API response carrying an after_goal entry (what a non-truncated
+  # response file holds).
+  RF_FULL='{"data":{"id":99},"hooks":[{"name":"after_review"},{"name":"after_goal"}]}'
+  # A tool_response.stdout truncated mid-JSON by the harness — invalid JSON.
+  RF_TRUNC_STDOUT='{"data":{},"hooks":[{"name":"after_go'
+  RF_INPUT_TRUNC=$(jq -nc --arg s "$RF_TRUNC_STDOUT" \
+    '{tool_input:{command:"curl"},tool_response:{stdout:$s}}')
+
+  # 9j (D118, regression): truncated tool_response.stdout + present response
+  # file with after_goal → detection succeeds via the file fast path.
+  printf '%s' "$RF_FULL" > "$RF_FILE"
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    RESPONSE_FILE="$RF_FILE"
+    response_has_after_goal "$RF_INPUT_TRUNC"
+  )
+  assert_eq "9j: after_goal detected from response file despite truncated stdout" "0" "$?"
+
+  # 9k (D118): no response file + truncated stdout → detection fails (documents
+  # the bug and the fallback; D119's fresh call is the reliability guarantee).
+  rm -f "$RF_FILE"
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    RESPONSE_FILE="$RF_FILE"
+    response_has_after_goal "$RF_INPUT_TRUNC"
+  )
+  RF_RC_NOFILE=$?
+  if [ "$RF_RC_NOFILE" -ne 0 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 9k: no response file + truncated stdout returns non-zero (fallback)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 9k: expected non-zero with no file and truncated stdout"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # 9l (D118, back-compat): no response file + small valid stdout with
+  # after_goal → detection still succeeds from tool_response.stdout.
+  rm -f "$RF_FILE"
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    RESPONSE_FILE="$RF_FILE"
+    response_has_after_goal "$AG_INPUT_CC"
+  )
+  assert_eq "9l: after_goal still detected from stdout when no response file (back-compat)" "0" "$?"
+
+  # 9m (D118, edge): empty response file → ignored, falls through to stdout.
+  : > "$RF_FILE"
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    RESPONSE_FILE="$RF_FILE"
+    response_has_after_goal "$AG_INPUT_CC"
+  )
+  assert_eq "9m: empty response file falls through to stdout parse" "0" "$?"
+
+  # 9n (D118, edge): response file present but not valid JSON → ignored, falls
+  # through to stdout (a truncated/garbage file must not shadow the fallback).
+  printf '%s' "$RF_TRUNC_STDOUT" > "$RF_FILE"
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    RESPONSE_FILE="$RF_FILE"
+    response_has_after_goal "$AG_INPUT_CC"
+  )
+  assert_eq "9n: invalid-JSON response file falls through to stdout parse" "0" "$?"
+
+  # 9o (D118, pitfall): HAS_JQ=false degrades cleanly even with a present file.
+  printf '%s' "$RF_FULL" > "$RF_FILE"
+  (
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=false
+    RESPONSE_FILE="$RF_FILE"
+    response_has_after_goal "$RF_INPUT_TRUNC"
+  )
+  RF_RC_NOJQ=$?
+  if [ "$RF_RC_NOJQ" -ne 0 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 9o: HAS_JQ=false returns non-zero even with present response file"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 9o: expected non-zero with HAS_JQ=false"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # 9p (D118): extract_response_payload prefers the response file over stdout.
+  printf '%s' "$RF_FULL" > "$RF_FILE"
+  RF_PAYLOAD_FILE=$(
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    RESPONSE_FILE="$RF_FILE"
+    extract_response_payload "$RF_INPUT_TRUNC"
+  )
+  assert_contains "9p: extract_response_payload reads the response file" '"after_goal"' "$RF_PAYLOAD_FILE"
+
+  # 9q (D118, back-compat): extract_response_payload falls back to stdout when
+  # no response file is present.
+  rm -f "$RF_FILE"
+  RF_PAYLOAD_STDOUT=$(
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    RESPONSE_FILE="$RF_FILE"
+    extract_response_payload "$AG_INPUT_CC"
+  )
+  assert_contains "9q: extract_response_payload falls back to stdout payload" '"after_goal"' "$RF_PAYLOAD_STDOUT"
+
+  rm -f "$RF_FILE"
 fi
 
 # ============================================================

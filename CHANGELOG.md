@@ -2,6 +2,36 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.34.0] - 2026-07-08
+
+### Fixed — `## after_goal` fires reliably regardless of `/complete` response size (G313 / D118, W1609, D119, W1611, W1610, W1612, W1614)
+
+The `after_goal` hook could silently fail to run. Root cause: `response_has_after_goal` parsed `tool_response.stdout`, which the Claude Code harness **truncates** for large `/complete` responses (the server echoes the full `reviewer_result` — ~46KB with 25 `project_checks`), yielding invalid JSON so detection failed and the local push never ran; the goal reached Done via the grace worker (which only flips status, it does **not** push), leaving the task branch's commit unmerged. This release makes detection independent of both response size and agent behavior. All executor changes land in **both** `hooks/stride-hook.sh` and `hooks/stride-hook.ps1`.
+
+**Reliability changes:**
+
+- **Canonical response file fast path (D118 / W1609)** — the hook now prefers a full API response read from `$PROJECT_DIR/.stride/.last-api-response.json` (jq-validated) over the truncatable `tool_response.stdout`. `extract_response_payload` became the ONE shared resolver — canonical file → `tool_response.stdout` unwrap → W1086 persisted-output file → best-effort raw — and `response_has_after_goal`, the server-env-forwarding path, **and** the claim `before_doing` env-cache/`TASK_BASE_REF` refresh all route through it, so a harness-truncated stdout can no longer make them diverge (the claim path previously re-parsed `$INPUT` independently and lost `TASK_ID`/`TASK_BASE_REF` on an oversized claim response). `capture_canonical_response` persists the current call's valid stdout JSON to that file early in the post phase; the root `.stride/` state dir is hard-excluded from `capture_changed_files` so the file never leaks into a task's `changed_files`.
+- **Hook-initiated fresh-call reliability guarantee (D119)** — the authoritative fallback: when the handed response is truncated/absent, the hook spawns a fresh `GET /api/tasks/:id/after_goal_status` (the compact endpoint added server-side in W1613) — a subprocess the hook spawns is **not** subject to Bash-tool output truncation and needs **zero** agent cooperation. `route_after_goal` unifies the two paths (fast path trusts a COMPLETE valid response; otherwise the fresh call fires) so `## after_goal` runs **at most once**. Unreachable/non-JSON/missing-prereq → clean no-op. The bearer token is never logged.
+- **PowerShell parity (W1611)** — D118/W1609/D119 ported to `stride-hook.ps1` for byte-for-byte outcome parity on Windows (`Read-CanonicalResponse`/`Save-CanonicalResponse`, `Get-ResponsePayload` source ordering, the shared `Invoke-AfterGoalRouting`, and the claim env-cache base-ref refresh moved out of the `if($response)` block to close a latent parity gap).
+
+**Docs + tests:**
+
+- **W1610** — `stride-completing-tasks` and `stride-claiming-tasks` document the response-capture curl pattern (`| tee $CLAUDE_PROJECT_DIR/.stride/.last-api-response.json` with a `--output` fallback); `stride-workflow` Step 8 documents "How the hook detects after_goal reliably" and a "Verify the push landed" step (`git log origin/main..main`; run `## after_goal` manually if commits remain); `hook-execution.md` documents the mutually-exclusive 3-source payload ordering.
+- **W1612** — end-to-end reliability group on both platforms proving `## after_goal` runs under a truncated `/complete` stdout when the canonical file is present, the `parent_id`→`GOAL_ID` fallback under truncation, the section-missing clean no-op, and the no-file/unreachable control (no false positive). Suites now at **388 bash / 270 pwsh** assertions.
+- **W1614 (spike, no runtime change)** — investigated enforcing response-capture via a `PreToolUse` command-rewrite (`updatedInput`); the mechanism exists (Claude Code 2.1.204) but is security-gated by the harness's auto-mode classifier and cannot be a silent universal mechanism. **Recommendation:** keep the canonical-file capture as a best-effort fast path and rely on the D119 fresh call as THE guarantee — confirming the shipped architecture is correct.
+
+### Port parity
+
+The five port plugins (`stride-codex`, `stride-gemini`, `stride-opencode`, `stride-copilot`, `stride-pi`) do **not** yet mirror this fix — port parity is follow-up work.
+
+### Backward compatibility
+
+Fully backward compatible. `.stride.md` files keep working unmodified. The new `.stride/.last-api-response.json` canonical response file lives under the already-gitignored `.stride/` directory and is excluded from every snapshot by name. Against a server without the `GET /api/tasks/:id/after_goal_status` endpoint the fresh-call fallback is a clean no-op (the grace worker still flips the goal to Done), so older servers are unaffected — they simply do not gain the fresh-call guarantee.
+
+### Source
+
+G313 — D118, W1609, D119, W1611, W1610, W1612, W1614 (`.sh` + `.ps1` parity; the five port plugins are follow-up).
+
 ## [1.33.0] - 2026-07-02
 
 ### Added / Fixed — Hook executor hardening + documentation accuracy sweep (G287 / W1449–W1458)

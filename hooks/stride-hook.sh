@@ -1022,18 +1022,24 @@ capture_canonical_response() {
 # truncation), then the tool_response.stdout unwrap, then the W1086 persisted-
 # output file. Delegating here keeps after_goal detection, env forwarding, and
 # the claim env-cache refresh on ONE resolver so they can never diverge.
-response_has_after_goal() {
-  local _hook_input="$1"
-  local _payload
-
-  [ "$HAS_JQ" = "true" ] || return 1
-
-  _payload=$(extract_response_payload "$_hook_input")
+# Pure jq predicate on an ALREADY-resolved payload string (no $INPUT unwrap):
+# does it carry an after_goal hook entry? Single-sourced so response_has_after_goal
+# and route_after_goal share one after_goal detection expression (D119).
+payload_has_after_goal() {
+  local _payload="$1"
+  [ "${HAS_JQ:-false}" = "true" ] || return 1
   [ -n "$_payload" ] || return 1
-
   echo "$_payload" \
     | jq -e '(.hooks // []) | map(select(.name == "after_goal")) | length > 0' \
         > /dev/null 2>&1
+}
+
+response_has_after_goal() {
+  local _hook_input="$1"
+
+  [ "$HAS_JQ" = "true" ] || return 1
+
+  payload_has_after_goal "$(extract_response_payload "$_hook_input")"
 }
 
 # --- Server-supplied hook env forwarding (W1453) ---
@@ -1209,6 +1215,89 @@ ${_key}=''"
       apply_env_lines "GOAL_ID=$(sq_escape "$_parent")"
     fi
   fi
+}
+
+# --- After-goal execution (shared by the D118 fast path and the D119 fresh call) ---
+# Export GOAL_* from the given payload and run the local ## after_goal section as
+# a blocking hook, restoring HOOK_NAME afterward. Centralised so both detection
+# paths run the section identically — and, because route_after_goal invokes
+# exactly one path, exactly once (de-dup).
+run_after_goal_section() {
+  local _payload="$1"
+  AFTER_GOAL_ROUTED=true
+  # (W1453) Export GOAL_* (server-supplied, with the parent-id fallback for
+  # GOAL_ID) before the section runs. The section observes HOOK_NAME=after_goal
+  # per the documented contract; the routed value is restored afterwards because
+  # the cleanup gate and finalize_after_doing key on it.
+  export_after_goal_env "$_payload"
+  local _routed_hook_name="$HOOK_NAME"
+  export HOOK_NAME="after_goal"
+  run_stride_section "after_goal" || true
+  HOOK_NAME="$_routed_hook_name"
+  export HOOK_NAME
+}
+
+# (D119) Reliability guarantee. Detect after_goal via a fresh, hook-initiated
+# GET /api/tasks/:id/after_goal_status (the compact endpoint from W1613). A curl
+# the hook spawns is NOT subject to the Bash-tool output truncation that can gut
+# the agent-handed /complete response, and it needs zero agent cooperation. Runs
+# the ## after_goal section from the endpoint's compact GOAL_* env when
+# after_goal_armed is true. Best-effort: a missing prerequisite (jq/curl/TASK_ID/
+# URL/token) or an unreachable / non-JSON endpoint degrades to a clean no-op —
+# the server's grace-window worker still completes the goal. Never echoes the
+# token. Returns 0 when it reached a definitive answer, 1 when it could not run.
+detect_after_goal_via_api() {
+  [ "${HAS_JQ:-false}" = "true" ] || return 1
+  command -v curl > /dev/null 2>&1 || return 1
+  [ -n "${TASK_ID:-}" ] || return 1
+
+  local _api_base _token _resp _armed _payload
+  _api_base=$(resolve_stride_api_url)
+  _token=$(resolve_stride_api_token)
+  [ -n "$_api_base" ] && [ -n "$_token" ] || return 1
+
+  _resp=$(curl -s --max-time 10 \
+    -H "Authorization: Bearer $_token" \
+    "$_api_base/api/tasks/$TASK_ID/after_goal_status" 2>/dev/null || printf '')
+  [ -n "$_resp" ] || return 1
+  echo "$_resp" | jq -e . > /dev/null 2>&1 || return 1
+
+  _armed=$(echo "$_resp" | jq -r '.after_goal_armed // false' 2>/dev/null || printf 'false')
+  # Reached the server and got a definitive answer. Not armed → clean success.
+  [ "$_armed" = "true" ] || return 0
+
+  # Wrap the endpoint's flat env into the after_goal-hook-entry shape that
+  # export_after_goal_env consumes; carry goal_id as data.parent_id so the
+  # GOAL_ID parent-id fallback still applies if env omits it.
+  _payload=$(echo "$_resp" \
+    | jq -c '{hooks: [{name: "after_goal", env: (.env // {})}], data: {parent_id: .goal_id}}' \
+        2>/dev/null || printf '')
+  [ -n "$_payload" ] || return 1
+
+  run_after_goal_section "$_payload"
+  return 0
+}
+
+# --- After-goal routing (W504 / D118 / D119) ---
+# Decide whether to run the local ## after_goal section after a /complete or
+# /mark_reviewed post. Two mutually-exclusive paths, so the section runs at most
+# once (de-dup):
+#   * Fast path (D118): when the handed response is COMPLETE, valid JSON it
+#     answers definitively — armed runs the section, parseable-but-absent means
+#     definitively not armed. No extra round-trip either way.
+#   * Reliability guarantee (D119): when the handed response is truncated,
+#     absent, or unparseable, ask the server directly with a hook-spawned curl.
+route_after_goal() {
+  local _payload="$1"
+
+  [ "${HAS_JQ:-false}" = "true" ] || return 0
+
+  if [ -n "$_payload" ] && echo "$_payload" | jq -e . > /dev/null 2>&1; then
+    payload_has_after_goal "$_payload" && run_after_goal_section "$_payload"
+    return 0
+  fi
+
+  detect_after_goal_via_api || true
 }
 
 # Exit early if no phase argument or no .stride.md. Placed AFTER the
@@ -1409,33 +1498,21 @@ if [ "$PRIMARY_RC" -ne 0 ]; then
   exit "$PRIMARY_RC"
 fi
 
-# --- After-goal routing (W504) ---
-# When the server bundles an `after_goal` entry in the response of /complete
-# or /mark_reviewed (last-child-of-goal case), run the local `## after_goal`
-# section as a blocking hook. Missing `## after_goal` in .stride.md is a
-# clean no-op — run_stride_section returns 0 silently and the agent's
-# follow-up PATCH /api/tasks/:goal_id/after_goal can either be skipped (the
-# server's grace-window worker covers it) or POSTed with a zero result.
-# A non-zero exit is surfaced via the same structured JSON shape as the
-# primary hook; we do NOT propagate it as a non-zero script exit because the
-# primary curl already succeeded — the failure is captured in the structured
-# stdout for the agent to forward to the server.
+# --- After-goal routing (W504 / D118 / D119) ---
+# When completing the last child of a goal, run the local `## after_goal`
+# section as a blocking hook. Detection prefers the handed response when it is
+# complete (D118 fast path) and otherwise falls back to a fresh, hook-initiated
+# GET /api/tasks/:id/after_goal_status that is immune to harness truncation
+# (D119 — the reliability guarantee). route_after_goal keeps the two paths
+# mutually exclusive so the section runs at most once. Missing `## after_goal`
+# in .stride.md is a clean no-op; the server's grace-window worker still covers
+# goal completion when neither path can detect it. A non-zero section exit is
+# surfaced via the structured JSON shape, never as a non-zero script exit (the
+# primary curl already succeeded).
 if [ "$PHASE" = "post" ]; then
   case "$COMMAND" in
     */api/tasks/*/complete*|*/api/tasks/*/mark_reviewed*)
-      if response_has_after_goal "$INPUT"; then
-        AFTER_GOAL_ROUTED=true
-        # (W1453) Export GOAL_* (server-supplied, with the parent-id fallback
-        # for GOAL_ID) before the section runs. The section observes
-        # HOOK_NAME=after_goal per the documented contract; the routed value
-        # is restored afterwards because the cleanup gate below and
-        # finalize_after_doing key on it.
-        export_after_goal_env "$RESPONSE_PAYLOAD"
-        _routed_hook_name="$HOOK_NAME"
-        export HOOK_NAME="after_goal"
-        run_stride_section "after_goal" || true
-        HOOK_NAME="$_routed_hook_name"
-      fi
+      route_after_goal "$RESPONSE_PAYLOAD"
       ;;
   esac
 fi

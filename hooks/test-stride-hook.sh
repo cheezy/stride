@@ -3135,7 +3135,10 @@ echo "=== Test Group 13: changed_files upload self-heal (W1094) ==="
 if ! command -v jq > /dev/null 2>&1 || ! command -v git > /dev/null 2>&1; then
   echo "  SKIP: jq or git missing — Group 13 requires both (reuses Group 8 helpers)"
 else
-  W1094_COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer tok\""}}'
+  # A parseable /complete response (no after_goal entry) so the D118 fast path in
+  # route_after_goal answers "not armed" without a D119 fresh call — isolating
+  # these changed_files self-heal assertions from the after_goal curl path.
+  W1094_COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer tok\""},"tool_response":{"stdout":"{\"data\":{\"id\":42},\"hooks\":[{\"name\":\"before_review\"}]}"}}'
 
   # 13a: finalize_after_doing records task id + mocked 2xx in the state file
   # after the pre-path PUTs, and the state file carries no credentials.
@@ -4248,6 +4251,137 @@ if command -v git > /dev/null 2>&1 && command -v jq > /dev/null 2>&1; then
   rm -rf "$E2E_DIR"
 else
   echo "  SKIP: git or jq not available"
+fi
+
+# ============================================================
+# Test Group 19: D119 hook-initiated after_goal detection
+# ============================================================
+# The reliability guarantee: when the agent-handed /complete response is
+# truncated/absent, the hook detects after_goal via its OWN fresh
+# GET /api/tasks/:id/after_goal_status call (immune to Bash-tool truncation) and
+# runs ## after_goal from the endpoint's compact GOAL_* env. The D118 fast path
+# short-circuits the fresh call when a full response is already available, and
+# the two paths never both run the section (de-dup).
+echo ""
+echo "=== Test Group 19: D119 hook-initiated after_goal detection ==="
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: jq missing — Group 19 requires jq"
+else
+  # Build a project whose ## after_goal echoes the exported GOAL_IDENTIFIER.
+  d119_project() {
+    local _dir="$TMPDIR_TEST/d119-$1"
+    mkdir -p "$_dir"
+    cat > "$_dir/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "after_goal ran for $GOAL_IDENTIFIER"
+```
+STRIDE
+    printf "TASK_ID='42'\n" > "$_dir/.stride-env-cache"
+    printf '%s' "$_dir"
+  }
+
+  # A curl stub that answers the after_goal_status GET with a JSON body and logs
+  # the hit. $2=armed(true|false), $3=call-log path, $4=exit code (0 ok).
+  d119_curl_stub() {
+    local _stub="$1" _armed="$2" _log="$3" _exit="${4:-0}"
+    mkdir -p "$_stub"
+    cat > "$_stub/curl" << CURLSTUB
+#!/usr/bin/env bash
+_hit=""
+for a in "\$@"; do
+  case "\$a" in */after_goal_status) _hit=1 ;; esac
+done
+if [ -n "\$_hit" ]; then
+  echo hit >> "$_log"
+  [ "$_exit" -ne 0 ] && exit $_exit
+  if [ "$_armed" = "true" ]; then
+    printf '%s' '{"after_goal_armed":true,"goal_id":55,"goal_identifier":"G7","env":{"GOAL_ID":"55","GOAL_IDENTIFIER":"G7","GOAL_TITLE":"Goal Seven","HOOK_NAME":"after_goal"}}'
+  else
+    printf '%s' '{"after_goal_armed":false,"goal_id":null,"goal_identifier":null,"env":{}}'
+  fi
+fi
+exit 0
+CURLSTUB
+    chmod +x "$_stub/curl"
+  }
+
+  # A /complete input with a truncated stdout (invalid JSON) and a URL+Bearer in
+  # the command so resolve_stride_api_url/token succeed with no .stride_auth.md.
+  D119_TRUNC_INPUT='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer tok\""},"tool_response":{"stdout":"{\"data\":{\"id\":42},\"hoo"}}'
+
+  # 19a: truncated response + NO response file + armed endpoint → the fresh call
+  # detects and runs ## after_goal (the exact condition that broke inline parsing).
+  D19A_PROJ=$(d119_project "armed")
+  D19A_STUB=$(mktemp -d)
+  D19A_LOG="$D19A_PROJ/curl.log"
+  d119_curl_stub "$D19A_STUB" "true" "$D19A_LOG"
+  D19A_OUT=$(echo "$D119_TRUNC_INPUT" | CLAUDE_PROJECT_DIR="$D19A_PROJ" PATH="$D19A_STUB:$PATH" bash "$HOOK_SCRIPT" post 2>&1)
+  D19A_RC=$?
+  assert_exit "19a: hook-initiated after_goal exits 0" 0 "$D19A_RC"
+  assert_contains "19a: fresh call ran ## after_goal with the endpoint's GOAL_IDENTIFIER" "after_goal ran for G7" "$D19A_OUT"
+  assert_contains "19a: the after_goal_status endpoint was called" "hit" "$(cat "$D19A_LOG" 2>/dev/null)"
+  rm -rf "$D19A_STUB"
+
+  # 19b: armed=false → ## after_goal does NOT run (endpoint answered definitively).
+  D19B_PROJ=$(d119_project "notarmed")
+  D19B_STUB=$(mktemp -d)
+  D19B_LOG="$D19B_PROJ/curl.log"
+  d119_curl_stub "$D19B_STUB" "false" "$D19B_LOG"
+  D19B_OUT=$(echo "$D119_TRUNC_INPUT" | CLAUDE_PROJECT_DIR="$D19B_PROJ" PATH="$D19B_STUB:$PATH" bash "$HOOK_SCRIPT" post 2>&1)
+  if echo "$D19B_OUT" | grep -qF "after_goal ran"; then
+    echo -e "  ${RED}FAIL${RESET}: 19b: ## after_goal ran despite armed=false"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 19b: armed=false does not run ## after_goal"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "19b: the endpoint was still consulted" "hit" "$(cat "$D19B_LOG" 2>/dev/null)"
+  rm -rf "$D19B_STUB"
+
+  # 19c (de-dup): a present canonical response file (fast path) runs the section
+  # ONCE from the file and the fresh after_goal_status endpoint is NOT called.
+  D19C_PROJ=$(d119_project "dedup")
+  mkdir -p "$D19C_PROJ/.stride"
+  printf '%s' '{"data":{"id":42},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G9"}}]}' \
+    > "$D19C_PROJ/.stride/.last-api-response.json"
+  D19C_STUB=$(mktemp -d)
+  D19C_LOG="$D19C_PROJ/curl.log"
+  d119_curl_stub "$D19C_STUB" "true" "$D19C_LOG"
+  D19C_OUT=$(echo "$D119_TRUNC_INPUT" | CLAUDE_PROJECT_DIR="$D19C_PROJ" PATH="$D19C_STUB:$PATH" bash "$HOOK_SCRIPT" post 2>&1)
+  assert_contains "19c: fast path runs ## after_goal from the canonical file (G9)" "after_goal ran for G9" "$D19C_OUT"
+  # Count only the EXPANDED output line ("ran for G9") — the raw command line
+  # carries the literal "$GOAL_IDENTIFIER", so counting the expansion isolates
+  # real section runs from the echoed command text.
+  D19C_RUNS=$(printf '%s\n' "$D19C_OUT" | grep -cF "ran for G9")
+  assert_eq "19c: ## after_goal ran exactly once (de-dup)" "1" "$D19C_RUNS"
+  if [ -f "$D19C_LOG" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 19c: fast path did not short-circuit — endpoint was called"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 19c: fast path short-circuits the fresh call (endpoint not hit)"
+    PASS=$((PASS + 1))
+  fi
+  rm -rf "$D19C_STUB"
+
+  # 19d: endpoint unreachable (curl fails) → clean no-op, exit 0, section not run
+  # (the grace-window worker still completes the goal).
+  D19D_PROJ=$(d119_project "unreachable")
+  D19D_STUB=$(mktemp -d)
+  D19D_LOG="$D19D_PROJ/curl.log"
+  d119_curl_stub "$D19D_STUB" "true" "$D19D_LOG" 7
+  D19D_OUT=$(echo "$D119_TRUNC_INPUT" | CLAUDE_PROJECT_DIR="$D19D_PROJ" PATH="$D19D_STUB:$PATH" bash "$HOOK_SCRIPT" post 2>&1)
+  D19D_RC=$?
+  assert_exit "19d: unreachable endpoint still exits 0" 0 "$D19D_RC"
+  if echo "$D19D_OUT" | grep -qF "after_goal ran"; then
+    echo -e "  ${RED}FAIL${RESET}: 19d: ran ## after_goal despite an unreachable endpoint"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 19d: unreachable endpoint degrades to a clean no-op"
+    PASS=$((PASS + 1))
+  fi
+  rm -rf "$D19D_STUB"
 fi
 
 # ============================================================

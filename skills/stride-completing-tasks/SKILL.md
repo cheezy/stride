@@ -340,6 +340,16 @@ that still expect `changed_files` in the body, see the
 [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section
 below for the inline-cat pattern.
 
+**Capture the response (D118).** Pipe the completion curl through `tee` to the
+canonical response file `$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json`.
+`tee` writes the full, untruncated response to that file **and** passes it
+through to stdout, so the PostToolUse hook still sees the response *and* has an
+untruncated copy to read when the harness truncates the large `/complete`
+stdout (the reviewer_result alone can run to tens of KB). This is what lets the
+hook reliably detect an `after_goal` entry on a goal's last child. The `.stride/`
+directory is created by the orchestrator; if you invoke the curl outside the
+orchestrator, `mkdir -p "$CLAUDE_PROJECT_DIR/.stride"` first.
+
 ```bash
 curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
   -H "Authorization: Bearer $STRIDE_API_TOKEN" \
@@ -371,8 +381,19 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
          {name: "after_doing", dispatched: true, duration_ms: 45678},
          {name: "before_review", dispatched: true, duration_ms: 2340}
        ]
-     }')"
+     }')" \
+  | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"
 ```
+
+**Best-effort, not the guarantee.** The capture is a *fast path*: it lets the
+hook short-circuit to the file. It is not required for correctness. On a shell
+without `tee`, use `--output "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"`
+(the response goes to the file only, not stdout) — or skip capture entirely.
+When the file is absent or the response is truncated with no capture, the hook
+falls back to a fresh, hook-initiated `GET /api/tasks/:id/after_goal_status`
+(D119), which is immune to harness truncation and needs no agent cooperation.
+Do **not** treat the grace-window worker as the push mechanism — it only flips
+the goal to Done; the `## after_goal` section is what performs any push.
 
 The resulting request body has this shape (illustrative — populated values
 match the `--arg` substitutions above):

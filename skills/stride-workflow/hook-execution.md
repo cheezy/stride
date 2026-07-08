@@ -46,6 +46,16 @@ For `after_goal`, the executor:
 
 Server-supplied env keys are applied **after** the env cache loads, so for any key the server supplies, the server's value wins over a stale cached value. Keys the server does not supply keep their cached values — during `after_goal` the claim-time `TASK_*` variables therefore remain visible, pointing at the just-completed child task. `HOOK_NAME` is never taken from the server env or written to the cache (the executor routes on its own value and sets `HOOK_NAME=after_goal` explicitly around the section run); `TASK_BASE_REF` is likewise never overwritten by server env (it is a client-only diff anchor owned by the claim branch).
 
+## Response Payload Source (untruncated)
+
+Step 1 above reads the server's response payload. That payload reaches the executor through the harness as `tool_response.stdout`, which the harness **truncates** for large responses — a `/complete` response echoing a full `reviewer_result` (25 `project_checks`) can exceed the truncation threshold, cutting the JSON mid-string. A truncated payload is invalid JSON, so naive parsing silently fails to detect an `after_goal` entry and the goal-completion push never fires. The executor resolves the payload in this order:
+
+1. **Canonical response file (fast path).** The completion/claim/mark_reviewed curls capture the full response to `$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json` (the `| tee` pattern the `stride-completing-tasks` / `stride-claiming-tasks` skills document). When that file is present and holds valid JSON, the executor reads it in preference to `tool_response.stdout` — it is untruncated by construction. This file lives in the same gitignored `.stride/` directory as the orchestrator marker and never enters a task's `changed_files` snapshot.
+2. **`tool_response.stdout` (fallback).** When no canonical file exists, the executor parses the inline stdout as before (unwrapping the `{"stdout": "..."}` Bash-tool shape, then the raw-object and persisted-output-file shapes). A complete stdout is authoritative; a truncated one yields no payload and falls through.
+3. **Hook-initiated fresh call (the guarantee).** When neither source yields a complete payload, the executor issues its own `GET /api/tasks/:id/after_goal_status` — a compact, fixed-size endpoint that is never truncated, called from a subprocess the hook spawns (not subject to the harness's tool-output truncation) and needing zero agent cooperation. This is the reliability guarantee: `after_goal` detection does not depend on the agent's curl output being intact or on the capture file being written.
+
+The three sources are mutually exclusive in effect — the `## after_goal` section runs at most once regardless of which source detected it. The capture file is therefore best-effort: it saves the extra round-trip when present, but its absence never breaks detection.
+
 ## Why Server-Sourced
 
 `GOAL_ID` and `GOAL_IDENTIFIER` are not present in any prior hook's `hook.env`, and `after_goal` fires after the claim/complete cache has been cleared. Letting the executor reach back into the API to "find" the goal would mean two extra round-trips per goal completion and a divergence risk if the goal record changed between the lifecycle event firing and the executor running. Forwarding the server's authoritative values eliminates both problems.

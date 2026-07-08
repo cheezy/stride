@@ -375,6 +375,34 @@ POST /api/tasks/claim
 
 **Critical:** `before_doing_result` is REQUIRED. The API will reject requests without it.
 
+**Capture the response (D118/W1609).** Pipe the claim curl through `tee` to the
+canonical response file so the PostToolUse hook reads an untruncated copy when
+the harness truncates the claim stdout. The claim response drives the env-cache
+refresh (`TASK_ID`, `TASK_IDENTIFIER`, `TASK_BASE_REF`); an oversized claim whose
+stdout is truncated would otherwise lose task identity and leave a stale
+`TASK_BASE_REF` (mis-scoping the completion's `changed_files`). `tee` still
+surfaces the response to you as well. The `.stride/` directory is created by the
+orchestrator; outside it, `mkdir -p "$CLAUDE_PROJECT_DIR/.stride"` first.
+
+```bash
+curl -X POST "$STRIDE_API_URL/api/tasks/claim" \
+  -H "Authorization: Bearer $STRIDE_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n \
+    --arg identifier 'W47' \
+    --arg agent_name 'Claude Opus 4.6' \
+    '{identifier: $identifier, agent_name: $agent_name,
+      before_doing_result: {exit_code: 0, output: "Already up to date.", duration_ms: 450}}')" \
+  | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"
+```
+
+The capture is best-effort — on a shell without `tee`, use
+`--output "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"` (the response
+goes to the file only, not stdout, so `cat` the file if you need to read the
+claim response for the task details), or skip capture entirely (the claim path
+still falls back to parsing the stdout, and after_goal detection on later
+completions is guaranteed by the D119 fresh call regardless).
+
 ## Red Flags - STOP
 
 - "I'll just claim quickly and run hooks later"

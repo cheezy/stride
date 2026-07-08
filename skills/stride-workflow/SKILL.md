@@ -641,6 +641,16 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$GOAL_ID/after_goal" \
 
 `$GOAL_ID` is supplied in the hook's `GOAL_ID` / `GOAL_IDENTIFIER` env vars (see Step 6's env-var matrix). A `2xx` with `exit_code == 0` transitions the goal to Done. A `2xx` with `exit_code != 0` records the failure on the goal's `after_goal_attempts` audit log and leaves the goal In Progress for the user to investigate and re-trigger.
 
+**How the hook detects `after_goal` reliably.** The `/complete` (and `/mark_reviewed`) response can be large — the echoed `reviewer_result` alone runs to tens of KB — and the harness truncates the `tool_response.stdout` the hook would otherwise parse. The completion/claim curls therefore capture the full response to the canonical file `$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json` (the `| tee` pattern documented in `stride-completing-tasks` / `stride-claiming-tasks`), which the hook reads in preference to the truncatable stdout (D118). When that file is absent or unreadable, the hook falls back to a fresh, hook-initiated `GET /api/tasks/:id/after_goal_status` (D119) — a subprocess the hook spawns, immune to harness truncation and needing no agent cooperation. Detection therefore does not depend on the agent's curl output being intact. See [hook-execution.md](hook-execution.md) for the source-of-truth ordering.
+
+**Verify the push landed (last-child completions).** The `## after_goal` section is what performs any project push (e.g. `git push`); the server-side grace-window worker only flips the goal to Done — it does **not** push. So after a `needs_review=false` completion that finishes a goal's last child, confirm the push actually happened:
+
+```bash
+git log origin/main..main --oneline
+```
+
+An empty result means local `main` is level with the remote — the push landed. If it lists commits, the `## after_goal` section did not run (truncated response with no capture and an unreachable status endpoint) — run the `## after_goal` steps from `.stride.md` manually (push, then PATCH the after_goal result as above) so the goal's work reaches the remote.
+
 **Back-compat (matters for agent runtimes that predate this feature):**
 
 - If `.stride.md` has no `## after_goal` section, the hook script silently no-ops — no JSON is emitted, no PATCH is needed. The server's grace-window worker (configured per board, typically a few minutes) will promote the goal to Done automatically.

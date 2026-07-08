@@ -2592,6 +2592,97 @@ Assert-Exit "15g: unreachable endpoint still exits 0" 0 $r.ExitCode
 Assert-NotContains "15g: unreachable endpoint does not run after_goal" "after_goal_ran" $r.Stdout
 
 # ============================================================
+# Test Group 16: after_goal reliability under truncation (W1612)
+# ============================================================
+# PowerShell parity of test-stride-hook.sh Group 20: under a truncated
+# tool_response.stdout, prove after_goal is detected, GOAL_* is exported, and
+# ## after_goal runs via the canonical response file — plus the parent_id
+# fallback and missing-section edge cases, and a no-file no-false-positive
+# control. (The fresh-call path itself is covered by Group 15.)
+Write-Host ""
+Write-Host "=== Test Group 16: after_goal reliability under truncation (W1612) ==="
+
+# A /complete input whose stdout is truncated mid-JSON, so detection MUST come
+# from the canonical response file.
+$w16Trunc = @{
+    tool_input    = @{ command = 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' }
+    tool_response = @{ stdout = '{"data":{"id":99},"hoo' }
+} | ConvertTo-Json -Compress
+
+# 16a: truncated stdout + present canonical file with a full after_goal entry ->
+# section runs, GOAL_* reaches the section AND the env cache (reliability proof).
+$w16aProj = Join-Path $TmpDir 'w1612-fastpath'
+New-Item -ItemType Directory -Path (Join-Path $w16aProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $w16aProj '.stride.md') -Value @'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER] title=[$GOAL_TITLE]"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16aProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":99,"parent_id":55},"hooks":[{"name":"before_review"},{"name":"after_goal","env":{"GOAL_ID":"55","GOAL_IDENTIFIER":"G55","GOAL_TITLE":"Goal 55"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16aProj
+Assert-Exit "16a: truncated /complete with a present file exits 0" 0 $r.ExitCode
+Assert-Contains "16a: ## after_goal ran with GOAL_IDENTIFIER from the file" "ident=[G55]" $r.Stdout
+Assert-Contains "16a: GOAL_TITLE exported to the section" "title=[Goal 55]" $r.Stdout
+$w16aCache = ''
+if (Test-Path (Join-Path $w16aProj '.stride-env-cache')) {
+    $w16aCache = Get-Content (Join-Path $w16aProj '.stride-env-cache') -Raw -Encoding UTF8
+}
+Assert-Contains "16a: env cache carries GOAL_ID for the follow-up PATCH" "GOAL_ID=55" $w16aCache
+
+# 16b: truncated stdout + present file whose after_goal env OMITS GOAL_ID but
+# data.parent_id is set -> parent-id fallback exports GOAL_ID under truncation.
+$w16bProj = Join-Path $TmpDir 'w1612-parentid'
+New-Item -ItemType Directory -Path (Join-Path $w16bProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $w16bProj '.stride.md') -Value @'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER]"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16bProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":99,"parent_id":77},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G77"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16bProj
+Assert-Contains "16b: GOAL_ID falls back to data.parent_id under truncation" "goal=[77]" $r.Stdout
+Assert-Contains "16b: GOAL_IDENTIFIER still exported from the file" "ident=[G77]" $r.Stdout
+
+# 16c: truncated stdout + present file WITH an after_goal entry, but the
+# ## after_goal section is MISSING -> clean no-op (exit 0, no after_goal JSON).
+$w16cProj = Join-Path $TmpDir 'w1612-missing'
+New-Item -ItemType Directory -Path (Join-Path $w16cProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $w16cProj '.stride.md') -Value @'
+## before_review
+```bash
+echo "before_review_ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16cProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":99},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G88"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16cProj
+Assert-Exit "16c: missing ## after_goal under truncation exits 0" 0 $r.ExitCode
+Assert-NotContains "16c: missing ## after_goal emits no after_goal JSON" '"hook":"after_goal"' $r.Stdout
+
+# 16d: no-file control — truncated stdout, NO canonical file, and no reachable
+# after_goal_status endpoint -> the section must NOT run (no false positive).
+$w16dProj = Join-Path $TmpDir 'w1612-nofile'
+New-Item -ItemType Directory -Path $w16dProj -Force | Out-Null
+Set-Content -Path (Join-Path $w16dProj '.stride.md') -Value @'
+## after_goal
+```bash
+echo "after_goal_ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16dProj '.stride-env-cache') -Value 'TASK_ID=99' -Encoding UTF8
+$w16dInput = @{
+    tool_input    = @{ command = 'curl -X PATCH http://localhost:19099/api/tasks/99/complete -H "Authorization: Bearer tok"' }
+    tool_response = @{ stdout = '{"data":{"id":99},"hoo' }
+} | ConvertTo-Json -Compress
+$r = Invoke-HookScript -InputJson $w16dInput -Phase 'post' -ProjectDir $w16dProj
+Assert-Exit "16d: no-file + truncated + unreachable exits 0" 0 $r.ExitCode
+Assert-NotContains "16d: no file + no endpoint does not run ## after_goal" "after_goal_ran" $r.Stdout
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

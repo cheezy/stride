@@ -2,6 +2,36 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [1.35.0] - 2026-07-10
+
+### Fixed — the `changed_files` diff upload targets the `/complete` URL task id, not a stale env cache (D127)
+
+The `after_doing` finalize and `before_review` self-heal previously targeted the `changed_files` PUT using the claim-time env-cache `TASK_ID`. When that cache is stale or corrupt — a piped or truncated claim capture, or a host restart before the on-disk cache reloads — the diff uploaded to the **previous** task, leaving the current task's `changed_files` empty. Both paths now resolve the task id from the authoritative `/complete`|`/mark_reviewed` command URL first (a new `task_id_from_command` helper, a pure numeric-only parse), falling back to the env-cache id only when the URL carries no id (the claim path). Lands in **both** `hooks/stride-hook.sh` and `hooks/stride-hook.ps1`, with URL→id unit and stale-env targeting tests. Pure string parse — no new network call.
+
+### Added — fail loud on a terminal `changed_files` upload failure (W1658)
+
+The `before_review` self-heal is the **last** upload retry. When its PUT still returns a non-2xx status, the hook now logs a distinct `stride-hook: CHANGED_FILES UPLOAD UNRESOLVED for task <id> (HTTP <code>) …` message (separate from the per-attempt warning) and appends an `unresolved=yes` marker to `.stride-diff-upload-state`, so a definitively-lost diff is actionable rather than silently swallowed. Fail-soft: it never changes the hook exit code or vetoes the already-succeeded `/complete`. A legitimately-empty diff that PUTs 2xx takes the success path, and a later successful PUT overwrites the state file, self-clearing the mark. `.sh` + `.ps1` parity, with tests.
+
+### Fixed — document the empty-`changed_files` root cause and add a reproduction test (D126)
+
+Added `docs/root-cause-changed-files-empty.md` documenting how a stale env-cache `TASK_ID` (from a piped or truncated claim capture) makes the diff upload target the wrong task, plus a reproduction test in `hooks/test-stride-hook.sh`. This is the root-cause analysis that motivated D127.
+
+### Changed — explicit stdout-preserving curl invocation rules in the skills (W1661)
+
+`stride-claiming-tasks`, `stride-completing-tasks`, and `stride-workflow` now spell out that the claim and complete curls must preserve their stdout — no piping through `head`/`jq`/`awk`, no redirect that swallows the body — so the Claude Code hook can read the full response to refresh the env cache and detect a bundled `after_goal`. Piping breaks the `.stride-env-cache` refresh and stale-tags the next auto-commit.
+
+### Docs — fleet-wide porting guide
+
+Added `docs/PORTING-changed-files-upload-fix.md`, the runtime-agnostic guide for porting the D127 targeting fix and the W1658 fail-loud signal to the other Stride plugin runtimes. `stride-opencode` ships both in its v1.26.1 release.
+
+### Backward compatibility
+
+Fully backward compatible. No `.stride.md`, wire-shape, or `.stride_auth.md` change. The `unresolved=yes` marker is additive to `.stride-diff-upload-state` (already gitignored) and self-clears on the next successful upload.
+
+### Source
+
+D126, W1661, D127, W1658 (`.sh` + `.ps1` parity).
+
 ## [1.34.0] - 2026-07-08
 
 ### Fixed — `## after_goal` fires reliably regardless of `/complete` response size (G313 / D118, W1609, D119, W1611, W1610, W1612, W1614)

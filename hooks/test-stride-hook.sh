@@ -4490,6 +4490,63 @@ STRIDE
 fi
 
 # ============================================================
+# D126 reproduction — hidden-stdout claim leaves TASK_ID stale in the env cache
+# ============================================================
+# Confirmed root cause behind the empty changed_files (goal G321): the diff
+# pipeline depends on the hook seeing the API response on stdout. When the claim
+# response is hidden (agent used `-o`, a transformer pipe, or an oversized
+# response was truncated with no canonical-file fallback), the `post` hook's
+# else-branch refreshes TASK_BASE_REF to HEAD but CANNOT recover the new task's
+# identity, so TASK_ID/TASK_IDENTIFIER are left stale (the prior task's). A later
+# after_doing capture then PUTs the diff to the PREVIOUS task's id, and the
+# current task's changed_files never populates. See
+# docs/root-cause-changed-files-empty.md.
+#
+# The fixture MUST contain a .stride.md, or stride-hook.sh exits at the STRIDE_MD
+# guard before the before_doing seeding block runs (making the test vacuous).
+# Asserted as a CONTRAST so it has discriminating power: a VISIBLE claim refreshes
+# TASK_ID; a HIDDEN claim leaves it stale.
+#
+# NOTE: the HIDDEN assertion documents the CURRENT (unfixed) behavior. D127 makes
+# the hook stdout-independent (resolves TASK_ID via a fresh GET); when that lands,
+# the hidden branch will also refresh TASK_ID and this assertion flips.
+d126_claim_env() {  # $1 = hidden|visible ; echoes the resulting TASK_ID= line
+  local mode="$1" _d
+  _d=$(mktemp -d)
+  (
+    cd "$_d" || exit 1
+    git init -q; git config user.email "test@test.local"; git config user.name "Test"
+    echo v1 > a.txt; git add a.txt > /dev/null; git commit -q -m v1
+    printf '## before_doing\n```bash\ntrue\n```\n' > .stride.md
+    printf "TASK_ID='OLD999'\nTASK_IDENTIFIER='W000'\nTASK_BASE_REF='deadbeef'\n" > .stride-env-cache
+    if [ "$mode" = hidden ]; then
+      _in='{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -o out.json"},"tool_response":{"stdout":"HTTP 201"}}'
+    else
+      _in='{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":5555,\"identifier\":\"D999\",\"title\":\"New\",\"status\":\"in_progress\",\"complexity\":\"small\",\"priority\":\"high\"}}"}}'
+    fi
+    echo "$_in" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+    grep '^TASK_ID=' .stride-env-cache
+  )
+  rm -rf "$_d"
+}
+D126_VISIBLE=$(d126_claim_env visible)
+D126_HIDDEN=$(d126_claim_env hidden)
+if [ "$D126_VISIBLE" = "TASK_ID='5555'" ]; then
+  echo -e "  ${GREEN}PASS${RESET}: D126 repro control — visible-stdout claim refreshes TASK_ID"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: D126 repro control — visible claim should refresh TASK_ID, got: $D126_VISIBLE"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$D126_HIDDEN" = "TASK_ID='OLD999'" ]; then
+  echo -e "  ${GREEN}PASS${RESET}: D126 repro — hidden-stdout claim leaves TASK_ID stale (routes the later diff PUT to the previous task)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: D126 repro — hidden claim should leave TASK_ID stale, got: $D126_HIDDEN"
+  FAIL=$((FAIL + 1))
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

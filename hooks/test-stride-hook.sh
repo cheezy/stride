@@ -3405,6 +3405,28 @@ STRIDE
   fi
   rm -rf "$SH_DIR_I"
 
+  # 13k (W1658): before_review self-heal TERMINAL failure. When the LAST retry
+  # PUT returns non-2xx, the hook surfaces a loud UNRESOLVED warning on stderr
+  # (distinct from the per-attempt warning) AND marks the state file
+  # `unresolved=yes` — so a definitively-lost diff is never silently swallowed.
+  SH_DIR_K=$(mktemp -d)
+  STUB_DIR=$(mktemp -d)
+  make_curl_stub "$STUB_DIR" "$SH_DIR_K/curl-call.txt" 0 500
+  SH_STDERR_K=$(
+    setup_put_repo "$SH_DIR_K" > /dev/null 2>&1 || exit 1
+    echo "$W1094_COMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$STUB_DIR:$PATH" bash "$HOOK_SCRIPT" post 2>&1 1>/dev/null
+  )
+  SH_STATE_K=$(cat "$SH_DIR_K/.stride-diff-upload-state" 2>/dev/null)
+  if printf '%s' "$SH_STDERR_K" | grep -qF 'CHANGED_FILES UPLOAD UNRESOLVED'; then
+    echo -e "  ${GREEN}PASS${RESET}: 13k (W1658): terminal self-heal failure prints a loud UNRESOLVED warning"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 13k (W1658): no loud UNRESOLVED warning on stderr: $SH_STDERR_K"
+    FAIL=$((FAIL + 1))
+  fi
+  assert_contains "13k (W1658): state file marked unresolved on terminal failure" "unresolved=yes" "$SH_STATE_K"
+  rm -rf "$SH_DIR_K" "$STUB_DIR"
+
   # 13j: end-to-end pre then post — a healthy after_doing upload (early +
   # refresh = exactly 2 PUTs) is NOT repeated by the before_review pass.
   SH_DIR_J=$(mktemp -d)

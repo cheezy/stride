@@ -475,6 +475,15 @@ Include placeholder hook results in the request body:
 
 If `after_doing` fails (PreToolUse returns exit 2), fix the issue and retry the curl. The hooks fire again automatically.
 
+**Curl invocation rules — preserve stdout, or your file diffs are silently dropped.** The hook captures the `changed_files` diff and refreshes the env cache (`TASK_ID`, `TASK_BASE_REF`) by reading the API response off the Bash tool's **stdout**. Hide that response and the hook goes blind — the diff is never captured and the task shows `changed_files: []` in Review with **no error**. For **every** claim and complete curl: (1) **never** `-o`/`--output`, (2) **never** pipe into a transformer (`jq`/`head`/`awk`/`grep`/`sed`), (3) **always** pipe into `tee` (the one blessed pipe — it passes stdout through unchanged *and* persists the truncation fallback):
+
+```bash
+curl -sS -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
+  -H "Authorization: Bearer $STRIDE_API_TOKEN" -H 'Content-Type: application/json' \
+  -d @payload.json \
+  | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"
+```
+
 ### Other Environments (manual hooks)
 
 **Execute each hook immediately -- no permission prompts, no confirmation.**

@@ -375,13 +375,37 @@ POST /api/tasks/claim
 
 **Critical:** `before_doing_result` is REQUIRED. The API will reject requests without it.
 
-**Capture the response (D118/W1609).** Pipe the claim curl through `tee` to the
-canonical response file so the PostToolUse hook reads an untruncated copy when
-the harness truncates the claim stdout. The claim response drives the env-cache
-refresh (`TASK_ID`, `TASK_IDENTIFIER`, `TASK_BASE_REF`); an oversized claim whose
-stdout is truncated would otherwise lose task identity and leave a stale
-`TASK_BASE_REF` (mis-scoping the completion's `changed_files`). `tee` still
-surfaces the response to you as well. The `.stride/` directory is created by the
+### Curl invocation rules (preserve stdout — or task identity is lost)
+
+The plugin hook refreshes the env cache (`TASK_ID`, `TASK_IDENTIFIER`,
+`TASK_BASE_REF`) by reading the claim response off the Bash tool's **stdout**.
+Hide that response and the hook keeps the **previous** task's stale `TASK_ID`, so
+the next completion's `changed_files` diff is PUT to the wrong task and the
+current task shows `changed_files: []` in Review — with **no error**. Three rules,
+always:
+
+1. **Never `-o` / `--output`** (nor `-o /dev/null`). It removes the response from
+   stdout entirely — the hook cannot see it.
+2. **Never pipe the response into a transformer** (`jq`, `head`, `awk`, `grep`,
+   `sed`, …). They alter or truncate what the hook reads.
+3. **Always pipe into `tee`** — the one blessed pipe, because it passes stdout
+   through **unchanged** (the hook sees it) **and** writes a full copy for the
+   truncation fallback:
+
+   ```bash
+   curl -sS -X POST "$STRIDE_API_URL/api/tasks/claim" \
+     -H "Authorization: Bearer $STRIDE_API_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d @payload.json \
+     | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"
+   ```
+
+**Capture the response (D118/W1609).** The `tee` above lets the PostToolUse hook
+read an untruncated copy when the harness truncates the claim stdout. The claim
+response drives the env-cache refresh (`TASK_ID`, `TASK_IDENTIFIER`,
+`TASK_BASE_REF`); an oversized or hidden claim response would otherwise lose task
+identity and leave a stale `TASK_ID` (routing the completion's `changed_files`
+PUT to the previous task). The `.stride/` directory is created by the
 orchestrator; outside it, `mkdir -p "$CLAUDE_PROJECT_DIR/.stride"` first.
 
 ```bash

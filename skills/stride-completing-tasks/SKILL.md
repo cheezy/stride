@@ -340,15 +340,38 @@ that still expect `changed_files` in the body, see the
 [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section
 below for the inline-cat pattern.
 
-**Capture the response (D118).** Pipe the completion curl through `tee` to the
-canonical response file `$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json`.
-`tee` writes the full, untruncated response to that file **and** passes it
-through to stdout, so the PostToolUse hook still sees the response *and* has an
-untruncated copy to read when the harness truncates the large `/complete`
-stdout (the reviewer_result alone can run to tens of KB). This is what lets the
-hook reliably detect an `after_goal` entry on a goal's last child. The `.stride/`
-directory is created by the orchestrator; if you invoke the curl outside the
-orchestrator, `mkdir -p "$CLAUDE_PROJECT_DIR/.stride"` first.
+### Curl invocation rules (preserve stdout — or your file diffs are silently dropped)
+
+The plugin hook captures your `changed_files` diff and refreshes the env cache
+(`TASK_ID`, `TASK_BASE_REF`) by reading the API response off the Bash tool's
+**stdout**. Hide that response and the hook goes blind: the diff is never
+captured/uploaded and the completed task shows `changed_files: []` in Review —
+with **no error**. Three rules, always:
+
+1. **Never `-o` / `--output`** (nor `-o /dev/null`). It removes the response from
+   stdout entirely — the hook cannot see it.
+2. **Never pipe the response into a transformer** (`jq`, `head`, `awk`, `grep`,
+   `sed`, …). They alter or truncate what the hook reads.
+3. **Always pipe into `tee`** — the one blessed pipe, because it passes stdout
+   through **unchanged** (the hook sees it) **and** writes a full copy for the
+   truncation fallback:
+
+   ```bash
+   curl -sS -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
+     -H "Authorization: Bearer $STRIDE_API_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d @payload.json \
+     | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"
+   ```
+
+**Capture the response (D118).** The `tee` above writes the full, untruncated
+response to the canonical file `$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json`
+**and** passes it through to stdout, so the PostToolUse hook still sees the
+response *and* has an untruncated copy to read when the harness truncates the
+large `/complete` stdout (the reviewer_result alone can run to tens of KB). This
+is what lets the hook reliably detect an `after_goal` entry on a goal's last
+child. The `.stride/` directory is created by the orchestrator; if you invoke the
+curl outside the orchestrator, `mkdir -p "$CLAUDE_PROJECT_DIR/.stride"` first.
 
 ```bash
 curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \

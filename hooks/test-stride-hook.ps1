@@ -974,7 +974,9 @@ $noTokJson = "{`"tool_input`":{`"command`":`"$noTokCmd`"}}"
 $r = Invoke-HookScript -InputJson $noTokJson -Phase 'pre' -ProjectDir $noTokProj
 Assert-Exit "7d: hook exits 0 with no Bearer token" 0 $r.ExitCode
 
-# 7e: No TASK_ID in env cache → finalize no-ops
+# 7e (D127): No env TASK_ID AND no numeric id in the /complete URL → finalize
+# no-ops. (After D127 the URL can supply the id, so the URL segment here is
+# deliberately non-numeric to exercise the genuine no-id path.)
 $noIdProj = Join-Path $TmpDir 'no-id-project'
 New-Item -ItemType Directory -Path $noIdProj -Force | Out-Null
 Set-Content -Path (Join-Path $noIdProj '.stride.md') -Value @'
@@ -988,10 +990,57 @@ Set-Content -Path (Join-Path $noIdProj '.stride-changed-files.json') `
 # Env cache without TASK_ID.
 Set-Content -Path (Join-Path $noIdProj '.stride-env-cache') `
     -Value "TASK_BASE_REF=abc" -Encoding UTF8
-$noIdCmd = 'curl -X PATCH http://stride.example.com/api/tasks/99/complete -H "Authorization: Bearer tok"'
+$noIdCmd = 'curl -X PATCH http://stride.example.com/api/tasks/none/complete -H "Authorization: Bearer tok"'
 $noIdJson = "{`"tool_input`":{`"command`":`"$noIdCmd`"}}"
 $r = Invoke-HookScript -InputJson $noIdJson -Phase 'pre' -ProjectDir $noIdProj
-Assert-Exit "7e: hook exits 0 with no TASK_ID" 0 $r.ExitCode
+Assert-Exit "7e: hook exits 0 when neither env cache nor URL yields a task id" 0 $r.ExitCode
+
+# 7h (D127): finalize PUTs to the task id in the /complete URL, NOT a stale
+# env-cache TASK_ID. Env cache says 111 (a previous task); the completion URL
+# says 99 → the PUT must target /api/tasks/99/changed_files. This is the fix for
+# the empty-changed_files root cause: a hidden claim leaves a stale env TASK_ID,
+# and before D127 the diff was PUT to that wrong task.
+$d127Proj = Join-Path $TmpDir 'd127-url-id-project'
+New-Item -ItemType Directory -Path $d127Proj -Force | Out-Null
+Set-Content -Path (Join-Path $d127Proj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $d127Proj '.stride-changed-files.json') `
+    -Value '[{"path":"foo.txt","diff":"body"}]' -Encoding UTF8
+# STALE env cache — a previous task's id.
+Set-Content -Path (Join-Path $d127Proj '.stride-env-cache') `
+    -Value "TASK_ID=111`nTASK_BASE_REF=abc" -Encoding UTF8
+
+$d127Port = 18879
+$d127Fixture = Join-Path $TmpDir 'd127-fixture.json'
+if (Test-Path $d127Fixture) { Remove-Item -Force $d127Fixture }
+$d127Job = Start-Job -ArgumentList $d127Port, $d127Fixture -ScriptBlock {
+    param($Port, $Fixture)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start(); $ctx = $l.GetContext(); $req = $ctx.Request
+        @{ Path = $req.Url.AbsolutePath } | ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+        $resp = $ctx.Response; $resp.StatusCode = 200; $resp.OutputStream.Close()
+    } catch { } finally { if ($l.IsListening) { $l.Stop() } }
+}
+try {
+    $null = Wait-ForListener -Port $d127Port
+    $d127Cmd = "curl -X PATCH http://localhost:$d127Port/api/tasks/99/complete -H `"Authorization: Bearer tok`""
+    $d127Json = @{ tool_input = @{ command = $d127Cmd } } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $d127Json -Phase 'pre' -ProjectDir $d127Proj
+    Assert-Exit "7h: hook exits 0 after PUT" 0 $r.ExitCode
+    Wait-Job $d127Job -Timeout 8 | Out-Null
+    Remove-Job $d127Job -Force -ErrorAction SilentlyContinue
+    $d127Path = if (Test-Path $d127Fixture) { (Get-Content -Raw -Path $d127Fixture | ConvertFrom-Json).Path } else { '' }
+    Assert-Contains "7h (D127): PUT targets the URL task id (99), not the stale env id (111)" "/api/tasks/99/changed_files" $d127Path
+    Assert-NotContains "7h (D127): PUT does not target the stale env id (111)" "/api/tasks/111/changed_files" $d127Path
+} finally {
+    Remove-Job $d127Job -Force -ErrorAction SilentlyContinue
+}
 
 # ============================================================
 # Test Group 8: after_goal end-to-end routing (W506)

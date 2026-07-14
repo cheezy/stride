@@ -2,7 +2,7 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
-## [Unreleased]
+## [1.36.0] - 2026-07-14
 
 ### Fixed — `TASK_BASE_REF` is captured AFTER `## before_doing` runs, so review diffs can no longer span another clone's pulled commits (D142)
 

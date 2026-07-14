@@ -2,6 +2,28 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [Unreleased]
+
+### Fixed — `TASK_BASE_REF` is captured AFTER `## before_doing` runs, so review diffs can no longer span another clone's pulled commits (D142)
+
+The claim-time env-cache refresh captured `TASK_BASE_REF` via `git rev-parse HEAD` **before** executing the `## before_doing` section. In the trunk-based two-clone workflow, the section's `git pull` moves HEAD — so the recorded base predated the pull, and the `after_doing` diff spanned commits another computer had pushed (production incident D132: an unrelated defect's Review panel showed a completed rate-limiting task's 37-file diff). The claim path now writes task **identity only** and strips any inherited `TASK_BASE_REF` immediately; a new `finalize_before_doing` (bash) / `Invoke-FinalizeBeforeDoing` (ps1) step rewrites the base — and re-records the W1457 dirty baseline against it — after the section finishes, regardless of the section's exit code and with no `jq` dependency (the old refresh was entirely jq-gated).
+
+### Added — `resolve_snapshot_base` staleness guard on every snapshot capture (D142)
+
+`after_doing` capture and the `before_review` self-heal now pass the stored base through a trust guard before diffing. A base that is empty/unresolvable, not an ancestor of HEAD (e.g. rebased away by `git pull --rebase`), or a **strict ancestor of the task branch point** (merge-base of HEAD and the origin default branch — the D132 shape a plain ancestor check cannot catch) is recomputed from the branch point, with a `stride-hook: TASK_BASE_REF … recomputed …` notice on stderr — never silently. Repos with no origin branch pass through unchanged. Two safeguards keep the guard from over-firing on legitimate workflows: the judgment is resolved **once per task window** (at the early pre-command capture, memoized for the post-command refresh, and persisted as a `base=` line in `.stride-diff-upload-state` for the self-heal) so an `## after_doing` that pushes the default branch cannot move the branch point out from under a correct base; and a base written by the post-`before_doing` capture carries a `TASK_BASE_REF_TRUSTED` cache marker that exempts it from the branch-point rule entirely — it *is* the branch point by construction, so pushing task commits before completing stays safe. Rule 3 therefore judges only inherited/legacy bases, the actual D132 class.
+
+### Fixed — committed task work can no longer be dropped from the `changed_files` snapshot (D142)
+
+The W1457 claim-time dirty-baseline filter excluded any path whose blob hash matched its claim-time value — including files the `after_doing` auto-commit had **committed as the task's own work** (production incident D137: 4 tracked `lib/` edits and an untracked migration silently vanished from a 12-file snapshot, so the reviewed diff missed 5 files). Both the bash capture and the ps1 upload filter now override the baseline exclusion for any path that differs between the base and HEAD: committed range = task work, by definition. The uploaded snapshot now equals the task commit's file list exactly in the normal flow.
+
+### Docs — `TASK_BASE_REF` lifecycle contract
+
+`skills/stride-workflow/hook-execution.md` gains a "`TASK_BASE_REF` Lifecycle" section: stripped at claim interception, written post-`before_doing` (therefore not visible inside that section), dirty baseline recorded at the same moment, trust-guarded at consumption, committed work always survives, cleared after `after_review`.
+
+### Backward compatibility
+
+Fully backward compatible. No `.stride.md`, wire-shape, or `.stride_auth.md` change. Projects whose `## before_doing` does not move HEAD see identical base refs; the guard only recomputes (loudly) when the stored base is provably untrustworthy. Regression coverage: bash Test Group 21 (two-clone pull scenario, guard unit tests, D137 parity tests) and ps1 Test Group 17.
+
 ## [1.35.0] - 2026-07-10
 
 ### Fixed — the `changed_files` diff upload targets the `/complete` URL task id, not a stale env cache (D127)

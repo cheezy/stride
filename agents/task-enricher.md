@@ -420,6 +420,8 @@ Can I determine the answer from the codebase alone?
 
 Your response is a single JSON object matching the Stride API task schema. Example for a "work" task:
 
+**This is your return value, not a request body — so it carries no `task` envelope and no top-level `agent_name`, and you should not add them.** You do not call the Stride API yourself. The orchestrator takes this object, places it under the `task` root key, and adds `"agent_name": "Claude Opus 4.6"` beside it before submitting — see the Request Envelope section in `stride-creating-tasks`. Return the bare task object exactly as shown below.
+
 ```json
 {
   "title": "Add pagination to task list view",

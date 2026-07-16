@@ -2,7 +2,7 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
-## [Unreleased]
+## [1.37.0] - 2026-07-16
 
 ### Added — every documented create payload carries a top-level `agent_name` (W1684)
 

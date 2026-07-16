@@ -2,6 +2,28 @@
 
 All notable changes to the Stride plugin will be documented in this file.
 
+## [Unreleased]
+
+### Added — every documented create payload carries a top-level `agent_name` (W1684)
+
+`stride-creating-tasks`, `stride-creating-goals`, `agents/task-decomposer.md`, and `commands/create-goals.md` now document a top-level `agent_name` on every create request — beside the `task` root key for `POST /api/tasks` and beside the `goals` root key for `POST /api/tasks/batch` — set to the exact same plain agent name the plugin already sends as `agent_name` on claim and complete (never the `ai_agent:<model>` token form). Per-task `created_by_agent` is forgotten in practice and cannot be backfilled (`PATCH` rejects it), so tasks lost their attribution permanently and the `/agents` feed rendered them with a `?` avatar. The root-level param is the always-sent fallback that kanban D137 teaches the server to read. Both creation skills gain the full five-step server resolution order (explicit `created_by_agent` → token `ai_agent:<model>` → top-level `agent_name` → token's last agent name → unset), an `agent_name` row in their field tables, and an explicit note that `agent_name` is display metadata only — never an authorization signal.
+
+### Fixed — `stride-creating-tasks` documented the single-create body without its `task` root key
+
+The skill's complete example was a bare task object, but `POST /api/tasks` requires a `{"task": {...}}` envelope and returns `422 Missing 'task' key` without it. Surfaced while placing `agent_name` "beside the task root key" — the key it had to sit beside was never documented. A new Request Envelope section shows the wrapper with `agent_name` as its top-level sibling; `agents/task-decomposer.md`'s single-goal format is corrected the same way.
+
+### Fixed — four unquoted JSON keys in `stride-creating-tasks` examples
+
+The complete task example carried bare `why:` and `file_path:` keys, and the ✅ "correct" `key_files` snippet under Mistake 3 did too — none of it parses as JSON, so an agent copying the example verbatim built a malformed body. All four are now quoted, and every non-illustrative `json` fence in the creation skills and the decomposer parses clean.
+
+### Backward compatibility
+
+Fully backward compatible, and safe to ship ahead of the server. No `.stride.md`, hook, or `.stride_auth.md` change. Unknown top-level keys are ignored by older servers, so sending `agent_name` before kanban D137 reaches production is a no-op. `created_by_agent` guidance is unchanged and still highest precedence — the new param is a fallback, never a replacement.
+
+### Source
+
+W1684 (kanban D137 ships the server half).
+
 ## [1.36.0] - 2026-07-14
 
 ### Fixed — `TASK_BASE_REF` is captured AFTER `## before_doing` runs, so review diffs can no longer span another clone's pulled commits (D142)

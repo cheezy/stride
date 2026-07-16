@@ -6,7 +6,7 @@ argument-hint: "[--dir <path>] [goal description]"
 
 # /stride:create-goals
 
-Create a Stride goal with nested tasks, optionally informed by a directory of project markdown. This command is a thin surface: it parses `$ARGUMENTS`, optionally loads a read-only markdown **context bundle** from `--dir`, then routes through the **`stride-workflow`** orchestrator, which dispatches the `stride-creating-goals` sub-skill. The batch contract — the `"goals"` root key, index-based dependencies, and the five review_queue-scored fields on every nested task — lives in `skills/stride-creating-goals/SKILL.md` and is enforced there.
+Create a Stride goal with nested tasks, optionally informed by a directory of project markdown. This command is a thin surface: it parses `$ARGUMENTS`, optionally loads a read-only markdown **context bundle** from `--dir`, then routes through the **`stride-workflow`** orchestrator, which dispatches the `stride-creating-goals` sub-skill. The batch contract — the `"goals"` root key, the top-level `agent_name` beside it, index-based dependencies, and the five review_queue-scored fields on every nested task — lives in `skills/stride-creating-goals/SKILL.md` and is enforced there.
 
 **This command never invokes `stride-creating-goals` directly** — the sub-skill gate would block that. It always goes through `stride-workflow`, which writes the activation marker that permits the dispatch.
 
@@ -62,7 +62,7 @@ Skill(skill: "stride-workflow",
       args: "intent=create-goals; description=<INTENT>; context_dir=<CONTEXT_DIR>; context_bundle=<CONTEXT_BUNDLE>")
 ```
 
-Do NOT invoke `stride-creating-goals` yourself. The orchestrator is the only sanctioned path — it satisfies the sub-skill STOP gate by dispatching from inside itself, and it forwards the context bundle to the sub-skill, which mines it per its **Consuming Provided Context** section (populating both goal-level fields and each nested task). The context **augments** the user's interactive intent; it never silently overrides the user's confirmation, never relaxes the `"goals"` root-key or index-dependency rules, and never excuses leaving a required field (including the five review_queue-scored fields on every nested task) blank.
+Do NOT invoke `stride-creating-goals` yourself. The orchestrator is the only sanctioned path — it satisfies the sub-skill STOP gate by dispatching from inside itself, and it forwards the context bundle to the sub-skill, which mines it per its **Consuming Provided Context** section (populating both goal-level fields and each nested task). The context **augments** the user's interactive intent; it never silently overrides the user's confirmation, never relaxes the `"goals"` root-key, top-level `agent_name`, or index-dependency rules, and never excuses leaving a required field (including the five review_queue-scored fields on every nested task) blank.
 
 ## Terminal state
 

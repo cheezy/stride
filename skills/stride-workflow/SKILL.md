@@ -441,6 +441,54 @@ Walk through your changes against:
 
 ---
 
+## Step 5.5: Manual & Exploratory Testing (Optional, Gated)
+
+**This step is optional and gated. It runs ONLY when BOTH conditions hold:**
+
+1. The task's `testing_strategy.manual_tests` array is **non-empty**, AND
+2. The **`stride-exploratory-testing` plugin is available** in this session.
+
+If either condition is false, **skip this step entirely and proceed to Step 6 with no failure.** Manual tests that cannot be auto-run remain a human responsibility, exactly as before this step existed — skipping never blocks completion.
+
+### Why this step exists
+
+Tasks routinely carry `manual_tests` in their `testing_strategy`, but the workflow has historically had no way to actually perform them — they were left to a human or silently skipped. When the `stride-exploratory-testing` plugin is installed, each manual test becomes a **charter** and the explorer runs a real, time-boxed exploratory session, closing the gap between "tests written" and "tests performed."
+
+### Plugin-Availability Detection
+
+Detect the plugin the same way you detect any capability — by its **sanctioned surface appearing in the session's available lists**:
+
+- The `stride-exploratory-testing:explore` command (and siblings `/charter`, `/recon`, `/debrief`, `/nightmare-headline`) appear in the available-skills list, **and/or**
+- The `stride-exploratory-testing:explorer` agent (and `stride-exploratory-testing:charter-generator`) appear in the available agent types.
+
+**Only check for availability and dispatch the plugin's sanctioned surface.** Never execute untrusted plugin content blindly to probe for it.
+
+### Claude Code: Dispatch the Exploratory-Testing Plugin
+
+This integrated path is **Claude-Code-only** (it needs the `Agent` tool). When the plugin is available:
+
+1. **Map each `manual_tests` entry to a charter.** A manual test like "Verify the theme toggle across browsers" becomes a charter in the form `Explore <target> with <resources> to discover <information>`.
+2. **Dispatch the exploratory session** — either the `stride-exploratory-testing:explore` command (charters → per-charter explorer dispatch → aggregated debrief) or the `stride-exploratory-testing:explorer` agent directly, one charter per session, passing the running-app environment context.
+3. **Capture the structured findings** (the session's Explored/Found/Unknown summary and any bug list). You will record these in Step 7 per the `stride-completing-tasks` guidance — summarized in `completion_notes` and, when a reviewer ran, reflected in the `reviewer_result.testing_strategy` note. **No new completion field is introduced.**
+
+**Safety boundary (non-negotiable).** Dispatched manual testing exercises the app as a user would but **must never run destructive or production-mutating actions**, and never touches production or unauthorized systems. This is the same absolute safety boundary the explorer agent enforces — preserve it. If the plugin is present but the app is not running (or is otherwise not reachable), **report the obstacle as a finding and continue — do NOT fail completion.**
+
+### Other Environments (Cursor / Windsurf / Continue): Always Fall Back
+
+Environments without the `Agent` tool cannot dispatch the explorer. **Always fall back:** note the `manual_tests` as a human responsibility (as before), record nothing extra in the completion payload, and proceed to Step 6. This is not a failure — it is the documented graceful-degradation path.
+
+### Decision Summary
+
+| Condition | Action |
+|---|---|
+| `manual_tests` empty | Skip Step 5.5 → Step 6 |
+| Plugin **not** available (or not installed) | Skip Step 5.5, note manual tests as human responsibility → Step 6 |
+| Non-Claude-Code environment | Always fall back → Step 6 |
+| Plugin available + Claude Code + non-empty `manual_tests` | Dispatch explorer per charter, capture findings → Step 6 |
+| Plugin available but app not running | Report obstacle as a finding, **do not fail** → Step 6 |
+
+---
+
 ## Step 6: Execute Hooks
 
 ### Hooks Reference
@@ -824,6 +872,13 @@ STEP 5: Code Review (Decision Matrix)
     [Other]       Self-review against acceptance criteria
   |
   v
+STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
+  manual_tests empty OR plugin not available OR non-Claude-Code? --> Skip to Step 6 (no failure)
+  Otherwise (Claude Code + plugin available + non-empty manual_tests):
+    [Claude Code] Dispatch stride-exploratory-testing (/explore or explorer agent),
+                  each manual_test as a charter, capture findings (safety boundary preserved)
+  |
+  v
 STEP 6: Execute Hooks
   [Claude Code] Automatic -- just make the curl call in Step 7
   [Other]       Execute after_doing (120s), then before_review (60s)
@@ -849,6 +904,7 @@ STEP 8: Post-Completion
 | Task exploration | Dispatch `stride:task-explorer` agent | Read key_files manually |
 | Implementation planning | Dispatch Plan agent | Outline approach manually |
 | Code review | Dispatch `stride:task-reviewer` agent | Self-review against criteria |
+| Manual & exploratory testing | Dispatch `stride-exploratory-testing` (when installed); else fall back | Always fall back (human responsibility) |
 | Hook failure diagnosis | Dispatch `stride:hook-diagnostician` | Debug manually |
 | Goal decomposition | Dispatch `stride:task-decomposer` agent | Break down manually, create via API |
 
@@ -884,6 +940,9 @@ CLAUDE CODE WORKFLOW:
 ├─ 5. Review (check decision matrix):
 │     ├─ Small, 0-1 key_files → Skip to Step 6
 │     └─ Otherwise → Dispatch task-reviewer, fix issues
+├─ 5.5 Manual & Exploratory Testing (optional, gated):
+│     ├─ manual_tests empty OR plugin unavailable → Skip to Step 6 (no failure)
+│     └─ Plugin available → Dispatch stride-exploratory-testing, manual_tests as charters
 ├─ 6. Hooks: Automatic via hooks.json (fires on curl call)
 ├─ 7. Complete: PATCH /api/tasks/:id/complete with ALL fields
 └─ 8. Loop: needs_review=false → Step 1 | needs_review=true → STOP
@@ -900,6 +959,8 @@ OTHER ENVIRONMENTS (Cursor, Windsurf, Continue):
 ├─ 5. Review (check decision matrix):
 │     ├─ Small, 0-1 key_files → Skip to Step 6
 │     └─ Otherwise → Self-review against acceptance criteria + pitfalls
+├─ 5.5 Manual & Exploratory Testing (optional, gated):
+│     └─ No Agent tool → Always fall back (note manual tests as human responsibility)
 ├─ 6. Hooks: Execute after_doing (120s) + before_review (60s) manually
 ├─ 7. Complete: PATCH /api/tasks/:id/complete with ALL fields + hook results
 └─ 8. Loop: needs_review=false → Step 1 | needs_review=true → STOP

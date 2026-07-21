@@ -95,7 +95,13 @@ stride:stride-creating-goals          ← BEFORE calling POST /api/tasks/batch (
 
 ### stride-workflow
 
-**RECOMMENDED** entry point for all task work. Single orchestrator that walks through the complete lifecycle: prerequisites, claiming, codebase exploration, implementation, code review, hooks, and completion. Handles both Claude Code (with subagent dispatch) and other environments (Cursor, Windsurf, Continue). Eliminates the need to remember which skills to invoke at which moments.
+**RECOMMENDED** entry point for all task work. Single orchestrator that walks through the complete lifecycle: prerequisites, claiming, codebase exploration, implementation, code review, hooks, and completion. Handles both Claude Code (with subagent dispatch) and other environments (Cursor, Windsurf, Continue). Eliminates the need to remember which skills to invoke at which moments. (v1.38.0+) adds an optional **Manual & Exploratory Testing** step (Step 5.5) — see below.
+
+### Optional: Manual & Exploratory Testing integration (v1.38.0+)
+
+When the [`stride-exploratory-testing`](https://github.com/cheezy/stride-exploratory-testing) plugin is installed, the workflow gains an optional **Manual & Exploratory Testing** step — Step 5.5 in `stride-workflow`, Phase 3.5 in `stride-subagent-workflow`, between Code Review and Execute Hooks. When a task's `testing_strategy.manual_tests` is non-empty, each manual test is framed as an exploratory **charter** and the plugin runs a time-boxed session; the findings are recorded in existing completion fields (`completion_notes` and the `reviewer_result.testing_strategy` note) — no new completion field is introduced. Dispatched manual testing preserves the exploratory-testing safety boundary — it never runs destructive or production-mutating actions. The creation skills add an advisory note nudging authors to phrase `manual_tests` entries as chartable scenarios.
+
+**Graceful fallback:** when the `stride-exploratory-testing` plugin is not installed, the task has no `manual_tests`, or you are in a non-Claude-Code environment, this step is skipped with no failure — completion proceeds exactly as before. The integration is optional and Claude-Code-only.
 
 ### stride-claiming-tasks
 

@@ -4,6 +4,19 @@ All notable changes to the Stride plugin will be documented in this file.
 
 ## [Unreleased]
 
+## [1.38.0] - 2026-07-21
+
+### Added — optional exploratory-testing manual-testing integration (G344)
+
+Stride now integrates optionally and gracefully with the [`stride-exploratory-testing`](https://github.com/cheezy/stride-exploratory-testing) plugin so that a task's `testing_strategy.manual_tests` can actually be executed instead of left to a human or silently skipped.
+
+- **`stride-workflow`** gains **Step 5.5: Manual & Exploratory Testing (Optional, Gated)** between Code Review and Execute Hooks. It runs only when the task's `manual_tests` is non-empty **and** the `stride-exploratory-testing` plugin is available in the session; each manual test is mapped to an exploratory charter and the plugin's `/explore` command / `explorer` subagent runs a time-boxed session. The Complete Workflow Flowchart, Platform Summary, and both Quick Reference Card blocks are updated to match.
+- **`stride-subagent-workflow`** documents the dispatch as a first-class, optional Phase 3.5 (and an orthogonal note under the Decision Matrix) with the identical trigger condition, inputs (manual tests as charters, the feature/target, the running app), outputs (structured findings), and the graceful skip when the plugin is absent.
+- **`stride-completing-tasks`** documents recording the findings in **existing** completion fields only — summarized in `completion_notes` and reflected in the `reviewer_result.testing_strategy` note — introducing **no** new server-validated field and **no** 7th `workflow_steps` name, so the strict-completion-validation contract is unchanged.
+- **`stride-creating-tasks`** and **`stride-creating-goals`** gain an advisory (non-required) note that `manual_tests` entries are run as charters when the plugin is installed, so authors should phrase each as a chartable scenario, with a before/after example. The required `testing_strategy` shape and the review_queue empty-pill gate are unchanged.
+
+The integration is **optional, Claude-Code-only, and gated on plugin availability**. When the `stride-exploratory-testing` plugin is not installed, the task has no `manual_tests`, or the environment is not Claude Code, the workflow falls back to prior behavior with no failure. Dispatched manual testing preserves the exploratory-testing safety boundary — no destructive or production-mutating actions.
+
 ### Fixed — the enrichment surface documented create and update bodies without their `task` root key (D151)
 
 `stride-enriching-tasks` documented submitting an enriched task with a bare body: `POST /api/tasks` carried `-d '{...enriched task JSON...}'` and no `agent_name`. The server requires a `{"task": {...}}` envelope and rejects a bare object with `422 Missing 'task' key`, so an agent following the enrichment skill literally built a rejected request and — once corrected by hand — created a task with no attribution fallback. The create example now shows the envelope with `"agent_name": "Claude Opus 4.6"` beside the `task` key, matching the Request Envelope section in `stride-creating-tasks` and the plain agent name this port already sends on claim and complete.

@@ -22,6 +22,7 @@ This skill contains the decision matrix that determines which agents to dispatch
 - `stride:task-reviewer` — Review your changes against acceptance criteria before completion
 - `stride:task-decomposer` — Break goals into properly-sized subtasks
 - `stride:hook-diagnostician` — Diagnose hook failures with prioritized fix plans
+- `stride-exploratory-testing` (optional dispatch) — Run the task's `manual_tests` as exploratory charters **when that plugin is installed**; skipped gracefully when it is not
 
 **Skipping this skill means:**
 - No codebase exploration before implementation (wrong approach, 2+ hours wasted)
@@ -77,6 +78,8 @@ Use this matrix to determine which subagents to dispatch based on task attribute
 | 25+ hour estimate, not yet decomposed | Run | Skip* | Skip* | Skip* |
 
 *After decomposition, each resulting child task follows its own row in this matrix when claimed individually.
+
+**Orthogonal optional dispatch — `stride-exploratory-testing`:** independent of the columns above, dispatch the exploratory-testing plugin after review (Phase 3.5) **only when BOTH** the task's `testing_strategy.manual_tests` is non-empty **AND** the `stride-exploratory-testing` plugin is available in this Claude Code session. This dispatch is **optional and never required for completion** — when the plugin is absent (or in a non-Claude-Code environment) it is skipped gracefully, exactly as before. See Phase 3.5 below.
 
 **Quick rules:**
 - If the task is a **goal** or has **large complexity without child tasks** or a **25+ hour estimate**: dispatch the decomposer first. The decomposer breaks it into claimable child tasks — you don't implement goals directly.
@@ -183,6 +186,23 @@ The reviewer will return either "Approved" or a list of issues categorized as Cr
 - Fix Important issues before proceeding
 - Minor issues are optional but recommended
 - After fixing, you do NOT need to re-run the reviewer — proceed to the after_doing hook
+
+## Phase 3.5: Manual & Exploratory Testing (Optional, Gated — After Review, Before Hooks)
+
+**When:** BOTH conditions hold — the task's `testing_strategy.manual_tests` array is **non-empty** AND the `stride-exploratory-testing` plugin is **available** in this Claude Code session (its `stride-exploratory-testing:explore` command / `stride-exploratory-testing:explorer` agent appear in the session's available lists). This trigger is intentionally **identical** to `stride-workflow` Step 5.5 — keep the two in sync. If either condition is false, **skip this phase and proceed to the hooks with no failure.** This dispatch is **optional and never required for completion.**
+
+**What to do:** Dispatch the `stride-exploratory-testing` plugin — its `stride-exploratory-testing:explore` command or `stride-exploratory-testing:explorer` agent — to run the task's manual tests as a real exploratory session.
+
+Provide the plugin with:
+- The task's `testing_strategy.manual_tests` entries, **each framed as a charter** (`Explore <target> with <resources> to discover <information>`)
+- The feature/target under test (the task's `what` / `where_context`)
+- The running-app environment context (base URL, auth, non-production instance)
+
+The plugin returns **structured findings** — the session's Explored/Found/Unknown summary and any severity-ranked bug list. Record these in existing completion fields per `stride-completing-tasks` (summarized in `completion_notes`, and reflected in the `reviewer_result.testing_strategy` note when a reviewer ran). **No new completion field is introduced.**
+
+**Safety boundary (non-negotiable):** dispatched manual testing exercises the app as a user would but **must never run destructive or production-mutating actions** and never touches production or unauthorized systems — the same absolute boundary the explorer agent enforces. If the plugin is present but the app is not running, **report the obstacle as a finding and continue — do NOT fail completion.**
+
+**Graceful skip:** when the `stride-exploratory-testing` plugin is not installed, or in a non-Claude-Code environment, skip this phase entirely — note the `manual_tests` as a human responsibility (as before) and proceed. Skipping never blocks or fails completion.
 
 ## Workflow Flowchart
 

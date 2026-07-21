@@ -460,6 +460,11 @@ Use these exact values — any other value will be rejected.
 **Valid keys:** `unit_tests`, `integration_tests`, `manual_tests`, `edge_cases`, `coverage_target`
 **All values** must be strings or arrays of strings.
 
+> **Advisory (optional) — phrase `manual_tests` as chartable scenarios.** When the `stride-exploratory-testing` plugin is installed, each `manual_tests` entry is run as an exploratory **charter** (see `stride-workflow` Step 5.5). Terse fragments make weak charters, so phrase each entry as a chartable scenario — a **target** plus the **information/risk to discover** — rather than a bare test fragment. This is **advisory only**: it does **not** change the required `testing_strategy` shape, does **not** make `manual_tests` entries longer-required, and does **not** alter the review_queue empty-pill gate — existing terse entries still validate.
+>
+> - Before: `"Test in multiple browsers"`
+> - After: `"Explore the theme toggle across browsers to discover rendering inconsistencies"`
+
 ### security_considerations
 
 ```json

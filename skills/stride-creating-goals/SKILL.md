@@ -255,6 +255,9 @@ When depending on EXISTING tasks already in the system:
 
 - `acceptance_criteria` — newline-separated string; the implementing agent's definition of done. **Blank → empty pill on the review_queue.**
 - `testing_strategy` — object with `unit_tests`, `integration_tests`, `manual_tests` arrays. **Empty arrays → empty pill on the review_queue.**
+  > **Advisory (optional) — phrase `manual_tests` as chartable scenarios.** When the `stride-exploratory-testing` plugin is installed, each `manual_tests` entry is run as an exploratory **charter** (see `stride-workflow` Step 5.5). Terse fragments make weak charters, so phrase each entry as a chartable scenario — a **target** plus the **information/risk to discover** — rather than a bare test fragment. This is **advisory only**: it does **not** change the required `testing_strategy` shape, does **not** make `manual_tests` entries longer-required, and does **not** alter the review_queue empty-pill gate — existing terse entries still validate.
+  > - Before: `"Test in multiple browsers"`
+  > - After: `"Explore the theme toggle across browsers to discover rendering inconsistencies"`
 - `security_considerations` — array of strings naming the security implications to address (or an explicit "None — …" reason). **Empty array → empty pill on the review_queue.**
 - `pitfalls` — array of "don't do X" strings. **Empty array → empty pill on the review_queue.**
 - `patterns_to_follow` — newline-separated string with file references. **Blank → empty pill on the review_queue.**

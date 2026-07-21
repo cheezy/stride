@@ -495,6 +495,19 @@ saved separately as `review_report`.
 
 **Optional:** Include `review_report` when a task-reviewer agent produced a structured review. Omit it when no review was performed (e.g., small tasks with 0-1 key_files).
 
+### Recording Manual & Exploratory Testing Findings (Optional — Existing Fields Only)
+
+When manual testing was performed via the **`stride-exploratory-testing` plugin** (the optional, gated Step 5.5 in `stride-workflow` / Phase 3.5 in `stride-subagent-workflow`), its findings are recorded in **existing completion fields** — **never** in a new server-validated field and **never** as a 7th `workflow_steps` name. This keeps the strict-completion-validation contract intact; the server rejects nothing.
+
+Record the session's results in these two existing carriers:
+
+- **`completion_notes`** — append a short manual-testing summary: the session's Explored/Found/Unknown outcome and any bugs surfaced (with severity). This is the primary carrier and is always available, even when no reviewer ran.
+- **`reviewer_result.testing_strategy.note`** — **when a reviewer ran**, reflect the manual-testing verdict inside the existing tolerant `testing_strategy` verdict note (e.g. append `"Manual/exploratory session: <one-line outcome>."` to the note). This reuses the tolerant-field approach already used for `reviewer_result`; do **not** add a new top-level key. When no reviewer ran, skip this carrier and rely on `completion_notes` alone.
+
+**Fallback (plugin not used) — completion is unchanged.** When the `stride-exploratory-testing` plugin was **not** used — because it is not installed, the task had no `manual_tests`, or this is a non-Claude-Code environment — record **nothing extra**. The completion payload is exactly what it would have been before this integration; no field is added, removed, or made required.
+
+**Security:** the recorded summary must **not** include real credentials, private data, or internal hostnames captured during exploration — redact them before writing to `completion_notes` or the `testing_strategy` note.
+
 **Optional (back-compat only):** On Stride server v1.16.0+, the `after_doing` hook PUTs `.stride-changed-files.json` to the server before the completion curl executes, so the agent does NOT need to send `changed_files` in the body. For older Stride deployments, the body still accepts `changed_files` — see the [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section below for the inline-cat pattern that targets those servers. The encoding rules (500-line truncation marker, binary placeholder, `{path, diff}` shape) live in `docs/diff-contract.md` and should not be duplicated into the example.
 
 ## Explorer/Reviewer Result Schema

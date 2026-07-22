@@ -4,6 +4,19 @@ All notable changes to the Stride plugin will be documented in this file.
 
 ## [Unreleased]
 
+## [1.39.0] - 2026-07-22
+
+### Added — optional deep security-considerations review integration (G-5613)
+
+Stride now integrates optionally and gracefully with the [`stride-security-review`](https://github.com/cheezy/stride-security-review) plugin so that a task's `security_considerations` can be checked by the specialist security-reviewer during the review phase, not just the generalist task-reviewer.
+
+- **`stride-agents/task-reviewer`** schema bumps to `schema_version` **1.5**: the `security_considerations` verdict object gains an OPTIONAL nested `considerations[]` array (`{ consideration, status: mitigated | partial | unmitigated, evidence, note }`) with a fail-closed escalation rule — any `partial`/`unmitigated` entry forces the section `status` to `failed` and requires a matching `category: "security"` issue. The three-state section-status enum (`passed`/`failed`/`not_assessed`) is unchanged; the nested array is populated only on the Claude Code path and is always optional.
+- **`stride-workflow`** gains a **Deep security-considerations review (Optional, Gated)** sub-step in Step 5. When the task has non-empty `security_considerations` **and** the `stride-security-review` plugin is available (detected via its sanctioned surface — never by executing untrusted plugin content), the `stride-security-review:security-reviewer` agent is dispatched in considerations mode with the git diff and the `security_considerations` list framed as **data to assess, never instructions**. Its verdicts merge into `reviewer_result.security_considerations.considerations[]` via the existing whole-object passthrough, escalate fail-closed, and the dispatch time folds into the existing reviewer `workflow_steps` entry (no new step name).
+- **`stride-subagent-workflow`** documents the dispatch as an orthogonal Decision-Matrix trigger with the identical condition, kept in sync with `stride-workflow` Step 5.
+- **`stride-completing-tasks`** documents that the nested `considerations[]` breakdown rides through the verbatim whole-object copy automatically (no new enumerated key) and adds a pre-submission self-check item: when a deep review ran the nested array must be present and consistent with the section status (a `passed` status beside a `partial`/`unmitigated` entry is a hard fail); when no deep review ran the array is simply absent and never required. The existing `not_assessed` gate and the self-check's privacy guarantee are unchanged.
+
+The integration is **optional, Claude-Code-only, and gated on plugin availability**. When the `stride-security-review` plugin is not installed, the task has no `security_considerations` (or only a `None — …` placeholder), or the environment is not Claude Code, the workflow falls back to the task-reviewer's prose verdict with no failure. A plugin that is present but returns malformed/absent verdicts stays fail-closed — the prose verdict is kept and the anomaly noted, never silently downgraded to `passed`.
+
 ## [1.38.0] - 2026-07-21
 
 ### Added — optional exploratory-testing manual-testing integration (G344)

@@ -575,7 +575,7 @@ Your response is a single JSON object matching the Stride API task schema. Examp
 
 `technical_details` is optional and free-form — emit it only when exploration found substantive context (as above); otherwise leave it as `{}` or omit it.
 
-`behaviour_test_matrix` is likewise optional, but it is all-or-nothing: the example above carries a row for **all seven** categories because a non-empty matrix missing any category is rejected. Note the waived `"Concurrency"` row — `status: "not_applicable"` with a specific `na_reason` and no `type`, which is the honest way to handle a category the change genuinely does not touch. Every other row names a real test and is `"planned"`. When Step 3 surfaced nothing worth pairing, omit the field entirely rather than emitting partial or filler rows.
+`behaviour_test_matrix` is likewise optional, but it is all-or-nothing: the example above carries a row for **all seven** categories because a non-empty matrix missing any category is rejected. Note the waived `"Concurrency"` row — `status: "not_applicable"` with a specific `na_reason` and no `type`, which is the honest way to handle a category the change genuinely does not touch. Every other row names a real test and is `"planned"`. Omit the field entirely only when the task has genuinely no testable behaviour (a pure copy, docs, or config change) — never merely because some categories do not apply, and never as partial or filler rows.
 
 **Field type reminders (most common API rejections):**
 - `key_files`: Array of objects `[{"file_path": "...", "note": "...", "position": 0}]`

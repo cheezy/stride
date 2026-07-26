@@ -304,9 +304,69 @@ The following shows a defect task after enrichment. `title`, `type`, and `descri
     "Don't forget to handle timezone display — use the existing application timezone handling",
     "Don't break existing comment layout or styling",
     "Don't forget to verify dark mode contrast for timestamp text"
+  ],
+  "behaviour_test_matrix": [
+    {
+      "category": "Happy path",
+      "behaviour": "Each rendered comment shows its creation timestamp",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"renders a timestamp for each comment\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 0
+    },
+    {
+      "category": "Boundary",
+      "behaviour": "A comment from a previous year renders the full date rather than a time-only label",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"renders the full date for a prior-year comment\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 1
+    },
+    {
+      "category": "Error / exception",
+      "behaviour": "The reported bug no longer reproduces — a comment never renders with a missing or blank timestamp",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"regression: comment timestamp is never blank\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 2
+    },
+    {
+      "category": "Null / empty",
+      "behaviour": "A task with no comments renders the empty state without a stray timestamp element",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"renders no timestamp when there are no comments\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 3
+    },
+    {
+      "category": "Concurrency",
+      "behaviour": "N/A — rendering a stored timestamp is a read-only display change with no shared-state writer",
+      "test_name": "N/A",
+      "status": "not_applicable",
+      "na_reason": "The fix only formats an already-persisted inserted_at for display; no write path or shared state is involved",
+      "position": 4
+    },
+    {
+      "category": "Lifecycle / wiring",
+      "behaviour": "Timestamps appear on the first render of the task detail view, not only after a live update",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"shows timestamps on initial mount\"",
+      "type": "integration",
+      "status": "planned",
+      "position": 5
+    },
+    {
+      "category": "Contract / serialization",
+      "behaviour": "The stored inserted_at is formatted in the application timezone rather than raw UTC",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"formats inserted_at in the application timezone\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 6
+    }
   ]
 }
 ```
+
+Note the `"Error / exception"` row: on a defect it pairs the bug-no-longer-reproducing behaviour with the regression test, per Step 3's defect guidance. The waived `"Concurrency"` row carries a specific `na_reason` and no `type` — the honest way to handle a category this fix genuinely does not touch.
 
 ## Red Flags - STOP
 

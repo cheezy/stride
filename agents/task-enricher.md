@@ -19,12 +19,12 @@ The full process runs in four ordered phases. Steps within Phase 2 are also orde
 2. **Phase 2 — Explore Codebase** (six ordered steps):
    1. Locate target area via grep → `key_files`, `where_context`
    2. Read sibling modules → `patterns_to_follow`
-   3. Map key_files to test files → `testing_strategy`
+   3. Map key_files to test files → `testing_strategy`, optional `behaviour_test_matrix`
    4. Build runnable commands → `verification_steps`
    5. Analyze code area for risks and security → `pitfalls`, `security_considerations`
    6. Convert intent to outcomes → `acceptance_criteria`
 3. **Phase 3 — Estimate Complexity**: Apply the heuristic table to all collected signals.
-4. **Phase 4 — Assemble and Validate**: Combine all fields, run the 17-item checklist, return the enriched JSON for the orchestrator to submit.
+4. **Phase 4 — Assemble and Validate**: Combine all fields, run the 18-item checklist, return the enriched JSON for the orchestrator to submit.
 
 ## Phase 1: Parse Intent
 
@@ -110,7 +110,7 @@ No similar feature exists?
   → Note the general project conventions (from CLAUDE.md/AGENTS.md patterns)
 ```
 
-### Step 3: Analyze Testing → `testing_strategy`
+### Step 3: Analyze Testing → `testing_strategy`, optional `behaviour_test_matrix`
 
 **Strategy:** Find existing test files for the key_files and infer what tests are needed.
 
@@ -131,9 +131,38 @@ No similar feature exists?
    - `edge_cases`: Null inputs, empty lists, concurrent access, permission boundaries
    - `coverage_target`: e.g., "100% for new/modified functions"
 
+4. **Project those test cases onto a `behaviour_test_matrix`.** The `unit_tests` / `integration_tests` / `manual_tests` / `edge_cases` you just generated are already the raw material — the matrix restates them one behaviour at a time, each paired with the test that covers it, across **seven fixed categories**. Emit one row per category, in this canonical order:
+
+   | Category | What it covers |
+   |---|---|
+   | `"Happy path"` | The change working as intended on valid input |
+   | `"Boundary"` | Limits and edges — first/last, min/max, off-by-one |
+   | `"Error / exception"` | Invalid input and failure paths surfacing correctly |
+   | `"Null / empty"` | Nil, empty collections, absent records |
+   | `"Concurrency"` | Races, simultaneous writers, shared state |
+   | `"Lifecycle / wiring"` | Mount/remount, setup/teardown, the change actually being wired in |
+   | `"Contract / serialization"` | Round-tripping through a boundary — params, JSON, changesets |
+
+   Each row is an object with these keys:
+
+   - `category` — exactly one of the seven strings above. No other value is accepted.
+   - `behaviour` — what the code should do, in one line (e.g. `"rejects an expired claim"`).
+   - `test_name` — the **real** test covering it: a test file you just mapped, or `path/to/test.exs — "test name"` for a test you are planning. Prefer a test *name* over a bare `file:line` — the test does not exist yet at enrichment time, so a line number is invented and goes stale immediately. Never invent a path: use only test files you actually located.
+   - `type` — `"unit"`, `"integration"`, or `"manual"`, or a `/`-joined combination like `"unit / manual"`.
+   - `status` — **always `"planned"`** for rows you author during enrichment. The implementing agent advances a row to `"passing"` / `"failing"` as its test is written and run; `"failing"` and `"passing"` are never correct at enrichment time. Use `"not_applicable"` only to waive a row (see below).
+   - `na_reason` — required on a waived row. One line saying why the category needs no test here.
+   - `position` — integer >= 0, row order. Emit the rows in that order too; nothing re-sorts the array.
+
+   **Every row needs either a real `test_name` or an `na_reason` — never neither.** Many tasks genuinely have no Concurrency or Lifecycle surface: waive that row (`"status": "not_applicable"`, `"test_name": "N/A"`, plus a specific `na_reason`) rather than inventing a test to fill the slot. A fabricated test name is worse than an honest waiver.
+
+   **All seven categories or nothing.** A non-empty matrix missing any category is rejected by the API, so either emit all seven rows or omit `behaviour_test_matrix` entirely. Omitting it is legitimate when Step 3 surfaced no concrete behaviours worth pairing — the field is optional and is **not** one of the five review_queue-scored fields, so a missing matrix is never an empty pill and never a scoring gap. Never pad it with filler rows to reach seven.
+
+   **No secrets, no markup.** Row text is stored and later rendered, so never place tokens, passwords, credentials, or raw HTML in `behaviour`, `test_name`, or `na_reason`.
+
 **For defect tasks**, additionally include:
 - A regression test that reproduces the original bug
 - Tests verifying the fix doesn't break related functionality
+- When you built a matrix, an `"Error / exception"` row whose `behaviour` is the bug no longer reproducing, paired with that regression test
 
 ### Step 4: Define Verification → `verification_steps`
 
@@ -225,7 +254,7 @@ If exploration surfaced concrete technical context that doesn't fit the structur
 
 Combine all discovered fields into the final task specification. **Return the assembled JSON as your final response — the orchestrator submits it.**
 
-**Pre-submission checklist (17 items):**
+**Pre-submission checklist (18 items):**
 - [ ] `title`, `type`, and `description` are preserved from human input (never modified by enrichment)
 - [ ] `complexity` matches the heuristic analysis
 - [ ] `priority` is set (default `"medium"` if unspecified)
@@ -240,9 +269,10 @@ Combine all discovered fields into the final task specification. **Return the as
 - [ ] `acceptance_criteria` is a newline-separated string (NOT an array)
 - [ ] `patterns_to_follow` is a newline-separated string (NOT an array)
 - [ ] `pitfalls` is an array of strings
+- [ ] `behaviour_test_matrix` — **optional**; decide explicitly: either omit it entirely, or emit one row for **all 7** fixed categories, every row either naming a real `test_name` (with a `type`) and `status` `"planned"`, or waived with `status` `"not_applicable"` plus an `na_reason`. Omitting it is always a correct outcome — not review_queue-scored, never an empty pill. **This item is satisfied by making the call, not by producing rows.**
 - [ ] `needs_review` is set to `false`
 - [ ] No invented file paths — every entry is a path located via Grep, Glob, or Read
-- [ ] All 17 fields above were considered for this task (none silently skipped)
+- [ ] All 18 items above were considered for this task (none silently skipped) — for the one optional item, `behaviour_test_matrix`, a deliberate omission counts as considered
 
 ## Handling Defect Tasks
 
@@ -478,6 +508,64 @@ Your response is a single JSON object matching the Stride API task schema. Examp
     "Scope the paginated query to tasks the current user is authorized to view — never page across other users' data",
     "Coerce and bounds-check the page/page_size params (reject negatives and absurd sizes) to avoid resource-exhaustion queries"
   ],
+  "behaviour_test_matrix": [
+    {
+      "category": "Happy path",
+      "behaviour": "Returns the first page of tasks at the default page size of 25",
+      "test_name": "test/kanban/tasks_test.exs — \"paginates tasks at the default page size\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 0
+    },
+    {
+      "category": "Boundary",
+      "behaviour": "The final page returns fewer rows than page_size, and consecutive pages never overlap",
+      "test_name": "test/kanban/tasks_test.exs — \"returns a short final page without overlapping rows\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 1
+    },
+    {
+      "category": "Error / exception",
+      "behaviour": "A negative or non-integer page param is rejected and falls back to page 1 without raising",
+      "test_name": "test/kanban_web/live/task_live/index_test.exs — \"falls back to page 1 on a malformed page param\"",
+      "type": "integration",
+      "status": "planned",
+      "position": 2
+    },
+    {
+      "category": "Null / empty",
+      "behaviour": "A board with no tasks renders the empty state rather than pagination controls",
+      "test_name": "test/kanban_web/live/task_live/index_test.exs — \"renders the empty state with no tasks\"",
+      "type": "integration",
+      "status": "planned",
+      "position": 3
+    },
+    {
+      "category": "Concurrency",
+      "behaviour": "N/A — pagination adds a read-only query with no new shared-state writer",
+      "test_name": "N/A",
+      "status": "not_applicable",
+      "na_reason": "The change introduces no write path, so there is no concurrent-writer race to cover",
+      "position": 4
+    },
+    {
+      "category": "Lifecycle / wiring",
+      "behaviour": "The current page survives a handle_params round trip so a refresh or back-button lands on the same page",
+      "test_name": "test/kanban_web/live/task_live/index_test.exs — \"keeps the current page across handle_params\"",
+      "type": "integration",
+      "status": "planned",
+      "position": 5
+    },
+    {
+      "category": "Contract / serialization",
+      "behaviour": "page and page_size round-trip through the URL query string as 1-based integers",
+      "test_name": "test/kanban/tasks_test.exs — \"coerces page params to 1-based integers\"; test/kanban_web/live/task_live/index_test.exs — \"round-trips the page params in the URL\"",
+      "type": "unit / integration",
+      "status": "planned",
+      "position": 6
+    }
+  ],
   "technical_details": {
     "data_shapes": {"page_params": "page (1-based integer), page_size (defaults to 25)"},
     "gotchas": ["The existing task query is unsorted — add a stable ORDER BY before paginating or pages will overlap"]
@@ -486,6 +574,8 @@ Your response is a single JSON object matching the Stride API task schema. Examp
 ```
 
 `technical_details` is optional and free-form — emit it only when exploration found substantive context (as above); otherwise leave it as `{}` or omit it.
+
+`behaviour_test_matrix` is likewise optional, but it is all-or-nothing: the example above carries a row for **all seven** categories because a non-empty matrix missing any category is rejected. Note the waived `"Concurrency"` row — `status: "not_applicable"` with a specific `na_reason` and no `type`, which is the honest way to handle a category the change genuinely does not touch. Every other row names a real test and is `"planned"`. When Step 3 surfaced nothing worth pairing, omit the field entirely rather than emitting partial or filler rows.
 
 **Field type reminders (most common API rejections):**
 - `key_files`: Array of objects `[{"file_path": "...", "note": "...", "position": 0}]`
@@ -497,12 +587,13 @@ Your response is a single JSON object matching the Stride API task schema. Examp
 - `pitfalls`: Array of strings `["Don't...", "Avoid..."]`
 - `estimated_files`: Optional string range like `"3-5"` — emit when the count is meaningful, omit otherwise
 - `technical_details`: Optional free-form object `{"data_shapes": {...}, "gotchas": ["..."]}` — any keys; leave `{}` when nothing substantive was found; NOT a review_queue-scored field; never record secrets
+- `behaviour_test_matrix`: Optional array of row objects — shape shown as an **excerpt only**: `[{"category": "Happy path", "behaviour": "...", "test_name": "...", "type": "unit", "status": "planned", "position": 0}, …]`. A real matrix carries a row for **all 7** fixed categories or the field is omitted entirely; the single-row value above would be rejected as a partial matrix. Every row needs a real `test_name` or an `na_reason`; NOT a review_queue-scored field; never record secrets
 
 ## Important Constraints
 
 - **Preserve human input verbatim** — `title`, `type`, and `description` come from the human and must never be modified, paraphrased, or "improved" by enrichment
 - **Always run the full 4-phase process** — even for tasks that look simple; skipping phases produces partial enrichment, which costs the implementing agent 15-30 minutes per missing field
-- **Always include all 17 fields from the Phase 4 checklist** — partial enrichment ≈ no enrichment in practice
+- **Work through all 18 items in the Phase 4 checklist** — every field it marks mandatory must be populated; `behaviour_test_matrix` is the sole optional item and may be omitted outright. Partial enrichment ≈ no enrichment in practice
 - **Never make changes to any files — you are read-only**
 - **Do not interact with the Stride API — you only explore code and produce JSON**
 - **Do not ask the human** unless the task is genuinely ambiguous (3+ valid interpretations) or requires domain knowledge not visible in the codebase; when you must ask, provide 2-3 specific options, never open-ended questions

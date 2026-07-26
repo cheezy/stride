@@ -94,7 +94,7 @@ This skill has two execution paths. Pick the one matching your platform.
 
 #### Claude Code: Dispatch the Enricher Agent
 
-1. **Dispatch `stride:task-enricher`** with the human-provided `title`, `type` (if known), `description`, and any `priority` or `dependencies` the human mentioned. The agent owns the four-phase enrichment procedure (intent parse, codebase exploration, complexity heuristic, 17-item validation checklist) and returns a single JSON object containing every enriched field.
+1. **Dispatch `stride:task-enricher`** with the human-provided `title`, `type` (if known), `description`, and any `priority` or `dependencies` the human mentioned. The agent owns the four-phase enrichment procedure (intent parse, codebase exploration, complexity heuristic, 18-item validation checklist) and returns a single JSON object containing every enriched field.
 2. **Wait for the result.** The agent's output is a complete enriched-task JSON ready for `POST /api/tasks` (new task) or the enriched-fields subset ready for `PATCH /api/tasks/:id` (existing minimal task). The agent does NOT call the API itself.
 3. **Submit via the Stride API** using the curl pattern in [API Integration](#api-integration) below. Verify the field types match the reminders in that section before submitting.
 4. **Do NOT walk the manual phases below.** The agent already executed them. Re-running them duplicates work and risks divergence.
@@ -106,7 +106,7 @@ Cursor, Windsurf, Continue, and other IDEs without subagent dispatch must walk t
 1. **Run Phase 1** — preserve `title`, `type`, `description` exactly as the human wrote them; default `priority` to `"medium"`; capture explicit `dependencies`.
 2. **Run Phase 2** — six ordered exploration steps, summarized below.
 3. **Run Phase 3** — paragraph-form complexity heuristic below.
-4. **Run Phase 4** — the 17-item pre-submission checklist (kept in full below).
+4. **Run Phase 4** — the 18-item pre-submission checklist (kept in full below).
 5. **Submit via [API Integration](#api-integration).**
 
 ## Manual Walkthrough Phases
@@ -131,9 +131,21 @@ Grep pattern="<keyword1>|<keyword2>" path="lib/" output_mode="files_with_matches
 
 List sibling modules in the same directory as `key_files`. Find the closest analog feature already in the codebase. Format as newline-separated references: `See lib/path/to/file.ex for X pattern`.
 
-**Step 3: Analyze testing → `testing_strategy`**
+**Step 3: Analyze testing → `testing_strategy`, optional `behaviour_test_matrix`**
 
 Map each `key_file` to its corresponding test file (e.g., `lib/foo.ex` → `test/foo_test.exs`). Read existing tests to learn helper modules, factories, and assertion style. Generate `unit_tests`, `integration_tests`, `manual_tests`, `edge_cases`, and `coverage_target`.
+
+**`behaviour_test_matrix` (optional, built here):** Project the behaviours the change must satisfy onto a `behaviour_test_matrix` — an array of rows, each pairing one behaviour with the real test that covers it — by mapping the `unit_tests` / `integration_tests` / `manual_tests` / `edge_cases` you just derived onto the **7 fixed categories**. It is **not** one of the five review_queue-scored fields, so leaving it unset is never an empty pill; build it when the analysis produced concrete behaviours, and omit it entirely when it did not — never emit filler rows:
+
+- `category` — exactly one of `"Happy path"`, `"Boundary"`, `"Error / exception"`, `"Null / empty"`, `"Concurrency"`, `"Lifecycle / wiring"`, `"Contract / serialization"`. No other value is accepted.
+- `behaviour` — what the code should do, in one line (e.g. `"rejects an expired claim"`).
+- `test_name` — the **real** test covering it: the test file you just mapped, or `path/to/test.exs — "test name"` for a test you plan to add. Prefer a test name over a bare `file:line` — the test does not exist yet at enrichment time, so a line number is invented and goes stale immediately. Never invent a path either: use only test files you located by searching the repo, the same rule `key_files` follows.
+- `type` — `"unit"`, `"integration"`, or `"manual"`, or a `/`-joined combination like `"unit / manual"`.
+- `status` — one of `"planned"`, `"passing"`, `"failing"`, `"not_applicable"` (an omitted status defaults to `"planned"`). Write `"planned"` explicitly for every row you author during enrichment; the implementing agent advances it to `"passing"` / `"failing"` as the test is written and run. `"not_applicable"` is for waived rows only.
+- `na_reason` — required when the row is waived (`status: "not_applicable"`, or an N/A `test_name`). One line saying why the category needs no test here, e.g. `"No shared state — single-writer preference update, no concurrent path exists"`.
+- `position` — integer >= 0, row order. The API does not reject a row missing it, but it is how a row records its intended order, so always supply it — and emit the rows in that order too, since nothing re-sorts the array.
+
+**A row must have either a real `test_name` or an `na_reason` — never neither.** Many enriched tasks genuinely have no Concurrency or Lifecycle surface; waive those rows with a specific reason rather than inventing a test. And because the matrix is only valid once it covers **all 7** categories, it is all-or-nothing: either emit a row for every category, or omit the field entirely. A partial matrix is rejected; an absent or empty one passes. Row text is stored and later rendered, so never record secrets, credentials, or raw HTML in `behaviour`, `test_name`, or `na_reason`.
 
 **Step 4: Define verification → `verification_steps`**
 
@@ -157,19 +169,7 @@ In the same pass, analyze the touched code for security implications → `securi
 
 Convert intent to observable, testable outcomes. Format as newline-separated string. Include user-facing outcomes, technical requirements, negative criteria, and "All existing tests still pass".
 
-**For defects:** search for the error string, include a regression test in `unit_tests`, add "Bug no longer reproducible" to `acceptance_criteria`.
-
-**Optional — `behaviour_test_matrix`:** If Step 3's testing analysis surfaced concrete behaviours the change must satisfy, you may additionally turn them into a `behaviour_test_matrix` — an array of rows, each pairing one behaviour with the real test that covers it. It is **not** one of the five review_queue-scored fields, so leaving it unset is never an empty pill; populate it only when you have real rows to record, never as filler. Build it by projecting the `unit_tests` / `integration_tests` / `manual_tests` / `edge_cases` you already derived onto the **7 fixed categories**:
-
-- `category` — exactly one of `"Happy path"`, `"Boundary"`, `"Error / exception"`, `"Null / empty"`, `"Concurrency"`, `"Lifecycle / wiring"`, `"Contract / serialization"`. No other value is accepted.
-- `behaviour` — what the code should do, in one line (e.g. `"rejects an expired claim"`).
-- `test_name` — the **real** test covering it: the test file you mapped in Step 3, or `path/to/test.exs — "test name"` for a test you plan to add. Prefer a test name over a bare `file:line` — the test does not exist yet at enrichment time, so a line number is invented and goes stale immediately. Never invent a path either: use only test files you located by searching the repo, the same rule `key_files` follows.
-- `type` — `"unit"`, `"integration"`, or `"manual"`, or a `/`-joined combination like `"unit / manual"`.
-- `status` — one of `"planned"`, `"passing"`, `"failing"`, `"not_applicable"` (an omitted status defaults to `"planned"`). Write `"planned"` explicitly for every row you author during enrichment; the implementing agent advances it to `"passing"` / `"failing"` as the test is written and run. `"not_applicable"` is for waived rows only.
-- `na_reason` — required when the row is waived (`status: "not_applicable"`, or an N/A `test_name`). One line saying why the category needs no test here, e.g. `"No shared state — single-writer preference update, no concurrent path exists"`.
-- `position` — integer >= 0, row order. The API does not reject a row missing it, but it is how a row records its intended order, so always supply it — and emit the rows in that order too, since nothing re-sorts the array.
-
-**A row must have either a real `test_name` or an `na_reason` — never neither.** Many enriched tasks genuinely have no Concurrency or Lifecycle surface; waive those rows with a specific reason rather than inventing a test. And because the matrix is only valid once it covers **all 7** categories, it is all-or-nothing: either emit a row for every category, or omit the field entirely. A partial matrix is rejected; an absent or empty one passes. Row text is stored and later rendered, so never record secrets, credentials, or raw HTML in `behaviour`, `test_name`, or `na_reason`.
+**For defects:** search for the error string, include a regression test in `unit_tests`, add "Bug no longer reproducible" to `acceptance_criteria`, and — when you built a matrix — pair the bug-no-longer-reproducing behaviour with that regression test in the `"Error / exception"` row.
 
 **Optional — `technical_details`:** If exploration surfaced concrete technical context that doesn't fit the structured fields (data shapes, gotchas, key decisions, reference links), record it in an optional free-form `technical_details` object — any keys you like. Populate it only with what you actually found; leave it as `{}` when there is nothing substantive — never fabricate it. It is **not** one of the five review_queue-scored fields, so a blank value is never an empty pill. Because it is free-form, never record secrets (tokens, passwords, credentials) in it.
 
@@ -196,9 +196,10 @@ Combine all discovered fields into the final task specification.
 - [ ] **`security_considerations` is populated** — review_queue-scored; array of strings naming the security implications to address (or an explicit "None — …" reason); an empty array scores as an empty pill
 - [ ] **`pitfalls` is populated** — review_queue-scored; array of strings; an empty array scores as an empty pill
 - [ ] **`patterns_to_follow` is populated** — review_queue-scored; newline-separated string with file references (NOT an array); blank scores as an empty pill
+- [ ] `behaviour_test_matrix` — **optional**; decide explicitly: either omit it entirely, or emit one row for **all 7** fixed categories, every row either naming a real `test_name` (with a `type`) and `status` `"planned"`, or waived with `status` `"not_applicable"` plus an `na_reason`. Omitting it is always a correct outcome — not review_queue-scored, never an empty pill. **This item is satisfied by making the call, not by producing rows.**
 - [ ] `needs_review` is set to `false`
 - [ ] No invented file paths — every entry is a path located via Grep, Glob, or Read
-- [ ] All 17 fields above were considered for this task (none silently skipped)
+- [ ] All 18 items above were considered for this task (none silently skipped) — for the one optional item, `behaviour_test_matrix`, a deliberate omission counts as considered
 
 ## API Integration
 
@@ -313,7 +314,7 @@ The following shows a defect task after enrichment. `title`, `type`, and `descri
 - "I'll just fill in the required fields with placeholders"
 - "Exploring the codebase takes too long, I'll guess"
 - "The human can add details later"
-- "This is a simple task, it doesn't need all 17 fields"
+- "This is a simple task, it doesn't need every required field"
 - "I'll leave `acceptance_criteria` blank — the implementing agent will figure out 'done'"
 - "`testing_strategy` doesn't apply to this enrichment — empty object is fine"
 - "`security_considerations` is the reviewer's job — I'll ship an empty array"

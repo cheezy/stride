@@ -202,7 +202,7 @@ Review the returned task completely:
 
 #### Other Environments: Invoke the Enrichment Skill
 
-1. Invoke `stride-enriching-tasks` and walk through its Manual Walkthrough Phases (Phase 1 intent parse → Phase 2 codebase exploration → Phase 3 complexity → Phase 4 17-item checklist).
+1. Invoke `stride-enriching-tasks` and walk through its Manual Walkthrough Phases (Phase 1 intent parse → Phase 2 codebase exploration → Phase 3 complexity → Phase 4 18-item checklist).
 2. Submit the assembled JSON via `PATCH /api/tasks/:id` per the API Integration block in that skill.
 
 ---

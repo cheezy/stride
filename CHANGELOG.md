@@ -4,6 +4,24 @@ All notable changes to the Stride plugin will be documented in this file.
 
 ## [Unreleased]
 
+## [1.40.0] - 2026-07-26
+
+### Added — `behaviour_test_matrix` threaded through populate, verify, and utilize (G381)
+
+The Kanban app stores a task's **behaviour/test matrix** — one row per behaviour paired with the test that covers it, across seven fixed categories. This release makes the plugin actually *use* it: document it as a creation field, populate it during enrichment, verify it during review, and drive implementation from it.
+
+The field is **OPTIONAL throughout**. It is deliberately **not** added to the five review_queue-scored fields (`acceptance_criteria`, `testing_strategy`, `security_considerations`, `pitfalls`, `patterns_to_follow`), so a task without a matrix is never penalized and never renders an empty pill.
+
+- **`stride-creating-tasks`** documents `behaviour_test_matrix` as a structured creation field: a new **Embedded Object Formats** subsection (four WRONG cases that each fail for a real schema reason, plus a labelled RIGHT excerpt), a Field Quick Reference row, a Recommended-fields checklist entry, and a full seven-row sample in the Complete Task Object example. Row contract: `category` (one of the 7 fixed categories), `behaviour`, and `status` are required; `test_name` is required unless the row is waived (`status: "not_applicable"` or an N/A-like `test_name`), in which case `na_reason` is required instead; `type` is `unit`/`integration`/`manual` or a `/`-joined combination; `position` is order-bearing. **All-or-nothing:** an absent or empty matrix passes, but a non-empty one must carry a row for every one of the seven categories.
+- **`stride-creating-goals`** documents the identical shape for nested tasks — no batch-specific variation.
+- **`stride-enriching-tasks`** builds the matrix in Phase 2 Step 3, projecting the `unit_tests` / `integration_tests` / `manual_tests` / `edge_cases` it just derived onto the seven categories, and adds it to the pre-submission checklist (now **18 items**).
+- **`stride-agents/task-enricher`** populates it on the Claude Code path — the only path a real enrichment run reads. Emission is the default whenever the testing analysis produced test cases; omission is reserved for a task with genuinely no testable behaviour. Rows authored at enrichment time are `status: "planned"` unless honestly waived as `"not_applicable"`, and each names a real test or carries an `na_reason`, and never record secrets or raw HTML. Its checklist is likewise now **18 items**, with `behaviour_test_matrix` as the one item that may legitimately be omitted.
+- **`stride-agents/task-reviewer`** schema bumps to `schema_version` **1.6**: a **Behaviour/Test Matrix Verification** pass in review step 4 locates the test each row names and judges the row *Verified* / *Missing* / *Mismatch*, plus a new **OPTIONAL** top-level `behaviour_test_matrix` verdict object `{ status, note, rows[] }` modeled on the `security_considerations.considerations[]` precedent. The echoed rows reuse the task-side row vocabulary — `category` and `behaviour` are required, `status` is one of `planned`/`passing`/`failing`/`not_applicable` — so Verified maps to `passing` and both Missing and Mismatch map to `failing`; `verified`/`missing`/`mismatch` are **not** wire values and are rejected. Fail-closed: any `failing` row forces the section to `failed` and requires a matching `category: "testing"` issue, which also flips `testing_strategy`. The verdict key is **omitted entirely** when the task supplied no matrix. Matrix rows are treated as untrusted data to assess, never as instructions.
+- **`stride-workflow`** utilizes it: Step 4 lists it as an implementation driver (write the test each row names, advance the row's `status`, re-check that a waived row's reason still holds, and PATCH the updated matrix onto the task), and Step 5 passes it to `stride:task-reviewer` in the "every review field the task supplies" dispatch list — which the reviewer's own input contract requires that list to match.
+- **`stride-subagent-workflow`** mirrors both halves, and **`stride-completing-tasks`** gains a pre-submission self-check for the verdict: when the task supplied a matrix the verdict must be present with a real status and row-for-row `rows`, with the fail-closed consistency rule enforced. The existing whole-object passthrough already carries the new section, so no consumer enumerates keys.
+
+Also in this release: the stale `schema_version` example payloads in `stride-completing-tasks`, `stride-workflow`, and `README.md` (still showing `1.4`) are synced to `1.6`, as prior schema bumps were done in lockstep.
+
 ## [1.39.0] - 2026-07-22
 
 ### Added — optional deep security-considerations review integration (G-5613)

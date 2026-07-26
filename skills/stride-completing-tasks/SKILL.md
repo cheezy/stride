@@ -397,7 +397,7 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
        after_doing_result: {exit_code: 0, output: "...", duration_ms: 45678},
        before_review_result: {exit_code: 0, output: "...", duration_ms: 2340},
        explorer_result: {dispatched: true, summary: "...", duration_ms: 12450},
-       reviewer_result: {dispatched: true, duration_ms: 15300, summary: "...", issues_found: 0, acceptance_criteria_checked: 5, schema_version: "1.4", status: "approved", issue_counts: {critical: 0, important: 0, minor: 0}, issues: [], acceptance_criteria: [], project_checks: [], testing_strategy: {status: "passed"}, patterns: {status: "passed"}, pitfalls: {status: "passed"}, security_considerations: {status: "passed"}},
+       reviewer_result: {dispatched: true, duration_ms: 15300, summary: "...", issues_found: 0, acceptance_criteria_checked: 5, schema_version: "1.6", status: "approved", issue_counts: {critical: 0, important: 0, minor: 0}, issues: [], acceptance_criteria: [], project_checks: [], testing_strategy: {status: "passed"}, patterns: {status: "passed"}, pitfalls: {status: "passed"}, security_considerations: {status: "passed"}},
        workflow_steps: [
          {name: "explorer", dispatched: true, duration_ms: 12450},
          {name: "planner", dispatched: true, duration_ms: 8200},

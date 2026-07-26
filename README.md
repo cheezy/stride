@@ -95,7 +95,7 @@ stride:stride-creating-goals          ← BEFORE calling POST /api/tasks/batch (
 
 ### stride-workflow
 
-**RECOMMENDED** entry point for all task work. Single orchestrator that walks through the complete lifecycle: prerequisites, claiming, codebase exploration, implementation, code review, hooks, and completion. Handles both Claude Code (with subagent dispatch) and other environments (Cursor, Windsurf, Continue). Eliminates the need to remember which skills to invoke at which moments. (v1.38.0+) adds an optional **Manual & Exploratory Testing** step (Step 5.5); (v1.39.0+) adds an optional **Deep security-considerations review** sub-step in Step 5 — see below.
+**RECOMMENDED** entry point for all task work. Single orchestrator that walks through the complete lifecycle: prerequisites, claiming, codebase exploration, implementation, code review, hooks, and completion. Handles both Claude Code (with subagent dispatch) and other environments (Cursor, Windsurf, Continue). Eliminates the need to remember which skills to invoke at which moments. (v1.38.0+) adds an optional **Manual & Exploratory Testing** step (Step 5.5); (v1.39.0+) adds an optional **Deep security-considerations review** sub-step in Step 5 — see below; (v1.40.0+) threads the optional `behaviour_test_matrix` through Step 4 (implementation driver) and Step 5 (reviewer dispatch).
 
 ### Optional: Manual & Exploratory Testing integration (v1.38.0+)
 

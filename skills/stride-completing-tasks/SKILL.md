@@ -145,9 +145,10 @@ Run this **before every** `PATCH /api/tasks/:id/complete`. If ANY check fails, *
 - [ ] **Every section present.** `reviewer_result` carries every section the reviewer emitted — the whole-object copy from "Extracting the structured review block" in the orchestrator. Nothing dropped.
 - [ ] **`project_checks` complete.** The submitted `project_checks` count equals the count the reviewer emitted — never trimmed or sub-selected.
 - [ ] **No `not_assessed` for a task-supplied section.** For each of `testing_strategy`, `patterns`, `pitfalls`, and `security_considerations`: if the **task** supplied that field, its verdict `status` is a real assessment (`passed`/`failed`), never `not_assessed` or absent. A task-supplied section coming back `not_assessed` means the reviewer was not handed it (fix the dispatch) or the verdict is wrong — re-run the reviewer; do not submit. **In particular: if the task carried `security_considerations`, `reviewer_result.security_considerations.status` MUST be `passed`/`failed`.**
+- [ ] **`behaviour_test_matrix` verdict present & consistent when the task supplied a matrix.** If the **task** carried a `behaviour_test_matrix`, `reviewer_result.behaviour_test_matrix` is present with a real `status` (`passed`/`failed`) and a `rows` array echoing the task's matrix row for row. Every row carries non-empty `category` and `behaviour` strings and a `status` from `planned`/`passing`/`failing`/`not_applicable` — **never** `verified`/`missing`/`mismatch`, which the completion API rejects outright (this is a hard failure in every mode, not a grace-gated warning). Fail-closed consistency: any row with `status: "failing"` REQUIRES `behaviour_test_matrix.status` to be `"failed"` AND a matching `issues[]` entry with `category: "testing"`. When the task supplied **no** matrix, the verdict key is simply absent — that is correct, not a gap, and must not be back-filled with an empty `not_assessed` placeholder. The whole-object passthrough already carries this section, so a missing verdict on a matrix-bearing task means the reviewer was not handed the field (fix the dispatch) — re-run the reviewer; do not submit.
 - [ ] **Nested `security_considerations.considerations[]` present & consistent when a deep review ran.** When the `stride-security-review` considerations-mode dispatch ran (see the `stride-workflow` Step 5 "Deep security-considerations review" sub-step), `reviewer_result.security_considerations.considerations[]` MUST be present (it rides through automatically on the verbatim whole-object copy — never trim it) and consistent with the section status: any entry with status `partial` or `unmitigated` REQUIRES `security_considerations.status: "failed"` and a matching `category: "security"` issue in `issues[]`. A `passed` status alongside a `partial`/`unmitigated` nested entry is a hard fail — do not submit; fix the escalation. When **no** deep review ran (plugin absent, or the task's `security_considerations` was empty), the nested array is simply absent and is **not** required — its absence never fails this gate.
 
-This gate is **not bypassable** by submitting a self-reported skip (`dispatched: false`) when a `stride:task-reviewer` agent actually ran — a dispatched review must pass all three checks. The self-check compares counts, keys, and status enums only; it never prints task content, diffs, or secrets. (The Kanban server now hard-rejects a report that fails any of these, so a failing self-check is also a failing completion — catch it here, before you submit.)
+This gate is **not bypassable** by submitting a self-reported skip (`dispatched: false`) when a `stride:task-reviewer` agent actually ran — a dispatched review must pass every check above. The self-check compares counts, keys, and status enums only; it never prints task content, diffs, or secrets. (The Kanban server now hard-rejects a report that fails any of these, so a failing self-check is also a failing completion — catch it here, before you submit.)
 
 ## The Complete Completion Process
 
@@ -452,7 +453,7 @@ match the `--arg` substitutions above):
     "summary": "Reviewed the diff against all 5 acceptance criteria and the 3 pitfalls; no issues found",
     "issues_found": 0,
     "acceptance_criteria_checked": 5,
-    "schema_version": "1.4",
+    "schema_version": "1.6",
     "status": "approved",
     "issue_counts": {"critical": 0, "important": 0, "minor": 0},
     "issues": [],
@@ -530,7 +531,7 @@ Every `/complete` call **must** include both `explorer_result` and `reviewer_res
   "summary": "<40+ non-whitespace characters describing what was reviewed>",
   "issues_found": 0,
   "acceptance_criteria_checked": 5,
-  "schema_version": "1.4",
+  "schema_version": "1.6",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
   "issues": [],
@@ -820,7 +821,7 @@ REQUIRED BODY: {
     "summary": "<40+ non-whitespace chars>",
     "issues_found": 0,
     "acceptance_criteria_checked": 5,
-    "schema_version": "1.4",
+    "schema_version": "1.6",
     "status": "approved",
     "issue_counts": {"critical": 0, "important": 0, "minor": 0},
     "issues": [],

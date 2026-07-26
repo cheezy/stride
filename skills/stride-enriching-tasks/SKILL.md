@@ -159,6 +159,18 @@ Convert intent to observable, testable outcomes. Format as newline-separated str
 
 **For defects:** search for the error string, include a regression test in `unit_tests`, add "Bug no longer reproducible" to `acceptance_criteria`.
 
+**Optional — `behaviour_test_matrix`:** If Step 3's testing analysis surfaced concrete behaviours the change must satisfy, you may additionally turn them into a `behaviour_test_matrix` — an array of rows, each pairing one behaviour with the real test that covers it. It is **not** one of the five review_queue-scored fields, so leaving it unset is never an empty pill; populate it only when you have real rows to record, never as filler. Build it by projecting the `unit_tests` / `integration_tests` / `manual_tests` / `edge_cases` you already derived onto the **7 fixed categories**:
+
+- `category` — exactly one of `"Happy path"`, `"Boundary"`, `"Error / exception"`, `"Null / empty"`, `"Concurrency"`, `"Lifecycle / wiring"`, `"Contract / serialization"`. No other value is accepted.
+- `behaviour` — what the code should do, in one line (e.g. `"rejects an expired claim"`).
+- `test_name` — the **real** test covering it: the test file you mapped in Step 3, or `path/to/test.exs — "test name"` for a test you plan to add. Prefer a test name over a bare `file:line` — the test does not exist yet at enrichment time, so a line number is invented and goes stale immediately. Never invent a path either: use only test files you located by searching the repo, the same rule `key_files` follows.
+- `type` — `"unit"`, `"integration"`, or `"manual"`, or a `/`-joined combination like `"unit / manual"`.
+- `status` — one of `"planned"`, `"passing"`, `"failing"`, `"not_applicable"` (an omitted status defaults to `"planned"`). Write `"planned"` explicitly for every row you author during enrichment; the implementing agent advances it to `"passing"` / `"failing"` as the test is written and run. `"not_applicable"` is for waived rows only.
+- `na_reason` — required when the row is waived (`status: "not_applicable"`, or an N/A `test_name`). One line saying why the category needs no test here, e.g. `"No shared state — single-writer preference update, no concurrent path exists"`.
+- `position` — integer >= 0, row order. The API does not reject a row missing it, but it is how a row records its intended order, so always supply it — and emit the rows in that order too, since nothing re-sorts the array.
+
+**A row must have either a real `test_name` or an `na_reason` — never neither.** Many enriched tasks genuinely have no Concurrency or Lifecycle surface; waive those rows with a specific reason rather than inventing a test. And because the matrix is only valid once it covers **all 7** categories, it is all-or-nothing: either emit a row for every category, or omit the field entirely. A partial matrix is rejected; an absent or empty one passes. Row text is stored and later rendered, so never record secrets, credentials, or raw HTML in `behaviour`, `test_name`, or `na_reason`.
+
 **Optional — `technical_details`:** If exploration surfaced concrete technical context that doesn't fit the structured fields (data shapes, gotchas, key decisions, reference links), record it in an optional free-form `technical_details` object — any keys you like. Populate it only with what you actually found; leave it as `{}` when there is nothing substantive — never fabricate it. It is **not** one of the five review_queue-scored fields, so a blank value is never an empty pill. Because it is free-form, never record secrets (tokens, passwords, credentials) in it.
 
 ### Phase 3: Estimate Complexity
@@ -247,6 +259,7 @@ curl -s -X PATCH \
 - `pitfalls`: Array of strings `["Don't...", "Avoid..."]`
 - `estimated_files`: Optional string range like `"3-5"` — emit when the count is meaningful, omit otherwise
 - `technical_details`: Optional free-form object `{"data_shapes": {...}, "gotchas": ["..."]}` — any keys; leave `{}` when nothing substantive was found; NOT a review_queue-scored field; never record secrets
+- `behaviour_test_matrix`: Optional array of row objects — one row per shape, **excerpt only**: `[{"category": "Happy path", "behaviour": "...", "test_name": "...", "type": "unit", "status": "planned", "position": 0}, …]`. A real matrix carries a row for **all 7** fixed categories or the field is omitted entirely; the one-row value above is illustrative and would be rejected as a partial matrix. NOT a review_queue-scored field; never record secrets
 
 ## Output Example: Enriched Task
 

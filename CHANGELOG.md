@@ -4,6 +4,25 @@ All notable changes to the Stride plugin will be documented in this file.
 
 ## [Unreleased]
 
+## [1.42.0] - 2026-07-28
+
+### Added — a worked `category: "security"` example in the reviewer schema of record (W1941)
+
+Every reviewer prompt mandates `category: "project_check"` in prose **and** demonstrates it in the worked JSON example, whereas `category: "security"` was mandated in four separate places and demonstrated nowhere in the tree. Models copy examples far more reliably than they follow prose, which predicts security issues are systematically under-emitted — leaving the fail-closed escalation rules built in 1.39.0 (G381/G382) unsatisfied in practice, since each requires a `category: "security"` issue to back a `failed` `security_considerations` verdict.
+
+- **`stride-agents/task-reviewer`** — the worked example now carries a fifth `issues[]` entry with `category: "security"`, describing a synthetic unaddressed bounds-check on the example's own fictional `move_task/3`. The example's `security_considerations` moves with it: the section `status` flips `passed` → `failed`, its second `considerations[]` entry flips `mitigated` → `unmitigated`, and the section `note` explains which of the two listed considerations was and was not implemented — so the issue, the nested entry, and the section verdict are visibly consistent with the fail-closed escalation and Consistency rules. `issue_counts.important` goes 2 → 3, the example `summary` gains the matching clause, and the preamble now spells out how the legs relate: the issue and the section status each require the other (Consistency rule) and always move together, while the `considerations` breakdown is optional but forces both when present and `unmitigated`/`partial` (escalation rule).
+- **Severity is demonstrated, not just mandated.** The new entry is `severity: "important"`, matching review step 5's own split — an unaddressed or inadequately-handled consideration is Important, and Critical is reserved for one that leaves an *exploitable* vulnerability in the diff. The preamble says so explicitly, so the single worked instance of that rule cannot be copied into systematic severity inflation.
+
+The seven-value `issues[].category` enum line is unchanged — `"security"` was already legal there; only a worked instance of it was missing. The finding is synthetic, mirroring the example's existing fictional `lib/kanban/tasks.ex` subject.
+
+### Backward compatibility
+
+Fully backward compatible. Prompt-text only — `schema_version` stays **1.6**, no field is added, removed, or re-typed, and no hook logic, `.stride.md`, env-var, or `.stride_auth.md` change is involved. Reviews emitted against the previous example remain valid; the seven-value enum this example draws from has been accepted by the Kanban server since W1940 widened it.
+
+### Scope
+
+Schema of record only. The other reviewer variants across the fleet mirror this file on their next natural sync and are deliberately **not** re-released here — a fleet-wide cascade for an example addition is not warranted.
+
 ## [1.41.0] - 2026-07-28
 
 ### Changed — the `behaviour_test_matrix` rules treat row text as untrusted, and say what to do when it carries a credential

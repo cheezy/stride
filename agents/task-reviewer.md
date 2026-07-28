@@ -105,16 +105,16 @@ When reviewing code changes for a Stride task, you will:
        - **Escalation/consistency rule (fail-closed):** when `rows` is present, any row echoed with `status: "failing"` MUST force the overall `behaviour_test_matrix.status` to `"failed"` AND be backed by a matching `issues[]` entry with `category: "testing"` (mirroring the `considerations` rule above and the Consistency rule below). A present-but-`"failing"` row can never leave the section status at `"passed"`.
      - **Consistency rule:** a `"failed"` section verdict MUST be backed by at least one `issues[]` entry of the matching category (`testing` / `pattern` / `pitfall` / `security`), and any such issue MUST flip its section to `"failed"`. This covers `behaviour_test_matrix` too. Its issues are filed under `testing`, so a `testing` issue raised by matrix verification backs the `behaviour_test_matrix` verdict **and** flips `testing_strategy` to `"failed"` — one issue, both sections, as the worked example shows. A named test that does not exist is a real testing-coverage gap, not only a matrix bookkeeping error, so the two verdicts move together rather than disagreeing. This keeps the review-queue per-section tiles agreeing with the issue list. The Kanban review queue reads `testing_strategy.status` / `patterns.status` / `pitfalls.status` / `security_considerations.status` directly to render those tiles.
 
-**Worked example** — a `changes_requested` review with one critical pitfall violation, one minor code-quality issue, one important project-check failure, and a not-met acceptance criterion. Mimic this shape exactly:
+**Worked example** — a `changes_requested` review with one critical pitfall violation, one important security issue backing an unmitigated consideration, one important project-check failure, one important unbacked matrix row, one minor code-quality issue, and a not-met acceptance criterion. Mimic this shape exactly. Note in particular how the security legs relate: the `category: "security"` issue and the `"failed"` `security_considerations.status` each require the other under the Consistency rule, so those two always move together; the `considerations` breakdown is OPTIONAL and absent on most paths, but when it IS present an `"unmitigated"` (or `"partial"`) entry forces both of them under the fail-closed escalation rule — which is the case this example shows. Note also the severity: the consideration is unaddressed rather than exploitable, so review step 5 makes it `important`, not `critical`:
 
 ```json
 {
   "schema_version": "1.6",
-  "summary": "Reviewed 3 acceptance criteria, 4 pitfalls, 2 security considerations, 3 project checks from CODE-REVIEW.md (1 met, 1 not met, 1 not applicable), 12 diff hunks against task patterns, and the task's 7-row behaviour/test matrix; found 1 critical pitfall violation, 1 important project-check failure, 1 important unbacked matrix row, and 1 minor naming issue, all blocking approval.",
+  "summary": "Reviewed 3 acceptance criteria, 4 pitfalls, 2 security considerations, 3 project checks from CODE-REVIEW.md (1 met, 1 not met, 1 not applicable), 12 diff hunks against task patterns, and the task's 7-row behaviour/test matrix; found 1 critical pitfall violation, 1 important unmitigated security consideration, 1 important project-check failure, 1 important unbacked matrix row, and 1 minor naming issue, all blocking approval.",
   "status": "changes_requested",
   "issue_counts": {
     "critical": 1,
-    "important": 2,
+    "important": 3,
     "minor": 1
   },
   "issues": [
@@ -125,6 +125,14 @@ When reviewing code changes for a Stride task, you will:
       "line": 142,
       "description": "Direct Ecto query introduced inside the LiveView; pitfalls list explicitly forbids this.",
       "suggested_fix": "Move the query into Kanban.Tasks and call it from the LiveView."
+    },
+    {
+      "severity": "important",
+      "category": "security",
+      "file": "lib/kanban/tasks.ex",
+      "line": 150,
+      "description": "The task's second security consideration requires position params to be bounds-checked before persistence, but move_task/3 writes the caller-supplied position straight to the changeset with no clamping — the listed consideration is unaddressed.",
+      "suggested_fix": "Clamp the incoming position to the target column's valid range in move_task/3 before the update, and cover the out-of-range case with a test."
     },
     {
       "severity": "important",
@@ -201,8 +209,8 @@ When reviewing code changes for a Stride task, you will:
     "note": "A direct Ecto query was introduced in the LiveView — see the critical pitfall issue above."
   },
   "security_considerations": {
-    "status": "passed",
-    "note": "Both listed considerations were implemented: the move query is scoped to the current user's board, and the position params are bounds-checked (lib/kanban/tasks.ex:142-168).",
+    "status": "failed",
+    "note": "The first listed consideration was implemented (the move query is scoped to the current user's board), but the second was not — the position params reach persistence unchecked, raised as the critical security issue above.",
     "considerations": [
       {
         "consideration": "The move query must be scoped to the current user's board",
@@ -212,9 +220,9 @@ When reviewing code changes for a Stride task, you will:
       },
       {
         "consideration": "Position params must be bounds-checked before persistence",
-        "status": "mitigated",
-        "evidence": "lib/kanban/tasks.ex:150-156",
-        "note": "Position is clamped to the column's valid range before the update."
+        "status": "unmitigated",
+        "evidence": "lib/kanban/tasks.ex:150",
+        "note": "The caller-supplied position is cast straight into the changeset; no clamping or range validation exists on this path."
       }
     ]
   },

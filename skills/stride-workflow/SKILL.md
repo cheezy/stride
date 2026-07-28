@@ -482,6 +482,7 @@ Walk through your changes against:
 - [ ] Each item in `pitfalls` -- did you avoid it?
 - [ ] `patterns_to_follow` -- does your code match?
 - [ ] `testing_strategy` -- did you write the specified tests?
+- [ ] `behaviour_test_matrix` -- if the task supplied one (it is optional, so many tasks will not): does every row's named test exist, and does each row's `status` reflect reality?
 
 ### Small tasks (0-1 key_files): Skip review. Omit `review_report` from completion.
 

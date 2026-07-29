@@ -25,6 +25,26 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.43.0] - 2026-07-29
+
+### Fixed — the worked example's `not_met` acceptance criterion now has a backing issue, and its dangling reference resolves (D191)
+
+The worked example's third acceptance criterion ("PubSub broadcast emitted exactly once per move") carried `status: "not_met"` with an `evidence` string ending "…see the critical issue above" — but no such issue existed. The example's `issues[]` carried `pitfall`, `security`, `project_check`, `testing` and `code_quality`, none of them about broadcasting. So the cross-reference dangled, and the example demonstrated the opposite of what two rules in the same file require: review step 1 ("If any criterion is Not Met, flag it as a Critical issue") and the `acceptance_criteria` hard rule ("If a criterion is partially satisfied, set `status: "not_met"`, describe the gap in `evidence`, and add a corresponding `important` entry to `issues`"). This is the same argument 1.42.0 (W1941) made for `security`: models copy examples far more reliably than they follow prose, so a category that is mandated but never demonstrated is systematically under-emitted. That leaves `pattern` as the one remaining undemonstrated category — mandated in review step 3, the enum line, the `patterns` verdict and the Consistency rule, and demonstrated in no worked instance. It is deliberately **not** addressed here: closing it means adding a seventh issue and flipping the example's `patterns` verdict to `failed`, which is its own change rather than a rider on this one. Recorded so the gap is not mistaken for closed.
+
+- **`stride-agents/task-reviewer`** — the worked example gains an `issues[]` entry with `category: "acceptance_criteria"` describing the synthetic double broadcast in the example's own fictional `move_task/3`, placed among the important entries directly after the critical pitfall. `issue_counts.important` goes 3 → 4, the example `summary` gains the matching clause, and the third criterion's `evidence` now points at that entry instead of at a critical issue that never existed.
+- **The preamble's two enumerations now agree.** It previously listed the five issues and then appended "and a not-met acceptance criterion" as a sixth item *outside* that enumeration — the framing that made the criterion a peer of the issue list rather than something backed by it. The criterion is now folded in as one of the six issues, and the preamble gains prose describing how the acceptance-criteria legs relate, mirroring the treatment the security legs already had.
+- **The Critical-vs-Important split is resolved in the text rather than left to reflex.** Review step 1 works on a three-value scale (Met / Partially Met / Not Met) and assigns Critical to Not Met and Important to Partially Met, while the emitted `status` enum has only two values — so a Partially Met criterion collapses to `"not_met"` on the wire while keeping `important` severity, which is exactly what the hard rule directs. The two rules were never in conflict; only the collapse was undocumented. The preamble now says so, states that this example is the partially-satisfied case (the broadcast is emitted, just twice), and reserves `critical` for a criterion whose behaviour is wholly absent — so the single worked instance cannot be copied into systematic severity inflation.
+
+The seven-value `issues[].category` enum line is unchanged — `"acceptance_criteria"` was already legal there; only a worked instance of it was missing. The finding is synthetic, mirroring the example's existing fictional `lib/kanban/tasks.ex` subject.
+
+### Backward compatibility
+
+Fully backward compatible. Prompt-text only — `schema_version` stays **1.6**, no field is added, removed, or re-typed, and no hook logic, `.stride.md`, env-var, or `.stride_auth.md` change is involved. Reviews emitted against the previous example remain valid.
+
+### Scope
+
+Schema of record only. The other reviewer variants across the fleet mirror this file on their next natural sync and are deliberately **not** re-released here — a fleet-wide cascade for an example addition is not warranted, the same scoping 1.42.0 applied.
+
 ## [1.42.0] - 2026-07-28
 
 ### Added — a worked `category: "security"` example in the reviewer schema of record (W1941)

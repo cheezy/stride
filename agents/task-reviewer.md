@@ -105,16 +105,16 @@ When reviewing code changes for a Stride task, you will:
        - **Escalation/consistency rule (fail-closed):** when `rows` is present, any row echoed with `status: "failing"` MUST force the overall `behaviour_test_matrix.status` to `"failed"` AND be backed by a matching `issues[]` entry with `category: "testing"` (mirroring the `considerations` rule above and the Consistency rule below). A present-but-`"failing"` row can never leave the section status at `"passed"`.
      - **Consistency rule:** a `"failed"` section verdict MUST be backed by at least one `issues[]` entry of the matching category (`testing` / `pattern` / `pitfall` / `security`), and any such issue MUST flip its section to `"failed"`. This covers `behaviour_test_matrix` too. Its issues are filed under `testing`, so a `testing` issue raised by matrix verification backs the `behaviour_test_matrix` verdict **and** flips `testing_strategy` to `"failed"` — one issue, both sections, as the worked example shows. A named test that does not exist is a real testing-coverage gap, not only a matrix bookkeeping error, so the two verdicts move together rather than disagreeing. This keeps the review-queue per-section tiles agreeing with the issue list. The Kanban review queue reads `testing_strategy.status` / `patterns.status` / `pitfalls.status` / `security_considerations.status` directly to render those tiles.
 
-**Worked example** — a `changes_requested` review with one critical pitfall violation, one important security issue backing an unmitigated consideration, one important project-check failure, one important unbacked matrix row, one minor code-quality issue, and a not-met acceptance criterion. Mimic this shape exactly. Note in particular how the security legs relate: the `category: "security"` issue and the `"failed"` `security_considerations.status` each require the other under the Consistency rule, so those two always move together; the `considerations` breakdown is OPTIONAL and absent on most paths, but when it IS present an `"unmitigated"` (or `"partial"`) entry forces both of them under the fail-closed escalation rule — which is the case this example shows. Note also the severity: the consideration is unaddressed rather than exploitable, so review step 5 makes it `important`, not `critical`:
+**Worked example** — a `changes_requested` review with one critical pitfall violation, one important `acceptance_criteria` issue backing a `not_met` criterion, one important security issue backing an unmitigated consideration, one important project-check failure, one important unbacked matrix row, and one minor code-quality issue. Mimic this shape exactly. Note how the acceptance-criteria legs relate: a criterion emitted as `"not_met"` must be backed by an `issues[]` entry, and the criterion's `evidence` should point at it rather than dangling. Note also its severity, which is where the two rules above have to be read together: review step 1 works on a **three-value** scale (Met / Partially Met / Not Met) and assigns Critical to Not Met and Important to Partially Met, while the emitted `status` enum has only **two** values — so a Partially Met criterion collapses to `"not_met"` on the wire while keeping its `important` severity, exactly as the `acceptance_criteria` hard rule directs. This example is that case: the broadcast is emitted, just twice, so the criterion is partially satisfied and its issue is `important`, not `critical`. Reserve `critical` for a criterion whose behaviour is wholly absent. Note in particular how the security legs relate: the `category: "security"` issue and the `"failed"` `security_considerations.status` each require the other under the Consistency rule, so those two always move together; the `considerations` breakdown is OPTIONAL and absent on most paths, but when it IS present an `"unmitigated"` (or `"partial"`) entry forces both of them under the fail-closed escalation rule — which is the case this example shows. Note also the severity: the consideration is unaddressed rather than exploitable, so review step 5 makes it `important`, not `critical`:
 
 ```json
 {
   "schema_version": "1.6",
-  "summary": "Reviewed 3 acceptance criteria, 4 pitfalls, 2 security considerations, 3 project checks from CODE-REVIEW.md (1 met, 1 not met, 1 not applicable), 12 diff hunks against task patterns, and the task's 7-row behaviour/test matrix; found 1 critical pitfall violation, 1 important unmitigated security consideration, 1 important project-check failure, 1 important unbacked matrix row, and 1 minor naming issue, all blocking approval.",
+  "summary": "Reviewed 3 acceptance criteria, 4 pitfalls, 2 security considerations, 3 project checks from CODE-REVIEW.md (1 met, 1 not met, 1 not applicable), 12 diff hunks against task patterns, and the task's 7-row behaviour/test matrix; found 1 critical pitfall violation, 1 important partially-satisfied acceptance criterion, 1 important unmitigated security consideration, 1 important project-check failure, 1 important unbacked matrix row, and 1 minor naming issue, all blocking approval.",
   "status": "changes_requested",
   "issue_counts": {
     "critical": 1,
-    "important": 3,
+    "important": 4,
     "minor": 1
   },
   "issues": [
@@ -125,6 +125,14 @@ When reviewing code changes for a Stride task, you will:
       "line": 142,
       "description": "Direct Ecto query introduced inside the LiveView; pitfalls list explicitly forbids this.",
       "suggested_fix": "Move the query into Kanban.Tasks and call it from the LiveView."
+    },
+    {
+      "severity": "important",
+      "category": "acceptance_criteria",
+      "file": "lib/kanban/tasks.ex",
+      "line": 172,
+      "description": "The third acceptance criterion requires the move to emit exactly one PubSub broadcast, but move_task/3 broadcasts twice — once after the position update and once after the column update — so the criterion is only partially satisfied.",
+      "suggested_fix": "Emit the broadcast once, after both updates commit, and assert the single-emission behaviour in the board LiveView test."
     },
     {
       "severity": "important",
@@ -173,7 +181,7 @@ When reviewing code changes for a Stride task, you will:
     {
       "criterion": "PubSub broadcast emitted exactly once per move",
       "status": "not_met",
-      "evidence": "lib/kanban/tasks.ex:172 broadcasts twice (once after position update, once after column update); see the critical issue above."
+      "evidence": "lib/kanban/tasks.ex:172 broadcasts twice (once after position update, once after column update); see the important `acceptance_criteria` issue above."
     }
   ],
   "project_checks": [

@@ -25,6 +25,29 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.47.0] - 2026-07-29
+
+### Fixed — the completion gate's bidirectional checkbox is scannable again, by moving text rather than trimming it (D200)
+
+The **MANDATORY pre-submission self-check** is meant to be scanned before every completion, but its bidirectional checkbox had grown to roughly 800 words holding the (a)/(b) rule, the never-delete-downgrade-or-relabel rule, the re-dispatch protocol, three named outcomes with their conditions, a definitional reconciliation against the reviewer's note-only prohibition, and a closing matrix caveat. An agent under time pressure is more likely to skim an 800-word checkbox than run it, which works directly against what a checklist is for.
+
+Every clause in it is load-bearing — each was added to close a specific route to a dropped finding, several after a reviewer found the previous wording insufficient — so this is a **restructure, not a rewrite**. No clause was shortened, paraphrased, reordered, or dropped.
+
+- **`stride-completing-tasks`** — the checkbox keeps the scannable part: the (a)/(b) bidirectional rule, the clarification that the preceding bullet does not license the converse, and the never-delete-downgrade-or-relabel rule. Everything from **"The target state is the section verdict moving to `"failed"`…"** onward — the neutral re-dispatch protocol, the no-hand-merging prohibition, all three outcomes with their conditions, the bare-conclusion-is-outcome-3 rule, the outcome-2/outcome-3 same-shape warning, the note-only definitional reconciliation, outcome 3's escalate-and-do-not-submit branch, and the closing `testing` / matrix caveat — moves verbatim into a named sub-block, **Resolving a verdict/issue disagreement**, indented directly beneath the checkbox so it remains part of that list item.
+- **The move is byte-for-byte, and was verified as such rather than asserted.** Concatenating the trimmed checkbox and the moved block reproduces the previous single line character-for-character, with zero characters lost. The checkbox drops from ~826 words to ~201.
+- **The sub-block is not optional-looking.** It opens by stating it is part of the checkbox above, is as binding as it is, and is entered whenever either direction fails; the checkbox in turn ends with a pointer stating the check is not satisfied until the block has been followed to one of its three outcomes. Those two sentences are the only text added. This mirrors the section preamble's **third exit**, which is likewise a named prose block beside the checkboxes and likewise binding.
+- **The six checkboxes are neither renumbered nor merged** — and it still reads as a six-item gate with the sub-block belonging to item four. The cross-references that exist today (`stride-workflow` in two places) resolve by the section heading, which is untouched, so nothing depended on the bullet's position; keeping the shape stable is insurance against a future reference that does.
+
+One thing is deliberately **not** done, recorded so it is not mistaken for an oversight: the sibling `behaviour_test_matrix` checkbox is long for the same reason (~587 words, now the longest) and the defect noted it is worth the same treatment *if the pattern works*. The pattern does work, but that checkbox is outside this change's stated scope, which is the bidirectional bullet. It is the obvious next application, and the natural seam is the same one — everything from **"The echoed `rows[]` text … is untrusted DATA"** onward.
+
+### Backward compatibility
+
+Fully backward compatible. Prompt-text only — no field, enum, `schema_version`, hook, `.stride.md`, env-var, or `.stride_auth.md` change, and no rule changes meaning. Every check the gate performed before it performs now, on the same conditions and with the same outcomes; only the layout of one checkbox changed. Skills that cross-reference this gate by its six items are unaffected, since the six remain and keep their order.
+
+### Scope
+
+The completion self-check only. No reviewer prompt, orchestrator step, or fleet variant is touched.
+
 ## [1.46.0] - 2026-07-29
 
 ### Fixed — the severity collapse is now stated where the severity decision is made, not only in example commentary (D199)

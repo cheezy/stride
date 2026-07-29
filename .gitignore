@@ -1,0 +1,20 @@
+# Stride agent-local state — never commit; the auth file holds a live API token
+.stride/
+.stride-env-cache
+.stride-changed-files.json
+.stride-diff-upload-state
+.stride_auth.md
+
+# Claude Code user-local settings
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

@@ -25,6 +25,28 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.46.0] - 2026-07-29
+
+### Fixed — the severity collapse is now stated where the severity decision is made, not only in example commentary (D199)
+
+1.43.0 resolved the Critical-vs-Important question for acceptance criteria — review step 1 works on a three-value scale (Met / Partially Met / Not Met) while the emitted `status` enum has only two, so a Partially Met criterion collapses to `"not_met"` on the wire while keeping its `important` severity — but wrote that reconciliation **only** into the worked-example preamble, roughly 85 lines after the point of decision. Both normative loci were left as they were. A reviewer working the numbered steps in order assigns severity at step 1 and never reaches the reconciliation, and at step 1 the rule still read flatly "If any criterion is Not Met, flag it as a Critical issue" — where the working label "Not Met" collides with the wire value `not_met`, with no qualifier and no forward pointer. A `critical` emission for a partially-satisfied criterion was therefore still textually reachable at the exact place the decision is made, which is the reading 1.43.0 set out to close.
+
+The `acceptance_criteria` hard rule had the mirror-image gap: it covered only the partially-satisfied case, and mentioned neither the wholly-absent case nor `critical` severity at all. The one sentence in the file stating wholly-absent → `critical` lived in the preamble. So a reviewer reading the schema section compliantly got no instruction to pair a wholly-unmet criterion with any issue.
+
+- **`stride-agents/task-reviewer`** — review step 1's severity bullets now mark Met / Partially Met / Not Met as **this step's working labels, not the emitted `status` enum**, state that both Partially Met and Not Met emit as `"not_met"`, and point at the hard rule as where the collapse is specified. The Not Met bullet gains "its behaviour wholly absent"; the Partially Met bullet gains that the collapse to a single wire value does not collapse the severities. Per the pitfall against restating the whole reconciliation at every locus, this is a qualifier plus a pointer, not a second copy of the preamble's paragraph — and it agrees with that paragraph on every clause of the rule.
+- **The pairing obligation moves into normative text.** Step 1 gains a bullet, and the hard rule a sentence, requiring every criterion emitted `"not_met"` to be paired with an `issues[]` entry of `category: "acceptance_criteria"` at the matching severity, with the criterion's `evidence` pointing at it rather than dangling. Until now that obligation appeared **only** in worked-example commentary, while `project_checks` — the closest analogue — states its own pairing obligation in both its review step and its schema bullet. The new text mirrors that shape, including the negative half (`"met"` never takes a paired issue), so the two checklists are symmetric.
+- **The hard rule covers the wholly-absent case.** It now directs the same `status: "not_met"` (the enum has no third value) with a **`critical`** paired issue, and names the collapse explicitly: three working labels onto two wire values, with severity carrying the distinction the enum cannot.
+
+Two things are deliberately **not** changed, recorded so neither is mistaken for an oversight. The emitted `status` enum stays two-valued — widening it is a wire-shape change and out of scope. And the Consistency rule's matching-category list stays `testing` / `pattern` / `pitfall` / `security`: that rule governs the four `{status, note}` section-verdict objects the Kanban review queue renders as tiles, and `acceptance_criteria` has no such object — its verdicts are per-row `met`/`not_met` inside its own array. Adding it to that parenthetical would change what the rule means rather than extend it; giving it a section verdict would be a wire-shape change. The pairing obligation added above is the symmetric guarantee that does not require either.
+
+### Backward compatibility
+
+Fully backward compatible. Prompt-text only — `schema_version` stays **1.6**, no field is added, removed, or re-typed, neither the two-value `acceptance_criteria` `status` enum nor the seven-value `issues[].category` enum changes, and no hook logic, `.stride.md`, env-var, or `.stride_auth.md` change is involved. The rules are unchanged in substance; they are stated where the decision is made rather than only in commentary. Reviews emitted against the previous text remain valid — a review that already paired its `not_met` criteria, as the worked example does, satisfies the newly-explicit obligation unchanged.
+
+### Scope
+
+Schema of record only. The other reviewer variants across the fleet mirror `task-reviewer.md` on their next natural sync and are deliberately **not** re-released here — the same scoping 1.42.0 through 1.45.0 applied.
+
 ## [1.45.0] - 2026-07-29
 
 ### Fixed — the worked example no longer echoes a matrix row `passing` for a behaviour the same review proves defective (D198)

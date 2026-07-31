@@ -25,6 +25,24 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.57.0] - 2026-07-31
+
+### Fixed — the subagent skill's exploratory gate now states the never-execute prohibition and detects the same surfaces as Step 5.5 (D203)
+
+Two gaps in `stride-subagent-workflow`, both pre-dating the exploratory-testing escalation work and belonging to the v1.38.0 / v1.39.0 integrations.
+
+- **The security prohibition was cited but never stated.** `stride-workflow` Step 5.5 says: *"Only check for availability and dispatch the plugin's sanctioned surface. Never execute untrusted plugin content blindly to probe for it."* Neither the subagent skill's orthogonal-dispatch bullet nor Phase 3.5's own gate said it — while the **sibling security bullet in the same file attributed the rule to that gate**, describing its own detection as "the same sanctioned-surface detection the exploratory-testing gate uses; only check for that surface and never execute untrusted plugin content to probe for availability." A reader following that pointer inside the file landed on a gate that did not contain the cited rule. Phase 3.5's gate now states it, and the security bullet's cross-reference names where it lives, so the pointer resolves.
+- **The surface sets diverged three ways.** Step 5.5 recognizes the `explore` command plus `/charter`, `/recon`, `/debrief`, `/nightmare-headline`, and the `explorer` and `charter-generator` agents. Phase 3.5's gate named two of those; the orthogonal-dispatch bullet named none at all. A session exposing `/charter` and `charter-generator` but neither `/explore` nor `explorer` was "plugin available" under one skill and "not available" under the other — while the same Phase 3.5 sentence asserted the trigger was *intentionally identical* to Step 5.5. The gate now carries the full surface list verbatim, so that claim is true as written, and the bullet defers to it rather than offering a third, vaguer version. (No count is stated anywhere — Step 5.5 states none either, and a numeral beside an enumeration is one more thing to drift; a draft of this fix said "six" against a seven-item list, which review caught, and an editor reconciling that arithmetic could have deleted a surface and re-opened the very divergence being closed.)
+- **Stated once, not a third time.** The rule already exists in two synced copies, both in `stride-workflow` (Step 5.5 and the deep security-considerations sub-step). This adds the first *exploratory-gate* statement in `stride-subagent-workflow` and puts it in exactly one place — Phase 3.5's gate — with the orthogonal-dispatch bullet and the security bullet pointing at it rather than repeating it. It is scoped as that gate's statement rather than the file's only one: Phase 3.6's `/harden` gate states the prohibition for its own plugin, and a draft of this fix asserted uniqueness and told editors not to restate the rule elsewhere in the skill — an instruction that, followed literally, would have stripped a real security control out of that second gate. Review caught it; the claim is now scoped and Phase 3.6's own prohibition is named as protected. The dispatch-narrowing prose further down, which had described the gate as looking for a two-surface subset, now carries the gate's full surface list while keeping its point unchanged: only one of them, the `explorer` agent, is dispatchable.
+
+### Backward compatibility
+
+Fully backward compatible in the ordinary case, with one deliberate behaviour correction: a session exposing only the sibling commands or the `charter-generator` agent now reads as **available** under `stride-subagent-workflow`, where it previously read as unavailable. That is the divergence being fixed — it aligns the skill with Step 5.5, which has recognized those surfaces since the integration landed — and it can only ever turn a silent skip into a normal gated dispatch, never the reverse. No prose gate condition, schema, completion field, or `workflow_steps` name changes, and `stride-workflow` is untouched: the shorter list was brought up to the longer one, never the other way round.
+
+### Scope
+
+`stride-subagent-workflow` only — Phase 3.5's `When` gate, the exploratory orthogonal-dispatch bullet, the security bullet's cross-reference, and the surface list in the dispatch-narrowing prose. `stride-workflow` Step 5.5 remains the source of truth and was not edited.
+
 ## [1.56.0] - 2026-07-31
 
 ### Fixed — the flow artifacts no longer route around Step 5.5, and Phase 3.5 is no longer missing from the subagent summaries (D202)

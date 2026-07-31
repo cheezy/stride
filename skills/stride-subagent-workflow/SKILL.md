@@ -87,7 +87,7 @@ Use this matrix to determine which subagents to dispatch based on task attribute
 
 **Quick rules:**
 - If the task is a **goal** or has **large complexity without child tasks** or a **25+ hour estimate**: dispatch the decomposer first. The decomposer breaks it into claimable child tasks — you don't implement goals directly.
-- If the task is small with 0-1 key_files, skip the decision-matrix subagents (explorer, Plan, reviewer) and code directly. This does **not** cover Phase 3.5's exploratory dispatch, whose gate is orthogonal to complexity and key_files.
+- If the task is small with 0-1 key_files, skip the decision-matrix subagents (explorer, Plan, reviewer) and code directly. This does **not** cover either orthogonal dispatch above — Phase 3.5's exploratory session or the `stride-security-review` considerations-mode dispatch — whose gates are orthogonal to complexity and key_files and have no reviewer precondition.
 - Otherwise, at minimum run the explorer and reviewer.
 
 ## Pre-Claim: Enrichment (Sparse Tasks)
@@ -275,7 +275,9 @@ Is it a goal OR large+undecomposed OR 25+ hours?
                     +--> Small, 0-1 key_files? --> Skip the decision-matrix subagents
                     |                              (explorer, Plan, reviewer) --> Begin
                     |                              implementation --> Phase 3.5
-                    |                              (this skip does NOT cover Phase 3.5)
+                    |                              (this skip covers NEITHER orthogonal
+                    |                              dispatch: the security considerations-
+                    |                              mode dispatch nor Phase 3.5)
                     |
                     +--> Medium/Large OR 2+ key_files?
                             |
@@ -299,9 +301,13 @@ Is it a goal OR large+undecomposed OR 25+ hours?
                             v
                         Check decision matrix for reviewer
                             |
-                            +--> Small, 0-1 key_files? --> Skip reviewer --> Phase 3.5
+                            +--> Small, 0-1 key_files? --> Skip reviewer, but the
+                            |    security considerations-mode dispatch still applies
+                            |    (no reviewer precondition) --> Phase 3.5
                             |
-                            +--> Otherwise --> Dispatch stride:task-reviewer
+                            +--> Otherwise --> Dispatch stride:task-reviewer, then
+                            |    the security considerations-mode dispatch if gated
+                            |    (it fires on BOTH branches, not small tasks only)
                                                 |
                                                 v
                                             Issues found?
@@ -394,10 +400,14 @@ SKIP THE DECISION-MATRIX SUBAGENTS WHEN:
   Task is small complexity AND has 0-1 key_files
   (explorer, Plan and reviewer only)
 
-NOT COVERED BY THAT SKIP — Phase 3.5's exploratory dispatch:
-  Its gate is manual_tests non-empty AND plugin available, which is orthogonal to
-  complexity and key_files. A small 0-1 key_files task that skipped every subagent
-  above STILL reaches Phase 3.5. Never read the skip line as covering it.
+NOT COVERED BY THAT SKIP — BOTH orthogonal dispatches:
+  Phase 3.5's exploratory session — gate is manual_tests non-empty AND the
+    exploratory plugin available.
+  The stride-security-review considerations-mode dispatch — gate is
+    security_considerations non-empty AND that plugin available.
+  Both gates are orthogonal to complexity and key_files and have NO reviewer
+  precondition, so a small 0-1 key_files task that skipped every subagent above
+  STILL reaches both. Never read the skip line as covering either.
 ```
 
 ## MANDATORY: Skill Chain Position

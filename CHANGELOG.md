@@ -25,6 +25,29 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.61.0] - 2026-07-31
+
+### Fixed — a small 0-1 `key_files` task now actually reaches the deep security-considerations sub-step (D208)
+
+`#### Deep security-considerations review` is a level-4 grandchild of `## Step 5`, nested inside `### Claude Code: Dispatch Task Reviewer`. A small 0-1 `key_files` task never enters that subtree — it reads the *sibling* `### Small tasks (0-1 key_files): Skip review.`, a bodyless heading that fell straight through to Step 5.5. So the sub-step was structurally unreachable on exactly the path its own gate fires on: that gate is non-empty `security_considerations` plus plugin availability, with **no reviewer precondition**, and 1.60.0 had just added a telemetry rule naming the small-task Shape 2 skip as its reachable no-reviewer case. The rule was right; the routing never delivered a reader to it.
+
+- **The small-task heading gained a body** stating that skipping the review does not skip the deep security gate, pointing at the sub-step, and naming the two rules that actually bite on a review-skipped task — the verdicts have no copied `reviewer_result` to merge into, and the wall-clock has no dispatched `reviewer` entry to fold into. Both were already stated in the sub-step; this is a pointer, not a second copy.
+- **The flowchart and Quick Reference Card were updated too.** Both stated what a small task does at Step 5 and were silent on this gate — leaving them would have reproduced the exact defect class D202 and D206 fixed, in the artifacts an agent consults mid-run *instead of* the prose.
+
+**Why a pointer rather than promoting the sub-step to a top-level step.** Two reasons, both about coupling rather than numbering. Promotion would break the **three cross-file citations** that identify the sub-step as "`stride-workflow` Step 5 … sub-step" (in `stride-subagent-workflow` and `stride-completing-tasks`), and it would strand three in-place references written for textual proximity to the reviewer block — "the JSON-parse fallback **above**", "during 'Extracting the structured review block'". That proximity is not incidental: the sub-step's merge rule is *about* the reviewer's output object, so filing it under the reviewer block is correct information architecture. The pointer fixes reachability without disturbing it, costs one section body, and matches house style — the flowchart already carried exactly this kind of pointer for Step 5.5.
+
+A draft of this entry also argued that **no renumbering-free slot existed**. That was false and review caught it: `Step 5.4` was free and ordering-correct, so promotion was available without renumbering. (Renumbering 5.5/5.6 would indeed have been costly — they are cited by number **dozens of times across five skill files**, and a pitfall forbids it — but that was never the binding constraint. A precise figure is deliberately not quoted here: two independent counts of it disagreed depending on case-sensitivity and match unit, which is exactly the drift a numeral beside an enumeration invites.) The choice stands on the two coupling reasons above, not on that one.
+
+### Backward compatibility
+
+Fully backward compatible. Prompt text only — no gate condition, schema, completion field, `workflow_steps` name, or step number changed. The sub-step's **heading and location are unchanged** (only its gate-false skip branch was extended, to cover the review-skipped state the new routing makes reachable), so every existing cross-reference to it still resolves. What changes is that a path which could already satisfy the gate is now told to evaluate it.
+
+### Scope
+
+`stride-workflow`: the `### Small tasks (0-1 key_files)` section body, the deep sub-step's skip branch (which the new routing made reachable in a state it was not written for — it named a task-reviewer prose verdict that does not exist on a review-skipped path), and the Step 5 blocks of the Complete Workflow Flowchart and the Claude Code Quick Reference Card. The Other Environments card was deliberately left alone, since the deep review is Claude-Code-only; review caught that the shared flowchart needed the same platform qualifier its neighbours carry, and it now has one.
+
+`stride-subagent-workflow` was corrected in four places, all the same omission: its small-task quick-rule, its flowchart's two small-task annotations, and its Quick Reference Card's `NOT COVERED BY THAT SKIP` block each carved out only Phase 3.5's exploratory dispatch and were silent on the orthogonal security dispatch stated a few lines above — inviting exactly the reading that the security dispatch *is* covered by the skip. All four now name both. Review caught that a first pass fixed only the prose rule and left the three summary artifacts stale, which would have reproduced this defect class inside the very file being edited to fix it. That file's structural *framing* still needed no change: it states both dispatches as orthogonal to the decision matrix, which is already reachable, and that framing is what this fix borrows for `stride-workflow`.
+
 ## [1.60.0] - 2026-07-31
 
 ### Fixed — the deep security review's telemetry rule now states the no-reviewer case, so all three gated dispatches agree (D207)

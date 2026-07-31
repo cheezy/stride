@@ -25,6 +25,26 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.58.0] - 2026-07-31
+
+### Fixed — the exploratory session's wall-clock now has a stated home in `workflow_steps` (D204)
+
+`workflow_steps` is a fixed six-entry array, an array with fewer than six entries is an incomplete telemetry record, and `stride-completing-tasks` separately forbids recording this dispatch as a 7th step name. The **security-considerations** dispatch has an explicit rule for this in both skills — fold its wall-clock into the existing `reviewer` entry, add no new name — and so does Step 5.6 / Phase 3.6 for `/harden`. The **exploratory-testing** dispatch had none: neither Step 5.5 nor Phase 3.5 mentioned `workflow_steps` at all. An agent running a time-boxed session was left to either invent a forbidden seventh entry or silently drop the time — under-reporting the very phase the integration exists to make visible, and which can be the largest single block of wall-clock in the whole task.
+
+- **Both skills now state the disposition**, worded to mirror the two rules already in place: fold the session's wall-clock into the existing `reviewer` entry, never add a seventh step name.
+- **The no-reviewer case is stated rather than left to inference.** Pitfall discipline mattered here: folding time into a step that did not run would be its own defect. Step 5.6 had already solved this exact problem — "when no reviewer ran, that entry is the skip form and carries no duration; record the dispatch in `completion_notes` instead rather than inventing a duration for a step that did not run" — so that resolution is mirrored rather than reinvented.
+- **And it is called out as routine, not exceptional.** Step 5.5's gate has no review precondition, so the small 0-1 `key_files` path — where the decision matrix skipped review — reaches the session routinely with no `reviewer` entry to fold into. Left implicit, the natural reading of "fold it into the reviewer entry" is that a reviewer always ran.
+
+### Backward compatibility
+
+Fully backward compatible. Prompt text only — no schema change, no new completion field, and **no seventh `workflow_steps` name**; the six-name vocabulary and the six-entry expectation are unchanged. Nothing that was previously valid becomes invalid: this states where time already had to go, for a dispatch that previously had nowhere sanctioned to put it.
+
+### Scope
+
+Step 5.5 in `stride-workflow` and its Phase 3.5 mirror in `stride-subagent-workflow`, prose only. Following the convention of the two rules it mirrors, no Decision Summary row was added — neither the security dispatch's table nor Step 5.6's carries one, and the telemetry rule lives in the prose in both.
+
+The manual sweep this task called for — enumerating every optional gated dispatch against the six-entry contract — found that the **deep security-considerations review is now the only one of the three whose telemetry rule is silent on the no-reviewer case**, even though its own gate text says it does not require the task-reviewer to have been dispatched. That gap pre-dates this change and sits outside these acceptance criteria, so it is filed as **D207** rather than folded in; this change's wording is simply what made the asymmetry visible. The sweep also noted three dispatches with no telemetry rule at all — `stride:hook-diagnostician`, `stride:task-decomposer`, and `stride:task-enricher` (which runs pre-claim) — recorded in D207 for consideration rather than asserted as defects.
+
 ## [1.57.0] - 2026-07-31
 
 ### Fixed — the subagent skill's exploratory gate now states the never-execute prohibition and detects the same surfaces as Step 5.5 (D203)

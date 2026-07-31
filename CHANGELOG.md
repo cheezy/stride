@@ -25,6 +25,24 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.55.0] - 2026-07-31
+
+### Fixed — a blocked session now has a coverage disposition, and two instructions that named things the explorer contract cannot supply (D205)
+
+Three related defects in the Step 5.5 / Phase 3.5 session-outcome handling, all surfaced by tracing a blocked session end to end.
+
+- **The blocked ending had no coverage disposition.** It was routed to the unreachable-app path, whose entire instruction was "report the obstacle as a finding and continue — do NOT fail completion." It was never told the manual test had not been performed, never told to hand it back as a human responsibility, and never routed to the follow-up filing — while the zero-probe ceiling ending one row up has **identical coverage (nothing)** and is told all three explicitly. Two endings with the same coverage were getting opposite dispositions, and only one of them was stated. Blocked now gets its own ending bullet carrying the same disposition, the older-contract mapping points at it, and the Decision Summary's unreachable-app row was **extended rather than duplicated**. It also inherits the ceiling bullet's *judge-from-the-sheet* hedge, which review of this change showed it needed: blocking is a stopping heuristic the agent can reach at any point, not only before the first probe, so a session that ran nine of twelve probes and then lost the app is blocked with a non-empty bug list. Coverage therefore turns on what the sheet says the session did — not performed at or near zero probes, partial coverage after meaningful ones — and an obstacle never being a finding does not make the real bugs alongside it stop being findings. The bite is worst on an older contract, where blocked cannot be resolved from the session sheet the way `stopped_early` can — that sheet has no probe count — so the disposition is now stated rather than left to be inferred; the text says so where it matters.
+- **"Report the obstacle as a finding" asked for something the contract forbids.** A finding is an item carrying an exploratory severity — a `bugs[]` entry — but the explorer contract requires a blocked session to record the obstacle in its `debrief` and **not fabricate results**, so the bug list is empty. An agent following the instruction literally held an obstacle-shaped item with no severity, which the completion skill's absent-severity rule then maps to `important`: an unreachable dev server filed as an important testing finding, with the reviewer note asked to name its worst impact. Nothing incorrect was persisted structurally; the record's *meaning* was wrong. It now says record the obstacle **as an obstacle**, in the terms the contract actually emits, and spells out why the distinction is not pedantry.
+- **The capture sentence named session-sheet fields an older contract lacks.** It stated flatly that the sheet "is the only carrier of how the session ended (its stop reason and how many probes it actually ran)." An older contract's sheet carries neither — it is wall-clock with no probe concept at all — and there the root-level `status` key is the carrier. The endings block already hedged this correctly; the capture sentence, which is what governs what actually gets captured, did not. It now **conditions on the installed contract** — the same pattern this skill already uses for the budget unit — instead of asserting either contract's shape, so it stays true whichever is installed. That framing matters: a check of the plugin cache during this task found **0.2.0** installed, whose sheet *does* carry `stop_reason` and `probes_attempted`, so hard-coding the older shape would have replaced one wrong assertion with another.
+
+### Backward compatibility
+
+Fully backward compatible. Prompt text only — no schema change, no new completion field, no new `workflow_steps` name, and no change to what any payload carries. **Budget exhaustion and blocking both still never fail completion**, which every touched passage restates; what changes is only what may honestly be claimed about coverage, and where the obstacle is recorded. The graceful-skip path is untouched.
+
+### Scope
+
+`stride-workflow` Step 5.5 (the endings block, the older-contract mapping, the capture instruction, the safety-boundary paragraph, and the Decision Summary row) and its `stride-subagent-workflow` Phase 3.5 mirror, which remains **identical in substance** — Phase 3.5 has no Decision Summary table, so the row's content lands in its prose. The `stride-exploratory-testing` plugin is untouched: every change here describes what the existing contract already emits rather than asking it for anything new.
+
 ## [1.54.0] - 2026-07-31
 
 ### Fixed — the completion gate's task-supplied-section rule is now satisfiable on the two payloads that structurally cannot carry a verdict (D201)

@@ -25,6 +25,31 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.54.0] - 2026-07-31
+
+### Fixed — the completion gate's task-supplied-section rule is now satisfiable on the two payloads that structurally cannot carry a verdict (D201)
+
+The hard gate said: if the task supplied `testing_strategy`, `patterns`, `pitfalls` or `security_considerations`, that section's verdict must be a real `passed`/`failed`, never `not_assessed` or absent — otherwise "re-run the reviewer; do not submit." Stated unconditionally, it fired on two documented payload shapes that have no verdict object at all, and on both the prescribed remedy was unavailable:
+
+- **A self-reported skip (Shape 2)** carries exactly `dispatched`, `reason` and `summary`. A small task with 0-1 `key_files` skips review *because the Step 3 decision matrix says to*, so re-running the reviewer is the one thing that matrix forbids.
+- **The Step 5 JSON-parse fallback** orders the agent to omit every structured field when the reviewer's fenced block does not parse, and promises the result is "a degraded-but-valid completion, never a hard failure." The gate then made that same payload a "do not submit," and re-running the reviewer does not help — it already ran.
+
+The only action that would have ticked the box was writing a verdict by hand, which the surrounding rules forbid as fabrication. So the gate was unsatisfiable in those cells, and the pressure was toward the forbidden escape.
+
+- **The checkbox now states its own precondition.** It is scoped to a payload where a `stride:task-reviewer` agent ran **and** its block parsed — the only payload that can carry a verdict. Where no block was parsed, the check is **inapplicable, not failed**: there is nothing that could be `not_assessed`, and the absence is the documented shape rather than a gap.
+- **The two sibling checkboxes are scoped the same way**, for the same reason — both had the identical shape. The `behaviour_test_matrix` verdict check blocked a matrix-bearing task that legitimately skipped review on identical unsatisfiable terms. The nested `security_considerations.considerations[]` check was the subtler of the two, and a review of this change is what surfaced it: the deep security-considerations sub-step's own gate is *non-empty `security_considerations` plus plugin availability* and does **not** require the task-reviewer to have been dispatched, so on a small 0-1 `key_files` task it fires while review is skipped — then demands a nested array on a payload with no `security_considerations` object to hold it, and its excusing clause named only "plugin absent" and "task's list empty," neither of which covers a skip or a parse failure.
+- **Fail-closed survives that scoping — only its carrier changes.** A `partial`/`unmitigated` consideration on a payload with no structured block is still **fixed before completing**, and the deep review's findings are recorded in `completion_notes` plus one line of `completion_summary`. The orchestrator's merge instruction says the same from its side. Neither document permits synthesizing a `reviewer_result`, a section verdict, an `issues[]` entry, or a `dispatched: true` to carry the finding — that is the route the Step 5.5 "no structured review block in the payload" branch already prescribes, reused here rather than reinvented.
+- **The fallback's guarantee is now true as written.** The orchestrator's fallback path says outright that the self-check agrees with it rather than overriding it, and names the same scoping for the skip shape, so the two documents no longer contradict each other. Step 7's one-line restatement of the gate, and the third restatement in `stride-subagent-workflow`, carry the qualifier too — a summary that outlived the rule it summarizes is how this drifts back.
+- **No bypass is created, and the three obvious ones are closed explicitly.** The clause answers only *whether a verdict object exists to be checked*, never *what a verdict may say*. It does not license hand-writing, back-filling or placeholder-ing a verdict; it does not license echoing the task's own matrix rows into a hand-built object; and it does not license reporting a dispatched, parsed review as a self-reported skip to land in the excused case — which the gate's closing paragraph already names as a bypass. Given a parsed block the check binds in full, with no small-task, docs-only or brevity discount.
+
+### Backward compatibility
+
+Fully backward compatible. Prompt text only — no schema change, no new or altered completion field, no change to any payload an agent already sends. The gate's behaviour is **unchanged on every payload it could previously pass**; what changes is that two payloads it could only fail now pass, which is the defect. The case the checkbox was written for — a dispatched review whose block parsed and reported `not_assessed` for a field the task supplied — still hard-blocks exactly as before. `agents/task-reviewer.md` is untouched: `not_assessed` remains reserved strictly for a section the task left empty, and that is the reviewer's own obligation, which only ever arises when a review actually runs.
+
+### Scope
+
+The completion skill (all three scoped checkboxes — the task-supplied-section rule, its `behaviour_test_matrix` sibling, and the nested `considerations[]` check), the orchestrator (the JSON-parse fallback, the deep security merge instruction, and Step 7's restatement), the subagent-workflow restatement, and the README's schema paragraph. The deep security sub-step's **gate is deliberately left alone**: adding a reviewer-ran precondition would stop the specialist check from running on exactly the small tasks that skip review, which trades a documentation defect for a coverage one. The dispatch still fires; only where its verdicts land changes. The defect pre-dates the exploratory-testing integration and is not specific to it — it fires for any task that supplied one of the four fields and whose `reviewer_result` is a skip shape or a parse fallback. It was simply most visible at Step 5.5, whose own gate guarantees the task supplied `testing_strategy`.
+
 ## [1.53.0] - 2026-07-31
 
 ### Added — an optional `/harden` sub-step, sequenced so a drafted check can never turn the `after_doing` gate red (W1978)

@@ -25,6 +25,25 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.59.0] - 2026-07-31
+
+### Fixed — the completion skill's two routing artifacts now route through Step 5.5 (D206)
+
+D202 (v1.56.0) fixed five routing artifacts across the two orchestrator skills that sent a small 0-1 `key_files` task straight from the skipped review to the `after_doing` hook, jumping over Step 5.5. Two more artifacts in `stride-completing-tasks` carried the identical staleness and were outside D202's `where_context`, so they were filed as this defect rather than folded in.
+
+- **The Completion Workflow Flowchart** routed the review decision's `NO (or no subagent access)` branch straight into `Read .stride.md after_doing section`. Step 5.5 now sits between them, with its gate stated on the node — `manual_tests` non-empty AND plugin available, **no review precondition**, so the NO branch reaches it too — and the gate-not-met path drawn straight on to the hook with no failure. Step 5.6 follows it, for the same reason it was folded into D202's subagent flowchart: adding 5.5 alone would leave the artifact stale in exactly the way it was being fixed for.
+- **The Quick Reference Card** went from `[Optional] Dispatch task-reviewer` at step 2 to the `complete` call at step 3, with nothing between. It gains a `2a` entry naming the gate and stating explicitly that a small 0-1 `key_files` task which skipped step 2 still reaches it.
+
+No prose gate was changed — Step 5.5's gate is owned by `stride-workflow` and is untouched here; these are summaries being brought into agreement with it, exactly as in D202.
+
+### Backward compatibility
+
+Fully backward compatible. Prompt text only, in two summary artifacts — no schema change, no completion field, no `workflow_steps` name, and no gate condition altered. The artifacts now describe a path the prose already permitted.
+
+### Scope
+
+`stride-completing-tasks`'s Completion Workflow Flowchart and Quick Reference Card. This completes the sweep D202 began: with these two, every flow and card across the three skills now routes a small 0-1 `key_files` task through Step 5.5.
+
 ## [1.58.0] - 2026-07-31
 
 ### Fixed — the exploratory session's wall-clock now has a stated home in `workflow_steps` (D204)

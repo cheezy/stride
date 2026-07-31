@@ -202,6 +202,13 @@ Medium+ OR 2+ key_files? ─YES→ Dispatch stride:task-reviewer
     ↓                                     ↓ NO            ↓
     ←─────────────────────────────────────←──────────────←─┘
     ↓
+Step 5.5 / Phase 3.5: Manual & Exploratory Testing (optional, gated)
+  Gate = manual_tests non-empty AND the exploratory plugin is available.
+  NO review precondition — the NO branch above reaches this too.
+  Gate not met → straight on to the hook, no failure.
+    ↓
+Step 5.6 / Phase 3.6: Harden findings into checks (optional, gated)
+    ↓
 Read .stride.md after_doing section
     ↓
 Execute after_doing (120s timeout, blocking)
@@ -823,6 +830,10 @@ After the complete endpoint succeeds:
 CLAUDE CODE COMPLETION WORKFLOW (automatic hooks):
 ├─ 1. Work is complete ✓
 ├─ 2. [Optional] Dispatch task-reviewer for code review ✓
+├─ 2a. [Optional, gated] Step 5.5 manual & exploratory testing ✓
+│      Gate = manual_tests non-empty AND plugin available — never on review,
+│      so a small 0-1 key_files task that skipped step 2 still reaches this
+│      (then Step 5.6 /harden, if that session returned convertible findings)
 ├─ 3. Call PATCH /api/tasks/:id/complete directly ✓
 │     (hooks.json PreToolUse auto-runs after_doing first
 │      hooks.json PostToolUse auto-runs before_review after)

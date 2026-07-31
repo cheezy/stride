@@ -25,6 +25,29 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.60.0] - 2026-07-31
+
+### Fixed — the deep security review's telemetry rule now states the no-reviewer case, so all three gated dispatches agree (D207)
+
+The plugin defines exactly three optional gated dispatches, each folding its wall-clock into the existing `reviewer` `workflow_steps` entry rather than adding a seventh step name: the deep security-considerations review, exploratory testing (Step 5.5 / Phase 3.5), and `/harden` (Step 5.6 / Phase 3.6). Two of them also said what happens when **no reviewer ran** — `/harden` since it landed, exploratory testing as of 1.58.0. The security review did not, and it is the dispatch where the omission bites hardest: its own gate text states that the gate is non-empty `security_considerations` plus plugin availability and **does not require the task-reviewer to have been dispatched**, so it fires on a Shape 2 self-reported skip — precisely the payload with no dispatched reviewer entry to fold into. An agent following the rule literally would fold a duration into a step that did not run, or drop the time.
+
+- **Both orchestrator skills now carry the sentence**, mirroring the wording the other two dispatches already use: when no reviewer ran, that entry is the skip form and carries no duration — record the dispatch in `completion_notes` rather than inventing one.
+- **The entry is still submitted, never omitted.** Stated explicitly at both sites, because the shorthand "no reviewer entry to fold into" reads as the entry being absent — which would produce a five-entry array, the exact incomplete-telemetry record these rules exist to prevent. (The same ambiguity was caught in review of 1.58.0 and fixed there; it is pre-empted here rather than repeated.)
+- **And the case is named as reachable, not hypothetical**, citing the gate's own no-precondition sentence, which sits a few lines below the telemetry item in the same sub-step but was never tied to it.
+- **The JSON-parse fallback is explicitly excluded**, because a draft of this fix got it wrong. That fallback and the Shape 2 skip are listed together by the merge rule — correctly, since neither carries a structured block to merge into — but they diverge for telemetry: on the fallback the reviewer *did* run and its entry keeps `dispatched: true` with a captured duration, so the ordinary fold-it-in rule applies. Borrowing the merge rule's two-shape list would have told an agent to divert the deep dispatch's time to `completion_notes` while a real reviewer duration sat in the array — the mirror image of the defect being fixed. The distinction is now stated where the confusion arises.
+
+### Backward compatibility
+
+Fully backward compatible. Prompt text only — no schema change, no completion field, **no seventh `workflow_steps` name**, and no gate condition touched. Nothing previously valid becomes invalid: this states where time already had to go on a payload shape the rule had simply not addressed.
+
+### Scope
+
+The deep security-considerations sub-step's telemetry item in `stride-workflow` and its clause in `stride-subagent-workflow`'s security orthogonal-dispatch bullet. Following the convention of the two rules it mirrors, no Decision Summary row was added — that table has no telemetry row, and `stride-subagent-workflow` has no such table at all.
+
+This closes the sweep that 1.58.0's manual test began: **all three optional gated dispatches now state the same telemetry disposition, including the no-reviewer case.**
+
+Review of this change surfaced one further gap, filed as **D208** rather than folded in: `#### Deep security-considerations review` is a level-4 child of `### Claude Code: Dispatch Task Reviewer`, while a small 0-1 `key_files` task reads the *sibling* `### Small tasks (0-1 key_files): Skip review.` line and never arrives there. So the sub-step is structurally unreachable on exactly the path whose gate — and now whose telemetry rule — says it fires. The rule added here is correct; the routing does not deliver a reader to it. That is the same defect class as D202 and D206, in the one place those sweeps did not reach: the prose heading hierarchy rather than a summary artifact. `stride-subagent-workflow` does not have the problem, since it states the dispatch as orthogonal to the decision matrix. Three further dispatches remain without any telemetry rule — `stride:hook-diagnostician`, `stride:task-decomposer`, and `stride:task-enricher` (which runs pre-claim, so arguably before telemetry begins). Those are recorded rather than fixed here: unlike the three above, they are not plugin-gated optional dispatches and belong to a separate question about whether the six-name vocabulary covers them at all.
+
 ## [1.59.0] - 2026-07-31
 
 ### Fixed — the completion skill's two routing artifacts now route through Step 5.5 (D206)

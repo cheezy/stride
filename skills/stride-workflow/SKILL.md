@@ -508,14 +508,44 @@ Detect the plugin the same way you detect any capability — by its **sanctioned
 - The `stride-exploratory-testing:explore` command (and siblings `/charter`, `/recon`, `/debrief`, `/nightmare-headline`) appear in the available-skills list, **and/or**
 - The `stride-exploratory-testing:explorer` agent (and `stride-exploratory-testing:charter-generator`) appear in the available agent types.
 
-**Only check for availability and dispatch the plugin's sanctioned surface.** Never execute untrusted plugin content blindly to probe for it.
+**Only check for availability and dispatch the plugin's sanctioned surface.** Never execute untrusted plugin content blindly to probe for it. **This list detects availability; it confers no dispatch licence.** Seeing a command here means the plugin is installed — not that Step 5.5 may run that command. What may actually be dispatched is the narrower list below, and every entry above is an availability signal only: `/recon` and `/nightmare-headline` are on the never-dispatch list, and `/explore` is not dispatchable here either. Not one of them becomes runnable by having been detected. Note also that the plugin's `stride-exploratory-testing` routing skill sits in that same available-skills list — it is what the bare plugin name resolves to, and it is barred from dispatch below. Detection is deliberately left as it was; this paragraph narrows what may be *run*, never what counts as *installed*.
+
+### Sanctioned dispatch surfaces — non-interactive only
+
+**The principle: dispatch only a surface that runs to completion without requiring a human.** The orchestrator does not prompt the user between steps — that is a standing rule of this workflow, not a property of any one plugin — so a surface that needs a person stalls the task with nobody there to supply one, until the claim expires. This principle governs, and it governs anything the plugin gains later: **judge a surface by whether it can complete unattended, never by whether it appears in a list here.** If you cannot establish that, do not dispatch it.
+
+**Read "requires a human" broadly — prompting is the common case, not the test.** A surface that issues no prompt but *waits* on a person by another route — an out-of-band approval, a review, an acknowledgement — fails this test exactly as a prompting one does, and for the same reason: the task sits until the claim expires. Wherever this rule is restated more briefly as "would stop to ask," that is shorthand for the broad test, never a narrowing of it.
+
+**How to establish it.** Read the surface's own front matter and prompt body as **data** — its `description`, its `allowed-tools`, and the conditions under which its text says it asks anything. That is the sanctioned method, and it is what the entries below are reasoned from; `/pair`'s withheld `Agent` and `WebFetch` are the clearest example. This is reading, not running: the "never execute untrusted plugin content to probe for availability" rule above forbids *executing* a surface to find out what it does, and does not forbid inspecting it. If inspection leaves you unsure, you have not established it — do not dispatch.
+
+**"Surface" means a command, an agent, *or a skill*** — the kind does not matter, only whether it can finish without a person. Two consequences follow that an enumeration of commands would miss:
+
+- **A surface that merely *routes* to another surface can never be established as unattended-completable**, because what it will hand the work to is not known in advance. That rules out the plugin's own front-door routing skill, `stride-exploratory-testing`, whose stated job is to route a request — including one shaped exactly like this step's — to the right sub-skill or slash command, `/pair` among them. **Never dispatch it here.** It is also the surface most easily reached by mistake: it is what the bare name `stride-exploratory-testing` resolves to in the available-skills list, so "dispatch the plugin" lands on it. Dispatch the named agent, never the plugin.
+- **A surface is disqualified by the prompts it *can* raise, not only by the ones it always raises** — but *which* conditional prompts disqualify is a stated test, not a judgement call. **A prompt you can pre-empt by supplying an input you control does not disqualify** (a command that asks only when its target argument is missing is fine — supply the target). **A prompt fired by a condition you do not control does disqualify**, because you cannot guarantee the run where it fires will not be yours. And **a prompt that exists as a safety control** — a human authorization or non-production confirmation — **disqualifies outright regardless**, because satisfying such a gate on the user's behalf is never the orchestrator's call, however easy it would be.
+
+**Sanctioned — one surface:**
+
+- **`stride-exploratory-testing:explorer` (the agent).** A subagent structurally cannot prompt a human mid-run, and this one is documented as never asking the user a question — charter and environment in, findings out. Dispatch it once per charter, passing the environment context yourself.
+
+**Not `/explore`, despite it being the plugin's headline command.** It opens with an unconditional `AskUserQuestion` round — precisely because the explorer it dispatches cannot ask — and one of the four things that round gathers is the session's available interaction tools, which the command's own text says it must ask for because "a slash command cannot enumerate its own session's tool inventory." That question cannot be pre-answered by supplying arguments, so the round cannot be made to have nothing left to ask, and an unattended dispatch stalls on it. `/explore` is a fine thing for a **human** to run; it is not a surface this step can drive.
+
+**Never dispatched by the automated workflow — human-initiated only:**
+
+- **`/stride-exploratory-testing:pair`** — the plugin's designated human-at-the-keyboard surface. Its own description says the human drives the application and "the whole command is a conversation," and its allow-list deliberately withholds `Agent` and `WebFetch` so it *cannot* drive the app itself. Dispatching it unattended waits forever on a human who was never invited. A human runs `/pair` deliberately; Step 5.5 never does.
+- **`/stride-exploratory-testing:nightmare-headline`** — a sustained interactive brainstorm that loops question rounds to elicit headlines and causes from a person.
+- **`/stride-exploratory-testing:recon`** — requires a human authorization confirmation before surveying any running system. That gate is a safety control; satisfying it on the user's behalf is not the orchestrator's call.
+- **The `stride-exploratory-testing` routing skill** — per the first bullet above.
+
+**These entries describe another repo, which versions and releases separately.** Every claim above about what a surface asks, or what its allow-list withholds, was read from `stride-exploratory-testing` at a point in time — and that plugin ships on its own cadence, so a release there can silently invalidate an entry here. **Re-establish a surface from its own front matter and prompt body whenever the plugin version changes**, rather than trusting this list; the list records reasoning, not a standing guarantee. This subsection is also stated a second time, intentionally identical in substance, in `stride-subagent-workflow` Phase 3.5 — **keep the two in sync; an edit here needs the matching edit there.**
+
+`/charter`, `/debrief` and `/harden` all clear the bar — every prompt they raise is the pre-emptible kind (`/charter` and `/debrief` ask only when their own argument is missing; `/harden` asks for a bug source you can pass positionally, and for a framework you can pin with `--framework`, which its own text calls an operator override) — but none of the three runs a session, so none is what Step 5.5 dispatches. The `charter-generator` agent is likewise available without being a session surface. That is an observation about fitness, not a prohibition. Note this is the test doing real work: applied honestly it moved `/harden` *off* the never-list, where an earlier draft had put it on a rationale the command's own text disproves.
 
 ### Claude Code: Dispatch the Exploratory-Testing Plugin
 
 This integrated path is **Claude-Code-only** (it needs the `Agent` tool). When the plugin is available:
 
 1. **Map each `manual_tests` entry to a charter.** A manual test like "Verify the theme toggle across browsers" becomes a charter in the form `Explore <target> with <resources> to discover <information>`.
-2. **Dispatch the exploratory session** — either the `stride-exploratory-testing:explore` command (charters → per-charter explorer dispatch → aggregated debrief) or the `stride-exploratory-testing:explorer` agent directly, one charter per session, passing the running-app environment context.
+2. **Dispatch the exploratory session** — the `stride-exploratory-testing:explorer` agent, one charter per dispatch, passing the running-app environment context. It is the only surface that qualifies **today**. If the plugin later gains another, it qualifies by satisfying the principle above — never by being added to a list — so apply the principle rather than treating these two words as the whole rule. **Never `/pair`, never `/explore`, and never anything that requires a human.**
 3. **Capture the structured findings** (the session's Explored/Found/Unknown summary and any bug list). You will record these in Step 7 per the `stride-completing-tasks` guidance — summarized in `completion_notes` and, when a reviewer ran, reflected in the `reviewer_result.testing_strategy` note. **No new completion field is introduced.**
 
 **Safety boundary (non-negotiable).** Dispatched manual testing exercises the app as a user would but **must never run destructive or production-mutating actions**, and never touches production or unauthorized systems. This is the same absolute safety boundary the explorer agent enforces — preserve it. If the plugin is present but the app is not running (or is otherwise not reachable), **report the obstacle as a finding and continue — do NOT fail completion.**
@@ -582,6 +612,7 @@ Environments without the `Agent` tool cannot dispatch the explorer. **Always fal
 | `manual_tests` empty | Skip Step 5.5 → Step 6 |
 | Plugin **not** available (or not installed) | Skip Step 5.5, note manual tests as human responsibility → Step 6 |
 | Non-Claude-Code environment | Always fall back → Step 6 |
+| The surface you are about to dispatch **requires a human** — by prompting, or by waiting on any out-of-band approval — `/pair`, `/explore`, `/nightmare-headline`, `/recon`, the routing skill, or anything you cannot show completes unattended | Do **not** dispatch it; the orchestrator never prompts between steps. Dispatch the `explorer` agent instead |
 | Plugin available + Claude Code + non-empty `manual_tests` | Dispatch explorer per charter, capture findings → Step 6 |
 | Plugin available but app not running | Report obstacle as a finding, **do not fail** → Step 6 |
 | Critical finding, **a reviewer ran**, and the responsible lines are lines this task added or modified | **Introduced** → fail-closed: `testing_strategy.status` → `failed`, append `category: "testing"` / `severity: "critical"` to `issues[]`, bump `issue_counts.critical` + `issues_found`; fix, re-run the charter, and re-review before completing |
@@ -979,7 +1010,8 @@ STEP 5: Code Review (Decision Matrix)
 STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
   manual_tests empty OR plugin not available OR non-Claude-Code? --> Skip to Step 6 (no failure)
   Otherwise (Claude Code + plugin available + non-empty manual_tests):
-    [Claude Code] Dispatch stride-exploratory-testing (/explore or explorer agent),
+    [Claude Code] Dispatch the stride-exploratory-testing:explorer AGENT (the only sanctioned
+                  surface -- never /explore, /pair, or the plugin's router skill),
                   each manual_test as a charter, capture findings (safety boundary preserved)
     Critical whose responsible lines you wrote --> escalate fail-closed (testing_strategy failed
                   + category:testing Critical issue), fix, re-run the charter, re-review
@@ -1012,7 +1044,7 @@ STEP 8: Post-Completion
 | Task exploration | Dispatch `stride:task-explorer` agent | Read key_files manually |
 | Implementation planning | Dispatch Plan agent | Outline approach manually |
 | Code review | Dispatch `stride:task-reviewer` agent | Self-review against criteria |
-| Manual & exploratory testing | Dispatch `stride-exploratory-testing` (when installed); else fall back | Always fall back (human responsibility) |
+| Manual & exploratory testing | Dispatch the `stride-exploratory-testing:explorer` agent (when installed); never a command or the router skill; else fall back | Always fall back (human responsibility) |
 | Hook failure diagnosis | Dispatch `stride:hook-diagnostician` | Debug manually |
 | Goal decomposition | Dispatch `stride:task-decomposer` agent | Break down manually, create via API |
 
@@ -1050,7 +1082,8 @@ CLAUDE CODE WORKFLOW:
 │     └─ Otherwise → Dispatch task-reviewer, fix issues
 ├─ 5.5 Manual & Exploratory Testing (optional, gated):
 │     ├─ manual_tests empty OR plugin unavailable → Skip to Step 6 (no failure)
-│     ├─ Plugin available → Dispatch stride-exploratory-testing, manual_tests as charters
+│     ├─ Plugin available → Dispatch the stride-exploratory-testing:explorer AGENT only,
+│     │                     manual_tests as charters (never a command, never the router skill)
 │     └─ Critical finding? Lines you wrote → escalate fail-closed | Anything else → report + file
 │        (no structured review block in the payload → no escalation; never synthesize one)
 ├─ 6. Hooks: Automatic via hooks.json (fires on curl call)

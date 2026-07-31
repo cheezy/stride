@@ -25,6 +25,28 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.52.0] - 2026-07-31
+
+### Added — gitignore guidance for exploratory session artifacts, before the first session rather than after (W1977)
+
+A session that writes anything to disk puts it under `.exploratory/` — `sessions/`, `checks/`, `backlog.md`, `coverage.md` — and those files arrive **untracked**, holding transcribed application output: the same material 1.51.0's redaction rules keep out of the completion payload. Separately, a project's own `## after_doing` section often stages everything before committing, `git add -A` being a common shape for a quality gate that commits its own fixes. Each behaviour is correct on its own; together they commit session data, and a commit is far harder to walk back than a payload field — it can be pushed, and then it is effectively permanent.
+
+- **The README now carries it where operators actually set up.** `## Configuration` — the section Prerequisites links to, and the moment an operator is creating project-root files — gained a `.gitignore` block listing every working artifact including `.exploratory/`, and the README's existing artifact-gitignore note names it too. The block also lists **`.stride_auth.md`**, closing a long-standing gap of its own: the README has always said "never commit it" of the file holding your API token, and had never once asked for the mechanical control that enforces it. An exploratory session against a draft of this change found the delivery gap and made it concrete: the first draft put the guidance in the marker-contract row and in Step 5.5, and the release note then claimed it lived "where operators already look" — but the marker row is inside a skill file **agents** load and operators never open, so the row had only ever told the agent that operators *should* be told. The tell was this repository's own `.gitignore`: it carries every artifact the README lists and had no `.exploratory/` entry.
+- **The instruction now has an execution site.** "Mention to operators on first install" had none — nothing anywhere prompted the agent to say it out loud. Step 0 now does, which is the only step that runs once per session and the only point where addressing the operator is sanctioned. Step 5.5 and Phase 3.5 keep the reminder but hand delivery to Step 0, because their own "before the first session" timing was unsatisfiable from inside a step that only runs once a session is already under way.
+- **The marker-contract row names both directories**, so the agent-side contract and the operator-side README agree on what to mention.
+- **Step 5.5 and Phase 3.5 both explain the mechanism rather than asserting it** — untracked artifacts plus an `after_doing` section that stages everything equals a commit — so an operator can see why the line is needed and judge whether their own hook has that shape.
+- **It stays operator guidance.** The agent tells the operator to add the entry, exactly as it does for `.stride/`, and **never edits their `.gitignore` itself**; an unrequested repository mutation is not the fix for this.
+- **`.exploratory/` is the default, not the only location.** `/explore`, `/pair` and `/harden` each take an `--output` flag that puts artifacts wherever the operator names, and the entry protects none of that — so both skills and the README say an operator who redirects artifacts needs that path gitignored too. The artifact carries the same transcribed output either way.
+- **Nothing requires the directory to exist.** A `.gitignore` entry for a path that never appears is inert, and on the sanctioned dispatch path nothing writes there at all — nothing in the `explorer` agent's contract asks it to write a session file. The entry is for the sessions an operator runs themselves, which is where artifacts actually come from.
+
+### Backward compatibility
+
+Fully backward compatible, and additive only. Prompt text and docs — no completion field, enum, hook, or schema change, and no change to any trigger condition or to the graceful-skip contract. Nothing is required of a project that has no `.exploratory/` directory, and a project whose `.gitignore` already covers it needs no action. The plugin's own behaviour is unchanged: it did not commit before this release and does not now — the staging it warns about belongs to the project's own `## after_doing` commands.
+
+### Scope
+
+The two orchestrator skills and the docs. No `.gitignore` in this repository or any other is modified by this change; that is the operator's call, which is the point.
+
 ## [1.51.0] - 2026-07-30
 
 ### Changed — the completion summary now names who is harmed, and cites the session artifact when one exists (W1976)

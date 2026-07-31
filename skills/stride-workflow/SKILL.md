@@ -159,6 +159,10 @@ Whether you arrive here from a creation intent or the build loop, **a claim fail
    - If missing: Ask user to create it
    - Verify sections exist: `## before_doing`, `## after_doing`, `## before_review`, `## after_review`, `## after_goal`
 
+3. **The exploratory-testing environment, when that plugin is installed.** Step 5.5 later dispatches sessions against a running app, and its safety gate needs an affirmative that **only the user can give** — the orchestrator may neither supply nor infer it, and once the loop begins it may not prompt between steps. **Here is the one point where asking is legal, so ask here or never.** In a single question, collect: whether the target is a system the user is **authorized to test and is not production** (force an explicit answer — never default to authorized), **how to reach it** (base URL, launch command, or host), and **where test accounts or seed data live** (a pointer, never pasted credentials). Record the answers for the rest of the session.
+
+   **This is optional and never blocks.** If the plugin is not installed, the user declines, or the answer is anything short of an explicit authorized-and-non-production affirmative, simply record that and move on — Step 5.5 will skip with no failure, exactly as it does when the plugin is absent. Skipping is the safe default; a missing affirmative is never a reason to hold up the workflow, and never a licence to guess one later.
+
 **Then write the orchestrator activation marker** (see "Orchestrator Activation Marker" section above for the contract):
 
 ```bash
@@ -499,7 +503,7 @@ If either condition is false, **skip this step entirely and proceed to Step 6 wi
 
 ### Why this step exists
 
-Tasks routinely carry `manual_tests` in their `testing_strategy`, but the workflow has historically had no way to actually perform them — they were left to a human or silently skipped. When the `stride-exploratory-testing` plugin is installed, each manual test becomes a **charter** and the explorer runs a real, time-boxed exploratory session, closing the gap between "tests written" and "tests performed."
+Tasks routinely carry `manual_tests` in their `testing_strategy`, but the workflow has historically had no way to actually perform them — they were left to a human or silently skipped. When the `stride-exploratory-testing` plugin is installed, each manual test becomes a **charter** and the explorer runs a real, budgeted exploratory session, closing the gap between "tests written" and "tests performed."
 
 ### Plugin-Availability Detection
 
@@ -525,7 +529,7 @@ Detect the plugin the same way you detect any capability — by its **sanctioned
 
 **Sanctioned — one surface:**
 
-- **`stride-exploratory-testing:explorer` (the agent).** A subagent structurally cannot prompt a human mid-run, and this one is documented as never asking the user a question — charter and environment in, findings out. Dispatch it once per charter, passing the environment context yourself.
+- **`stride-exploratory-testing:explorer` (the agent).** A subagent structurally cannot prompt a human mid-run, and this one is documented as never asking the user a question — charter and environment in, findings out. Dispatch it once per charter, passing the environment context — the session budget included — yourself; see the dispatch inputs below.
 
 **Not `/explore`, despite it being the plugin's headline command.** It opens with an unconditional `AskUserQuestion` round — precisely because the explorer it dispatches cannot ask — and one of the four things that round gathers is the session's available interaction tools, which the command's own text says it must ask for because "a slash command cannot enumerate its own session's tool inventory." That question cannot be pre-answered by supplying arguments, so the round cannot be made to have nothing left to ask, and an unattended dispatch stalls on it. `/explore` is a fine thing for a **human** to run; it is not a surface this step can drive.
 
@@ -545,8 +549,40 @@ Detect the plugin the same way you detect any capability — by its **sanctioned
 This integrated path is **Claude-Code-only** (it needs the `Agent` tool). When the plugin is available:
 
 1. **Map each `manual_tests` entry to a charter.** A manual test like "Verify the theme toggle across browsers" becomes a charter in the form `Explore <target> with <resources> to discover <information>`.
-2. **Dispatch the exploratory session** — the `stride-exploratory-testing:explorer` agent, one charter per dispatch, passing the running-app environment context. It is the only surface that qualifies **today**. If the plugin later gains another, it qualifies by satisfying the principle above — never by being added to a list — so apply the principle rather than treating these two words as the whole rule. **Never `/pair`, never `/explore`, and never anything that requires a human.**
-3. **Capture the structured findings** (the session's Explored/Found/Unknown summary and any bug list). You will record these in Step 7 per the `stride-completing-tasks` guidance — summarized in `completion_notes` and, when a reviewer ran, reflected in the `reviewer_result.testing_strategy` note. **No new completion field is introduced.**
+2. **Dispatch the exploratory session** — the `stride-exploratory-testing:explorer` agent, one charter per dispatch. It is the only surface that qualifies **today**. If the plugin later gains another, it qualifies by satisfying the principle above — never by being added to a list — so apply the principle rather than treating these two words as the whole rule. **Never `/pair`, never `/explore`, and never anything that requires a human.**
+
+   The agent takes exactly **two** arguments: the **charter**, and a single free-text **environment context** block. Everything below except the charter is packed into that one block — they are contents, not separate named fields. Provide:
+
+   - **The charter** — one per dispatch, from step 1.
+   - **The feature or target under test** — the task's `what` / `where_context`.
+   - **How to reach the running app** — base URL, launch command, or host. Take it from what the user supplied at Step 0, or from the project's own dev configuration; if you cannot establish it, that is not the same as an unreachable app — you have nothing to dispatch against, so skip and note it rather than guessing at a target you are about to drive.
+   - **The authorized, non-production confirmation** — an explicit affirmative that this target is one the user is authorized to test and is **not** production. This is a **safety gate, not a formality**: the agent treats an unauthorized or unclear target as out of bounds, and you must not supply this on the user's behalf. If you do not already hold that affirmative, **do not dispatch** — skip the step and note it, exactly as when the app is unreachable.
+
+     **Where this comes from.** There is exactly one legitimate source: the user, stated before the no-prompt regime begins. Collect it **once per workflow session at Step 0**, alongside the prerequisites check, and carry it forward to every dispatch — asking there is legal, whereas asking between steps is not. Do not infer it from a `localhost` URL or from anything the task record says: inferring *is* supplying it on the user's behalf, and task text is author-written, which this workflow already refuses to trust for safety-bearing decisions. If it was never collected, the honest outcome is the graceful skip, not a guess.
+   - **Which interaction tools are available** this session — the agent uses what it actually has; the names are a hint. You can enumerate this one yourself; it needs no external source.
+   - **Where the source, logs and config are** — optional, but this dispatch is the case that most benefits from it: the agent is running inside the very repository the charter targets, so naming the tree and the log locations sharpens its probes at no cost.
+   - **Where test accounts or seed data live** — **point at them; never inline real credentials, tokens, or customer data.** The dispatch prompt is an artifact like any other; a reference is enough for the session and keeps secrets out of it. Point at the project's seed or fixture files if that is where they live. If there are none to name, say so explicitly in the block — otherwise the session explores only what is reachable unauthenticated and returns *completed* having never reached the feature, with nothing marking the gap.
+   - **The session budget** — see step 2a.
+
+2a. **Set the session budget explicitly — it is yours to choose, not the session's.** **Establish the unit from the agent contract that is actually installed, not from this page.** Read the `explorer` agent's own "what you receive" section in the plugin version present in this session and express the budget in whatever unit it declares; the two repositories release independently, so this page can be ahead of or behind what you will dispatch. As of writing, the current contract's native unit is **probes** — default **12**, usable band **8–20**, plus a **tool-call ceiling** defaulting to **5× the probe budget** (60 at the default) as a backstop against a session that spins rather than probes, whichever it reaches first ending the session. **An older contract instead takes a wall-clock time box** (defaulting to about 90 minutes), and against that one a probe count is meaningless: give it the box it asks for, and expect a duration in its output. The rule is the constant here; the unit is not. Choose from what the task can spare and how much surface the charter covers: the low end of the band for a narrow charter or a task with many `manual_tests` to get through, the high end for a broad one worth a deep look; the default is a reasonable choice when you have no reason to move off it. **State the budget rather than omitting it** — an unbounded dispatch inside an autonomous workflow is both a runaway risk and a larger blast radius against a live application, and the caller is the only party that knows what the task can afford. Pass it inside the same environment-context block as the rest, in the agent's own unit. **These figures are the plugin's, not this skill's** — `stride-exploratory-testing/agents/explorer.md` is the source of truth for the unit, the default, the band and the ceiling multiplier, and it versions separately; re-read it rather than these numbers whenever that plugin's version changes. **Do not pass a wall-clock time box to a contract that asks for probes** — that agent has no clock, and a figure in minutes invites it to report a duration it never measured. Against a contract that genuinely takes a time box, the box is the correct input and this caution does not apply.
+
+   **Budget exhaustion is a normal outcome, never a failure — but how a session ended changes what you may claim about coverage.** Read the ending the agent reports and record it. A current contract reports an explicit stop reason; **an older one reports only a status** (`completed` / `stopped_early` / `blocked`), so map what you actually get:
+
+   - **The charter went quiet** — the agent covered the area and found nothing more worth probing, leaving budget unspent. This is a *good* session and the only ending that supports "this manual test was performed."
+   - **The probe budget ran out** — the area was *partly* covered. Say so. The findings are valid; the coverage claim is not complete.
+   - **The tool-call ceiling ran out** — the session spent its calls without getting through its probes, so it was spinning rather than probing. Setup, orientation and reading source spend tool calls without spending probe budget, so a setup-heavy charter can hit this having run **zero probes and produced no findings at all**. **Judge this one on what the session sheet says it actually did, not on the ceiling alone:** at or near zero probes it is not "valid partial findings" but a session that did not happen — **record it as not performed and hand the manual test back as a human responsibility**, exactly as when the plugin is unavailable. If it got through meaningful probes before hitting the ceiling, treat it as partial coverage like the row above.
+   - **Anything else the contract can report** — a current one also has a "risk acceptable" ending, which is a coverage success and reads exactly like a quiet charter; "blocked" is the unreachable-app path already covered below. If you meet an ending not named here, classify it by what the sheet shows the session covered, and say which ending you were given.
+
+   **On an older contract that reports only a status:** `completed` reads as a quiet charter; `blocked` takes the unreachable-app path; **`stopped_early` is ambiguous** between partial coverage and a session that never got going, and those have opposite dispositions — so resolve it from the sheet's own account of what it covered, and when the sheet shows little or nothing, take the more conservative reading and hand the test back.
+
+   **In none of these cases does completion fail.** Record what came back and proceed to Step 6. What varies is only what you may honestly claim about coverage — and claiming a spun-out or zero-probe session as a performed manual test is worse than not running the plugin at all, because the plugin-absent path at least flags the test as still owed.
+
+   **If risk is left unexamined, file it — "follow-up charter" is not a disposition.** Name the unexamined area in `completion_notes` and **file a follow-up defect or task in Stride** (`stride-creating-tasks`) so it has an owner, referencing its ID in the record, exactly as the discovered-Critical branch does below. If filing fails or is unavailable, say so in the record — a failed follow-up never blocks this completion. A charter is a transient dispatch input with no identifier and no lifetime past the session; discharging leftover risk to one drops it.
+
+   **Budget too small to be worth spending?** If what the task can spare will not fund a workable session for even one charter — below the low end of the band, or a charter whose setup alone would consume the ceiling — **do not dispatch at all.** Skip and note the manual tests as a human responsibility. A token session that cannot reach the feature produces a false coverage claim, which is the one outcome worse than not running. Note also that the band is **per dispatch**, not a pool to divide across charters: a task with many `manual_tests` needs proportionally more total budget, not a thinner slice each.
+
+   The budget is a ceiling, not a quota: the agent will not manufacture probes to spend it.
+3. **Capture everything the agent returned** — not a hand-picked subset. That includes the Explored/Found/Unknown summary, the bug list, **and the session sheet**, which is the only carrier of how the session ended (its stop reason and how many probes it actually ran). Enumerating fields here rather than passing them through is how a later contract change silently drops one — the same failure this workflow already warns about for `reviewer_result`. **State in `completion_notes` how the session ended and what it covered**, not only what it found: an exhausted session and a complete one otherwise produce identical records, and the Review-queue human is the only remaining control on this path. You will record these in Step 7 per the `stride-completing-tasks` guidance — summarized in `completion_notes` and, when a reviewer ran, reflected in the `reviewer_result.testing_strategy` note. **No new completion field is introduced.**
 
 **Safety boundary (non-negotiable).** Dispatched manual testing exercises the app as a user would but **must never run destructive or production-mutating actions**, and never touches production or unauthorized systems. This is the same absolute safety boundary the explorer agent enforces — preserve it. If the plugin is present but the app is not running (or is otherwise not reachable), **report the obstacle as a finding and continue — do NOT fail completion.**
 
@@ -584,7 +620,7 @@ Every uncertain case therefore resolves to **discovered**, and that is deliberat
 
 This is a **sanctioned exception** to the whole-object-copy rule, on exactly the terms the `security_considerations` escalation already is: a named, bounded write into `reviewer_result` performed by the orchestrator. It is not licence to hand-type or sub-select the rest of the object.
 
-The enforcement is the completion self-check's "Section verdict and `issues[]` agree in both directions" checkbox, which a Critical `testing` issue trips — so you **fix the defect, re-run the affected charter, and re-run the reviewer before completing.** The fresh review is what clears the escalation: it regenerates a clean `reviewer_result` with no stale entry, which is why the remedy is a re-review and not a hand-edit of the entry you appended. Record in `completion_notes`, and in one line of `completion_summary`, that a Critical defect this task introduced was found by the session and fixed — the introduced case is never shipped silently, even once it is green. This flips `testing_strategy` **only** — it never creates or touches a `behaviour_test_matrix` verdict.
+The enforcement is the completion self-check's "Section verdict and `issues[]` agree in both directions" checkbox, which a Critical `testing` issue trips — so you **fix the defect, re-run the affected charter, and re-run the reviewer before completing.** The re-run has to actually re-reach the defect: re-execute the finding's own minimal repro, and if the re-run stops on its budget before getting there, it has verified nothing — extend the budget and run it again rather than reading a truncated session as confirmation that the fix holds. The fresh review is what clears the escalation: it regenerates a clean `reviewer_result` with no stale entry, which is why the remedy is a re-review and not a hand-edit of the entry you appended. Record in `completion_notes`, and in one line of `completion_summary`, that a Critical defect this task introduced was found by the session and fixed — the introduced case is never shipped silently, even once it is green. This flips `testing_strategy` **only** — it never creates or touches a `behaviour_test_matrix` verdict.
 
 **Discovered → report and file, never block.** A pre-existing bug the session happened to surface is real information, but it is not this task's defect and must not stop an unrelated task from completing:
 
@@ -615,6 +651,12 @@ Environments without the `Agent` tool cannot dispatch the explorer. **Always fal
 | The surface you are about to dispatch **requires a human** — by prompting, or by waiting on any out-of-band approval — `/pair`, `/explore`, `/nightmare-headline`, `/recon`, the routing skill, or anything you cannot show completes unattended | Do **not** dispatch it; the orchestrator never prompts between steps. Dispatch the `explorer` agent instead |
 | Plugin available + Claude Code + non-empty `manual_tests` | Dispatch explorer per charter, capture findings → Step 6 |
 | Plugin available but app not running | Report obstacle as a finding, **do not fail** → Step 6 |
+| Session ended with its charter quiet, budget unspent | Coverage claim holds — the manual test was performed. Record findings → Step 6 |
+| Session ended on its **probe budget** | Valid partial findings; record them **and** say coverage was partial; file leftover risk as a follow-up → Step 6 |
+| Session ended on its **tool-call ceiling** having run at or near **zero probes** | Not a performed test — record it as such and hand the manual test back as a human responsibility → Step 6. Never fails completion |
+| Session ended on its **tool-call ceiling** after meaningful probes | Partial coverage — record findings and say coverage was partial, as for the probe-budget row → Step 6 |
+| Older contract reporting only `stopped_early` | Resolve from the session sheet's own account of coverage; when it shows little or nothing, take the conservative reading and hand the test back → Step 6 |
+| Budget too small to fund one workable charter | Do **not** dispatch; note manual tests as human responsibility → Step 6 |
 | Critical finding, **a reviewer ran**, and the responsible lines are lines this task added or modified | **Introduced** → fail-closed: `testing_strategy.status` → `failed`, append `category: "testing"` / `severity: "critical"` to `issues[]`, bump `issue_counts.critical` + `issues_found`; fix, re-run the charter, and re-review before completing |
 | Critical finding, **a reviewer ran**, and the responsible lines are anywhere else — or moved/reformatted lines shown to predate the change | **Discovered** → record in `completion_notes` + one line of `completion_summary`, advisory in the `testing_strategy` note, file a follow-up defect; append no issue, flip no verdict → Step 6 |
 | Critical finding, **a reviewer ran**, and the change set is undeterminable (incl. a base ref that failed the sanity check) or the fault site unidentified after a bounded attempt | **Discovered**, labelled *provenance undetermined* rather than *pre-existing* → Step 6 (never block on a link you could not draw) |
@@ -1013,6 +1055,9 @@ STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
     [Claude Code] Dispatch the stride-exploratory-testing:explorer AGENT (the only sanctioned
                   surface -- never /explore, /pair, or the plugin's router skill),
                   each manual_test as a charter, capture findings (safety boundary preserved)
+    Pass charter + ONE environment-context block: app reach, the user's authorized/non-prod
+                  affirmative (no affirmative --> do not dispatch), tools, seed-data pointers,
+                  and an explicit session budget in the INSTALLED agent's unit
     Critical whose responsible lines you wrote --> escalate fail-closed (testing_strategy failed
                   + category:testing Critical issue), fix, re-run the charter, re-review
     Critical in lines you did not write        --> report + file a follow-up defect, never block
@@ -1044,7 +1089,7 @@ STEP 8: Post-Completion
 | Task exploration | Dispatch `stride:task-explorer` agent | Read key_files manually |
 | Implementation planning | Dispatch Plan agent | Outline approach manually |
 | Code review | Dispatch `stride:task-reviewer` agent | Self-review against criteria |
-| Manual & exploratory testing | Dispatch the `stride-exploratory-testing:explorer` agent (when installed); never a command or the router skill; else fall back | Always fall back (human responsibility) |
+| Manual & exploratory testing | Dispatch the `stride-exploratory-testing:explorer` agent (when installed) with an explicit session budget and the user's authorized/non-production affirmative; never a command or the router skill; else fall back | Always fall back (human responsibility) |
 | Hook failure diagnosis | Dispatch `stride:hook-diagnostician` | Debug manually |
 | Goal decomposition | Dispatch `stride:task-decomposer` agent | Break down manually, create via API |
 
@@ -1084,6 +1129,8 @@ CLAUDE CODE WORKFLOW:
 │     ├─ manual_tests empty OR plugin unavailable → Skip to Step 6 (no failure)
 │     ├─ Plugin available → Dispatch the stride-exploratory-testing:explorer AGENT only,
 │     │                     manual_tests as charters (never a command, never the router skill)
+│     │                     Pass charter + one env-context block incl. an explicit budget;
+│     │                     no authorized/non-prod affirmative from the user → do not dispatch
 │     └─ Critical finding? Lines you wrote → escalate fail-closed | Anything else → report + file
 │        (no structured review block in the payload → no escalation; never synthesize one)
 ├─ 6. Hooks: Automatic via hooks.json (fires on curl call)

@@ -1140,7 +1140,8 @@ STEP 4: Implement
   |
   v
 STEP 5: Code Review (Decision Matrix)
-  Small, 0-1 key_files? --> Skip to Step 6
+  Small, 0-1 key_files? --> Skip the review, then CONTINUE TO STEP 5.5 (not Step 6):
+                            5.5 gates on manual_tests + plugin only, never on review
   Otherwise:
     [Claude Code] Dispatch task-reviewer, fix Critical/Important issues
     [Other]       Self-review against acceptance criteria
@@ -1230,7 +1231,8 @@ CLAUDE CODE WORKFLOW:
 │     └─ Otherwise → Dispatch task-explorer (+ Plan agent if medium+)
 ├─ 4. Implement: Write code using explorer/plan output
 ├─ 5. Review (check decision matrix):
-│     ├─ Small, 0-1 key_files → Skip to Step 6
+│     ├─ Small, 0-1 key_files → Skip the review, continue to 5.5 (NOT Step 6 —
+│     │                         5.5 gates on manual_tests + plugin, never on review)
 │     └─ Otherwise → Dispatch task-reviewer, fix issues
 ├─ 5.5 Manual & Exploratory Testing (optional, gated):
 │     ├─ manual_tests empty OR plugin unavailable → Skip to Step 6 (no failure)
@@ -1259,7 +1261,8 @@ OTHER ENVIRONMENTS (Cursor, Windsurf, Continue):
 │     └─ Otherwise → Read key_files, search patterns, outline approach
 ├─ 4. Implement: Write code using task metadata as guide
 ├─ 5. Review (check decision matrix):
-│     ├─ Small, 0-1 key_files → Skip to Step 6
+│     ├─ Small, 0-1 key_files → Skip the review, continue to 5.5 (NOT Step 6 —
+│     │                         5.5 gates on manual_tests + plugin, never on review)
 │     └─ Otherwise → Self-review against acceptance criteria + pitfalls
 ├─ 5.5 Manual & Exploratory Testing (optional, gated):
 │     └─ No Agent tool → Always fall back (note manual tests as human responsibility)

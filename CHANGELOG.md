@@ -25,6 +25,25 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.56.0] - 2026-07-31
+
+### Fixed — the flow artifacts no longer route around Step 5.5, and Phase 3.5 is no longer missing from the subagent summaries (D202)
+
+Step 5.5's gate is two conditions — non-empty `testing_strategy.manual_tests` and plugin availability — with **no review precondition**, so a small 0-1 `key_files` task that skipped review still reaches it. The v1.48.0 escalation policy has an explicit carve-out for exactly that state. Five routing artifacts said that state could not occur, and a reader had no way to tell which was authoritative. Quick Reference Cards are what an agent consults mid-run *instead of* the prose, which is what made this worth fixing rather than tolerating.
+
+- **The three `stride-workflow` artifacts** — the Complete Workflow Flowchart and both Quick Reference Cards — each routed the small-task branch of Step 5 straight to "Skip to Step 6", jumping over 5.5 entirely. All three now skip the *review* and continue to 5.5, and each says why in place: 5.5 gates on `manual_tests` plus plugin availability, never on review.
+- **The `stride-subagent-workflow` flowchart** had no Phase 3.5 node at all — both branches, reviewer-ran and reviewer-skipped, funnelled directly into the `after_doing` hook. Phase 3.5 is now drawn, with both branches routing into it and the gate's orthogonality stated on the node itself.
+- **The `stride-subagent-workflow` Quick Reference Card** never listed Phase 3.5 as a step, and its blanket `SKIP ALL OTHER SUBAGENTS WHEN: Task is small complexity AND has 0-1 key_files` read as covering the exploratory dispatch — which is another subagent dispatch, but one whose gate is orthogonal to the decision matrix. The skip line is now scoped to the three decision-matrix subagents (explorer, Plan, reviewer) and is followed by an explicit *not covered by that skip* note for Phase 3.5. **The same overreach sat in that file's flowchart** — `Skip all subagents --> Begin implementation`, which review caught still contradicting the Phase 3.5 node being added 36 lines below it — and is scoped identically there.
+- **Phase 3.6 was folded into the same two artifacts.** It was absent from both for the identical reason, and adding 3.5 to a flowchart while leaving 3.6 out would have left the artifact stale in the same way it was being fixed for. `stride-workflow`'s own flowchart and Claude Code card already carried 5.6, so this brings the two skills level.
+
+### Backward compatibility
+
+Fully backward compatible, and deliberately inert on behaviour: **no prose gate was touched.** These are summaries being brought into agreement with prose that was already correct — no schema change, no completion field, no new `workflow_steps` name, and nothing added that implies Step 5.5 requires a reviewer (the no-structured-review-block carve-out depends on it not requiring one, and that dependency is now visible in the summaries rather than contradicted by them).
+
+### Scope
+
+`stride-workflow`'s Complete Workflow Flowchart and both Quick Reference Cards; `stride-subagent-workflow`'s Workflow Flowchart and Quick Reference Card. The Platform Summary table was checked and needed no change — it implies no review precondition (its row names plugin availability but not the `manual_tests` condition, which is fine for a platform-capability summary rather than a gate statement). The `stride-subagent-workflow` Quick rules bullet carried the same `skip all subagents` overreach as its flowchart and card and was rescoped in place alongside them. **`stride-completing-tasks` carries the same staleness and is deferred, not clear:** its Completion Workflow Flowchart routes the `NO (or no subagent access)` branch of the review decision straight into `Read .stride.md after_doing section`, and its Quick Reference Card goes from `[Optional] Dispatch task-reviewer` at step 2 to the `complete` call at step 3 — both jumping over Step 5.5 exactly as the five artifacts here did. That skill is outside this task's `where_context`, so it is filed as **D206** rather than folded in, per the introduced-versus-discovered policy. (An earlier draft of this entry recorded it as checked-and-clear on the grounds that its flowchart "begins after this stage" and its card is "pure API mechanics"; review caught that both halves are contradicted by the file, and the claim was corrected rather than shipped — a wrong all-clear here would have suppressed the follow-up.)
+
 ## [1.55.0] - 2026-07-31
 
 ### Fixed — a blocked session now has a coverage disposition, and two instructions that named things the explorer contract cannot supply (D205)

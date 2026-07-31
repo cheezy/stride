@@ -87,7 +87,7 @@ Use this matrix to determine which subagents to dispatch based on task attribute
 
 **Quick rules:**
 - If the task is a **goal** or has **large complexity without child tasks** or a **25+ hour estimate**: dispatch the decomposer first. The decomposer breaks it into claimable child tasks — you don't implement goals directly.
-- If the task is small with 0-1 key_files, skip all subagents and code directly.
+- If the task is small with 0-1 key_files, skip the decision-matrix subagents (explorer, Plan, reviewer) and code directly. This does **not** cover Phase 3.5's exploratory dispatch, whose gate is orthogonal to complexity and key_files.
 - Otherwise, at minimum run the explorer and reviewer.
 
 ## Pre-Claim: Enrichment (Sparse Tasks)
@@ -265,7 +265,10 @@ Is it a goal OR large+undecomposed OR 25+ hours?
     |
     +--> NO --> Check decision matrix
                     |
-                    +--> Small, 0-1 key_files? --> Skip all subagents --> Begin implementation
+                    +--> Small, 0-1 key_files? --> Skip the decision-matrix subagents
+                    |                              (explorer, Plan, reviewer) --> Begin
+                    |                              implementation --> Phase 3.5
+                    |                              (this skip does NOT cover Phase 3.5)
                     |
                     +--> Medium/Large OR 2+ key_files?
                             |
@@ -289,16 +292,35 @@ Is it a goal OR large+undecomposed OR 25+ hours?
                             v
                         Check decision matrix for reviewer
                             |
-                            +--> Small, 0-1 key_files? --> Skip reviewer --> Run after_doing hook
+                            +--> Small, 0-1 key_files? --> Skip reviewer --> Phase 3.5
                             |
                             +--> Otherwise --> Dispatch stride:task-reviewer
                                                 |
                                                 v
                                             Issues found?
                                                 |
-                                                +--> YES --> Fix issues --> Run after_doing hook
+                                                +--> YES --> Fix issues --> Phase 3.5
                                                 |
-                                                +--> NO  --> Run after_doing hook
+                                                +--> NO  --> Phase 3.5
+                                                              |
+                                                              v
+                            Phase 3.5: Manual & Exploratory Testing (optional, gated)
+                            Gate is manual_tests non-empty AND plugin available --
+                            NO review precondition, so EVERY branch above reaches it
+                                |
+                                +--> Gate not met --> Phase 3.6
+                                |
+                                +--> Gate met --> Dispatch stride-exploratory-testing:explorer
+                                                  (one charter per manual_test) --> Phase 3.6
+                                |
+                                v
+                            Phase 3.6: Harden findings into checks (optional, gated)
+                                |
+                                +--> No session / no convertible findings / no /harden
+                                |    --> Skip to after_doing hook
+                                |
+                                +--> Otherwise --> Dispatch /harden (drafts stay staged)
+                                                   --> Run after_doing hook
 ```
 
 ## Red Flags - STOP
@@ -342,7 +364,13 @@ SUBAGENT WORKFLOW:
 ├─ 6. If medium+ OR 2+ key_files:
 │     ├─ Dispatch stride:task-reviewer with diff + task metadata
 │     └─ Fix any Critical/Important issues found
-└─ 7. Proceed to after_doing hook (stride-completing-tasks)
+├─ 7. Phase 3.5 — if manual_tests non-empty AND the exploratory plugin is available:
+│     ├─ Dispatch stride-exploratory-testing:explorer, one charter per manual_test
+│     └─ REACHED EVEN WHEN STEPS 3/4/6 WERE SKIPPED — this gate is orthogonal to the
+│        decision matrix and has no review or key_files precondition
+├─ 8. Phase 3.6 — if that session returned convertible findings AND /harden is available:
+│     └─ Dispatch /harden to draft regression checks (staged, never run)
+└─ 9. Proceed to after_doing hook (stride-completing-tasks)
 
 CUSTOM AGENTS:
   stride:task-decomposer - Breaks goals into dependency-ordered child tasks
@@ -355,8 +383,14 @@ BUILT-IN AGENTS:
 DISPATCH DECOMPOSER WHEN:
   Task type is goal, OR large complexity without children, OR 25+ hour estimate
 
-SKIP ALL OTHER SUBAGENTS WHEN:
+SKIP THE DECISION-MATRIX SUBAGENTS WHEN:
   Task is small complexity AND has 0-1 key_files
+  (explorer, Plan and reviewer only)
+
+NOT COVERED BY THAT SKIP — Phase 3.5's exploratory dispatch:
+  Its gate is manual_tests non-empty AND plugin available, which is orthogonal to
+  complexity and key_files. A small 0-1 key_files task that skipped every subagent
+  above STILL reaches Phase 3.5. Never read the skip line as covering it.
 ```
 
 ## MANDATORY: Skill Chain Position

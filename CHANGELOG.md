@@ -25,6 +25,29 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.53.0] - 2026-07-31
+
+### Added — an optional `/harden` sub-step, sequenced so a drafted check can never turn the `after_doing` gate red (W1978)
+
+A session that finds a bug and stops has closed nothing; the same bug can come back unnoticed. `/harden` reads the bugs a session confirmed and drafts one regression check per convertible bug — the step that turns *Explored* back into *Checked*, and the only place the workflow can close that loop automatically. The reason it did not already exist is the sequencing: a regression check for an **unfixed** bug is *supposed* to fail, that failure being the evidence it reproduces the bug, while `after_doing` is a **blocking** gate that usually runs the suite. Sequenced naively, a session that did exactly the right thing blocks the completion of a task that may not even be scoped to fix the bug — and an integration that punishes doing the right thing is one authors stop enabling.
+
+- **Step 5.6 / Phase 3.6, gated on three conditions:** a session actually ran and returned convertible findings, `/harden` is available, and this is Claude Code. The middle one is a real gate rather than a formality — the command post-dates the plugin's first release, so a session can have the plugin installed and still not have `/harden`. The step checks for the command itself rather than inferring it.
+- **Two exploratory sessions rewrote the sequencing rule, and the first draft would not have held.** It stated that a check entering the suite must be "green or inert" and then named no action that establishes it, while permitting an unrun check in on the expectation it passes. Worse, a skip marker makes a *case* inert, not a *file*: runners compile or import every file in the tree first, so a draft carrying an unresolved `TODO(harden):` wiring marker — which `/harden` is expressly permitted to leave — reddens the gate however it is tagged. Both routes are closed: **the file must load and the case must be green or inert, both established by running the suite once rather than by expecting**, and anything short of clean means reverting the move and deferring.
+- **The collision safeguard was attributed to the wrong party.** The first draft said `/harden` suffixes a colliding name so a move never overwrites — but `/harden` never writes into the test tree at all, so nothing was protecting the move the *agent* performs. The check is now explicitly the agent's, with deferral as the answer when the target exists.
+- **A staged draft lives in a gitignored directory**, so a follow-up defect that cites only its path points at a file in no commit on one machine. Defects now carry the check's substance. This is the same reasoning the workflow already applied when it refused "follow-up charter" as a disposition.
+- **Post-review surfacing reaches `actual_files_changed`**, not only the prose carriers — that required, structured field is the one that lists the change set — and the re-review trigger is now "whenever a check entered the tree" rather than a judgement call about whether the edit was substantial, since an undecidable trigger resolves toward not re-reviewing. The small-task path where no reviewer ran at all is stated rather than assumed away.
+- **Staged drafts are the default and are always safe.** `/harden` writes to `.exploratory/checks/`, outside the test tree, and holds no test runner, so the gate never sees a draft and nothing is ever reported as passing that was not run.
+- **Nothing new is introduced to carry it.** Hardened checks are recorded in the same three completion carriers, and the dispatch's wall-clock folds into the existing `reviewer` `workflow_steps` entry. No new completion field, no seventh step name.
+- **`/harden` itself is unchanged**, and its existing rules are relied on rather than restated: it never hard-codes an observed credential into a draft, never points a check at a real host, never writes a destructive step, and never overwrites an existing file.
+
+### Backward compatibility
+
+Fully backward compatible and entirely additive. Prompt text only — no completion field, enum, hook, or schema change, and no new `workflow_steps` name. With no session, no convertible findings, no `/harden`, or a non-Claude-Code environment, the step is skipped and the workflow behaves exactly as it did before it existed. No existing trigger condition moves, no graceful-skip contract changes, and the `.exploratory/checks/` output is already covered by the gitignore guidance added in 1.52.0.
+
+### Scope
+
+The two orchestrator skills, the completion skill, and the docs. The `stride-exploratory-testing` plugin is untouched: this adds the call site that was missing, not a change to the command it calls.
+
 ## [1.52.0] - 2026-07-31
 
 ### Added — gitignore guidance for exploratory session artifacts, before the first session rather than after (W1977)

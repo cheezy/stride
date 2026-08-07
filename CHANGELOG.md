@@ -25,6 +25,32 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — the cold lookup sections moved out of the hot path (W2049)
+
+Six sections were pure lookup material that running a task does not require reading. They now live in `skills/stride-workflow/reference.md`: the Step Name Vocabulary for `workflow_steps`, Edge Cases, the Complete Workflow Flowchart, the Platform Summary, Failure Modes This Skill Prevents, and the Quick Reference Card. **SKILL.md: 88,382 → 79,084 bytes (−9,298).**
+
+- **A walkthrough of Steps 0-8 confirms the coverage target holds.** Only three pointers to `reference.md` exist, and the two that a task run can actually reach — in the `workflow_steps` schema table and its ordering rule — each name an inline answer first (Step 7's own worked example, and the two telemetry examples that stayed). So no step requires the file to be loaded.
+- **Two cuts, both contiguous.** Five of the six sections turned out to be one unbroken run ending immediately before `## Red Flags`, so only the Step Name Vocabulary needed a separate cut. Same technique as its predecessors: the 10,258 bytes travelled only through `sed -n`, and reconstructing the pre-change file from the two results diffs clean at 88,382 bytes — at the end of the move phase, before the in-place sentence edits that followed. Against the shipped tree the same reconstruction lands at 88,692, differing by exactly those edits and nothing else, which the reviewer confirmed independently.
+- **`## Red Flags -- STOP` stays inline** — short, and deliberately positioned to be read.
+
+**The step-name vocabulary was checked before extraction, not assumed safe.** A pitfall warned not to move it if Step 7 could not then build a valid payload. It can: Step 7's own worked example spells out all six names, the Workflow Telemetry section's two remaining examples enumerate them twice more, and `stride-completing-tasks` carries an independent copy — four surviving enumerations in all. What the table uniquely held was orientation prose, not anything a payload-builder consumes. The **per-step schema and the "always include all six" rule stay inline**, because Step 7 does build from those.
+
+**Four cross-references had to move with the content, and two of them were created by W2048 one commit earlier.** This is the failure mode the goal keeps rediscovering: an extraction leaves behind prose that silently stops being true. The fourth was found by review, not by the author — see below.
+
+- `SKILL.md`'s per-step schema table said the six values were listed "above". They are now in `reference.md`, which it names — and it also notes Step 7's own example spells them out, so a reader never has to leave.
+- `SKILL.md`'s telemetry Rules block said to record entries in "the order listed in the vocabulary table above" — the same phrasing as the schema table's, 38 lines below it, and missed on the first pass. A reader following "above" would have landed on the per-step schema table, which carries no ordering information at all: a plausible-looking wrong answer rather than an obvious dead end. It now names both the two surviving examples and `reference.md`.
+- `platform-other.md` asserted that "SKILL.md still owns … the Platform Summary table and the Decision Matrix Quick Check". Both have now moved to `reference.md`, and it says so.
+- `SKILL.md`'s own Platform Detection load instruction said "the Claude Code branches stay inline here", which stopped being true for the Quick Reference Card's Claude Code half.
+
+**W2048 declined to move the Platform Summary; this task moves it, and the two are consistent.** W2048 gave two reasons and both need answering, because only the first is about splitting.
+
+1. *A region may only move when the platform split falls on line boundaries.* The Platform Summary is a three-column table whose Claude Code and Other Environments content share every row, so it could not be split between SKILL.md and `platform-other.md`. Moving the **whole** table to `reference.md` splits nothing.
+2. *Moving it would strip Claude Code capability information out of SKILL.md, which pitfall #4 forbids.* This is the decisive one, and it turns on the destination rather than the table: **`platform-other.md` is loaded only on the non-Claude-Code path, so the table would have been unreachable to a Claude Code agent there. `reference.md` carries no platform gate** and stays reachable from either path. That is why pitfall #4's concern binds for one destination and not the other.
+
+(W2048's entry called the table two-column; it is three — `Capability | Claude Code | Cursor / Windsurf / Continue`.)
+
+**Two figures the task got wrong, reported rather than glossed.** Its acceptance criterion estimates ~17KB of savings; the six sections measure 10,258 bytes and the net is **−9,298** — about 55% of the stated figure, which "approximately" does not cover, so that criterion is **not met** and is recorded as such rather than argued up. Its verification step expects SKILL.md "under 40KB"; it is **79,084**. The file has gone 139,972 → 98,276 → 90,525 → 88,382 → 79,084 across four extractions, and the largest section still in it is Step 5 at ~20.8KB of hot-path procedure — reaching 40KB would mean gutting Steps 4, 5, 5.5, 6 and 8. The 40KB target is not reachable by extraction alone.
+
 ### Changed — the non-Claude-Code branches moved to one reference file (W2048)
 
 The "Other Environments (Cursor / Windsurf / Continue)" branches appeared as parallel prose at five steps plus half the Quick Reference Card. In a Claude Code session none of it is ever read. All of it now lives in `skills/stride-workflow/platform-other.md`, loaded once from Platform Detection when the platform is not Claude Code. **SKILL.md: 90,525 → 88,382 bytes (−2,143).**

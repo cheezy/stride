@@ -25,6 +25,22 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — Step 5.5's body moved to a gated reference file (W2046)
+
+`## Step 5.5: Manual & Exploratory Testing` was 47.2KB — 34% of the entire orchestrator SKILL.md — and is gated on non-empty `manual_tests` plus plugin availability, so on most tasks it loads and never runs. Its body now lives in `skills/stride-workflow/optional-exploratory-testing.md`, read on demand when the gate fires. **SKILL.md: 139,972 → 98,276 bytes (−41,696).**
+
+- **What stayed inline:** the gate conditions, the full Decision Summary table, and a load instruction between them. The Decision Summary deliberately remains in SKILL.md so the gate decision is answerable *without* opening the reference file — the rows that decide whether the gate fires are self-contained, including the "requires a human" row, which names its disqualified surfaces explicitly. Later rows do use vocabulary from the moved body (`explorer`, `charter`, probe budgets), but those rows are only reachable once the gate has fired and the file has been loaded.
+- **What moved, verbatim:** why the step exists, plugin-availability detection, the sanctioned non-interactive dispatch surfaces, the Claude Code dispatch procedure with its absolute safety boundary and its authorized-and-non-production requirement, the Critical-finding escalation policy including the introduced-versus-discovered provenance test, and the non-Claude-Code fallback.
+- **Byte identity was proved, not assumed.** The body travelled only through `sed -n '516,664p'` — never retyped, never through an editor tool. Reconstructing the original from the two resulting files diffs clean against the pre-change blob at 139,972 bytes.
+
+**The measured delta is −41,696 bytes, not the ~47KB the task estimated.** That estimate counted the whole section, gate and Decision Summary included; both are required to stay. No arrangement that keeps them reaches 47KB, and shaving the Decision Summary to close the gap would trip the task's own pitfall.
+
+**Deliberate deviation:** the reference file nests `#` → `###`, skipping `##`, because the moved body opens at `### Why this step exists` and promoting those headings would change bytes and break the verbatim requirement. Byte identity wins; do not "tidy" it.
+
+**The cross-reference contract with `stride-subagent-workflow` Phase 3.5 needed work in one direction.** The two *outbound* sync statements travelled intact with the material they govern. But Phase 3.5 holds **three** *inbound* pointers, and two of them cited Step 5.5 sub-section titles — "Sanctioned dispatch surfaces — non-interactive only" and "Escalation: what happens when a session returns a Critical finding" — that no longer exist in SKILL.md. A maintainer following one would land on a stub and could reasonably conclude the sync partner had been deleted. All three now name `skills/stride-workflow/optional-exploratory-testing.md` as where the text lives.
+
+No markdown anchor dangles: the ~20 other references to Step 5.5 across the plugin are plain-text by name, and the `## Step 5.5:` heading still exists in SKILL.md.
+
 ## [1.61.0] - 2026-07-31
 
 ### Fixed — a small 0-1 `key_files` task now actually reaches the deep security-considerations sub-step (D208)

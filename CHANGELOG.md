@@ -25,6 +25,20 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — Step 5.6's body moved to a gated reference file (W2047)
+
+`## Step 5.6: Harden findings into regression checks` is gated on three conditions — a Step 5.5 session having produced convertible findings, `/harden` being available, and Claude Code — so it fires more rarely still than Step 5.5. Its body now lives in `skills/stride-workflow/optional-hardening.md`. **SKILL.md: 98,276 → 90,525 bytes (−7,751).**
+
+- **What stayed inline:** the three-condition gate, the `#### Decision Summary` table, the load instruction between them, the "Skipping changes nothing" paragraph (it describes the path where the file is deliberately *not* read), and the Phase 3.6 sync statement.
+- **What moved, verbatim:** why the step exists, the unattended-dispatch rationale, the sequencing rule that a drafted check must never turn the blocking `after_doing` gate red, the three permitted dispositions, the never-overwrite-an-existing-test-file rule, the post-review surfacing requirement, and the telemetry rule.
+- **Byte identity proved the same way as W2046:** the 8,917-byte body travelled only through `sed -n '554,597p'`. Reconstructing the pre-change file from the two results diffs clean at 98,276 bytes — *when run before the Phase 3.6 sync amendment below*. Re-running it against the shipped tree yields 98,414 bytes, differing by exactly that one amended line; the reviewer reproduced it from scratch and confirmed the amendment is the only other edit to SKILL.md.
+
+**Structural difference from W2046, decided rather than defaulted.** Step 5.6 carries content *after* its Decision Summary, which Step 5.5 did not. Both trailing paragraphs stayed inline: "Skipping changes nothing" is about the skip path, and a reader on that path never opens the reference file; the Phase 3.6 sync statement is maintenance meta-information that belongs where a maintainer looking for the contract will be. Step 5.6's headings are also `####` where Step 5.5's were `###`, so the reference file nests `#` → `####`. Same rule as before: byte identity wins, do not tidy it.
+
+**The W2046 cross-reference lesson was applied proactively.** In W2046 a reviewer caught inbound pointers in `stride-subagent-workflow` citing headings that had just moved out. Phase 3.6 turned out **not** to have that defect — its single sync pointer cites Step 5.6 by number, not by sub-heading — but both directions now name `skills/stride-workflow/optional-hardening.md` anyway, so a maintainer following either lands on the file that actually holds the procedure.
+
+**The measured delta is −7,751 bytes, not the ~12.5KB the task estimated.** The whole section measures 12,545 bytes, but the gate (1,167), Decision Summary (2,001), trailing paragraphs (460) and the load instruction all stay — capping removal at 8,032, which is what the split itself achieved. Two deliberate additions then gave some back: the +138-byte Phase 3.6 sync amendment, and +143 bytes naming the credential/real-host prohibition in the load instruction's enumeration so it is visible to a maintainer deciding whether the file matters. Same arithmetic as W2046: the estimate sized the section, not the extractable body.
+
 ### Changed — Step 5.5's body moved to a gated reference file (W2046)
 
 `## Step 5.5: Manual & Exploratory Testing` was 47.2KB — 34% of the entire orchestrator SKILL.md — and is gated on non-empty `manual_tests` plus plugin availability, so on most tasks it loads and never runs. Its body now lives in `skills/stride-workflow/optional-exploratory-testing.md`, read on demand when the gate fires. **SKILL.md: 139,972 → 98,276 bytes (−41,696).**

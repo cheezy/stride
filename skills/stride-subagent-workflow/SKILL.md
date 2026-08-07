@@ -252,7 +252,7 @@ Record what comes back in existing completion fields per `stride-completing-task
 
 **Record a skip that had something to convert.** When a session returned convertible bugs but `/harden` was unavailable, say so — otherwise "could not" is indistinguishable from "never considered". Likewise record a dispatch that converted nothing.
 
-**Graceful skip:** with no session, no convertible findings, no `/harden`, or a non-Claude-Code environment, skip entirely — the workflow behaves exactly as it did before this phase existed, no completion field changes, and nothing blocks. This phase is intentionally **identical in substance** to `stride-workflow` Step 5.6 — keep the two in sync.
+**Graceful skip:** with no session, no convertible findings, no `/harden`, or a non-Claude-Code environment, skip entirely — the workflow behaves exactly as it did before this phase existed, no completion field changes, and nothing blocks. This phase is intentionally **identical in substance** to `stride-workflow` Step 5.6, whose procedure lives in `skills/stride-workflow/optional-hardening.md` — keep the two in sync.
 
 ## Workflow Flowchart
 

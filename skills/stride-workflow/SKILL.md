@@ -135,13 +135,15 @@ Whether you arrive here from a creation intent or the build loop, **a claim fail
 |---|---|---|
 | You have access to the `Agent` tool with subagent types (Explore, Plan, etc.) | Claude Code | Use "Claude Code" sections |
 | You can dispatch `stride:task-explorer`, `stride:task-reviewer` agents | Claude Code | Use "Claude Code" sections |
-| You do NOT have an `Agent` tool | Cursor, Windsurf, Continue, or other | Use "Other Environments" sections |
-| You are unsure | Any | Use "Other Environments" sections (safe default) |
+| You do NOT have an `Agent` tool | Cursor, Windsurf, Continue, or other | Read [platform-other.md](platform-other.md) |
+| You are unsure | Any | Read [platform-other.md](platform-other.md) (safe default) |
 
-**Both paths follow the same step sequence (Steps 0-8).** Each step contains clearly labeled subsections for both platforms. The difference is HOW each step is executed:
+**Both paths follow the same step sequence (Steps 0-8).** Where a step branches by platform, its Claude Code branch is inline here and its Other Environments branch is in [platform-other.md](platform-other.md) — except the gated Steps 5.5 and 5.6, whose whole bodies (both platforms') live in their own reference files, loaded at their own gates. The difference is HOW each step is executed:
 
 - **Claude Code:** Subagent dispatch for exploration/planning/review, automatic hook execution via hooks.json
 - **Other Environments:** Manual file reading for exploration, self-review against acceptance criteria, manual hook execution via Bash
+
+**Other Environments: read [platform-other.md](platform-other.md) now, before Step 0, and keep it open for the whole task.** The non-Claude-Code branches of Step 1 enrichment, Step 2 claim + `before_doing`, Step 3 exploration, Step 5 self-review, Step 6 `after_doing` + `before_review`, and the Other Environments half of the Quick Reference Card all live in that sibling file; the Claude Code branches stay inline here. Two do not: Step 3 Branch A's goal-decomposition item stays inline below, and Step 5.5's always-fall-back rule is in `optional-exploratory-testing.md` — the sibling file names both, so you are not expected to remember them. **This is not a gated step and there is nothing to evaluate:** if you are on this path at all, you need all of it, so read the file rather than deciding per step. **If you are unsure which platform you are on, you are on this one** — take the safe default from the table above and read the file.
 
 **Neither path skips mandatory steps.** The non-Claude-Code path replaces subagent dispatch with manual equivalents -- it does not remove the steps.
 
@@ -208,11 +210,6 @@ Review the returned task completely:
 2. **Submit the returned JSON via `PATCH /api/tasks/:id`** to populate the missing fields on the existing task. The agent does NOT call the API itself.
 3. Re-fetch the task with `GET /api/tasks/:id` and verify all required fields are populated before proceeding to Step 2.
 
-#### Other Environments: Invoke the Enrichment Skill
-
-1. Invoke `stride-enriching-tasks` and walk through its Manual Walkthrough Phases (Phase 1 intent parse → Phase 2 codebase exploration → Phase 3 complexity → Phase 4 18-item checklist).
-2. Submit the assembled JSON via `PATCH /api/tasks/:id` per the API Integration block in that skill.
-
 ---
 
 ## Step 2: Claim the Task
@@ -235,14 +232,6 @@ Call `POST /api/tasks/claim` directly with:
 ```
 
 The `hooks.json` PostToolUse handler automatically executes `.stride.md` `## before_doing` commands after the claim succeeds. If the automatic hook fails, Claude Code reports the failure -- fix the issue and retry the claim curl.
-
-### Other Environments (manual hooks)
-
-1. Read `.stride.md` `## before_doing` section
-2. Execute each command line immediately via Bash -- no permission prompts, no confirmation
-3. Capture `exit_code`, `output`, `duration_ms`
-4. If hook fails (non-zero exit): fix the issue, re-run -- do NOT proceed
-5. Call `POST /api/tasks/claim` with the captured `before_doing_result`
 
 ---
 
@@ -282,13 +271,6 @@ Skip exploration, planning, and review. Proceed directly to Step 4 (Implementati
 1. **Dispatch `stride:task-explorer`** with the task's `key_files`, `patterns_to_follow`, `where_context`, and `testing_strategy`. Wait for the result. Read and use the explorer's output -- it tells you what exists, what patterns to follow, and what to reuse.
 
 2. **If medium+ OR 3+ key_files OR 3+ acceptance criteria lines:** Dispatch a **Plan** subagent with the explorer's output, `acceptance_criteria`, `testing_strategy`, `pitfalls`, and `verification_steps`. Follow the resulting plan during implementation.
-
-#### Other Environments: Manual Exploration
-
-1. Read each file in `key_files` to understand current state
-2. Search for patterns mentioned in `patterns_to_follow`
-3. Find related test files
-4. For medium+ tasks, outline your implementation approach before coding
 
 ---
 
@@ -487,15 +469,6 @@ If either condition is false, **skip this sub-step entirely and use the task-rev
 | Plugin present but app/agent unavailable | Skip deep dispatch, **no failure** → task-reviewer prose verdict is the sole source |
 | Plugin present but verdicts malformed/absent | Fail-closed: keep prose verdict, note the anomaly, do NOT downgrade to `passed` |
 
-### Other Environments: Self-Review
-
-Walk through your changes against:
-- [ ] Each line of `acceptance_criteria` -- is it met?
-- [ ] Each item in `pitfalls` -- did you avoid it?
-- [ ] `patterns_to_follow` -- does your code match?
-- [ ] `testing_strategy` -- did you write the specified tests?
-- [ ] `behaviour_test_matrix` -- if the task supplied one (it is optional, so many tasks will not): does every row's named test exist, and does each row's `status` reflect reality?
-
 ### Small tasks (0-1 key_files): Skip review. Omit `review_report` from completion.
 
 **Skipping the review does NOT skip the deep security-considerations review.** That sub-step is filed above under "Claude Code: Dispatch Task Reviewer" because it consumes the reviewer's output when there is one — but its gate is independent of this one: **non-empty `security_considerations` plus plugin availability, with no reviewer precondition.** So it still applies on this path. **[Claude Code]** go read ["Deep security-considerations review (Optional, Gated)"](#deep-security-considerations-review-optional-gated) above and evaluate its gate before continuing; its placement is about where its prose belongs, not about which tasks reach it. In a non-Claude-Code environment the sub-step is skipped outright — see its own Decision Summary — so continue to Step 5.5.
@@ -619,22 +592,6 @@ curl -sS -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
   -d @payload.json \
   | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"
 ```
-
-### Other Environments (manual hooks)
-
-**Execute each hook immediately -- no permission prompts, no confirmation.**
-
-1. **after_doing hook** (blocking, 120s timeout):
-   - Read `.stride.md` `## after_doing` section
-   - Execute each command line one at a time via Bash
-   - Capture `exit_code`, `output`, `duration_ms`
-   - If fails: fix issues, re-run until success. Do NOT proceed while failing.
-
-2. **before_review hook** (blocking, 60s timeout):
-   - Read `.stride.md` `## before_review` section
-   - Execute each command line one at a time via Bash
-   - Capture `exit_code`, `output`, `duration_ms`
-   - If fails: fix issues, re-run until success. Do NOT proceed while failing.
 
 ### Hook Environment Variables
 
@@ -1074,24 +1031,7 @@ CLAUDE CODE WORKFLOW:
 ├─ 7. Complete: PATCH /api/tasks/:id/complete with ALL fields
 └─ 8. Loop: needs_review=false → Step 1 | needs_review=true → STOP
 
-OTHER ENVIRONMENTS (Cursor, Windsurf, Continue):
-├─ 0. Prerequisites: .stride_auth.md + .stride.md exist
-├─ 1. Discovery: GET /api/tasks/next, review task, enrich if needed
-├─ 2. Claim: Execute before_doing manually, then POST /api/tasks/claim
-├─ 3. Explore (check decision matrix):
-│     ├─ Goal/large undecomposed → Break down manually → Create via API
-│     ├─ Small, 0-1 key_files → Skip to Step 4
-│     └─ Otherwise → Read key_files, search patterns, outline approach
-├─ 4. Implement: Write code using task metadata as guide
-├─ 5. Review (check decision matrix):
-│     ├─ Small, 0-1 key_files → Skip the review, continue to 5.5 (NOT Step 6 —
-│     │                         5.5 gates on manual_tests + plugin, never on review)
-│     └─ Otherwise → Self-review against acceptance criteria + pitfalls
-├─ 5.5 Manual & Exploratory Testing (optional, gated):
-│     └─ No Agent tool → Always fall back (note manual tests as human responsibility)
-├─ 6. Hooks: Execute after_doing (120s) + before_review (60s) manually
-├─ 7. Complete: PATCH /api/tasks/:id/complete with ALL fields + hook results
-└─ 8. Loop: needs_review=false → Step 1 | needs_review=true → STOP
+OTHER ENVIRONMENTS (Cursor, Windsurf, Continue): see platform-other.md
 
 DECISION MATRIX QUICK CHECK:
   small + 0-1 key_files  → Skip explore, plan, review

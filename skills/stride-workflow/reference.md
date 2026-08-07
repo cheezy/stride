@@ -148,7 +148,7 @@ STEP 8: Post-Completion
 |---|---|---|
 | Forgot to explore | Agent skipped stride-subagent-workflow | Step 3 is inline -- can't be missed |
 | Forgot to review | Agent jumped to completion | Step 5 is inline -- can't be missed |
-| Wrong API fields | Agent guessed from memory | Step 7 has the exact format |
+| Wrong API fields | Agent guessed from memory | Step 7 loads the contract from stride-completing-tasks |
 | Skipped hooks | Agent called complete directly | Step 6 blocks Step 7 |
 | Asked user permission | Agent prompted between steps | Automation notice says don't |
 | Speed over process | Agent optimized for throughput | Every step is framed as mandatory |

@@ -8,7 +8,7 @@ skills_version: 1.0
 
 ## Purpose
 
-This skill replaces the fragmented pattern of remembering to invoke `stride-claiming-tasks`, `stride-subagent-workflow`, and `stride-completing-tasks` at specific moments. Instead, invoke this one skill and follow it through. Every step is here. Nothing is elsewhere.
+This skill replaces the fragmented pattern of remembering to invoke `stride-claiming-tasks`, `stride-subagent-workflow`, and `stride-completing-tasks` at specific moments. Instead, invoke this one skill and follow it through. Every step is here, in order, and this skill tells you at each point what it needs — including the few places it deliberately hands off rather than duplicating: gated procedures in sibling reference files, lookup material in `reference.md`, and the completion payload contract, which Step 7 loads from `stride-completing-tasks`. You never have to remember when; you only have to follow.
 
 **Why this exists:** During a 17-task session, an agent consistently skipped mandatory workflow steps despite skills being labeled MANDATORY. The root cause: too many disconnected skills that the agent had to remember to invoke at specific moments. Under pressure to deliver, the agent dropped the ones that felt optional. This orchestrator eliminates that failure mode.
 
@@ -76,7 +76,7 @@ Invoke this skill ONCE when you're ready to start working on Stride tasks. It ha
 claim -> explore -> implement -> review -> complete -> [loop if needs_review=false]
 ```
 
-You do NOT need to invoke `stride-claiming-tasks`, `stride-subagent-workflow`, or `stride-completing-tasks` separately. This skill absorbs all of them.
+You do NOT need to decide *when* to invoke `stride-claiming-tasks`, `stride-subagent-workflow`, or `stride-completing-tasks` — this skill absorbs their procedures and tells you at the one point where it still hands off: **Step 7 dispatches `stride-completing-tasks`**, which owns the completion payload contract this orchestrator deliberately does not duplicate.
 
 **Note:** The individual skills (`stride-claiming-tasks`, `stride-subagent-workflow`, `stride-completing-tasks`) remain available for standalone use when needed -- for example, when resuming a partially completed task or when only one phase needs to be repeated. This orchestrator is the preferred entry point for new task work.
 
@@ -358,58 +358,7 @@ assert len(structured["acceptance_criteria"]) == len(task_criterion_lines), \
   - `dispatched: true`, `duration_ms: <wall-clock ms>` (as before)
 - Structured fields — **copy the reviewer's entire parsed JSON object verbatim** into `reviewer_result`, then overlay the legacy fields above on top. Do **not** maintain an allow-list of which structured keys to copy: whatever the agent emitted is persisted as-is, so any field the schema gains later flows through automatically (this is exactly how `project_checks` was being dropped — an enumerated copy-list silently omitted it). The structured key-set is owned by `stride/agents/task-reviewer.md`; passthrough it, never re-enumerate it here. Concretely, the reviewer currently emits `status`, `issue_counts`, `issues`, `acceptance_criteria`, `project_checks`, `testing_strategy`, `patterns`, `pitfalls`, `security_considerations`, and `schema_version` — but treat that as illustrative, not exhaustive. Because you copy the parsed JSON verbatim, keys the agent did not emit are simply absent (no empty placeholders to send). **Hand-typing, re-typing, or sub-selecting `reviewer_result` is FORBIDDEN — no exceptions, no small-task or brevity shortcut. The mechanical whole-object copy + mandatory self-check above is the only correct path; if the self-check fails, fix the copy, never the assertion.**
 
-**Worked example.** Given the reviewer response below (truncated for brevity)…
-
-````text
-Approved
-...prose summary + issue list + acceptance-criteria table...
-
-```json
-{
-  "schema_version": "1.6",
-  "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
-  "status": "approved",
-  "issue_counts": {"critical": 0, "important": 0, "minor": 0},
-  "issues": [],
-  "acceptance_criteria": [
-    {"criterion": "All task positions recalculate when a card moves columns", "status": "met", "evidence": "lib/kanban/tasks.ex:142-168"},
-    {"criterion": "Existing position-stable behavior unchanged", "status": "met", "evidence": "test/kanban/tasks_test.exs:198-240"},
-    {"criterion": "PubSub broadcast emitted exactly once per move", "status": "met", "evidence": "lib/kanban/tasks.ex:172"}
-  ],
-  "project_checks": [],
-  "testing_strategy": {"status": "passed", "note": "Move + broadcast paths covered by tests."},
-  "patterns": {"status": "passed", "note": "Mirrors the existing reorder pattern."},
-  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."},
-  "security_considerations": {"status": "passed", "note": "Move query scoped to the current user's board; no new input or injection surface."}
-}
-```
-````
-
-…the resulting `reviewer_result` value in the Step 7 PATCH payload is:
-
-```json
-"reviewer_result": {
-  "dispatched": true,
-  "duration_ms": 29560,
-  "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
-  "issues_found": 0,
-  "acceptance_criteria_checked": 3,
-  "schema_version": "1.6",
-  "status": "approved",
-  "issue_counts": {"critical": 0, "important": 0, "minor": 0},
-  "issues": [],
-  "acceptance_criteria": [
-    {"criterion": "All task positions recalculate when a card moves columns", "status": "met", "evidence": "lib/kanban/tasks.ex:142-168"},
-    {"criterion": "Existing position-stable behavior unchanged", "status": "met", "evidence": "test/kanban/tasks_test.exs:198-240"},
-    {"criterion": "PubSub broadcast emitted exactly once per move", "status": "met", "evidence": "lib/kanban/tasks.ex:172"}
-  ],
-  "project_checks": [],
-  "testing_strategy": {"status": "passed", "note": "Move + broadcast paths covered by tests."},
-  "patterns": {"status": "passed", "note": "Mirrors the existing reorder pattern."},
-  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."},
-  "security_considerations": {"status": "passed", "note": "Move query scoped to the current user's board; no new input or injection surface."}
-}
-```
+**What the copy must produce.** The result is **every key of the parsed block, unchanged, plus exactly the five overlaid keys above** (`dispatched`, `duration_ms`, `summary`, `issues_found`, `acceptance_criteria_checked`) — never fewer keys than the reviewer emitted, never one renamed, dropped, or re-typed on the way. That set relation *is* the mechanic; if you can state which keys you chose to copy, you did it wrong. A populated example of the resulting object lives in the `stride-completing-tasks` skill (`skills/stride-completing-tasks/SKILL.md`, "Explorer/Reviewer Result Schema" — Shape 1) — this orchestrator does not duplicate it. The reviewer's own emitted schema is owned by `stride/agents/task-reviewer.md`.
 
 Legacy + structured fields coexist in the same map; the server persists `reviewer_result` as `:jsonb` and tolerates the structured keys today (G143/W688 will validate them explicitly).
 
@@ -644,71 +593,14 @@ When a blocking hook fails, dispatch `stride:hook-diagnostician` agent with the 
 
 **FIRST run the mandatory pre-submission self-check** — the hard gate in `stride-completing-tasks` ("MANDATORY pre-submission self-check"). It must pass before you submit: every section the reviewer produced is present, the `project_checks` count equals the reviewer's, and — **whenever a structured review block was parsed** — no task-supplied section (especially `security_considerations`) comes back `not_assessed`. If it fails, re-run the reviewer with the full inputs or fix the passthrough — never submit a thin or task-inconsistent report (the Kanban server hard-rejects it anyway). That last check is **scoped, not unconditional**: a Shape 2 self-reported skip and the JSON-parse fallback above carry no verdict object at all, so it is inapplicable there and those payloads are complete rather than thin — never satisfy it by hand-writing a verdict or by re-labelling a dispatched review as a skip.
 
-Call `PATCH /api/tasks/:id/complete` with ALL required fields:
+**THEN load the completion contract — do not build the payload from memory.** The `PATCH /api/tasks/:id/complete` body is defined by the `stride-completing-tasks` skill (`skills/stride-completing-tasks/SKILL.md`). **[Claude Code]** invoke `stride:stride-completing-tasks` now — the Step 0 activation marker is what permits it; if the marker has gone stale on a long task the gate will block, so re-write it per [Write Command (Step 0)](#write-command-step-0) and invoke again, or read that file directly, which is never gated. **[Other environments]** read that file. Build every field from its **Completion Request Field Reference** table — the authoritative required-field set — and its **Explorer/Reviewer Result Schema** section, which owns the Shape 1 dispatched form, the Shape 2 skip form, the five-value skip-reason enum, and the 40-character non-whitespace summary rule. Those live there — this orchestrator does not duplicate them.
 
-```json
-{
-  "agent_name": "Claude Opus 4.6",
-  "time_spent_minutes": 45,
-  "completion_notes": "Summary of what was done and key decisions made.",
-  "completion_summary": "Brief one-line summary for tracking.",
-  "actual_complexity": "medium",
-  "actual_files_changed": "lib/foo.ex, lib/bar.ex, test/foo_test.exs",
-  "skills_version": "1.0",
-  "review_report": "## Review Summary\n\nApproved -- 0 issues found.\n...",
-  "after_doing_result": {
-    "exit_code": 0,
-    "output": "...",
-    "duration_ms": 0
-  },
-  "before_review_result": {
-    "exit_code": 0,
-    "output": "...",
-    "duration_ms": 0
-  },
-  "explorer_result": {
-    "dispatched": true,
-    "summary": "Explored the 3 key_files and identified the existing pattern to mirror",
-    "duration_ms": 12000
-  },
-  "reviewer_result": {
-    "dispatched": true,
-    "summary": "Reviewed the diff against all acceptance criteria and pitfalls",
-    "duration_ms": 8000,
-    "acceptance_criteria_checked": 5,
-    "issues_found": 0
-  },
-  "workflow_steps": [
-    {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
-    {"name": "planner",        "dispatched": true,  "duration_ms": 8200},
-    {"name": "implementation", "dispatched": true,  "duration_ms": 1820000},
-    {"name": "reviewer",       "dispatched": true,  "duration_ms": 15300},
-    {"name": "after_doing",    "dispatched": true,  "duration_ms": 45678},
-    {"name": "before_review",  "dispatched": true,  "duration_ms": 2340}
-  ]
-}
-```
+**Never reconstruct the payload from memory, from a previous task, or from any JSON example in this file.** A `reviewer_result` assembled from a stale example is not a soft failure: on a dispatched review the server requires the full structured block unconditionally — it rejects with `422` regardless of the grace-period flag — and an example that fell behind the contract is exactly how that happens.
 
-**Required fields:**
-| Field | Type | Notes |
-|---|---|---|
-| `agent_name` | string | Your agent name |
-| `time_spent_minutes` | integer | Actual time spent |
-| `completion_notes` | string | What was done |
-| `completion_summary` | string | Brief summary |
-| `actual_complexity` | enum | "small", "medium", or "large" |
-| `actual_files_changed` | string | Comma-separated paths (NOT an array) |
-| `after_doing_result` | object | `{exit_code, output, duration_ms}` |
-| `before_review_result` | object | `{exit_code, output, duration_ms}` |
-| `explorer_result` | object | `stride:task-explorer` dispatch result or skip-form — see `stride-completing-tasks` for full shape and skip-reason enum |
-| `reviewer_result` | object | `stride:task-reviewer` dispatch result or skip-form — see `stride-completing-tasks` for full shape and skip-reason enum |
-| `workflow_steps` | array | Six-entry telemetry array — see **Workflow Telemetry** section below |
+**Two fields this orchestrator owns, not that skill:**
 
-**Optional fields:**
-| Field | Type | Notes |
-|---|---|---|
-| `review_report` | string | Include when task-reviewer ran; omit when skipped |
-| `skills_version` | string | From SKILL.md frontmatter |
+- **`workflow_steps`** — the six-entry telemetry array you have been building since Step 1. Its schema, the six-name vocabulary and the all-six rule are in [Workflow Telemetry: The `workflow_steps` Array](#workflow-telemetry-the-workflow_steps-array) immediately below.
+- **`reviewer_result`** — submit the object Step 5 built, exactly as it built it. When the reviewer was dispatched and its block parsed, that is the whole-object copy from ["Extracting the structured review block"](#extracting-the-structured-review-block) with the five legacy keys overlaid, plus any bounded write the deep-security or Step 5.5 escalations made. When Step 5's JSON-parse fallback applied, it is that step's legacy-only envelope with every structured key omitted. When the Step 3 decision matrix skipped review, it is the Shape 2 skip form with a `reason` from the enum. Do not re-derive, sub-select, or re-type it here.
 
 ---
 
@@ -783,7 +675,7 @@ Each element of `workflow_steps` is an object with these keys:
 
 | Key | Type | Required | Notes |
 |---|---|---|---|
-| `name` | string | Always | One of the six vocabulary values — the Step Name Vocabulary table is in [reference.md](reference.md); Step 7's own worked example also spells all six out |
+| `name` | string | Always | One of the six vocabulary values — the Step Name Vocabulary table is in [reference.md](reference.md); the two End-of-Workflow Examples below spell all six out |
 | `dispatched` | boolean | Always | `true` if the step ran; `false` if intentionally skipped |
 | `duration_ms` | integer | When `dispatched=true` | Wall-clock time the step took, in milliseconds |
 | `reason` | string | When `dispatched=false` | Short explanation of why the step was skipped |

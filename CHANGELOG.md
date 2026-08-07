@@ -25,6 +25,16 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.62.0] - 2026-08-07
+
+**Goal G404 — cut the orchestrator's per-task context footprint via progressive disclosure.** `skills/stride-workflow/SKILL.md` goes **139,972 → 80,523 bytes (−42%)**, by moving gated and cold content into sibling reference files loaded on demand. Content was **moved, never deleted**: each of the four extractions was proved lossless by reconstructing the pre-change file from its parts and diffing it byte-for-byte against git — including W2048's six non-contiguous cuts, where the six deliberately-dropped blank lines each appear explicitly in the proof rather than being absorbed.
+
+**The most consequential change in this release is not a size reduction — it is W2050's `422` fix.** Step 7's worked `reviewer_result` example had fallen behind the contract it illustrated, listing five keys where the server requires eight structured sections on any dispatched review, rejected **unconditionally** by `CompletionResultGate` regardless of the grace flag. An agent building its payload from that example was getting a hard rejection. If you read only one entry below, read that one.
+
+**The goal's own headline criterion — SKILL.md under 40KB — is not met, and is not reachable by extraction.** The largest section still in the file is Step 5 at ~20.8KB of hot-path procedure; closing the remaining gap would mean deleting rules, which this goal's premise forbids. The 42% achieved is the honest ceiling for this technique. Two of the nine tasks also completed as deliberate no-ops after investigation showed their premises were already satisfied — the reviewer agent's JSON examples were never duplicated (there is exactly one, already minimal), and the two mechanical subagents were pinned to `sonnet` back in 1.9.1. Both are recorded on their Stride tasks rather than fabricated into changes.
+
+New in this release: `docs/token-baseline.md`, a reproducible per-task token measurement — real `usage` records from session transcripts, never estimated from byte sizes — with its method written down precisely enough to re-run against the post-change plugin.
+
 ### Changed — Step 5 now specifies how to compute the diff it hands the reviewer (W2052)
 
 The task asked to stop the reviewer "re-reading whole files" by handing it the captured diff instead. **Investigation showed the premise does not hold, and the proposed mechanism cannot work** — but there was a real gap next to it, and that is what this fixes.

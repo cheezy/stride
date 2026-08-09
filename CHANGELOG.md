@@ -25,6 +25,19 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Fixed
+
+- **D222 — `task-reviewer` could emit an unfilled stub as a section verdict.** A live review returned `pitfalls: {"status": "failed", "note": "placeholder"}` beside `"status": "approved"`, zero issue counts and an empty `issues[]`. That output was **legal** under the prompt as written: `note` was documented as optional on every section verdict, and the Consistency rule said a `"failed"` verdict "MUST be backed by" a matching `issues[]` entry — phrased as an obligation rather than naming its violation as invalid. It reached the payload and was caught only because a correction round happened to run.
+
+  Two producer-side rules now close it, both in step 8 where the reviewer builds the JSON rather than only where a consumer checks it:
+
+  - **New Verdict-note rule (anti-placeholder).** On a `"failed"` verdict — all four section tiles plus `behaviour_test_matrix` — `note` is REQUIRED and must name the specific violation in at least 20 non-whitespace characters. A placeholder, stub, `TODO`, empty string or bare restatement of the status is invalid output. Modelled on the existing 40-character minimum on `summary`, the file's one precedent for a hard content gate. It also names the right remedy for the state that produces a stub: nothing substantive to write means the *verdict* is wrong, not that the note is unnecessary.
+  - **Consistency rule sharpened.** A `"failed"` verdict with no matching `issues[]` entry is now stated to be invalid output, "whether or not the workflow's completion gate would also reject it" — the gate is a safety net that fires only if a correction round runs, not the thing that makes the rule binding. The two obligations are explicitly not alternatives: a failed section needs both a matching issue and a substantive note.
+
+  **`not_assessed` is deliberately untouched.** `note` stays optional on `"passed"` and `"not_assessed"`, so the ordinary empty-section case gains no friction — the fix targets the stub, not the rule it hid behind.
+
+  **Prompt-text only — `schema_version` stays `"1.6"`.** No field is added, removed or re-typed; a previously-optional field becomes conditionally required, which no consumer needs to change to read. **Schema of record only:** the five variant reviewer prompts (Cursor, Windsurf, Continue, Codex, Gemini) are not touched here and will mirror `task-reviewer.md` on their next natural sync, per the meta-block's rule that variants reference this document by path rather than redefining the schema.
+
 ## [1.63.0] - 2026-08-09
 
 **Per-task context isolation — an opt-in dispatcher mode that gives one task's whole lifecycle to one subagent.** G404 shrank the resident skill body; this goes after the other half of the cost, the material each task *accumulates* in the main loop — the diff, the explorer/planner/reviewer reports, the hook tails — all of which is re-sent on every later main-loop request while nothing fails and nothing looks wrong.

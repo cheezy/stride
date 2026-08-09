@@ -190,3 +190,85 @@ The 422 protocol-rejection case is **not** retried — repeating an invalid payl
 - **`after_goal` rides the `mark_reviewed` response.** The executor defers the usual `after_review` env-cache deletion so the agent can still read `GOAL_ID` from the cache for the follow-up `PATCH /api/tasks/:goal_id/after_goal`. The next claim rewrites the cache. The diff-snapshot artifacts are still cleaned up normally.
 - **Invalid env key names.** Keys that are not valid shell identifiers (e.g. containing `;` or spaces) are dropped — never written to the cache, never exported, never executed.
 - **`hook.timeout` missing from the server payload.** Treated as a protocol error — the executor should reject the hook and report `exit_code: -1` with an `output` explaining the missing field, rather than guess a default. (In practice the server always supplies it; this branch exists so the agent never silently invents a timeout budget.)
+
+## Behavior When Invoked From a Subagent
+
+Everything above is written for the main loop, but the executor has no notion of
+who is calling it — and the isolation design in
+[`../../docs/orchestrator-context-isolation-design.md`](../../docs/orchestrator-context-isolation-design.md)
+rests entirely on that being true. The three facts below were established
+experimentally on 2026-08-08 rather than assumed. **Each names the experiment
+that established it, and what that experiment did not establish**, so a future
+reader can re-run it instead of trusting it.
+
+- **Hooks fire for a subagent's tool calls, exactly as they do in the main loop.**
+  Established by two experiments together, and it takes both. **U1** planted the
+  file the `after_review` path unconditionally deletes
+  (`.stride-changed-files.json`) as a sentinel, then ran a command whose *text*
+  matched the `mark_reviewed` URL pattern — at the time, the hook dispatched on
+  command text, so this needed no network call and no claimed task. **That premise
+  no longer holds, and re-running U1 as originally written now yields a false
+  negative.** `D220` (`eb8939f`) landed after these experiments and hardened
+  routing to require the call to *actually issue* the request — client in command
+  position, endpoint as the tail of a URL in argument position, matching method —
+  rather than merely mention it. A plain `echo` containing a `mark_reviewed` URL
+  routes nowhere today, so the sentinel survives and a reader would conclude hooks
+  do not fire in subagents. **To re-run U1 against current code, issue a real
+  `curl`/`wget` request to the endpoint with a matching method — a nonexistent
+  task id is enough.** Routing depends on the command and the phase, not on the
+  API's response, so the hook chain runs against a `404` just as it does against
+  a real task. That keeps the original method's most useful property: the probe
+  makes no live write. Three runs: main loop with
+  the pattern (sentinel deleted — the detector works), subagent with the pattern
+  (sentinel deleted — the hook fired in the subagent), and a negative control,
+  subagent *without* the pattern (sentinel survived). The negative control is
+  what makes it conclusive: it rules out "something else deletes the file."
+  **What U1 alone did not establish:** all three runs used `.stride.md` in plugin
+  mode with **empty** hook sections, so U1 proves the hook script is *invoked*,
+  not that a populated section body runs. **U3** closes that gap with a populated
+  body — cite both, not U1 on its own.
+
+- **A failing blocking hook blocks the subagent's tool call and returns the full
+  error text to it.** Established by **U3**, which is the load-bearing one: with
+  `.stride.md` in `stride_dev` mode (populated bodies), a deliberately failing
+  test was planted so that line 1 of `after_doing` (`mix test --cover`) exited
+  non-zero. Main loop and subagent produced *identical* results — the following
+  `echo` never ran, and both received `after_doing hook failed on command 1/5`.
+  The subagent received the complete error text verbatim, and the call took tens
+  of seconds, consistent with the whole test chain running before it failed. That
+  the hook aborts on its first failing line was confirmed from the other side too:
+  line 5's `git add -A && git commit` was never reached — clean tree, unchanged
+  `HEAD`, no new commits. **This is the fact a gate depends on.** A gate that
+  fires but does not block is worse than no gate, because it reads as protection.
+
+- **A hook that *passes* is invisible to the subagent.** From **U1**: the
+  subagent reported seeing no hook output, no error and no notification, even
+  though the sentinel showed the hook had run. **U3 corrects the scope of this**,
+  and the correction matters: U1 originally concluded the hook was simply
+  "invisible to the subagent," which was an artefact of testing a *passing* hook.
+  A failing hook is fully visible. The visibility gap applies only to hooks that
+  succeed — the harmless direction. **Do not read silence as a pass.** U1's own
+  negative control is the counter-example: there the hook did *not* fire, and the
+  subagent observed exactly what it observed when the hook fired and passed —
+  nothing. That is precisely why the experiment needed a filesystem sentinel. From
+  inside a subagent, *fired-and-passed* and *never-fired* are indistinguishable
+  without an out-of-band signal; what the experiments establish is only that a
+  passing hook is silent, never that silence implies a pass.
+
+**Not established: what a subagent sees when a gate hook *times out*.** U3 forced
+a non-zero exit from a failing command; no experiment forced a timeout. The
+executor's own contract above is unambiguous that a timeout is forwarded as a
+non-zero exit (`124`/`143`, never remapped), and the gate path has timeout
+plumbing of its own — but "a timed-out gate surfaces to a subagent the way a
+failing one does" is an inference from those two facts, not a measurement.
+**Treat it as unknown until someone runs it**, and do not let the surrounding
+confidence of this section borrow authority for it.
+
+**The sentinel technique was a probe, not an interface.** The
+`.stride-changed-files.json` deletion is an ordinary implementation detail of the
+`after_review` path that U1 repurposed as a detector because it needed a
+filesystem-observable signal with no network call. Nothing in `hooks/` or
+`test-stride-hook.sh` supports or documents it as a way to test hooks, no flag
+enables it, and it must not be described as the recommended way to test hook
+firing. It is recorded here because U1's claim is only re-runnable if the method
+is written down with it.

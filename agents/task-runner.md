@@ -153,8 +153,9 @@ the gates: the PreToolUse and PostToolUse hooks fire on *your* tool calls exactl
 as they do in the main loop, and a blocking hook that exits non-zero **blocks
 your tool call and returns the full hook error text to you, verbatim** — you see
 it, and you are the one who must act on it. The asymmetry runs only in the
-harmless direction: a hook that *passes* is invisible to you, so silence from a
-gate means it passed, never that it did not run. Both facts are verified rather
+harmless direction: a hook that *passes* is invisible to you. **But do not read
+silence as a pass** — a hook that never fired is equally silent, and from inside
+a subagent the two are indistinguishable without an out-of-band signal. Both facts are verified rather
 than assumed (`stride/docs/orchestrator-context-isolation-design.md`, U1 and U3;
 U3 corrects U1's earlier "invisible to the subagent" reading, which was an
 artefact of testing a passing hook).

@@ -163,6 +163,20 @@ gates explorer and planner.
 Both were run before choosing an option. **Both came back favourable**, which
 unblocks Option A and removes the review-quality objection against it.
 
+> **D220 (`eb8939f`) landed after these experiments and changed how U1 re-runs.**
+> Routing no longer dispatches on command text: it requires the call to actually
+> issue the request (client in command position, endpoint as a URL tail in
+> argument position, matching method). The `~1561` line citation below predates
+> that commit. U1's *result* stands — the hook fired in the subagent — but a
+> re-run needs a real `curl`/`wget`, not a command that merely contains the URL.
+>
+> **The three hook facts below now also live in the executor's own reference**,
+> [`../skills/stride-workflow/hook-execution.md`](../skills/stride-workflow/hook-execution.md),
+> under "Behavior When Invoked From a Subagent" — with their methods, so they can
+> be re-run. That is where someone touching the executor will look, and it is the
+> copy that has to survive; this section keeps the full experimental write-up.
+> **An edit to either belongs in both.**
+
 ### U1. Do hooks fire for a **subagent's** tool calls? — **YES**
 
 Method. The hook dispatches on *command text*, not on a real API call

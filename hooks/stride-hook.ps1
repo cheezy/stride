@@ -1312,7 +1312,7 @@ function Invoke-FinalizeBeforeDoing {
 
 # (W1094) Self-heal for the changed_files upload — mirror of
 # stride-hook.sh's self_heal_changed_files_upload. The after_doing gate can
-# burn the whole 120s hook budget, killing the process before or during the
+# burn the whole 600s hook budget, killing the process before or during the
 # snapshot PUT — or the PUT itself returned non-2xx. before_review
 # (PostToolUse on the same completion curl) runs on a FRESH budget, so it
 # verifies the recorded outcome and re-PUTs the on-disk snapshot when no
@@ -1493,7 +1493,7 @@ function Invoke-StrideSection {
     Set-Location $ProjectDir
 
     # Early per-file diff snapshot upload (W1093 parity, ported in W1095) —
-    # the after_doing section runs the full quality gate, and the 120s hook
+    # the after_doing section runs the full quality gate, and the 600s hook
     # timeout can kill this process mid-loop, silently losing the diff
     # upload. PUT the snapshot BEFORE the first command executes; the
     # post-loop call below is KEPT as a refresh once the gate succeeds. A

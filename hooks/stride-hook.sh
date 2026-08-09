@@ -1158,7 +1158,7 @@ finalize_before_doing() {
 }
 
 # --- (W1094) Self-heal for the changed_files upload ---
-# The after_doing gate can burn the whole 120s hook budget, killing the
+# The after_doing gate can burn the whole 600s hook budget, killing the
 # process before or during the snapshot PUT — or the PUT itself returned
 # non-2xx. before_review (PostToolUse on the same completion curl) runs on a
 # FRESH budget, so it verifies the recorded outcome and re-captures +
@@ -1548,7 +1548,7 @@ run_stride_section() {
   cd "$PROJECT_DIR"
 
   # Early per-file diff snapshot (W1093) — the after_doing section runs the
-  # full quality gate, and the 120s hook timeout can kill this process
+  # full quality gate, and the 600s hook timeout can kill this process
   # mid-loop, silently losing the diff upload (how W1092 lost its diffs).
   # Capture and PUT the snapshot BEFORE the first command executes; the
   # post-loop call below is KEPT as a refresh once the gate succeeds. A bare

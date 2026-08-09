@@ -3216,7 +3216,7 @@ fi
 # Test Group 12: after_doing early snapshot capture (W1093)
 # ============================================================
 # run_stride_section must call finalize_after_doing BEFORE the command loop
-# when the GLOBAL HOOK_NAME is after_doing, so the 120s hook timeout cannot
+# when the GLOBAL HOOK_NAME is after_doing, so the 600s hook timeout cannot
 # kill the process before the diff snapshot is written. The post-loop call is
 # kept as a refresh. Network safety: TASK_ID is never set and no
 # .stride_auth.md exists in these fixtures, so finalize_after_doing skips the

@@ -422,6 +422,39 @@ carried only `explorer` and `reviewer`, omitting `implementation`, `after_doing`
 and `before_review` — the resume path does not reconstruct phase timings for
 work it inherited.
 
+### 6. This verification misattributed its own diff — found at its own completion
+
+**D226.** The sharpest finding of the run, because it was produced by the run
+rather than looked for, and it is the exact silent class AC4 exists to guard.
+
+`.stride-env-cache` is a single global file at the project root with no
+per-task isolation. W2066 claimed with `TASK_BASE_REF=b5737c98`. Its *work* was
+to dispatch runners at W2072 and W2073 — and each nested claim rewrote that
+shared cache. By completion the cache held W2073's base, `30aa57c4`.
+
+| Moment | `TASK_ID` | `TASK_BASE_REF` |
+|---|---|---|
+| W2066 claimed | `6161` | `b5737c98` — its real base |
+| W2072 claimed by a runner | `6168` | `b5737c98` |
+| W2073 claimed by a runner | `6169` | **`30aa57c4`** |
+| W2066 completed | `6161` (refreshed) | **`30aa57c4`** — never restored |
+
+**Reading:** W2066's own deliverable is in the gitignored `stride/` subrepo, so
+its true `changed_files` is empty. What it actually carries is **W2073's two
+files** — `lib/kanban_web/avatar_palette.ex` and its test — uploaded with
+`http_code=200` and no error anywhere. A reviewer opening W2066 sees a diff with
+nothing to do with it, and nothing reports a problem.
+
+**Dispatcher mode makes this systematic rather than exotic**, because a task
+whose work is to dispatch runners necessarily causes nested claims.
+
+**It could not be corrected on the record.** `PATCH /api/tasks/6161` with a
+corrected `completion_notes` returned **200 and silently discarded the field** —
+completion fields are immutable after completion, but the API reports success
+rather than refusing. So W2066's persisted notes still assert its `changed_files`
+is empty, which is wrong, and this document is the correction. That silent-200
+is filed separately as **D227**.
+
 ---
 
 ## Caveats

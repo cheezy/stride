@@ -55,6 +55,7 @@ STEP 1: Task Discovery
 STEP 1.5: Dispatcher Mode (Optional, Gated)
   No opt-in / no stride:task-runner agent / non-Claude-Code? --> Skip; run Steps 2-8 inline (default)
   Branch A task (goal / large undecomposed / 25+ hours)? --> Do NOT dispatch; run Steps 2-8 inline
+  Step 3 matrix Isolate column says inline (small, 0-1 key_files)? --> Do NOT dispatch; run Steps 2-8 inline
   Otherwise: dispatch ONE stride:task-runner with the identifier only, read ONE record
     completed --> loop to Step 1
     completed_needs_review / claim_blocked / review_blocked / failed --> STOP and report
@@ -175,6 +176,7 @@ CLAUDE CODE WORKFLOW:
 ├─ 1.5 Dispatcher Mode (optional, gated):
 │     ├─ No opt-in / no stride:task-runner / non-Claude-Code → Skip, run 2-8 inline (default)
 │     ├─ Branch A task (goal / large undecomposed / 25+ hours) → do NOT dispatch; run 2-8 inline
+│     ├─ Step 3 matrix Isolate = inline (small, 0-1 key_files) → do NOT dispatch; run 2-8 inline
 │     └─ Else → dispatch one runner per task, act only on its record:
 │        completed → loop | hook_blocked → re-dispatch once | anything else → stop and report
 ├─ 2. Claim: POST /api/tasks/claim (hooks auto-fire via hooks.json)

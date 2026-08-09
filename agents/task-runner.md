@@ -263,8 +263,9 @@ means *this* attempt measured the phase; `0` means it genuinely did not run or t
 means it ran in a **previous** attempt and this one did not measure it. Never omit a key, and never use `0` for an
 inherited phase — `0` already means "nothing ran", so reusing it destroys the only distinction the field carries
 (D224). `after_doing` and `before_review` are routinely a truthful `0`: a passing hook's output never reaches you,
-and both fire outside the window in which you build the payload — do not invent a number for either, and do not
-copy the figure a *failed* hook showed you, which measures the failed run (D224/D234). The record above shows `0` for both for exactly this reason — a runner can wall-clock its own completion curl, but that one span contains `after_doing`, the request and `before_review` together and nothing can split them. The full rule is
+and both fire outside the window in which you build the payload — do not invent a number for either. A *failed*
+hook is the one whose output you can see, and it carries no duration field at all, so there is nothing to copy
+from there either (D224/D234). The record above shows `0` for both for exactly this reason — a runner can wall-clock its own completion curl, but that one span contains `after_doing`, the request and `before_review` together and nothing can split them. The full rule is
 [`docs/task-runner-contract.md`](../docs/task-runner-contract.md) item 4.
 
 **Important constraints:**

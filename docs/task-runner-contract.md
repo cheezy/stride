@@ -748,8 +748,15 @@ already built.
    figure to a channel the agent cannot read. So "restates six durations already
    submitted in `workflow_steps`" is the correct framing, and both of those
    durations are `0` in the payload for the same reason. The one record that
-   legitimately carries a non-zero `after_doing` is the **`hook_blocked`** one —
-   a *failed* hook IS visible, and that record is about the failed run itself.
+   legitimately carries a non-zero `after_doing` is the **`hook_blocked`** one, and
+   the reason is the splitting problem being absent rather than anything being
+   visible: on the blocked path the completion curl never executes and
+   `before_review` never fires, so a runner wall-clocking that tool call
+   brackets `after_doing` **alone**. That is exactly the isolation the success
+   path cannot achieve. (A failed hook's output IS readable, but it carries no
+   duration field — `stride-hook.sh:1651-1666`, with `_duration_ms` computed
+   only at `:1695`, after that branch returns — so visibility is not the
+   mechanism here.)
 5. **`summary` versus `completion_summary`.** The record's `summary` SHOULD be the
    same paragraph submitted as `completion_summary`. If they differ, the persisted
    `completion_summary` is authoritative.

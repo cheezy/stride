@@ -587,9 +587,9 @@ redaction rule there needs the matching edit here.
   "telemetry": {
     "nested_dispatches": 3,
     "nested_tokens": 214880,
-    "phase_ms": { "explorer": 92237, "planner": 61400, "implementation": 900000, "reviewer": 71000, "after_doing": 1200, "before_review": 400 }
+    "phase_ms": { "explorer": 92237, "planner": 61400, "implementation": 900000, "reviewer": 71000, "after_doing": 0, "before_review": 0 }
   },
-  "record_bytes": 799
+  "record_bytes": 794
 }
 ```
 
@@ -622,9 +622,9 @@ it summarises is already persisted server-side.
   "telemetry": {
     "nested_dispatches": 2,
     "nested_tokens": 138204,
-    "phase_ms": { "explorer": 40100, "planner": 0, "implementation": 512000, "reviewer": 58300, "after_doing": 1100, "before_review": 380 }
+    "phase_ms": { "explorer": 40100, "planner": 0, "implementation": 512000, "reviewer": 58300, "after_doing": 0, "before_review": 0 }
   },
-  "record_bytes": 761
+  "record_bytes": 756
 }
 ```
 
@@ -739,6 +739,17 @@ already built.
    look like. Note `after_doing` and `before_review` are routinely a truthful
    `0`: a passing hook's output never reaches the agent, so no real figure
    exists to report (D224/D234).
+
+   **That is why every success-path worked record below shows `0` for both.** It
+   is not an omission in the examples — it is the only honest value. A runner
+   could wall-clock its own completion curl, but that single span contains
+   `after_doing`, the HTTP request and `before_review` together, and nothing
+   available to it can split them: the hook that measured each one wrote its
+   figure to a channel the agent cannot read. So "restates six durations already
+   submitted in `workflow_steps`" is the correct framing, and both of those
+   durations are `0` in the payload for the same reason. The one record that
+   legitimately carries a non-zero `after_doing` is the **`hook_blocked`** one —
+   a *failed* hook IS visible, and that record is about the failed run itself.
 5. **`summary` versus `completion_summary`.** The record's `summary` SHOULD be the
    same paragraph submitted as `completion_summary`. If they differ, the persisted
    `completion_summary` is authoritative.

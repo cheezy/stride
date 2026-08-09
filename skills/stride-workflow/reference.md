@@ -71,7 +71,7 @@ STEP 2: Claim
   v
 STEP 3: Explore (Decision Matrix)
   Goal/large undecomposed? --> Decompose --> Create children --> Claim first child --> Step 1
-  Small, 0-1 key_files?   --> Skip to Step 4
+  Row says Skip for Explore/Plan/Review? --> Skip to Step 4
   Otherwise:
     [Claude Code] Dispatch task-explorer; Plan agent iff the matrix's Plan column says YES
     [Other]       Read key_files, search patterns manually
@@ -83,7 +83,7 @@ STEP 4: Implement
   |
   v
 STEP 5: Code Review (Decision Matrix)
-  Small, 0-1 key_files? --> Skip the review, BUT [Claude Code] still evaluate the
+  Row's Review column says Skip? --> Skip the review, BUT [Claude Code] still evaluate the
                             deep security-considerations gate (security_considerations
                             + plugin, no reviewer precondition; non-Claude-Code -->
                             skip it), then CONTINUE TO STEP 5.5 (not Step 6):
@@ -182,11 +182,11 @@ CLAUDE CODE WORKFLOW:
 ├─ 2. Claim: POST /api/tasks/claim (hooks auto-fire via hooks.json)
 ├─ 3. Explore (check decision matrix):
 │     ├─ Goal/large undecomposed → Dispatch task-decomposer → Claim children
-│     ├─ Small, 0-1 key_files → Skip to Step 4
+│     ├─ Row says Skip for Explore/Plan/Review → Skip to Step 4
 │     └─ Otherwise → Dispatch task-explorer (+ Plan agent if the matrix's Plan column says YES)
 ├─ 4. Implement: Write code using explorer/plan output
 ├─ 5. Review (check decision matrix):
-│     ├─ Small, 0-1 key_files → Skip the review, but STILL evaluate the deep
+│     ├─ Row's Review column says Skip → Skip the review, but STILL evaluate the deep
 │     │                         security gate (security_considerations + plugin,
 │     │                         no reviewer precondition), then continue to 5.5
 │     │                         (NOT Step 6 — 5.5 likewise gates on manual_tests

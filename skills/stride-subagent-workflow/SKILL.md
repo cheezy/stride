@@ -90,7 +90,7 @@ Use this matrix to determine which subagents to dispatch based on task attribute
 
 **Quick rules:**
 - If the task is a **goal** or has **large complexity without child tasks** or a **25+ hour estimate**: dispatch the decomposer first. The decomposer breaks it into claimable child tasks — you don't implement goals directly.
-- If the task is small with 0-1 key_files, skip the decision-matrix subagents (explorer, Plan, reviewer) and code directly. This does **not** cover either orthogonal dispatch above — Phase 3.5's exploratory session or the `stride-security-review` considerations-mode dispatch — whose gates are orthogonal to complexity and key_files and have no reviewer precondition.
+- When the resolved matrix row says Skip in all three subagent columns (today: `small, 0-1 key_files`), skip the decision-matrix subagents (explorer, Plan, reviewer) and code directly. This does **not** cover either orthogonal dispatch above — Phase 3.5's exploratory session or the `stride-security-review` considerations-mode dispatch — whose gates are orthogonal to complexity and key_files and have no reviewer precondition.
 - Otherwise, at minimum run the explorer and reviewer.
 
 ## Pre-Claim: Enrichment (Sparse Tasks)
@@ -184,7 +184,7 @@ The Plan agent will return an ordered implementation plan. Follow this plan duri
 
 The reviewer will return either "Approved" or a list of issues categorized as Critical, Important, or Minor.
 
-**Capture the reviewer's output as `review_report`:** Save the full structured review output returned by the task-reviewer agent. You will include this as the `review_report` field in the completion API call (via `stride-completing-tasks`). Capture it regardless of whether the review found issues — an "Approved" report is still valuable for traceability. When the reviewer is skipped (small tasks with 0-1 key_files), simply omit `review_report` from the completion call.
+**Capture the reviewer's output as `review_report`:** Save the full structured review output returned by the task-reviewer agent. You will include this as the `review_report` field in the completion API call (via `stride-completing-tasks`). Capture it regardless of whether the review found issues — an "Approved" report is still valuable for traceability. When the resolved matrix row's reviewer column says Skip, simply omit `review_report` from the completion call.
 
 **Copy the whole structured block into `reviewer_result` — never a subset.** Beyond the prose `review_report`, the reviewer's structured JSON block must be carried into `reviewer_result` by a mechanical whole-object copy, then verified by the mandatory self-check before submission. The passthrough mechanics and the self-check (every section present; `project_checks` count equals the reviewer's; and — whenever a structured block was parsed — no `not_assessed` for a task-supplied section) are owned by `stride-workflow` ("Extracting the structured review block") and `stride-completing-tasks` (`skills/stride-completing-tasks/SKILL.md` — "MANDATORY pre-submission self-check", and "Explorer/Reviewer Result Schema" for the full payload shape) — follow them; do not re-enumerate or sub-select keys here. That last check is scoped there rather than unconditional: a self-reported skip and the JSON-parse fallback carry no verdict object, so it is inapplicable on those payloads — read the owning documents for the exact terms, and never satisfy it by hand-writing a verdict or by reporting a dispatched review as a skip.
 
@@ -275,7 +275,7 @@ Is it a goal OR large+undecomposed OR 25+ hours?
     |
     +--> NO --> Check decision matrix
                     |
-                    +--> Small, 0-1 key_files? --> Skip the decision-matrix subagents
+                    +--> Row says Skip in all three columns? --> Skip those subagents
                     |                              (explorer, Plan, reviewer) --> Begin
                     |                              implementation --> Phase 3.5
                     |                              (this skip covers NEITHER orthogonal
@@ -304,7 +304,7 @@ Is it a goal OR large+undecomposed OR 25+ hours?
                             v
                         Check decision matrix for reviewer
                             |
-                            +--> Small, 0-1 key_files? --> Skip reviewer, but the
+                            +--> Row's reviewer column says Skip? --> Skip reviewer, but the
                             |    security considerations-mode dispatch still applies
                             |    (no reviewer precondition) --> Phase 3.5
                             |
@@ -400,7 +400,7 @@ DISPATCH DECOMPOSER WHEN:
   Task type is goal, OR large complexity without children, OR 25+ hour estimate
 
 SKIP THE DECISION-MATRIX SUBAGENTS WHEN:
-  Task is small complexity AND has 0-1 key_files
+  The resolved matrix row says Skip in every subagent column
   (explorer, Plan and reviewer only)
 
 NOT COVERED BY THAT SKIP — BOTH orthogonal dispatches:

@@ -509,7 +509,7 @@ saved separately as `review_report`.
 
 **Schema reference:** The `workflow_steps` array must match the schema documented in the `stride-workflow` skill — key-for-key. Always include one entry per step name (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`). Skipped steps use `{"name": "<step>", "dispatched": false, "reason": "<why>"}`.
 
-**Optional:** Include `review_report` when a task-reviewer agent produced a structured review. Omit it when no review was performed (e.g., small tasks with 0-1 key_files).
+**Optional:** Include `review_report` when a task-reviewer agent produced a structured review. Omit it when the resolved matrix row's Review column said Skip, so no review was performed.
 
 ### Recording Manual & Exploratory Testing Findings (Optional — Existing Fields Only)
 

@@ -568,7 +568,9 @@ If either condition is false, **skip this sub-step entirely and use the task-rev
 | Plugin present but app/agent unavailable | Skip deep dispatch, **no failure** → task-reviewer prose verdict is the sole source |
 | Plugin present but verdicts malformed/absent | Fail-closed: keep prose verdict, note the anomaly, do NOT downgrade to `passed` |
 
-### Small tasks (0-1 key_files): Skip review. Omit `review_report` from completion.
+### When the resolved row's Review column says Skip: omit `review_report` from completion.
+
+(Today that is the `small, 0-1 key_files` row — read the column, not this gloss.)
 
 **Skipping the review does NOT skip the deep security-considerations review.** That sub-step is filed above under "Claude Code: Dispatch Task Reviewer" because it consumes the reviewer's output when there is one — but its gate is independent of this one: **non-empty `security_considerations` plus plugin availability, with no reviewer precondition.** So it still applies on this path. **[Claude Code]** go read ["Deep security-considerations review (Optional, Gated)"](#deep-security-considerations-review-optional-gated) above and evaluate its gate before continuing; its placement is about where its prose belongs, not about which tasks reach it. In a non-Claude-Code environment the sub-step is skipped outright — see its own Decision Summary — so continue to Step 5.5.
 

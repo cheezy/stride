@@ -66,11 +66,11 @@ OTHER ENVIRONMENTS (Cursor, Windsurf, Continue):
 ├─ 2. Claim: Execute before_doing manually, then POST /api/tasks/claim
 ├─ 3. Explore (check decision matrix):
 │     ├─ Goal/large undecomposed → Break down manually → Create via API
-│     ├─ Small, 0-1 key_files → Skip to Step 4
+│     ├─ Row says Skip for Explore/Plan/Review → Skip to Step 4
 │     └─ Otherwise → Read key_files, search patterns, outline approach
 ├─ 4. Implement: Write code using task metadata as guide
 ├─ 5. Review (check decision matrix):
-│     ├─ Small, 0-1 key_files → Skip the review, continue to 5.5 (NOT Step 6 —
+│     ├─ Row's Review column says Skip → Skip the review, continue to 5.5 (NOT Step 6 —
 │     │                         5.5 gates on manual_tests + plugin, never on review)
 │     └─ Otherwise → Self-review against acceptance criteria + pitfalls
 ├─ 5.5 Manual & Exploratory Testing (optional, gated):

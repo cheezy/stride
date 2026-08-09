@@ -29,15 +29,16 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 - **D229 — a fresh clone could neither claim nor complete, because the budgets killed the developer's own hooks.** Measured on a genuine clone with no `deps/` and no `_build/`: `before_doing` **80s against a 60s budget**, `after_doing` **138s against 120s**. Both blocking sections were killed, so a new contributor, a new machine or CI could not get through a single task. It stayed invisible because every figure anyone had ever taken was warm, on a machine carrying an uncommitted `STRIDE_HOOK_TIMEOUT_OVERRIDE=200`.
 
-  Per-command, cold — the expensive parts are not where anyone assumed:
+  Per-command, across three baselines — a fresh clone on a machine with a warm `~/.hex`; the same fresh clone with `HEX_HOME` pointed at an empty directory, so the registry and every package tarball are re-fetched over the network; and the same clone once warm. The expensive parts are not where anyone assumed:
 
-  | `before_doing` | cold |
-  |---|---|
-  | `mix deps.get` | 4s |
-  | `mix hex.outdated` | 0s |
-  | `mix deps.audit` | **45s** |
-  | `mix hex.audit` | 1s |
-  | `mix ecto.migrate` | **30s** |
+  | `before_doing` | cold | cold, empty `~/.hex` | warm |
+  |---|---|---|---|
+  | `mix deps.get` | 4s | 4s | 2s |
+  | `mix hex.outdated` | 0s | 0s | 1s |
+  | `mix deps.audit` | **45s** | **48s** | 1s |
+  | `mix hex.audit` | 1s | 1s | 1s |
+  | `mix ecto.migrate` | **30s** | **29s** | 1s |
+  | **section** | **80s** | **82s** | **6s** |
 
   And `after_doing`, per command, on a clone where `before_doing`'s work had already run (deps fetched, `:dev` compiled) — which is exactly the state `after_doing` finds:
 
@@ -51,7 +52,7 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
   That 136s reconciles with the 138s single-command reading taken earlier under the same conditions. It does **not** reconcile with the 172s cold `mix test` recorded in `.stride_dev.md` — that figure came from a different baseline (the main working repo with only `_build/test` wiped, `deps/` and `:dev` warm, on a machine doing other work). The spread is real and is not explained by anything measured here; treat 136–172s as the honest cold band for that command rather than picking one.
 
-  `deps.audit` is expensive because its task lives in `_build/dev`, so it *triggers* the dependency compile; remove it and `ecto.migrate` absorbs the identical cost (measured separately at 82s). One caveat stated rather than buried: `deps.get` was only 4s because this machine has a warm `~/.hex` cache — on a machine that has never built an Elixir project it would be far larger, so these are "fresh clone, experienced machine" figures.
+  `deps.audit` is expensive because its task lives in `_build/dev`, so it *triggers* the dependency compile; remove it and `ecto.migrate` absorbs the identical cost (that one command measured 82s in a separate run — coincidentally the same number as the cold-cache *section* total in the table above, and unrelated to it). The caveat this entry previously carried — that `deps.get` was only 4s because this machine has a warm `~/.hex`, so the figures were "fresh clone, experienced machine" — has now been measured instead of left standing. With `HEX_HOME` pointed at an empty directory, Hex genuinely re-fetched the registry and every package tarball (8.3 MB across 77 files landed in the isolated cache, which is what confirms a real download rather than a silent cache hit), and `deps.get` still cost 4s. **A cold package cache is worth ~2s across the whole section, not the large unknown it was assumed to be.**
 
   **The fix is entirely on the budget side. No `.stride.md` hook body was touched.** A developer's hook commands are theirs, and the executor's job is to detect a *hung* command, not to police how long a legitimate quality gate takes. Budgets are now hang detectors:
 
@@ -65,7 +66,9 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
   **The cost, stated rather than implied.** A genuinely wedged command now blocks for 600s instead of 60s, and the harness holds a session for 900s instead of 300s — time-to-diagnose on the failure path gets 10x and 3x worse respectively. That is the deliberate trade: the budget's job is to catch a hang eventually, not to catch a slow command quickly, and killing legitimate work was costing far more than a slow hang detection does.
 
-  **Bounding the sizing honestly.** The multiplier above is computed against measurements taken on a machine with a warm `~/.hex` cache, which the same paragraph notes is not worst-case. A true first-build machine — one that has never fetched a hex package — is outside the verified envelope, and nothing here bounds it. 600s is sized for the fresh-clone-experienced-machine case; if a first-build machine turns out to exceed it, that is a measurement someone should take rather than a number to guess at now.
+  **Bounding the sizing honestly.** Two of the three baselines are now measured rather than assumed. A cold package cache costs ~2s (82s against 80s), so the first-build machine that was previously "outside the verified envelope" is inside it. The warm steady state is **6s** — inside even the *old* 60s budget — so raising the ceiling demonstrably costs the success path nothing; that was previously a deduction from the fact that a `timeout` wrapper cannot slow a command that succeeds, and it is now a measurement.
+
+  What is **not** reproduced is a genuinely slow link. An empty cache on a fast connection bounds download *volume*, not *latency*, and the two are different failure modes. That residual is arithmetic rather than open-ended: the three network-bound commands (`deps.get`, `hex.outdated`, `hex.audit`) account for **5s** of the 82s section, and the remaining 77s is local dependency compilation and migration that a slow link does not touch. The network portion would have to run roughly **100x slower** before the section reached 600s — that is a broken link, not a slow one, and it would fail on its own timeouts long before the budget mattered.
 
   **On shipping this to every plugin user.** `.stride_dev.md` previously recorded the counter-argument — that raising the shared default "ships to every plugin user rather than fixing this repo" — and this change reverses that judgement deliberately rather than by oversight. Three things changed since: the developer's hook bodies are now off-limits, which removes every repo-local lever; `after_doing` resolves at PRE phase, so only the local default ever reaches it; and a user without `jq` falls through to the default for all five sections, so they hit the identical cold breach. A per-repo fix was not available. The documented contract in `parser.md`, `hook-execution.md` and the four skill files now states 600s throughout; the older 60/120s figures in `docs/runner-path-end-to-end-w2066.md` are left as the dated record they are.
 

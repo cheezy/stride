@@ -64,7 +64,9 @@ Invoke this skill **after claiming a task** (via `stride-claiming-tasks`) and **
 
 ## Decision Matrix
 
-Use this matrix to determine which subagents to dispatch based on task attributes:
+Use this matrix to determine which subagents to dispatch based on task attributes.
+
+**This table is a MIRROR of the decision matrix in `stride-workflow` Step 3, restricted to the subagent columns. It must agree with that matrix row for row, and where the two diverge, `stride-workflow` Step 3 is authoritative.** Read its **Row precedence** rule too — more than one row can match (a `medium` defect matches both `medium (any)` and `Defect type`), and that ordering lives there rather than being restated here. Do not state an independent trigger for any column in this file; that was defect D221.
 
 | Task Attributes | stride:task-decomposer | stride:task-explorer | Plan Agent | stride:task-reviewer |
 |---|---|---|---|---|
@@ -76,6 +78,7 @@ Use this matrix to determine which subagents to dispatch based on task attribute
 | Goal type | Run | Skip* | Skip* | Skip* |
 | Large complexity, not yet decomposed | Run | Skip* | Skip* | Skip* |
 | 25+ hour estimate, not yet decomposed | Run | Skip* | Skip* | Skip* |
+| Complexity absent or unrecognised | Skip | Run | Run | Run |
 
 *After decomposition, each resulting child task follows its own row in this matrix when claimed individually.
 
@@ -160,7 +163,7 @@ The explorer will return a structured summary of: each key file's current state,
 
 ## Phase 2: Planning (Conditional, Before Coding)
 
-**When:** the decision matrix above says `Run` in the **Plan** column for this task's row. **Read the column; do not re-derive the condition here.** This line previously stated its own trigger ("medium or large, OR 3+ key_files, OR 3+ acceptance criteria lines"), which could fire on a row whose Plan column said `Skip` — the `small, 2+ key_files` row being the case that collided. That was defect D221; the matrix is the sole decision point, and `stride-workflow` Step 3 carries the full account under "One signal the matrix deliberately does not act on".
+**When:** the decision matrix above says `Run` in the **Plan** column for this task's row — resolved by `stride-workflow` Step 3's Row precedence rule, and per that step authoritative there if the two tables ever diverge. **Read the column; do not re-derive the condition here.** This line previously stated its own trigger ("medium or large, OR 3+ key_files, OR 3+ acceptance criteria lines"), which could fire on a row whose Plan column said `Skip` — the `small, 2+ key_files` row being the case that collided. That was defect D221; the matrix is the sole decision point, and `stride-workflow` Step 3 carries the full account under "One signal the matrix deliberately does not act on".
 
 **What to do:** Dispatch a **Plan** subagent (built-in type, not a custom agent), passing:
 - The explorer's output from Phase 1
@@ -367,14 +370,14 @@ SUBAGENT WORKFLOW:
 │     ├─ Create child tasks via API
 │     └─ Claim first child task (re-enter workflow)
 ├─ 2. Check decision matrix (complexity + key_files count)
-├─ 3. If medium+ OR 2+ key_files:
+├─ 3. If the matrix says Run in the explorer column:
 │     ├─ Dispatch stride:task-explorer with task metadata
 │     └─ Read and use the explorer's output
 ├─ 4. If the matrix says Run in the Plan column:
 │     ├─ Dispatch Plan agent with explorer output + task metadata
 │     └─ Follow the resulting plan
 ├─ 5. Implement the task
-├─ 6. If medium+ OR 2+ key_files:
+├─ 6. If the matrix says Run in the reviewer column:
 │     ├─ Dispatch stride:task-reviewer with diff + task metadata
 │     └─ Fix any Critical/Important issues found
 ├─ 7. Phase 3.5 — if manual_tests non-empty AND the exploratory plugin is available:

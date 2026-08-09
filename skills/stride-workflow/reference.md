@@ -212,10 +212,10 @@ CLAUDE CODE WORKFLOW:
 OTHER ENVIRONMENTS (Cursor, Windsurf, Continue): see platform-other.md
 
 DECISION MATRIX QUICK CHECK:
-  small + 0-1 key_files  → Skip explore, plan, review
-  small + 2+ key_files   → Explore + Review
-  medium/large           → Explore + Plan + Review
-  goal/undecomposed      → Decompose first
+  There is no quick check. Open Step 3, find the task's row, read the
+  column. This block used to restate the rows and drifted out of step
+  with them (D221) — it gave Plan for a medium defect where the matrix
+  gives Skip. A summary of the matrix is a second matrix.
 ```
 
 ---

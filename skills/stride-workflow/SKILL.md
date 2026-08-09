@@ -284,14 +284,34 @@ The `hooks.json` PostToolUse handler automatically executes `.stride.md` `## bef
 | Defect type | Skip | YES | Skip (unless large) | YES | YES |
 | Complexity absent or unrecognised | Skip | YES | YES | YES | YES |
 
-**This matrix is the SOLE decision point for every column it carries** — Decompose,
-Explore, Plan, Review and Isolate. Find the task's row, read the column, done.
-Nothing elsewhere in this skill, in `stride-subagent-workflow`, or in any
-reference or platform file states an independent trigger for any of them; where
-those files mention a step they describe what this matrix already decided and
-defer to it. **If prose anywhere appears to give a second, separately-satisfiable
-condition, the matrix wins** — that ambiguity was defect D221, and this sentence
-is its fix.
+**This matrix is the SOLE decision point for every column it carries** —
+Decompose, Explore, Plan, Review and Isolate. **Nothing anywhere may state a
+second, separately-satisfiable condition for any of them**; where another file,
+section, flowchart or quick-reference card mentions one of these steps it
+describes what this matrix already decided and defers to it. **If any prose
+appears to give an independent trigger, the matrix wins.** That ambiguity was
+defect D221, and this rule is its fix. `stride-subagent-workflow` carries a
+mirror of this table for the subagent columns: it must agree row for row, and
+**where it diverges, this matrix is authoritative.**
+
+**Row precedence — more than one row can match, so read them in this order.**
+A `medium` defect matches both `medium (any)` and `Defect type`; without an
+order that is the same two-rules-one-task ambiguity D221 was about, moved inside
+the matrix. Resolve it top-down:
+
+1. **Branch A row first.** Goal type, large-and-undecomposed, or a 25+ hour
+   estimate routes to decomposition and no other row applies.
+2. **Then the type row.** `Defect type` overrides the complexity rows for any
+   task whose type is `defect` — the row exists to say something about defects
+   specifically, so it outranks the complexity label. Its `Skip (unless large)`
+   resolves as: a **large** defect gets `Plan = YES`; every other defect gets
+   `Plan = Skip`.
+3. **Then the complexity row** — `small` (by `key_files`), `medium`, or `large`.
+4. **`Complexity absent or unrecognised` only when `complexity` is missing or
+   not one of the three known values** — it is a fallback, never a tiebreaker.
+
+Exactly one row survives that order for every task, which is what makes "read
+the column" a complete instruction rather than an assumption.
 
 **The Isolate column is read only in dispatcher mode** (Step 1.5); when that gate
 has not fired there is nothing to isolate and the column is inert. **Inline means
@@ -312,9 +332,17 @@ it differently and wrote **different reasons for the same skip** into their
 
 The trigger is gone; the signal is not. **Read it as a mis-labelling check, not
 as a planner condition:** the matrix still governs dispatch by the row the task
-actually has, and if the shape looks wrong for its label, say so in
-`completion_notes` rather than silently taking a different branch. Re-labelling
-the task is a human's call, not a reason to diverge from the row.
+actually has, and if the shape looks wrong for its label, say so rather than
+silently taking a different branch. Re-labelling the task is a human's call, not
+a reason to diverge from the row.
+
+**Record it in `completion_notes` AND in one line of `completion_summary`** — the
+same both-channels rule this workflow already applies to every observation that
+must reach a human. `completion_notes` is persisted only by Stride servers from
+D188 onward and you cannot tell which version you are talking to, so a
+mis-labelling noted there alone may reach nobody; `completion_summary` is
+required, persisted, and rendered on the Review queue. A signal routed to a
+channel that might not exist is not a preserved signal.
 
 #### Why small 0-1 key_files tasks are not isolated
 
@@ -399,7 +427,7 @@ Follow:
 
 ## Step 5: Code Review (Decision Matrix)
 
-**Check the decision matrix from Step 3.** If the task is medium+ OR has 2+ key_files, review is required.
+**Check the decision matrix from Step 3.** Review is required when that matrix's **Review** column says YES for this task's row. **Read the column; do not re-derive the condition here.** This line previously restated its own trigger ("medium+ OR 2+ key_files"), which disagreed with the matrix for a `small` defect with 1 `key_file` — the same defect as D221, in the Review column instead of the Plan column.
 
 ### Claude Code: Dispatch Task Reviewer
 

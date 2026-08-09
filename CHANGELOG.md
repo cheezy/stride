@@ -33,15 +33,19 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
   Worse than a two-way conflict on inspection: the trigger was stated **six times in four different wordings**, three of them silently narrower — `reference.md` twice and `platform-other.md` once had already drifted to "medium+", dropping the `key_files` and acceptance-criteria legs entirely.
 
-  **The matrix is now the sole decision point**, stated directly beneath it and covering every column it carries. Every restatement was rewritten to read the column rather than re-derive the condition:
-  - `skills/stride-workflow/SKILL.md` — the sole-decision-point rule, Branch C bullet 2, and a new subsection explaining the removed trigger
-  - `skills/stride-subagent-workflow/SKILL.md` — Phase 2's `When:`, the flowchart node, and the Quick Reference Card
-  - `skills/stride-workflow/reference.md` — the flowchart and the Quick Reference Card
+  **The matrix is now the sole decision point**, stated directly beneath it and covering every column it carries. Review found three restatements still surviving a first pass — `reference.md`'s `DECISION MATRIX QUICK CHECK` block (which gave `Plan` for a medium defect where the matrix gives `Skip`), and two more in the subagent-workflow Quick Reference Card for the *explorer* and *reviewer* columns — so the sweep was widened until a repo-wide grep returned nothing. The quick-check block was deleted rather than rewritten: a summary of the matrix is a second matrix.
+
+  **Two structural gaps closed in the same pass, both the same defect class one level in.** `Step 5`'s own text restated an independent Review trigger ("medium+ OR 2+ key_files") that disagreed with the matrix for a `small` defect with 1 `key_file`. And the matrix itself had **no row-precedence rule**, so a `medium` defect matched both `medium (any)` (`Plan = YES`) and `Defect type` (`Plan = Skip`) — D221's exact shape, inside the table the fix was making authoritative. A four-step precedence order now resolves every task to exactly one row, and `Skip (unless large)` is spelled out.
+
+  Every restatement now reads the column rather than re-deriving the condition:
+  - `skills/stride-workflow/SKILL.md` — the sole-decision-point rule, the new row-precedence order, Branch C bullet 2, Step 5's Review trigger, and a new subsection explaining the removed planner trigger
+  - `skills/stride-subagent-workflow/SKILL.md` — Phase 2's `When:`, the flowchart node, three Quick Reference Card lines (Plan, explorer, reviewer), plus its table now explicitly labelled a MIRROR that defers to Step 3, and the missing `Complexity absent or unrecognised` row added so the two agree row for row
+  - `skills/stride-workflow/reference.md` — the flowchart, the Quick Reference Card, and the `DECISION MATRIX QUICK CHECK` block (deleted)
   - `skills/stride-workflow/platform-other.md` — the Other-Environments planning step
 
   This matches what `agents/task-runner.md:101-104` already assumed when it named only "the decision matrix in `stride-workflow` Step 3" and instructed "apply its rows unchanged and do not restate or reinterpret them here".
 
-  **The signal is kept, the trigger is not.** A `small` task with 3+ `key_files` or 3+ criteria lines is now documented as a **mis-labelling check** — a sign the complexity label may be wrong, to be raised in `completion_notes` — rather than a condition that silently takes a different branch. Resolving toward the matrix keeps the dispatch economics the Isolate-column derivation depends on; resolving the other way would have added a planner dispatch to the most common task shape.
+  **The signal is kept, the trigger is not.** A `small` task with 3+ `key_files` or 3+ criteria lines is now documented as a **mis-labelling check** — a sign the complexity label may be wrong, to be raised in BOTH `completion_notes` and one line of `completion_summary`, per this workflow's existing both-channels rule for anything that must reach a human — rather than a condition that silently takes a different branch. Resolving toward the matrix keeps the dispatch economics the Isolate-column derivation depends on; resolving the other way would have added a planner dispatch to the most common task shape.
 
   **No `skills_version` bump** — both files stay at `1.0`, consistent with every prior release (the CHANGELOG has never recorded a bump; the plugin's semver tag is the version of record). Prompt-text only: no field, schema or API shape changes.
 

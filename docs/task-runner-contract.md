@@ -719,6 +719,26 @@ already built.
 4. **`telemetry.phase_ms` restates six durations already submitted in
    `workflow_steps`** because the dispatcher never sees the server record. It adds
    no step name, replaces no entry, and is not a completion field.
+
+   **All six keys are ALWAYS present, including on a resumed attempt.** Three
+   values are possible and none substitutes for another:
+
+   | Value | Means |
+   |---|---|
+   | integer | this attempt measured that phase |
+   | `0` | the phase genuinely did not run, or took no measurable time — the `claim_blocked` all-zero record is this case, and its zeroes are load-bearing |
+   | `null` | the phase ran in a **previous attempt** and this attempt did not measure it |
+
+   **Never omit a key, and never use `0` for an inherited phase.** `0` already
+   means "nothing ran", so reusing it for "ran, unmeasured" destroys the one
+   distinction this field exists to carry. A resumed runner (`attempt > 1`)
+   typically inherits `implementation` and may inherit `explorer` or `planner`;
+   report those `null` and say so in one clause of `summary`. That was defect
+   **D224** — a resumed runner silently dropped `implementation`, `after_doing`
+   and `before_review`, and nothing here told it what an inherited phase should
+   look like. Note `after_doing` and `before_review` are routinely a truthful
+   `0`: a passing hook's output never reaches the agent, so no real figure
+   exists to report (D224/D234).
 5. **`summary` versus `completion_summary`.** The record's `summary` SHOULD be the
    same paragraph submitted as `completion_summary`. If they differ, the persisted
    `completion_summary` is authoritative.

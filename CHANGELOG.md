@@ -27,6 +27,20 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ### Fixed
 
+- **D224 — the instruction to record a real `after_doing` duration described something that cannot happen.** Every completion persisted `after_doing` and `before_review` as `duration_ms: 0`, and W1455's note blamed the agent for not copying the measured figure "when you can see it". Exploration found the figure is never visible on a successful run: `stride-hook.sh:1705-1718` measures a real `duration_ms` and writes it to bare **stdout**, then exits 0 — and Claude Code's PreToolUse contract routes exit-0 stdout to the transcript, not to the model. Only exit 2 feeds output back, and the script never populates `hookSpecificOutput.additionalContext`, the one field that would change that.
+
+  This repo had already established the same fact from the other direction: *"A hook that **passes** is invisible to the subagent… Do not read silence as a pass"* (`hook-execution.md:244-256`). Nobody connected it to the telemetry.
+
+  So the `0` was honest all along, and the guidance was wrong. **Step 6 and both `stride-completing-tasks` sites now say so plainly** — `0` is correct, not a placeholder you failed to replace; `before_review` is `0` for a second independent reason (it fires *after* the curl, so its duration does not exist at request time); and in plugin mode the executor emits no JSON at all because the section body is empty, making `0` doubly correct. **Do not invent either number.**
+
+  **The `phase_ms` resume gap is closed in the contract.** A resumed runner had silently dropped `implementation`, `after_doing` and `before_review` from `telemetry.phase_ms`, and nothing said what an inherited phase should look like — `0` was unavailable because `claim_blocked`'s all-zero record already uses it to mean "nothing ran". `task-runner-contract.md` item 4 now defines three distinct values: an **integer** (this attempt measured it), **`0`** (genuinely did not run, or took no measurable time), and **`null`** (ran in a previous attempt, unmeasured here). All six keys are always present; omission and `0`-for-inherited are both forbidden, because reusing `0` destroys the only distinction the field carries. `agents/task-runner.md`'s worked record carries the same rule inline.
+
+  **Filed rather than fixed here: D234.** Making a real duration *obtainable* needs the executor to persist its result to a durable file the agent reads back — mirroring the existing `.stride/.last-api-response.json` pattern — which is a change to the hook script and its test suite, not to prompt text. D234 carries the two constraints this exploration established: a truthful `0` must stay reachable (an empty section does no work and writes nothing, so a missing file means keep-`0`, never retry or invent), and `before_review` cannot be captured at request time by any file, because it has not run yet.
+
+  **Severity note, so this is not over-sold:** nothing currently aggregates `duration_ms` — `compliance.ex` reads dispatch rates, skip reasons and array length, never durations — so today's harm is per-task display accuracy on the `workflow_steps` panel rather than a corrupted metric.
+
+  **Prompt-text plus one contract clarification.** No `skills_version` bump (both skills stay `1.0`); the `phase_ms` `null` value is an addition to the runner handoff record's documented vocabulary, which no server validates.
+
 - **D221 — the Step 3 matrix and Branch C stated competing planner triggers.** The matrix row `small, 2+ key_files` gives `Plan = Skip`; Branch C bullet 2 independently said "If medium+ OR 3+ key_files OR 3+ acceptance criteria lines: Dispatch a **Plan** subagent". A `small` task with 2 `key_files` and 4 criteria lines matched both, and no precedence was stated.
 
   Not theoretical: during the W2066 verification, two `stride:task-runner` dispatches on identically-shaped tasks (W2072 and W2073 — both `small`, 2 `key_files`, 4 criteria lines) resolved it differently and wrote **different reasons for the same skip** into `workflow_steps`, making the `planner` telemetry entry non-comparable across runs.

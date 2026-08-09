@@ -253,6 +253,13 @@ here.
     "nested_dispatches": 3,
     "nested_tokens": 214880,
     "phase_ms": { "explorer": 92237, "planner": 61400, "implementation": 900000, "reviewer": 71000, "after_doing": 1200, "before_review": 400 }
+    // All six keys are ALWAYS present. An integer means THIS attempt measured
+    // the phase; 0 means it genuinely did not run or took no measurable time;
+    // null means it ran in a PREVIOUS attempt and this one did not measure it.
+    // Never omit a key, and never use 0 for an inherited phase - 0 already
+    // means "nothing ran" (D224). after_doing and before_review are routinely
+    // 0 because a passing hook's output never reaches you; do not invent a
+    // number for them (D224/D234).
   },
   "record_bytes": 799
 }

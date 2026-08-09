@@ -216,13 +216,30 @@ is that these did *not* change.
 | 3 | Git: `before_review` never ran | branch absent, `main=30aa57c4` | branch `W2073` **still present**, `main` **still `30aa57c4`**, 0 commits, tree dirty with 2 modified files | The commit (command 5/5) was never reached and nothing merged |
 
 **Attribution, stated honestly.** The block had **two independent causes**, not
-only the probe. `mix test --cover` also **exceeded the hook's 200s budget**. In
-the green run the same command took **169s** and passed. So the gate in this repo
-sits roughly 30s from its ceiling, and attempt 1 would likely have been blocked
-even with no probe planted. AC2 is satisfied either way — both are genuine
-`after_doing` failures and the completion provably did not happen — but the block
-is not cleanly attributable to the injected fault alone. That timeout is a real
-finding in its own right and is carried into [Recommendations](#recommendations).
+only the probe. `mix test --cover` also **exceeded the `after_doing` budget**.
+AC2 is satisfied either way — both are genuine `after_doing` failures and the
+completion provably did not happen — but the block is not cleanly attributable
+to the injected fault alone. That timeout is a real finding in its own right and
+is carried into [Recommendations](#recommendations).
+
+**The budget, measured rather than assumed.** This paragraph originally reported
+a 200s budget and ~30s of headroom, taken from the runner's own record. Review
+caught it and it was wrong; the corrected reading is worse, so it is recorded
+here rather than quietly amended.
+
+| Observable | Reading |
+|---|---|
+| Configured budget, server side | **120 000 ms** — `lib/kanban/hooks.ex:17`, `"after_doing" => %{blocking: true, timeout: 120_000}` |
+| Configured budget, hook side | **120 s** — `stride/hooks/stride-hook.sh:1254`, `after_doing) printf '120'`; clamped to 290s at `:1294`. **No 200s budget exists anywhere** |
+| `mix test --cover`, warm build, timed directly | **119 s**, exit 0 |
+
+**Headroom is one second.** That is the real finding, and it explains both runs
+without needing the probe: the green run passed just under the wire, attempt 1
+did not. The runner's "200s budget" claim was wrong, and the 169s it reported is
+a runner-measured *phase* duration — which cannot be an in-hook reading, since a
+169s command under a 120s budget is killed at 120s. Treat runner-reported
+`phase_ms` as phase wall-clock, not as hook execution time; the two are not
+comparable, and conflating them is what produced the original error.
 
 **The runner did not remove the instrument.** The known hazard for this design is
 that a runner told to act on a hook failure investigates, finds an unrelated
@@ -281,7 +298,18 @@ a reconstruction.
    inside the runner. It cannot be forced without designing a task to fail
    review, and a task designed to fail review is not a task. Both runs were
    approved. The nearest thing observed was a reviewer **self-correction** on
-   W2072 (below), which is not the same code path.
+   W2072 (below), which is not the same code path. Note the asymmetry: W2066's
+   *own* review returned `changes_requested` and drove a fix round — but that
+   happened in the main loop, not inside a runner, so it does not close this gap.
+3. **A `needs_review=true` task halting the dispatcher loop.** The task's
+   `testing_strategy` names this as a manual exploration, and it was **not
+   exercised**: both W2072 and W2073 were deliberately created with
+   `needs_review=false`, because a task parking in Review would have failed AC1
+   ("reaches Done") through no fault of the runner. The contract says such a task
+   returns `completed_needs_review` and the dispatcher stops rather than looping;
+   that path is documented but unobserved here. It is cheap to cover — one task
+   with `needs_review=true` — and it is the natural companion to gap 1, since
+   both concern what the dispatcher does *after* a runner returns.
 
 ---
 
@@ -289,9 +317,13 @@ a reconstruction.
 
 Four, surfaced by the runs rather than sought:
 
-1. **`after_doing`'s `mix test --cover` is at its budget ceiling** — ~169s
-   against 200s, and it blocked attempt 1. The gate is one slow run from blocking
-   every completion in this repo.
+1. **`after_doing`'s `mix test --cover` is one second under its budget** — a
+   timed warm-build run takes **119s against a 120s budget**, and it blocked
+   attempt 1 outright. This is not "close to the ceiling"; it is at it. Any
+   variance — a cold build, concurrent load, one added test — blocks the
+   completion, and the block is indistinguishable from a real test failure. The
+   figure was corrected during review: the original 200s/169s reading was taken
+   from the runner's record and was wrong in the safe direction.
 2. **`stride-workflow` SKILL.md disagrees with itself on the planner.** The
    Step 3 matrix row `small, 2+ key_files` says Plan = Skip; Branch C's second
    bullet dispatches Plan at 3+ acceptance-criteria lines. Both tasks matched
@@ -333,8 +365,19 @@ work it inherited.
    commands' blocking is inferred from `stride-hook.sh` stopping at the first
    non-zero (test 5h), not observed live.
 7. **The red block is not cleanly attributable to the injected fault.** The
-   budget timeout was an independent, unplanned second cause. See
+   budget timeout was an independent, unplanned second cause, and at 119s
+   against 120s it would likely have blocked attempt 1 on its own. See
    [Attribution](#the-gate-in-its-failing-direction).
+12. **AC1's "through the dispatcher" half is weaker than its "reaches Done"
+    half.** Done rests on the server record; the dispatcher half rests partly on
+    a transcript absence (no `Edit`/`Write` in the main loop) with no pre-run
+    value shown — which is a weaker standard than this document demands of its
+    other negatives. The returned records' `task_identifier` and phase telemetry
+    corroborate it, but it is not durably evidenced the way AC2's observable 2 is.
+13. **The budget figures in this document were wrong on first writing** (200s /
+    ~30s headroom, taken from the runner's record) and were corrected to 120s /
+    1s after review measured them. Recorded because a verification document that
+    silently fixed its own numbers would be asking for more trust than it earned.
 8. `changed_files` was populated (2 files, real diffs, `http_code=200`) on
    attempt 1 **even though that attempt never completed** — the diff capture is
    driven by the hook, not by the completion. Defensible, but it means a
@@ -360,9 +403,21 @@ credential reached anything the run produced.
 | Token occurrences inside the captured diffs | **0** on both runs |
 | `.stride_auth.md` / `.stride.md` in `changed_files` paths | **absent** on both runs |
 | Returned records | No `Bearer`, no token, no credential in `failure.detail` — the field the contract flags as most likely to leak, and the one the red run actually populated |
+| **Git objects** the run created — `30aa57c4`, `2cf4dab1` on kanban `main`, `6c38a1f` in the subrepo | **Clean.** The two kanban commits touch only the four `lib/`+`test/` files and carry `after_doing`'s fixed subject template; the subrepo commit contains only this document. Structurally protected as well: `.gitignore:44,46,47,48,97` cover `.stride_auth.md`, `.stride-env-cache`, `.stride-changed-files.json`, `.stride-diff-upload-state` and `.stride/`, so `after_doing`'s `git add -A` cannot stage any of them |
 
 Scoped honestly: this covers artifacts the run *produces*. The token legitimately
 appears inside the runner's own curl invocations, which is its sanctioned use.
+
+**One exposure this does not eliminate.** The extraction idiom keeps the token
+out of literal command text and out of everything persisted — but
+`-H "Authorization: Bearer $T"` still materialises it in **curl's `argv`** for
+the life of the call, where `ps` can read it, and it would be written verbatim
+by `set -x` or a `script` capture. That is ephemeral rather than an artifact, so
+it does not defeat the consideration, and it is the same idiom `stride-hook.sh`
+itself uses. It is recorded because the Reproduction block below is a recipe
+others will run: **do not run it under `set -x`**, and on a shared host prefer
+feeding the header to `curl --config -` over stdin so the secret never reaches
+the process arguments.
 
 ## Reproduction
 
@@ -428,9 +483,11 @@ Ordered by return. Findings 1–4 and the moduledoc error were filed as defects
    reaching the Review queue* rather than a missing number. A `failed` section
    with an empty `issues[]` should be impossible to emit.
 3. **Get `after_doing` off its budget ceiling** — **D223** (finding 1). Split
-   coverage out of the blocking gate, or raise the budget. At ~169s against 200s
-   this will keep blocking completions non-deterministically, and each
-   occurrence looks like a real failure.
+   coverage out of the blocking gate, or raise the budget. At **119s against
+   120s** this is not a risk of future blocking — it is already blocking
+   completions non-deterministically, and each occurrence looks like a real test
+   failure and costs a diagnosis. D223 was filed on the pre-correction
+   200s figure and its premise has been updated to the measured 120s/119s.
 4. **Copy the real `after_doing` duration** into the completion payload per
    W1455, and reconstruct `phase_ms` on the resume path — **D224** (finding 4
    and the resume-path omission).
@@ -442,3 +499,8 @@ Ordered by return. Findings 1–4 and the moduledoc error were filed as defects
    last child — including the push verification, since the grace-window worker
    flips the goal to Done but does not push. Not filed as a defect: it is a
    coverage gap in this verification, not a fault in the code.
+7. **Cover the `needs_review=true` stop** (gap 3) — one task with
+   `needs_review=true`, dispatched, checking that the runner returns
+   `completed_needs_review` and that the dispatcher stops the loop rather than
+   claiming another task. Also a coverage gap rather than a defect, and the
+   cheapest of the three to close.

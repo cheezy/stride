@@ -26,7 +26,7 @@ Read this whenever Platform Detection resolved to **Other Environments** — you
 1. Read each file in `key_files` to understand current state
 2. Search for patterns mentioned in `patterns_to_follow`
 3. Find related test files
-4. For medium+ tasks, outline your implementation approach before coding
+4. When the Step 3 matrix's Plan column says YES for this task's row, outline your implementation approach before coding (there is no subagent to dispatch here, but the matrix decides whether the step happens)
 
 ## Step 5: Code Review (Decision Matrix)
 

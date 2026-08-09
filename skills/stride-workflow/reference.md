@@ -73,7 +73,7 @@ STEP 3: Explore (Decision Matrix)
   Goal/large undecomposed? --> Decompose --> Create children --> Claim first child --> Step 1
   Small, 0-1 key_files?   --> Skip to Step 4
   Otherwise:
-    [Claude Code] Dispatch task-explorer, optionally Plan agent
+    [Claude Code] Dispatch task-explorer; Plan agent iff the matrix's Plan column says YES
     [Other]       Read key_files, search patterns manually
   |
   v
@@ -183,7 +183,7 @@ CLAUDE CODE WORKFLOW:
 ├─ 3. Explore (check decision matrix):
 │     ├─ Goal/large undecomposed → Dispatch task-decomposer → Claim children
 │     ├─ Small, 0-1 key_files → Skip to Step 4
-│     └─ Otherwise → Dispatch task-explorer (+ Plan agent if medium+)
+│     └─ Otherwise → Dispatch task-explorer (+ Plan agent if the matrix's Plan column says YES)
 ├─ 4. Implement: Write code using explorer/plan output
 ├─ 5. Review (check decision matrix):
 │     ├─ Small, 0-1 key_files → Skip the review, but STILL evaluate the deep

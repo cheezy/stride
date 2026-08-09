@@ -160,7 +160,7 @@ The explorer will return a structured summary of: each key file's current state,
 
 ## Phase 2: Planning (Conditional, Before Coding)
 
-**When:** Task complexity is medium or large, OR task has 3+ key_files, OR task has 3+ acceptance criteria lines.
+**When:** the decision matrix above says `Run` in the **Plan** column for this task's row. **Read the column; do not re-derive the condition here.** This line previously stated its own trigger ("medium or large, OR 3+ key_files, OR 3+ acceptance criteria lines"), which could fire on a row whose Plan column said `Skip` — the `small, 2+ key_files` row being the case that collided. That was defect D221; the matrix is the sole decision point, and `stride-workflow` Step 3 carries the full account under "One signal the matrix deliberately does not act on".
 
 **What to do:** Dispatch a **Plan** subagent (built-in type, not a custom agent), passing:
 - The explorer's output from Phase 1
@@ -285,7 +285,7 @@ Is it a goal OR large+undecomposed OR 25+ hours?
                         Dispatch stride:task-explorer
                             |
                             v
-                        Medium/Large OR 3+ key_files OR 3+ criteria?
+                        Does the matrix say Run in the Plan column?
                             |
                             +--> YES --> Dispatch Plan agent
                             |             |
@@ -370,7 +370,7 @@ SUBAGENT WORKFLOW:
 ├─ 3. If medium+ OR 2+ key_files:
 │     ├─ Dispatch stride:task-explorer with task metadata
 │     └─ Read and use the explorer's output
-├─ 4. If medium+ OR 3+ key_files OR 3+ criteria:
+├─ 4. If the matrix says Run in the Plan column:
 │     ├─ Dispatch Plan agent with explorer output + task metadata
 │     └─ Follow the resulting plan
 ├─ 5. Implement the task

@@ -284,11 +284,37 @@ The `hooks.json` PostToolUse handler automatically executes `.stride.md` `## bef
 | Defect type | Skip | YES | Skip (unless large) | YES | YES |
 | Complexity absent or unrecognised | Skip | YES | YES | YES | YES |
 
+**This matrix is the SOLE decision point for every column it carries** — Decompose,
+Explore, Plan, Review and Isolate. Find the task's row, read the column, done.
+Nothing elsewhere in this skill, in `stride-subagent-workflow`, or in any
+reference or platform file states an independent trigger for any of them; where
+those files mention a step they describe what this matrix already decided and
+defer to it. **If prose anywhere appears to give a second, separately-satisfiable
+condition, the matrix wins** — that ambiguity was defect D221, and this sentence
+is its fix.
+
 **The Isolate column is read only in dispatcher mode** (Step 1.5); when that gate
 has not fired there is nothing to isolate and the column is inert. **Inline means
 the same steps in a different context, never fewer steps** — a task routed inline
 runs every step this matrix gives it, exactly as it did before dispatcher mode
 existed.
+
+#### One signal the matrix deliberately does not act on
+
+A task labelled `small` that carries **3+ `key_files` or 3+ acceptance-criteria
+lines** is a task whose complexity label is probably wrong. Branch C used to
+treat that as an independent trigger to dispatch a planner, which is exactly what
+collided with the `small, 2+ key_files` row's `Plan = Skip` — two rules, one
+task, no stated precedence. Measured consequence: two runners on
+identically-shaped tasks (both `small`, 2 `key_files`, 4 criteria lines) resolved
+it differently and wrote **different reasons for the same skip** into their
+`workflow_steps` telemetry, making the `planner` entry non-comparable across runs.
+
+The trigger is gone; the signal is not. **Read it as a mis-labelling check, not
+as a planner condition:** the matrix still governs dispatch by the row the task
+actually has, and if the shape looks wrong for its label, say so in
+`completion_notes` rather than silently taking a different branch. Re-labelling
+the task is a human's call, not a reason to diverge from the row.
 
 #### Why small 0-1 key_files tasks are not isolated
 
@@ -351,7 +377,7 @@ Skip exploration, planning, and review. Proceed directly to Step 4 (Implementati
 
 1. **Dispatch `stride:task-explorer`** with the task's `key_files`, `patterns_to_follow`, `where_context`, and `testing_strategy`. Wait for the result. Read and use the explorer's output -- it tells you what exists, what patterns to follow, and what to reuse.
 
-2. **If medium+ OR 3+ key_files OR 3+ acceptance criteria lines:** Dispatch a **Plan** subagent with the explorer's output, `acceptance_criteria`, `testing_strategy`, `pitfalls`, and `verification_steps`. Follow the resulting plan during implementation.
+2. **When the decision matrix's `Plan` column says YES for this task's row:** Dispatch a **Plan** subagent with the explorer's output, `acceptance_criteria`, `testing_strategy`, `pitfalls`, and `verification_steps`. Follow the resulting plan during implementation. **Read the column; do not re-derive the condition here.** This bullet previously stated its own trigger ("medium+ OR 3+ key_files OR 3+ acceptance criteria lines"), which could fire on a row whose `Plan` column said Skip — see [the signal the matrix deliberately does not act on](#one-signal-the-matrix-deliberately-does-not-act-on).
 
 ---
 

@@ -27,6 +27,26 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ### Fixed
 
+- **D221 — the Step 3 matrix and Branch C stated competing planner triggers.** The matrix row `small, 2+ key_files` gives `Plan = Skip`; Branch C bullet 2 independently said "If medium+ OR 3+ key_files OR 3+ acceptance criteria lines: Dispatch a **Plan** subagent". A `small` task with 2 `key_files` and 4 criteria lines matched both, and no precedence was stated.
+
+  Not theoretical: during the W2066 verification, two `stride:task-runner` dispatches on identically-shaped tasks (W2072 and W2073 — both `small`, 2 `key_files`, 4 criteria lines) resolved it differently and wrote **different reasons for the same skip** into `workflow_steps`, making the `planner` telemetry entry non-comparable across runs.
+
+  Worse than a two-way conflict on inspection: the trigger was stated **six times in four different wordings**, three of them silently narrower — `reference.md` twice and `platform-other.md` once had already drifted to "medium+", dropping the `key_files` and acceptance-criteria legs entirely.
+
+  **The matrix is now the sole decision point**, stated directly beneath it and covering every column it carries. Every restatement was rewritten to read the column rather than re-derive the condition:
+  - `skills/stride-workflow/SKILL.md` — the sole-decision-point rule, Branch C bullet 2, and a new subsection explaining the removed trigger
+  - `skills/stride-subagent-workflow/SKILL.md` — Phase 2's `When:`, the flowchart node, and the Quick Reference Card
+  - `skills/stride-workflow/reference.md` — the flowchart and the Quick Reference Card
+  - `skills/stride-workflow/platform-other.md` — the Other-Environments planning step
+
+  This matches what `agents/task-runner.md:101-104` already assumed when it named only "the decision matrix in `stride-workflow` Step 3" and instructed "apply its rows unchanged and do not restate or reinterpret them here".
+
+  **The signal is kept, the trigger is not.** A `small` task with 3+ `key_files` or 3+ criteria lines is now documented as a **mis-labelling check** — a sign the complexity label may be wrong, to be raised in `completion_notes` — rather than a condition that silently takes a different branch. Resolving toward the matrix keeps the dispatch economics the Isolate-column derivation depends on; resolving the other way would have added a planner dispatch to the most common task shape.
+
+  **No `skills_version` bump** — both files stay at `1.0`, consistent with every prior release (the CHANGELOG has never recorded a bump; the plugin's semver tag is the version of record). Prompt-text only: no field, schema or API shape changes.
+
+  **Not fixed here, filed instead:** the same conflict exists in **9 of 11 equivalent files across five sibling port repos** (`stride-codex`, `stride-opencode`, `stride-gemini`, `stride-pi` ×2 each, and `stride-copilot`'s `stride-subagent-workflow`) — filed as its own defect rather than folded in, since each port is a separate repo with its own release. The two `-lite` ports are unaffected: they collapsed to a 3-branch matrix with the planner gated to one row, closing this ambiguity by design.
+
 - **D222 — `task-reviewer` could emit an unfilled stub as a section verdict.** A live review returned `pitfalls: {"status": "failed", "note": "placeholder"}` beside `"status": "approved"`, zero issue counts and an empty `issues[]`. That output was **legal** under the prompt as written: `note` was documented as optional on every section verdict, and the Consistency rule said a `"failed"` verdict "MUST be backed by" a matching `issues[]` entry — phrased as an obligation rather than naming its violation as invalid. It reached the payload and was caught only because a correction round happened to run.
 
   Two producer-side rules now close it, both in step 8 where the reviewer builds the JSON rather than only where a consumer checks it:

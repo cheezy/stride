@@ -394,8 +394,11 @@ Four, surfaced by the runs rather than sought:
    costs a diagnosis. The margin under the override is **at least ~31s and
    unmeasured** — no in-hook per-command timing was ever captured. This
    finding's numbers were wrong three times before this statement; see
-   [the budget](#the-gate-in-its-failing-direction) for all three, and note that
-   nothing above rests on a `phase_ms` reading.
+   [the budget](#the-gate-in-its-failing-direction) for all three. Nothing above
+   rests on a `phase_ms` reading **except the ~31s lower bound**, which uses the
+   phase figure as a *bound* rather than a measurement: if the section takes at
+   most ~169s, the margin under a 200s budget is at least ~31s. The fresh-clone
+   conclusion uses neither.
 2. **`stride-workflow` SKILL.md disagrees with itself on the planner.** The
    Step 3 matrix row `small, 2+ key_files` says Plan = Skip; Branch C's second
    bullet dispatches Plan at 3+ acceptance-criteria lines. Both tasks matched

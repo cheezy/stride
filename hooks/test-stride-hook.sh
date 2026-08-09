@@ -703,6 +703,272 @@ if command -v jq > /dev/null 2>&1; then
   fi
 fi
 
+# ------------------------------------------------------------
+# 5m-5ad (D220): routing depends on the request being ISSUED, not on the
+# command text CONTAINING a lifecycle URL. Before D220 a plain grep, echo or
+# doc-writing heredoc ran real commit/checkout/merge sections. Each routed URL
+# gets a mention-only negative alongside its existing positive.
+# ------------------------------------------------------------
+
+# Negative helper: neither phase may run any section for this command.
+assert_no_route() {
+  local label="$1" fixture="$2" out code
+  for _phase in post pre; do
+    out=$(echo "$fixture" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" "$_phase" 2>&1)
+    code=$?
+    assert_exit "$label ($_phase) exits 0" 0 "$code"
+    assert_eq "$label ($_phase) runs no section" "" "$out"
+  done
+}
+
+# 5m: a grep whose PATTERN names a completion route does not route
+assert_no_route "5m: grep for a completion route" \
+  '{"tool_input":{"command":"grep -rn PATCH.*api/tasks/:id/complete test/kanban_web/"}}'
+
+# 5n: the observed misfire — an echo of a completion URL with a fake id, which
+# previously ran after_doing AND issued a live changed_files PUT to task 999999999
+assert_no_route "5n: echo of a completion URL with a fake id" \
+  '{"tool_input":{"command":"echo curl -X PATCH https://stridelikeaboss.com/api/tasks/999999999/complete"}}'
+
+# 5o/5p: an exploratory GET probe of a lifecycle URL issues a request, but not
+# THAT request — the method guard drops it
+assert_no_route "5o: GET probe of a completion URL" \
+  '{"tool_input":{"command":"curl -s https://stridelikeaboss.com/api/tasks/12345/complete"}}'
+assert_no_route "5p: GET probe of the claim URL" \
+  '{"tool_input":{"command":"curl -s https://stridelikeaboss.com/api/tasks/claim"}}'
+
+# 5q/5r: mention-only negatives for the remaining two routed URLs
+assert_no_route "5q: grep for a mark_reviewed route" \
+  '{"tool_input":{"command":"rg -n api/tasks/[0-9]+/mark_reviewed hooks/"}}'
+assert_no_route "5r: grep for the claim URL" \
+  '{"tool_input":{"command":"grep -c api/tasks/claim hooks/stride-hook.sh"}}'
+
+if command -v jq > /dev/null 2>&1; then
+  # 5s: the python/cat heredoc reproduction — documentation ABOUT the completion
+  # curl, at column 0 with clean quote state, satisfies every other requirement.
+  # Only heredoc-body stripping stops it.
+  HEREDOC_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"cat > docs/d220.md <<EOF\nThe completion call looks like:\n\ncurl -X PATCH \"$STRIDE_API_URL/api/tasks/$TASK_ID/complete\" \\\n  -H \"Authorization: Bearer $STRIDE_API_TOKEN\" -d @payload.json\nEOF"}}
+JSON
+)
+  assert_no_route "5s: heredoc writing docs about the completion curl" "$HEREDOC_JSON"
+
+  # 5t: AC 3 — a changed_files PUT whose payload TEXT contains a completion URL.
+  # The trigger here is content-controlled (a raw code diff), so this is the
+  # security-relevant case.
+  CFPUT_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"curl -X PUT \"$STRIDE_API_URL/api/tasks/42/changed_files\" -H \"Authorization: Bearer $STRIDE_API_TOKEN\" -d '{\"changed_files\":[{\"path\":\"SKILL.md\",\"diff\":\"+curl -X PATCH https://h/api/tasks/9/complete\"}]}'"}}
+JSON
+)
+  assert_no_route "5t: changed_files PUT with a completion URL in its payload" "$CFPUT_JSON"
+
+  # 5u: the same, but the diff spans lines and one BEGINS with the completion
+  # curl — a command position on its face, defeated by quote-state tracking
+  CFPUT_ML_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"curl -X PUT \"$STRIDE_API_URL/api/tasks/42/changed_files\" -d '{\"diff\":\"--- a/SKILL.md\n+++ b/SKILL.md\ncurl -X PATCH \\\"$STRIDE_API_URL/api/tasks/7/complete\\\" \\\n  -H \\\"Authorization: Bearer tok\\\"\n\"}'"}}
+JSON
+)
+  assert_no_route "5u: changed_files PUT whose diff line starts with the completion curl" "$CFPUT_ML_JSON"
+fi
+
+# 5v: interpolated claim URL still routes (pitfall: agents rarely write literals)
+ICLAIM_JSON='{"tool_input":{"command":"curl -sS -X POST $STRIDE_API_URL/api/tasks/claim -d @payload.json"}}'
+OUTPUT=$(echo "$ICLAIM_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+EXIT_CODE=$?
+assert_exit "5v: interpolated claim exits 0" 0 "$EXIT_CODE"
+assert_contains "5v: interpolated claim still runs before_doing" "before_doing_executed" "$OUTPUT"
+
+if command -v jq > /dev/null 2>&1; then
+  # 5w: the DOCUMENTED completion curl — interpolated, backslash-continued over
+  # five physical lines, piped into tee. A silent failure here would remove the
+  # after_doing quality gate entirely, so both phases are asserted.
+  MLCOMPLETE_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"curl -sS -X PATCH \"$STRIDE_API_URL/api/tasks/$TASK_ID/complete\" \\\n  -H \"Authorization: Bearer $STRIDE_API_TOKEN\" \\\n  -H 'Content-Type: application/json' \\\n  -d @payload.json \\\n  | tee \"$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""}}
+JSON
+)
+  OUTPUT=$(echo "$MLCOMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" pre 2>&1)
+  assert_contains "5w: documented multi-line completion still runs after_doing" "after_doing_executed" "$OUTPUT"
+  OUTPUT=$(echo "$MLCOMPLETE_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  assert_contains "5w: documented multi-line completion still runs before_review" "before_review_executed" "$OUTPUT"
+
+  # 5x: the URL on its own continuation line, not the curl line
+  URLONOWNLINE_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"curl -sS -X PATCH \\\n  \"$STRIDE_API_URL/api/tasks/1234/complete\" \\\n  -H \"Authorization: Bearer $STRIDE_API_TOKEN\" \\\n  -d @payload.json"}}
+JSON
+)
+  OUTPUT=$(echo "$URLONOWNLINE_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" pre 2>&1)
+  assert_contains "5x: URL on its own continuation line still runs after_doing" "after_doing_executed" "$OUTPUT"
+
+  # 5y: brace-form interpolation, multi-line mark_reviewed
+  MLREVIEW_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"curl -sS -X PATCH \"${STRIDE_API_URL}/api/tasks/77/mark_reviewed\" \\\n  -H \"Authorization: Bearer $STRIDE_API_TOKEN\" \\\n  -d @review.json"}}
+JSON
+)
+  OUTPUT=$(echo "$MLREVIEW_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  assert_contains "5y: interpolated mark_reviewed still runs after_review" "after_review_executed" "$OUTPUT"
+
+  # 5ad: a REAL completion whose payload text names a mark_reviewed URL routes to
+  # before_review, never after_review — payload text must not steer the section
+  MIXED_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"curl -X PATCH \"$STRIDE_API_URL/api/tasks/5/complete\" -H \"Authorization: Bearer $T\" -d '{\"completion_notes\":\"then I hit /api/tasks/6/mark_reviewed by hand\"}'"}}
+JSON
+)
+  OUTPUT=$(echo "$MIXED_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  assert_contains "5ad: completion with a mark_reviewed mention runs before_review" "before_review_executed" "$OUTPUT"
+  assert_eq "5ad: and does NOT run after_review" "" "$(echo "$OUTPUT" | grep -F after_review_executed || true)"
+fi
+
+# 5z: the URL AFTER the flags still routes
+URLLAST_JSON='{"tool_input":{"command":"curl -sS -X PATCH -d @payload.json $STRIDE_API_URL/api/tasks/77/complete"}}'
+OUTPUT=$(echo "$URLLAST_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+assert_contains "5z: URL after the flags still runs before_review" "before_review_executed" "$OUTPUT"
+
+# 5aa: a compound command whose curl is not the first token
+ANDCLAIM_JSON='{"tool_input":{"command":"mkdir -p .stride && curl -X POST $STRIDE_API_URL/api/tasks/claim -d @p.json"}}'
+OUTPUT=$(echo "$ANDCLAIM_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+assert_contains "5aa: && before the claim curl still runs before_doing" "before_doing_executed" "$OUTPUT"
+
+# 5ab: timeout/env/absolute-path wrappers still reach the client
+PFX_JSON='{"tool_input":{"command":"timeout 60 env FOO=1 /usr/bin/curl -X PATCH https://h/api/tasks/9/complete -d @p.json"}}'
+OUTPUT=$(echo "$PFX_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" pre 2>&1)
+assert_contains "5ab: timeout/env/abs-path wrappers still run after_doing" "after_doing_executed" "$OUTPUT"
+
+# 5ac: implied POST (curl defaults to POST when -d is present, no -X)
+IMPL_JSON='{"tool_input":{"command":"curl -d @payload.json $STRIDE_API_URL/api/tasks/claim"}}'
+OUTPUT=$(echo "$IMPL_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+assert_contains "5ac: implied-POST claim still runs before_doing" "before_doing_executed" "$OUTPUT"
+
+if command -v jq > /dev/null 2>&1; then
+  # 5ae: the escaped-quote bypass. A -d payload placed BEFORE the URL, whose
+  # embedded \" would flip a parity-only quote tracker back OUT of quoting, must
+  # not let payload text supply the request URL and method. This is the same
+  # PUT-not-a-completion case as 5t, ordered the other way round so _s_urlseen
+  # cannot be what saves it.
+  ESCQ_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"curl -X PUT -d \"{\\\"diff\\\":\\\"x curl -X PATCH https://h/api/tasks/9/complete y\\\"}\" \"$U/api/tasks/42/changed_files\""}}
+JSON
+)
+  assert_no_route "5ae: escaped-quote payload before the URL" "$ESCQ_JSON"
+fi
+
+# 5af: pitfall 2 — the whole URL hoisted into a shell variable still routes.
+# This form routed before D220, so failing it would be a silent regression that
+# removes the after_doing gate.
+HOISTED_JSON='{"tool_input":{"command":"URL=\"$STRIDE_API_URL/api/tasks/$TASK_ID/complete\"; curl -X PATCH \"$URL\" -d @payload.json"}}'
+OUTPUT=$(echo "$HOISTED_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" pre 2>&1)
+assert_contains "5af: hoisted-URL completion still runs after_doing" "after_doing_executed" "$OUTPUT"
+OUTPUT=$(echo "$HOISTED_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+assert_contains "5af: hoisted-URL completion still runs before_review" "before_review_executed" "$OUTPUT"
+
+# 5ag: a hoisted variable that does NOT name the API is not resolved into one
+HOISTED_NEG_JSON='{"tool_input":{"command":"URL=\"https://example.com/health\"; curl -X PATCH \"$URL\" -d @payload.json"}}'
+OUTPUT=$(echo "$HOISTED_NEG_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" pre 2>&1)
+assert_eq "5ag: unrelated hoisted URL runs no section" "" "$OUTPUT"
+
+# 5ah: a CRLF command line still routes. The CR must sit on the URL token — with
+# it on a trailing flag the assertion would pass with or without the strip.
+CRLF_JSON='{"tool_input":{"command":"curl -X PATCH -d @p.json https://h/api/tasks/55/complete\r"}}'
+OUTPUT=$(echo "$CRLF_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" pre 2>&1)
+assert_contains "5ah: CRLF command still runs after_doing" "after_doing_executed" "$OUTPUT"
+
+if command -v jq > /dev/null 2>&1; then
+  # 5ai-5ak: the heredoc stripper is the only control that stops a command
+  # WRITING documentation about the completion curl from being routed as one, so
+  # its view of the command must not diverge from bash's.
+
+  # 5ai: a here-string on the opener line must skip only itself, not disable
+  # heredoc detection for the whole line
+  HD_HERESTRING_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"grep -q x <<< \"$s\" && cat > d.md <<EOF\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\nEOF"}}
+JSON
+)
+  assert_no_route "5ai: here-string on the opener line" "$HD_HERESTRING_JSON"
+
+  # 5aj: two heredocs on one line — both bodies must be stripped, in order
+  HD_TWO_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"cat <<DOC > d.md; cat <<JSONP > p.json\ndocs\nDOC\ncurl -X PATCH https://h/api/tasks/9/complete\nJSONP"}}
+JSON
+)
+  assert_no_route "5aj: two heredocs on one line" "$HD_TWO_JSON"
+
+  # 5ak: <<- strips only TABS in bash, so a SPACE-indented lookalike does not end
+  # the body and the real curl below it is still inside the heredoc
+  HD_DASH_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"cat <<-EOF > d.md\ndocs\n  EOF\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\nEOF"}}
+JSON
+)
+  assert_no_route "5ak: <<- with a space-indented delimiter lookalike" "$HD_DASH_JSON"
+
+  # 5al: $'...' is ANSI-C quoting — \' does NOT close it, so payload text after
+  # an escaped apostrophe must not be scanned as syntax
+  ANSIC_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"curl -X PUT -d $'a\\'b curl -X PATCH /api/tasks/9/complete x' \"$U/api/tasks/42/changed_files\""}}
+JSON
+)
+  assert_no_route "5al: ANSI-C quoted payload with an escaped apostrophe" "$ANSIC_JSON"
+fi
+
+# 5am: a read-only probe with an unresolvable method carries no body, so it must
+# NOT be granted the -X "$METHOD" leniency
+assert_no_route "5am: methodless probe with an unresolvable -X" \
+  '{"tool_input":{"command":"curl -X \"$METHOD\" https://h/api/tasks/9/complete"}}'
+
+# 5an: a redirection target is not a request URL
+assert_no_route "5an: redirect target that looks like a completion URL" \
+  '{"tool_input":{"command":"curl -X POST https://example.com/x -d @p.json > /tmp/api/tasks/9/complete"}}'
+
+# 5ao: neither is an unrecognised option's value
+assert_no_route "5ao: --dump-header value that looks like a completion URL" \
+  '{"tool_input":{"command":"curl --dump-header /api/tasks/9/complete -X POST https://example.com/x -d @p.json"}}'
+
+# 5ax: a redirect on a HIGH file descriptor must consume its target too — an
+# operator table covering only fds 0-2 leaves the target to be read as the
+# request URL, which both picks the section and supplies the task id
+REDIR_FD_JSON='{"tool_input":{"command":"curl -X PATCH -d @p.json 3> /tmp/api/tasks/9/complete \"$STRIDE_API_URL/api/tasks/5/complete\""}}'
+OUTPUT=$(echo "$REDIR_FD_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+assert_contains "5ax: high-fd redirect does not displace the real URL" "before_review_executed" "$OUTPUT"
+
+if command -v jq > /dev/null 2>&1; then
+  # 5ay: `<<''` is a valid heredoc whose body ends at the first EMPTY line.
+  # Guarding the queue on the quote-stripped delimiter dropped it entirely and
+  # left the body — a completion curl at column 0 — to be scanned as syntax.
+  HD_EMPTY_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"cat <<'' > d.md\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\n\nx"}}
+JSON
+)
+  assert_no_route "5ay: heredoc with an empty delimiter" "$HD_EMPTY_JSON"
+
+  # 5az: a `<<` inside a QUOTED string is text, not an opener. Read as an opener
+  # it swallows lines until one equals the derived word — which here would eat
+  # the opening quote of the payload below and let its text be scanned as syntax.
+  HD_INQUOTE_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"echo \"shift << END\"\ncurl -X PUT \"$U/api/tasks/42/changed_files\" -d '{\"diff\":\"\nEND\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\n\"}'"}}
+JSON
+)
+  assert_no_route "5az: << inside a quoted string is not a heredoc opener" "$HD_INQUOTE_JSON"
+
+  # 5ba: the fail-closed half of the same defect — a stray `<<` in a quoted
+  # string must not swallow a REAL completion curl on a later line
+  HD_NOSWALLOW_JSON=$(cat <<'JSON'
+{"tool_input":{"command":"echo \"a << b\"\ncurl -X PATCH https://h/api/tasks/77/complete -d @p.json"}}
+JSON
+)
+  OUTPUT=$(echo "$HD_NOSWALLOW_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" pre 2>&1)
+  assert_contains "5ba: a quoted << does not swallow a real completion" "after_doing_executed" "$OUTPUT"
+fi
+
+# 5ap: a subshell-wrapped completion still routes (fail-closed narrowings are
+# acceptable, but not for a form this close to the documented one)
+SUBSH_JSON='{"tool_input":{"command":"(curl -X PATCH \"$STRIDE_API_URL/api/tasks/321/complete\" -d @payload.json)"}}'
+OUTPUT=$(echo "$SUBSH_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" pre 2>&1)
+assert_contains "5ap: subshell-wrapped completion still runs after_doing" "after_doing_executed" "$OUTPUT"
+
+# 5aq: the hoisted URL on a SEPARATE line from the curl (the curl line names no
+# path of its own, so the per-line fast path must not skip it)
+HOIST2_JSON='{"tool_input":{"command":"URL=\"$STRIDE_API_URL/api/tasks/1234/complete\"\ncurl -X PATCH \"$URL\" -d @payload.json"}}'
+OUTPUT=$(echo "$HOIST2_JSON" | CLAUDE_PROJECT_DIR="$PROJ" bash "$HOOK_SCRIPT" pre 2>&1)
+assert_contains "5aq: two-line hoisted URL still runs after_doing" "after_doing_executed" "$OUTPUT"
+
 # ============================================================
 # Test Group 6: Edge cases
 # ============================================================
@@ -4992,6 +5258,122 @@ else
   echo -e "  ${RED}FAIL${RESET}: D126 repro — hidden claim should leave TASK_ID stale, got: $D126_HIDDEN"
   FAIL=$((FAIL + 1))
 fi
+
+# ============================================================
+# Test Group 22: D220 command routing (sourced, in isolation)
+# ============================================================
+echo ""
+echo "=== Test Group 22: D220 command routing ==="
+
+# Cheap breadth coverage of the single routing entry point. Each cell is
+# "<hook-or-none>/<numeric-task-id>", so one assertion pins both the section
+# choice and the id the changed_files upload would target.
+ROUTE_OUT=$(
+  # shellcheck source=/dev/null
+  . "$HOOK_SCRIPT" 2>/dev/null || true
+  r() { stride_route_command "$1" "$2"; printf '%s/%s|' "${STRIDE_ROUTE_HOOK:-none}" "${STRIDE_ROUTE_TASK_ID:-}"; }
+  r post 'curl -X POST https://x/api/tasks/claim -d {}'
+  r pre  'curl -X PATCH https://x/api/tasks/99/complete'
+  r post 'curl -X PATCH https://x/api/tasks/99/complete'
+  r post 'curl -X PATCH https://x/api/tasks/99/mark_reviewed'
+  r post 'echo curl -X PATCH https://x/api/tasks/999999999/complete'
+  r post 'curl -s https://x/api/tasks/99/complete'
+  r post 'curl -X PUT https://x/api/tasks/42/changed_files -d @diff.json'
+  r post 'curl -sSX PATCH "$U/api/tasks/88/complete" -d @p.json'
+  r post 'curl -X "$METHOD" "$U/api/tasks/88/complete" -d @p.json'
+  r post 'cd /tmp;curl -X POST "$U/api/tasks/claim" -d @p.json'
+  r post 'curl -X PUT -d "{\"d\":\"curl -X PATCH https://h/api/tasks/9/complete\"}" "$U/api/tasks/42/changed_files"'
+  r pre  'URL="$U/api/tasks/1234/complete"; curl -X PATCH "$URL" -d @p.json'
+  r post 'curl -x http://proxy:8080 "$U/api/tasks/5/complete" -d @p.json'
+  r post 'CURL -X PATCH https://h/api/tasks/5/complete -d @p.json'
+  r post 'curl -X PATCH https://h/api/tasks/5/complete/ -d @p.json'
+  # two assignments to one name: which value bash used depends on control flow
+  # we do not evaluate, so decline to resolve rather than guess a task id
+  r post 'URL=https://h/api/tasks/claim; URL=https://h/api/tasks/9/complete; curl -X POST "$URL" -d @p.json'
+  # variable names are case-sensitive, as in bash
+  r post 'URL=https://h/api/tasks/9/complete; curl -X PATCH "$url" -d @p.json'
+  # a redirect on ANY file descriptor consumes its target; the real URL wins
+  r post 'curl -X PATCH -d @p.json 3> /tmp/api/tasks/9/complete https://h/api/tasks/5/complete'
+  # the sentinel is order-INDEPENDENT: a non-API value FIRST must still block
+  r post 'URL=https://example.com/noop; URL=https://h/api/tasks/9/complete; curl -X PATCH "$URL" -d @p.json'
+  # a literal URL is unaffected by sentinel-ed assignments elsewhere
+  r post 'URL=https://example.com/a; URL=https://example.com/b; curl -X PATCH https://h/api/tasks/333/complete -d @p.json'
+  # bash keeps what a backslash escapes, so the delimiter is E'F, not EF — the
+  # curl sits INSIDE the body. $'...' so the \n are real newlines: in a
+  # double-quoted string they would be two literal characters, which would make
+  # this a single line and the assertion vacuous.
+  r post $'cat <<E\\\'F > d.md\nEF\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\nE\'F'
+  # The MULTI-LINE assignment layouts. The one-line rows above cannot fail:
+  # their second assignment puts /api/tasks/ on the same line, so the fast path
+  # tokenises it anyway. Here the first assignment's line names no API path.
+  r pre $'URL="https://e.com/noop"\nURL="$U/api/tasks/9/complete"\ncurl -X PATCH "$URL" -d @p.json'
+  r pre $'if $DRY; then\n  URL="https://e.com/noop"\nelse\n  URL="$U/api/tasks/9/complete"\nfi\ncurl -X PATCH "$URL" -d @p.json'
+  # CONTROL: a single assignment across two lines must still route, or the
+  # guard above has simply disabled resolution instead of narrowing it.
+  r pre $'URL="$U/api/tasks/1234/complete"\ncurl -X PATCH "$URL" -d @p.json'
+)
+assert_eq "22a: D220 routing table" \
+  "before_doing/|after_doing/99|before_review/99|after_review/99|none/|none/|none/|before_review/88|before_review/88|before_doing/|none/|after_doing/1234|before_review/5|none/|before_review/5|none/|none/|before_review/5|none/|before_review/333|none/|none/|none/|after_doing/1234|" \
+  "$ROUTE_OUT"
+
+# 22c: the delimiter derivation itself, since a wrong delimiter can end a body
+# EARLY and expose the rest of it to the scanner. Each expected value is bash's
+# own — verified against bash, not against the implementation.
+DELIM_OUT=$(
+  # shellcheck source=/dev/null
+  . "$HOOK_SCRIPT" 2>/dev/null || true
+  d() { _stride_hd_delim "$1"; printf '%s/%s|' "$_HD_D" "$_HD_ANY"; }
+  d 'EOF'
+  d "'EOF'"
+  d "E\\'F"
+  d "\"'\""
+  d "''"
+  d "'A B' rest"
+  d 'a\ b rest'
+  d '$'"'"'xy'"'"''
+  d '"a\bc"'
+  d ' ;'
+)
+assert_eq "22c: heredoc delimiter derivation follows bash" \
+  "EOF/1|EOF/1|E'F/1|'/1|/1|A B/1|a b/1|xy/1|a\\bc/1|/0|" \
+  "$DELIM_OUT"
+
+# 22d: an ANSI-C delimiter carrying an escape we do not interpret is marked
+# UNSAFE, so its body is swallowed to EOF rather than dequeuing on a rendering
+# that is not bash's. \' \" \\ are identity escapes and stay safe.
+UNSAFE_OUT=$(
+  # shellcheck source=/dev/null
+  . "$HOOK_SCRIPT" 2>/dev/null || true
+  u() { _stride_hd_delim "$1"; printf '%s' "$_HD_UNSAFE"; }
+  u '$'"'"'a\nb'"'"''
+  u '$'"'"'\x41'"'"''
+  u '$'"'"'a\\'"'"'b'"'"''
+  u '$'"'"'xy'"'"''
+  u "'EOF'"
+)
+assert_eq "22d: uninterpretable ANSI-C escapes mark the delimiter unsafe" "11000" "$UNSAFE_OUT"
+
+# 22e: end to end — the body of an unsafe-delimiter heredoc is NOT scanned, so
+# the completion curl inside it routes nowhere
+UNSAFE_E2E=$(
+  # shellcheck source=/dev/null
+  . "$HOOK_SCRIPT" 2>/dev/null || true
+  stride_route_command post $'cat <<$\'a\\nb\' > d.md\nanb\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\nanb'
+  printf '%s' "${STRIDE_ROUTE_HOOK:-none}"
+)
+assert_eq "22e: unsafe-delimiter body is not scanned" "none" "$UNSAFE_E2E"
+
+# 22b: task_id_from_command shares the parser, so an id can only come from a URL
+# the router accepted — this is what stopped the live PUT to task 999999999.
+ID_OUT=$(
+  # shellcheck source=/dev/null
+  . "$HOOK_SCRIPT" 2>/dev/null || true
+  printf '%s|' \
+    "$(task_id_from_command 'curl -X PATCH https://x/api/tasks/7777/complete')" \
+    "$(task_id_from_command 'echo https://x/api/tasks/999999999/complete')" \
+    "$(task_id_from_command 'curl -X PATCH https://x/api/tasks/abc/complete')"
+)
+assert_eq "22b: task ids come only from accepted request URLs" "7777|||" "$ID_OUT"
 
 # ============================================================
 # Summary

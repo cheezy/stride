@@ -524,6 +524,224 @@ echo "only before_doing"
 $r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete"}}' -Phase 'pre' -ProjectDir $partialProj
 Assert-Exit "missing section exits 0" 0 $r.ExitCode
 
+# ------------------------------------------------------------
+# 5m-5ad (D220): routing depends on the request being ISSUED, not on the
+# command text CONTAINING a lifecycle URL. Mirrors the bash suite's 5m-5ad —
+# keep the two in lockstep, since a divergence here means Windows agents route
+# differently from everyone else.
+# ------------------------------------------------------------
+
+# Negative helper: neither phase may run any section for this command.
+function Assert-NoRoute {
+    param([string]$Label, [string]$Fixture)
+    foreach ($phase in @('post', 'pre')) {
+        $res = Invoke-HookScript -InputJson $Fixture -Phase $phase -ProjectDir $proj5
+        Assert-Exit "$Label ($phase) exits 0" 0 $res.ExitCode
+        Assert-Eq "$Label ($phase) runs no section" "" $res.Stdout.Trim()
+    }
+}
+
+# 5m: a grep whose PATTERN names a completion route does not route
+Assert-NoRoute "5m: grep for a completion route" `
+    '{"tool_input":{"command":"grep -rn PATCH.*api/tasks/:id/complete test/kanban_web/"}}'
+
+# 5n: the observed misfire — an echo of a completion URL with a fake id, which
+# previously ran after_doing AND issued a live changed_files PUT to task 999999999
+Assert-NoRoute "5n: echo of a completion URL with a fake id" `
+    '{"tool_input":{"command":"echo curl -X PATCH https://stridelikeaboss.com/api/tasks/999999999/complete"}}'
+
+# 5o/5p: an exploratory GET probe issues a request, but not THAT request
+Assert-NoRoute "5o: GET probe of a completion URL" `
+    '{"tool_input":{"command":"curl -s https://stridelikeaboss.com/api/tasks/12345/complete"}}'
+Assert-NoRoute "5p: GET probe of the claim URL" `
+    '{"tool_input":{"command":"curl -s https://stridelikeaboss.com/api/tasks/claim"}}'
+
+# 5q/5r: mention-only negatives for the remaining two routed URLs
+Assert-NoRoute "5q: grep for a mark_reviewed route" `
+    '{"tool_input":{"command":"rg -n api/tasks/[0-9]+/mark_reviewed hooks/"}}'
+Assert-NoRoute "5r: grep for the claim URL" `
+    '{"tool_input":{"command":"grep -c api/tasks/claim hooks/stride-hook.sh"}}'
+
+# 5s: the heredoc reproduction — documentation ABOUT the completion curl sits at
+# column 0 with clean quote state, so only body-stripping stops it
+Assert-NoRoute "5s: heredoc writing docs about the completion curl" `
+    '{"tool_input":{"command":"cat > docs/d220.md <<EOF\nThe completion call looks like:\n\ncurl -X PATCH \"$STRIDE_API_URL/api/tasks/$TASK_ID/complete\" \\\n  -H \"Authorization: Bearer $STRIDE_API_TOKEN\" -d @payload.json\nEOF"}}'
+
+# 5t: AC 3 — a changed_files PUT whose payload TEXT contains a completion URL.
+# The trigger is content-controlled (a raw code diff), so this is the
+# security-relevant case.
+Assert-NoRoute "5t: changed_files PUT with a completion URL in its payload" `
+    '{"tool_input":{"command":"curl -X PUT \"$STRIDE_API_URL/api/tasks/42/changed_files\" -H \"Authorization: Bearer $STRIDE_API_TOKEN\" -d ''{\"changed_files\":[{\"path\":\"SKILL.md\",\"diff\":\"+curl -X PATCH https://h/api/tasks/9/complete\"}]}''"}}'
+
+# 5u: the same, but the diff spans lines and one BEGINS with the completion curl
+Assert-NoRoute "5u: changed_files PUT whose diff line starts with the completion curl" `
+    '{"tool_input":{"command":"curl -X PUT \"$STRIDE_API_URL/api/tasks/42/changed_files\" -d ''{\"diff\":\"--- a/SKILL.md\n+++ b/SKILL.md\ncurl -X PATCH \\\"$STRIDE_API_URL/api/tasks/7/complete\\\" \\\n  -H \\\"Authorization: Bearer tok\\\"\n\"}''"}}'
+
+# 5v: interpolated claim URL still routes (agents rarely write literals)
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -sS -X POST $STRIDE_API_URL/api/tasks/claim -d @payload.json"}}' -Phase 'post' -ProjectDir $proj5
+Assert-Exit "5v: interpolated claim exits 0" 0 $r.ExitCode
+Assert-Contains "5v: interpolated claim still runs before_doing" "before_doing_executed" $r.Stdout
+
+# 5w: the DOCUMENTED completion curl — interpolated, backslash-continued over
+# five physical lines, piped into tee. A silent miss here would remove the
+# after_doing quality gate entirely, so both phases are asserted.
+$MlComplete = '{"tool_input":{"command":"curl -sS -X PATCH \"$STRIDE_API_URL/api/tasks/$TASK_ID/complete\" \\\n  -H \"Authorization: Bearer $STRIDE_API_TOKEN\" \\\n  -H ''Content-Type: application/json'' \\\n  -d @payload.json \\\n  | tee \"$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""}}'
+$r = Invoke-HookScript -InputJson $MlComplete -Phase 'pre' -ProjectDir $proj5
+Assert-Contains "5w: documented multi-line completion still runs after_doing" "after_doing_executed" $r.Stdout
+$r = Invoke-HookScript -InputJson $MlComplete -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5w: documented multi-line completion still runs before_review" "before_review_executed" $r.Stdout
+
+# 5x: the URL on its own continuation line, not the curl line
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -sS -X PATCH \\\n  \"$STRIDE_API_URL/api/tasks/1234/complete\" \\\n  -H \"Authorization: Bearer $STRIDE_API_TOKEN\" \\\n  -d @payload.json"}}' -Phase 'pre' -ProjectDir $proj5
+Assert-Contains "5x: URL on its own continuation line still runs after_doing" "after_doing_executed" $r.Stdout
+
+# 5y: brace-form interpolation, multi-line mark_reviewed
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -sS -X PATCH \"${STRIDE_API_URL}/api/tasks/77/mark_reviewed\" \\\n  -H \"Authorization: Bearer $STRIDE_API_TOKEN\" \\\n  -d @review.json"}}' -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5y: interpolated mark_reviewed still runs after_review" "after_review_executed" $r.Stdout
+
+# 5z: the URL AFTER the flags still routes
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -sS -X PATCH -d @payload.json $STRIDE_API_URL/api/tasks/77/complete"}}' -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5z: URL after the flags still runs before_review" "before_review_executed" $r.Stdout
+
+# 5aa: a compound command whose curl is not the first token
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"mkdir -p .stride && curl -X POST $STRIDE_API_URL/api/tasks/claim -d @p.json"}}' -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5aa: && before the claim curl still runs before_doing" "before_doing_executed" $r.Stdout
+
+# 5ab: timeout/env/absolute-path wrappers still reach the client
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"timeout 60 env FOO=1 /usr/bin/curl -X PATCH https://h/api/tasks/9/complete -d @p.json"}}' -Phase 'pre' -ProjectDir $proj5
+Assert-Contains "5ab: timeout/env/abs-path wrappers still run after_doing" "after_doing_executed" $r.Stdout
+
+# 5ac: implied POST (curl defaults to POST when -d is present, no -X)
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -d @payload.json $STRIDE_API_URL/api/tasks/claim"}}' -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5ac: implied-POST claim still runs before_doing" "before_doing_executed" $r.Stdout
+
+# 5ad: a REAL completion whose payload text names a mark_reviewed URL routes to
+# before_review, never after_review — payload text must not steer the section
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -X PATCH \"$STRIDE_API_URL/api/tasks/5/complete\" -H \"Authorization: Bearer $T\" -d ''{\"completion_notes\":\"then I hit /api/tasks/6/mark_reviewed by hand\"}''"}}' -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5ad: completion with a mark_reviewed mention runs before_review" "before_review_executed" $r.Stdout
+Assert-NotContains "5ad: and does NOT run after_review" "after_review_executed" $r.Stdout
+
+# 5ae: the escaped-quote bypass — a -d payload placed BEFORE the URL, whose
+# embedded \" would flip a parity-only quote tracker back OUT of quoting, must
+# not let payload text supply the request URL and method.
+Assert-NoRoute "5ae: escaped-quote payload before the URL" `
+    '{"tool_input":{"command":"curl -X PUT -d \"{\\\"diff\\\":\\\"x curl -X PATCH https://h/api/tasks/9/complete y\\\"}\" \"$U/api/tasks/42/changed_files\""}}'
+
+# 5af: pitfall 2 — the whole URL hoisted into a shell variable still routes
+$Hoisted = '{"tool_input":{"command":"URL=\"$STRIDE_API_URL/api/tasks/$TASK_ID/complete\"; curl -X PATCH \"$URL\" -d @payload.json"}}'
+$r = Invoke-HookScript -InputJson $Hoisted -Phase 'pre' -ProjectDir $proj5
+Assert-Contains "5af: hoisted-URL completion still runs after_doing" "after_doing_executed" $r.Stdout
+$r = Invoke-HookScript -InputJson $Hoisted -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5af: hoisted-URL completion still runs before_review" "before_review_executed" $r.Stdout
+
+# 5ag: a hoisted variable that does NOT name the API is not resolved into one
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"URL=\"https://example.com/health\"; curl -X PATCH \"$URL\" -d @payload.json"}}' -Phase 'pre' -ProjectDir $proj5
+Assert-Eq "5ag: unrelated hoisted URL runs no section" "" $r.Stdout.Trim()
+
+# 5at-5aw: the sh/ps1 divergences acceptance criterion 4 requires closing.
+# -x is a proxy, not -X; CURL is not curl; a trailing slash is stripped once.
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -x http://proxy:8080 \"$STRIDE_API_URL/api/tasks/5/complete\" -d @p.json"}}' -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5at: -x is a proxy option, not -X" "before_review_executed" $r.Stdout
+Assert-NoRoute "5au: CURL in caps is not the curl client" `
+    '{"tool_input":{"command":"CURL -X PATCH https://h/api/tasks/5/complete -d @p.json"}}'
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -X PATCH https://h/api/tasks/5/complete/ -d @p.json"}}' -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5av: one trailing slash is stripped" "before_review_executed" $r.Stdout
+Assert-NoRoute "5aw: --data-ascii= alone does not make a GET probe route" `
+    '{"tool_input":{"command":"curl -G --data-ascii=x https://h/api/tasks/5/complete"}}'
+
+# 5ah: a CRLF command line still routes. The CR sits on the URL token, so this
+# actually exercises the trim rather than passing either way.
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -X PATCH -d @p.json https://h/api/tasks/55/complete\r"}}' -Phase 'pre' -ProjectDir $proj5
+Assert-Contains "5ah: CRLF command still runs after_doing" "after_doing_executed" $r.Stdout
+
+# 5ai-5ak: the heredoc stripper is the only control that stops a command WRITING
+# documentation about the completion curl from being routed as one.
+Assert-NoRoute "5ai: here-string on the opener line" `
+    '{"tool_input":{"command":"grep -q x <<< \"$s\" && cat > d.md <<EOF\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\nEOF"}}'
+Assert-NoRoute "5aj: two heredocs on one line" `
+    '{"tool_input":{"command":"cat <<DOC > d.md; cat <<JSONP > p.json\ndocs\nDOC\ncurl -X PATCH https://h/api/tasks/9/complete\nJSONP"}}'
+Assert-NoRoute "5ak: <<- with a space-indented delimiter lookalike" `
+    '{"tool_input":{"command":"cat <<-EOF > d.md\ndocs\n  EOF\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\nEOF"}}'
+
+# 5al: $'...' is ANSI-C quoting — \' does NOT close it
+Assert-NoRoute "5al: ANSI-C quoted payload with an escaped apostrophe" `
+    '{"tool_input":{"command":"curl -X PUT -d $''a\\''b curl -X PATCH /api/tasks/9/complete x'' \"$U/api/tasks/42/changed_files\""}}'
+
+# 5am-5ao: a request that does not COMPLETE the task must not run the section
+Assert-NoRoute "5am: methodless probe with an unresolvable -X" `
+    '{"tool_input":{"command":"curl -X \"$METHOD\" https://h/api/tasks/9/complete"}}'
+Assert-NoRoute "5an: redirect target that looks like a completion URL" `
+    '{"tool_input":{"command":"curl -X POST https://example.com/x -d @p.json > /tmp/api/tasks/9/complete"}}'
+Assert-NoRoute "5ao: --dump-header value that looks like a completion URL" `
+    '{"tool_input":{"command":"curl --dump-header /api/tasks/9/complete -X POST https://example.com/x -d @p.json"}}'
+
+# 5ax: a redirect on a HIGH file descriptor must consume its target too — an
+# operator table covering only fds 0-2 left the target to be read as the request
+# URL, which both picked the section and supplied the task id.
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"curl -X PATCH -d @p.json 3> /tmp/api/tasks/9/complete \"$STRIDE_API_URL/api/tasks/5/complete\""}}' -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5ax: high-fd redirect does not displace the real URL" "before_review_executed" $r.Stdout
+
+# 5ap/5aq: forms close to the documented one must not fail closed
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"(curl -X PATCH \"$STRIDE_API_URL/api/tasks/321/complete\" -d @payload.json)"}}' -Phase 'pre' -ProjectDir $proj5
+Assert-Contains "5ap: subshell-wrapped completion still runs after_doing" "after_doing_executed" $r.Stdout
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"URL=\"$STRIDE_API_URL/api/tasks/1234/complete\"\ncurl -X PATCH \"$URL\" -d @payload.json"}}' -Phase 'pre' -ProjectDir $proj5
+Assert-Contains "5aq: two-line hoisted URL still runs after_doing" "after_doing_executed" $r.Stdout
+
+# 5ar/5as: variable resolution is conservative — two assignments to one name
+# means the value depends on control flow we do not evaluate, so decline rather
+# than guess a task id; and names are case-sensitive (a bare PowerShell
+# hashtable would resolve $url against URL=, which bash never would)
+Assert-NoRoute "5ar: two assignments to one name decline to resolve" `
+    '{"tool_input":{"command":"URL=https://h/api/tasks/claim; URL=https://h/api/tasks/9/complete; curl -X POST \"$URL\" -d @p.json"}}'
+Assert-NoRoute "5as: variable names are case-sensitive" `
+    '{"tool_input":{"command":"URL=https://h/api/tasks/9/complete; curl -X PATCH \"$url\" -d @p.json"}}'
+
+# 5bb: the sentinel is order-INDEPENDENT — a non-API value assigned FIRST must
+# still block, or the common `if $DRY; then URL=noop; else URL=...; fi` shape
+# resolves a branch bash may never have taken
+Assert-NoRoute "5bb: non-API value assigned first still blocks" `
+    '{"tool_input":{"command":"URL=https://example.com/noop; URL=https://h/api/tasks/9/complete; curl -X PATCH \"$URL\" -d @p.json"}}'
+
+# 5bc: a literal URL is unaffected by sentinel-ed assignments elsewhere
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"URL=https://example.com/a; URL=https://example.com/b; curl -X PATCH https://h/api/tasks/333/complete -d @p.json"}}' -Phase 'post' -ProjectDir $proj5
+Assert-Contains "5bc: a literal URL still routes alongside a sentinel" "before_review_executed" $r.Stdout
+
+# 5bd: bash KEEPS what a backslash escapes, so the delimiter is E'F, not EF —
+# a delete-all-quotes reduction dequeues at the EF line and scans the body
+Assert-NoRoute "5bd: heredoc delimiter with an escaped quote" `
+    '{"tool_input":{"command":"cat <<E\\''F > d.md\nEF\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\nE''F"}}'
+
+# 5be/5bf: the MULTI-LINE assignment layouts. 5bb cannot fail on its own — its
+# second assignment puts /api/tasks/ on the same line, so the fast path
+# tokenises it anyway. Here the first assignment's line names no API path.
+Assert-NoRoute "5be: two-line branch-dependent URL declines to resolve" `
+    '{"tool_input":{"command":"URL=\"https://e.com/noop\"\nURL=\"$U/api/tasks/9/complete\"\ncurl -X PATCH \"$URL\" -d @p.json"}}'
+Assert-NoRoute "5bf: if/else branch-dependent URL declines to resolve" `
+    '{"tool_input":{"command":"if $DRY; then\n  URL=\"https://e.com/noop\"\nelse\n  URL=\"$U/api/tasks/9/complete\"\nfi\ncurl -X PATCH \"$URL\" -d @p.json"}}'
+
+# 5bg-5bi: delimiters bash derives differently from a split-then-unquote pass.
+# Each expected terminator was verified against bash itself.
+Assert-NoRoute "5bg: delimiter containing a quoted space" `
+    '{"tool_input":{"command":"cat <<''A B'' > d.md\nA\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\nA B"}}'
+Assert-NoRoute "5bh: delimiter with a backslash inside double quotes" `
+    '{"tool_input":{"command":"cat <<\"a\\bc\" > d.md\nabc\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\na\\bc"}}'
+Assert-NoRoute "5bi: ANSI-C quoted delimiter" `
+    '{"tool_input":{"command":"cat <<$''xy'' > d.md\n$xy\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\nxy"}}'
+
+# 5bj: an ANSI-C delimiter carrying an escape we do not interpret is marked
+# UNSAFE, so its body is swallowed to EOF rather than dequeuing on a rendering
+# that is not bash's — fail-closed instead of exposing the body to the scanner.
+Assert-NoRoute "5bj: uninterpretable ANSI-C escape swallows the body" `
+    '{"tool_input":{"command":"cat <<$''a\\nb'' > d.md\nanb\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\nanb"}}'
+
+# 5ay-5ba: the quote-aware heredoc scanner and the empty-delimiter heredoc
+Assert-NoRoute "5ay: heredoc with an empty delimiter" `
+    '{"tool_input":{"command":"cat <<'''' > d.md\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\n\nx"}}'
+Assert-NoRoute "5az: << inside a quoted string is not a heredoc opener" `
+    '{"tool_input":{"command":"echo \"shift << END\"\ncurl -X PUT \"$U/api/tasks/42/changed_files\" -d ''{\"diff\":\"\nEND\ncurl -X PATCH https://h/api/tasks/9/complete -d @p.json\n\"}''"}}'
+$r = Invoke-HookScript -InputJson '{"tool_input":{"command":"echo \"a << b\"\ncurl -X PATCH https://h/api/tasks/77/complete -d @p.json"}}' -Phase 'pre' -ProjectDir $proj5
+Assert-Contains "5ba: a quoted << does not swallow a real completion" "after_doing_executed" $r.Stdout
+
 # ============================================================
 # Test Group 6: Edge cases
 # ============================================================

@@ -22,6 +22,19 @@ ENV_CACHE="$PROJECT_DIR/.stride-env-cache"
 # Best-effort fast path only — the reliability guarantee is D119's fresh call.
 RESPONSE_FILE="$PROJECT_DIR/.stride/.last-api-response.json"
 
+# (D220) Published by stride_route_command — the single source of truth for
+# "which Stride lifecycle endpoint, if any, is this Bash call actually issuing?".
+# Declared here because `set -u` is active and the after-goal gate reads
+# STRIDE_ROUTE_ENDPOINT on every post-phase run.
+STRIDE_ROUTE_ENDPOINT=""
+STRIDE_ROUTE_HOOK=""
+STRIDE_ROUTE_TASK_ID=""
+_SR_Q=""
+_SR_REST=""
+_SR_NL='
+'
+_SR_CR=$(printf '\r')
+
 # --- Platform detection: delegate to PowerShell on native Windows ---
 # Git Bash (OSTYPE=msys*) and WSL have full bash — run directly.
 # Native Windows without bash (COMSPEC set, no OSTYPE) → delegate to .ps1
@@ -452,6 +465,580 @@ record_diff_upload_state() {
   } > "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
 }
 
+# --- Bash-command routing (D220) ---
+# Decide which .stride.md lifecycle section a Claude Code Bash tool call should
+# run. THE COMMAND TEXT IS UNTRUSTED ROUTING INPUT: a changed_files PUT carries a
+# raw code diff, and a heredoc writing documentation can contain the completion
+# curl verbatim, so "the string contains /api/tasks/<id>/complete" is not
+# evidence that the call IS a completion. Before D220 it was treated as such, and
+# a plain `echo`, a `grep`, and a python heredoc each ran real
+# commit/checkout/merge/branch-delete sections and drove a live API write against
+# an id scraped out of prose.
+#
+# Routing now requires ALL of:
+#   1. curl/wget in COMMAND position of a shell segment — outside every quoted
+#      string and outside every heredoc body;
+#   2. the endpoint as the TAIL of a URL in an ARGUMENT position of that client
+#      (option values for -d/-H/-o/... are consumed, so a payload cannot supply
+#      the request URL);
+#   3. an HTTP method consistent with the endpoint (claim POST; complete and
+#      mark_reviewed PATCH or POST) — the guard that keeps a
+#      PUT .../changed_files whose diff mentions a completion URL from routing as
+#      a completion, and that drops a bare GET probe of /complete.
+#
+# Deliberately lenient where a miss would be SILENT: an unresolvable method
+# (-X "$METHOD") is allowed WHEN the call also carries a body, because a
+# completion that quietly stops firing after_doing removes the quality gate
+# entirely. Everything it cannot parse routes NOWHERE: running the wrong section
+# runs real git state changes, running none only misses a gate.
+#
+# ACCEPTED MISSES — forms that DO issue a lifecycle request but route nowhere.
+# All fail closed, none is reachable from payload or diff text, and each is a
+# decision rather than an oversight:
+#   * a lifecycle call made by anything but curl/wget — `bash -c 'curl …'`,
+#     `echo $URL | xargs curl`, python/requests;
+#   * a URL assembled by command substitution, e.g. "$(echo $U)/api/tasks/1/complete";
+#   * a URL variable ASSIGNED TWICE in one command — which branch bash took is
+#     not knowable here, and guessing decides both the section and the task the
+#     changed_files diff is PUT to, so resolution is declined outright;
+#   * wget's `-c -r -b -E -x -K`, which take no value there but do in curl, so
+#     one placed immediately before the URL swallows it. Keying the option table
+#     off the client would double the surface that must stay byte-identical
+#     between this file and the .ps1 mirror;
+#   * an arithmetic left shift on a line BEFORE the call, `V=$((1<<3))`: the
+#     heredoc walk reads `<<` outside quotes as an opener and swallows to the
+#     matching word. (On the SAME line it is harmless — opener lines are kept.)
+
+# Advance $_SR_Q ("" | sq | dq) across the quote characters of $1. With a second
+# argument, stop as soon as the state returns to "" and leave the unconsumed
+# remainder in $_SR_REST (lets the scanner skip a multi-line payload in one
+# call).
+#
+# Backslash escapes ARE modelled, and must be: outside single quotes a backslash
+# escapes the next character, so a JSON payload's \" does NOT close the enclosing
+# double quote. Ignoring that flips the tracker OUT of quoting on an odd number
+# of \" and lets payload text be scanned as syntax — a FAIL-OPEN bug that
+# re-enables the original D220 misroute for a -d value placed before the URL.
+_stride_quotes() {
+  _q_r="$1"
+  _q_stop="${2:-}"
+  _SR_REST=""
+  case "$_q_r" in *\'*|*\"*|*\\*) : ;; *) return 0 ;; esac
+  # A huge token (an inline JSON payload) is first collapsed so the loop stays
+  # O(specials^2) instead of O(bytes*specials). Every run of ordinary characters
+  # becomes a single '.', which preserves ADJACENCY — the one property escape
+  # handling depends on — where a quote-only reduction would falsely make a
+  # backslash adjacent to a later quote. Measured worst case: an 82 KB inline
+  # payload carrying 8000 quote characters costs ~2.5s here (0.7s in the ps1
+  # mirror, which can scan characters directly). Ordinary commands cost ~10ms,
+  # and the /api/tasks/ fast path in stride_route_command means the vast
+  # majority never reach this function at all.
+  if [ -z "$_q_stop" ] && [ "${#_q_r}" -gt 512 ]; then
+    _q_r=$(printf '%s' "$_q_r" | sed "s/[^\"'\\\$]\{1,\}/./g")
+  fi
+  while :; do
+    case "$_q_r" in *\'*|*\"*|*\\*) : ;; *) break ;; esac
+    # Whichever of ' " \ comes first is the next significant character.
+    # Comparing %%-trimmed prefix lengths avoids a bracket set containing quotes.
+    _q_a="${_q_r%%\'*}"
+    _q_b="${_q_r%%\"*}"
+    _q_e="${_q_r%%\\*}"
+    _q_c="'"; _q_n="${#_q_a}"
+    if [ "${#_q_b}" -lt "$_q_n" ]; then _q_c='"'; _q_n="${#_q_b}"; fi
+    if [ "${#_q_e}" -lt "$_q_n" ]; then _q_c='\'; _q_n="${#_q_e}"; fi
+    case "$_q_c" in
+      "'") _q_r="${_q_r#"$_q_a"?}" ;;
+      '"') _q_r="${_q_r#"$_q_b"?}" ;;
+      *)   _q_r="${_q_r#"$_q_e"?}" ;;
+    esac
+    case "$_SR_Q" in
+      "")  case "$_q_c" in
+             # $'...' is ANSI-C quoting, where \' does NOT close the string —
+             # treating it as a plain '...' exits quoting early and lets the rest
+             # of the token be scanned as syntax.
+             "'") case "$_q_a" in *\$) _SR_Q=aq ;; *) _SR_Q=sq ;; esac ;;
+             '"') _SR_Q=dq ;;
+             *)   _q_r="${_q_r#?}" ;;    # unquoted \x — x is literal, never syntax
+           esac ;;
+      sq)  case "$_q_c" in "'") _SR_Q="" ;; esac ;;   # no escapes inside ' '
+      aq)  case "$_q_c" in
+             "'") _SR_Q="" ;;
+             '\') _q_r="${_q_r#?}" ;;     # \' inside $'...' does NOT close it
+           esac ;;
+      *)   case "$_q_c" in
+             '"') _SR_Q="" ;;
+             '\') _q_r="${_q_r#?}" ;;     # \" inside " " does NOT close it
+           esac ;;
+    esac
+    if [ -n "$_q_stop" ] && [ -z "$_SR_Q" ]; then
+      _SR_REST="$_q_r"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# Record NAME=VALUE seen in command position, but only when VALUE names the API —
+# the list stays at zero or one entry in practice, so the lookup below is cheap.
+_stride_record_var() {
+  _rv_n="${1%%=*}"
+  _rv_v="${1#*=}"
+  while :; do case "$_rv_v" in \"*|\'*) _rv_v="${_rv_v#?}" ;; *) break ;; esac; done
+  while :; do case "$_rv_v" in *\"|*\'|*\;) _rv_v="${_rv_v%?}" ;; *) break ;; esac; done
+  # A SECOND assignment to the same name means the effective value depends on
+  # control flow we do not evaluate (`if …; then URL=A; else URL=B; fi`). Record
+  # an empty sentinel so the lookup declines to resolve rather than guessing
+  # which branch bash took — that guess decides both which section runs and
+  # which task the changed_files diff is PUT to. Declining means the URL token
+  # keeps its literal `$NAME` form, which carries no /api/tasks/, so NO section
+  # fires at all — not "the right section with a fallback id". That is the
+  # deliberate fail-closed trade: a reassigned URL variable loses the gate.
+  #
+  # EVERY name is recorded, even when its value does not name the API, so the
+  # sentinel is order-INDEPENDENT. Recording only API-valued names made it fire
+  # for (api, other) but not for (other, api) — and the second ordering is the
+  # common one (`if $DRY; then URL=noop; else URL=…/complete; fi`), which would
+  # resolve and run commit/checkout/merge for a call that issued nothing.
+  case "$_SR_NL$_s_vars" in
+    *"$_SR_NL$_rv_n="*) _s_vars="$_rv_n=$_SR_NL$_s_vars"; return 0 ;;
+  esac
+  case "$_rv_v" in */api/tasks/*) : ;; *) _rv_v="" ;; esac
+  # PREPEND so the lookup below finds the most recent assignment first.
+  _s_vars="$_rv_n=$_rv_v$_SR_NL$_s_vars"
+  return 0
+}
+
+# Print the recorded value of variable $1, or nothing.
+_stride_var() {
+  _lv_r="$_s_vars"
+  while [ -n "$_lv_r" ]; do
+    _lv_e="${_lv_r%%"$_SR_NL"*}"
+    _lv_r="${_lv_r#"$_lv_e"}"
+    _lv_r="${_lv_r#"$_SR_NL"}"
+    case "$_lv_e" in "$1="*) printf '%s' "${_lv_e#*=}"; return 0 ;; esac
+  done
+  return 0
+}
+
+# Derive the heredoc delimiter from the text following `<<` (and any `-`),
+# applying bash's word splitting AND quote removal in ONE pass.
+#
+# Both halves have to happen together. Splitting the word first and unquoting
+# after cuts `<<'A B'` and `<<a\ b` at a QUOTED space, and cannot see the `$` of
+# `$'…'` or `$"…"`; a delete-all-quotes reduction loses what a backslash escapes,
+# so `<<E\'F` becomes EF. Every one of those yields a SHORTER delimiter than
+# bash's — and a shorter delimiter can match a body line BEFORE bash's real
+# terminator, ending the body early and leaving the rest of it, which is data in
+# bash, to be scanned as syntax. That is fail-OPEN, not mere truncation.
+#
+# Sets _HD_D (delimiter), _HD_REST (unconsumed remainder) and _HD_ANY (1 when a
+# word was present at all, so `<<''` still queues an empty delimiter — whose body
+# ends at the first empty line — while `<< ;` queues nothing).
+_stride_hd_delim() {
+  _hd_i="$1"
+  _HD_D=""; _HD_REST=""; _HD_ANY=0; _HD_UNSAFE=0
+  _hd_st=""
+  while [ -n "$_hd_i" ]; do
+    _hd_c="${_hd_i%"${_hd_i#?}"}"
+    _hd_i="${_hd_i#?}"
+    case "$_hd_st" in
+      sq) if [ "$_hd_c" = "'" ]; then _hd_st=""; else _HD_D="$_HD_D$_hd_c"; fi ;;
+      aq) case "$_hd_c" in
+            "'") _hd_st="" ;;
+            # Inside $'…' bash INTERPRETS escape sequences: \n is a newline, \x41
+            # is A. We do not implement that table. For \' \" \\ the ANSI-C
+            # meaning IS the next character, so those agree; anything else would
+            # render SHORTER than bash's delimiter, which dequeues the body early
+            # — fail-open. Mark the word unsafe instead, so it never terminates
+            # and the body is swallowed to EOF: fail-closed, like every other
+            # form we cannot parse.
+            '\') _hd_n="${_hd_i%"${_hd_i#?}"}"
+                 case "$_hd_n" in
+                   "'"|'"'|'\') : ;;
+                   *) _HD_UNSAFE=1 ;;
+                 esac
+                 _HD_D="$_HD_D$_hd_n"; _hd_i="${_hd_i#?}" ;;
+            *)   _HD_D="$_HD_D$_hd_c" ;;
+          esac ;;
+      dq) case "$_hd_c" in
+            '"') _hd_st="" ;;
+            # Inside " " bash removes the backslash ONLY before $ ` " \ and
+            # newline; anywhere else both characters survive.
+            '\') _hd_n="${_hd_i%"${_hd_i#?}"}"
+                 case "$_hd_n" in
+                   '$'|'`'|'"'|'\') _HD_D="$_HD_D$_hd_n"; _hd_i="${_hd_i#?}" ;;
+                   *) _HD_D="$_HD_D\\" ;;
+                 esac ;;
+            *)   _HD_D="$_HD_D$_hd_c" ;;
+          esac ;;
+      *)  case "$_hd_c" in
+            ' '|'	'|';'|'|'|'&'|'('|')'|'<'|'>')
+              _HD_REST="$_hd_c$_hd_i"; return 0 ;;
+          esac
+          _HD_ANY=1
+          case "$_hd_c" in
+            '\') _HD_D="$_HD_D${_hd_i%"${_hd_i#?}"}"; _hd_i="${_hd_i#?}" ;;
+            "'") _hd_st=sq ;;
+            '"') _hd_st=dq ;;
+            '$') case "$_hd_i" in
+                   \'*) _hd_st=aq; _hd_i="${_hd_i#?}" ;;
+                   \"*) _hd_st=dq; _hd_i="${_hd_i#?}" ;;
+                   *)   _HD_D="$_HD_D\$" ;;
+                 esac ;;
+            *)   _HD_D="$_HD_D$_hd_c" ;;
+          esac ;;
+    esac
+  done
+  _HD_REST=""
+  return 0
+}
+
+# Print $1 with every heredoc BODY removed. The opening line is KEPT (a curl can
+# legitimately read its payload from `-d @- <<'JSON'`); everything up to and
+# including the delimiter line is dropped. This is what stops an agent writing
+# documentation ABOUT the completion curl from being routed as one — a doc line
+# inside a heredoc sits at column 0 with clean quote state, so it satisfies every
+# other requirement.
+_stride_strip_heredocs() {
+  printf '%s\n' "$1" | (
+    # FIFO of pending "<dash>:<delimiter>" entries. A queue, not a single value:
+    # bash allows several openers on one line (`cat <<A > x; cat <<B > y`) and
+    # consumes their bodies in order, so tracking only the first leaves the
+    # second body to be scanned as syntax.
+    _hd_q=""
+    # Quote state carried across lines, so a `<<` inside a string is not read as
+    # an opener. Separate from the scanner's own $_SR_Q run: the two run in
+    # different subshells of the pipeline below.
+    _hd_state=""
+    while IFS= read -r _hd_line; do
+      if [ -n "$_hd_q" ]; then
+        _hd_e="${_hd_q%%
+*}"
+        _hd_dash="${_hd_e%%:*}"
+        _hd_delim="${_hd_e#*:}"
+        _hd_t="$_hd_line"
+        # dash "2" marks a delimiter we could not derive exactly (ANSI-C escapes
+        # we do not interpret). It never matches, so the body is swallowed to
+        # EOF — fail-closed, rather than dequeuing early on a rendering that is
+        # not bash's and exposing the rest of the body to the scanner.
+        if [ "$_hd_dash" = 2 ]; then continue; fi
+        # bash strips only TABS for <<- ; stripping spaces too would let a
+        # space-indented lookalike end the body early for us but not for bash.
+        if [ -n "$_hd_dash" ]; then _hd_t="${_hd_t#"${_hd_t%%[!	]*}"}"; fi
+        if [ "$_hd_t" = "$_hd_delim" ]; then
+          _hd_q="${_hd_q#"$_hd_e"}"
+          _hd_q="${_hd_q#
+}"
+        fi
+        continue
+      fi
+      printf '%s\n' "$_hd_line"
+      # Walk the line left to right. A positional scan, because `<<<` is a
+      # here-string that must skip only ITSELF — testing the whole line and
+      # skipping it wholesale lets a real heredoc on the same line go
+      # unregistered.
+      # The walk is QUOTE-AWARE: a `<<` inside a string is text (`echo "shift <<
+      # END"`, `cout << x`), and treating it as an opener swallows lines until
+      # one happens to equal the derived word — which can eat the opening quote
+      # of a later payload and desynchronise the scanner's own tracker, or eat a
+      # real completion curl and silently drop the after_doing gate.
+      _hd_r="$_hd_line"
+      while :; do
+        case "$_hd_r" in *'<<'*) : ;; *) break ;; esac
+        _hd_pre="${_hd_r%%<<*}"
+        _SR_Q="$_hd_state"; _stride_quotes "$_hd_pre"; _hd_state="$_SR_Q"
+        _hd_r="${_hd_r#*<<}"
+        if [ -n "$_hd_state" ]; then continue; fi
+        case "$_hd_r" in '<'*) _hd_r="${_hd_r#<}"; continue ;; esac
+        case "$_hd_r" in -*) _hd_dash=1; _hd_r="${_hd_r#-}" ;; *) _hd_dash="" ;; esac
+        _hd_a="${_hd_r#"${_hd_r%%[! 	]*}"}"
+        _stride_hd_delim "$_hd_a"
+        _hd_r="$_HD_REST"
+        # Guard on "a word was present", not on the derived text: `<<''` and
+        # `<<""` are valid heredocs whose body ends at the first EMPTY line.
+        # Guarding on the derived text drops them entirely, leaving the body to
+        # be scanned as syntax — the precondition this function exists to remove.
+        if [ "$_HD_UNSAFE" -eq 1 ]; then _hd_dash=2; fi
+        if [ "$_HD_ANY" -eq 1 ]; then _hd_q="$_hd_q$_hd_dash:$_HD_D
+"; fi
+      done
+      _SR_Q="$_hd_state"; _stride_quotes "$_hd_r"; _hd_state="$_SR_Q"
+    done
+  )
+}
+
+# Start a fresh shell segment (new command position, no client, no URL).
+_stride_seg_reset() {
+  _s_pos=1; _s_client=""; _s_method=""; _s_implied=""
+  _s_ep=""; _s_id=""; _s_urlseen=0; _s_next=""
+  return 0
+}
+
+# Classify a candidate URL ARGUMENT. Only the FIRST argument-position token that
+# contains /api/tasks/ is ever considered ($_s_urlseen), because that is curl's
+# own request-URL semantic — so a later bare word inside a payload can neither
+# override nor supply a target. The endpoint must be the TAIL of the path (a
+# trailing / and a ?query are tolerated), which is why a completion URL embedded
+# in a JSON value — {"u":".../complete"} — is not a request target.
+_stride_take_url() {
+  [ "$_s_urlseen" -eq 0 ] || return 0
+  _u_t="$1"
+  while :; do
+    case "$_u_t" in \"*|\'*|\\*|\(*) _u_t="${_u_t#?}" ;; *) break ;; esac
+  done
+  while :; do
+    case "$_u_t" in *\"|*\'|*\\|*,|*\;|*\)|*\`) _u_t="${_u_t%?}" ;; *) break ;; esac
+  done
+  # (D220) Pitfall 2 — the URL "may be written in a shell variable rather than as
+  # a literal". `URL="$STRIDE_API_URL/api/tasks/$TASK_ID/complete"; curl -X PATCH
+  # "$URL"` routed before this change and must keep routing; a silent miss here
+  # would remove the after_doing gate entirely.
+  case "$_u_t" in
+    '$'*)
+      _u_n="${_u_t#\$}"; _u_n="${_u_n#\{}"; _u_n="${_u_n%\}}"
+      case "$_u_n" in
+        "" | *[!A-Za-z0-9_]*) : ;;
+        *) _u_v=$(_stride_var "$_u_n"); [ -z "$_u_v" ] || _u_t="$_u_v" ;;
+      esac
+      ;;
+  esac
+  case "$_u_t" in */api/tasks/*) : ;; *) return 0 ;; esac
+  _s_urlseen=1
+  _u_p="${_u_t%%\?*}"; _u_p="${_u_p%%#*}"; _u_p="${_u_p%/}"
+  _u_r="${_u_p#*/api/tasks/}"
+  if [ "$_u_r" = "claim" ]; then
+    _s_ep=claim; _s_id=""
+    return 0
+  fi
+  case "$_u_r" in */*) : ;; *) return 0 ;; esac
+  _u_id="${_u_r%%/*}"
+  _u_act="${_u_r#*/}"
+  case "$_u_act" in complete|mark_reviewed) : ;; *) return 0 ;; esac
+  [ -n "$_u_id" ] || return 0
+  _s_ep="$_u_act"
+  # (D127) Only a NUMERIC id is authoritative; $TASK_ID interpolation leaves it
+  # empty and callers fall back to the env cache, exactly as before D220.
+  case "$_u_id" in *[!0-9]*) _s_id="" ;; *) _s_id="$_u_id" ;; esac
+  return 0
+}
+
+# Decide whether the segment accumulated so far is a real lifecycle call.
+_stride_seg_eval() {
+  [ -n "$_s_client" ] || return 0
+  [ -n "$_s_ep" ] || return 0
+  _e_m="$_s_method"
+  [ -n "$_e_m" ] || _e_m="$_s_implied"
+  [ -n "$_e_m" ] || _e_m=GET
+  _e_m=$(printf '%s' "$_e_m" | tr -d "\"'" | tr '[:lower:]' '[:upper:]')
+  # -X "$METHOD" cannot be resolved statically. Allow it — a silent non-firing
+  # after_doing removes the quality gate entirely, which is worse than an
+  # over-permissive method — but only when the call also carries a BODY. Every
+  # documented lifecycle curl does; a bare read-only probe of the same URL does
+  # not, and that probe should not run git commit/checkout/merge.
+  case "$_e_m" in
+    *'$'*|*'`'*|"")
+      if [ -n "$_s_implied" ]; then _e_m=UNKNOWN; else _e_m=GET; fi ;;
+  esac
+  case "$_s_ep" in
+    claim)
+      case "$_e_m" in POST|UNKNOWN) : ;; *) return 0 ;; esac ;;
+    complete|mark_reviewed)
+      case "$_e_m" in PATCH|POST|UNKNOWN) : ;; *) return 0 ;; esac ;;
+    *) return 0 ;;
+  esac
+  _s_hit="$_s_ep:$_s_id"
+  return 0
+}
+
+# Read heredoc-stripped lines on stdin; print "<endpoint>:<numeric-id>" for the
+# first real lifecycle call found, nothing otherwise.
+_stride_scan_stream() {
+  _SR_Q=""; _s_pend=""; _s_hit=""; _s_vars=""
+  _stride_seg_reset
+  _s_hadf=0
+  case "$-" in *f*) _s_hadf=1 ;; esac
+  set -f
+  while IFS= read -r _s_line; do
+    # A CRLF command would otherwise carry \r into the final token and never
+    # match a URL tail (the ps1 mirror splits on \r?\n, so this keeps the two
+    # deciding alike).
+    _s_line="${_s_line%"$_SR_CR"}"
+    # Join backslash continuations FIRST: the documented completion curl spans
+    # five physical lines and its URL is not always on the `curl` line.
+    case "$_s_line" in *\\) _s_pend="$_s_pend${_s_line%?} "; continue ;; esac
+    _s_line="$_s_pend$_s_line"; _s_pend=""
+
+    if [ -n "$_SR_Q" ]; then
+      # Inside a multi-line quoted string (a -d '<diff>' payload): no command
+      # position exists here. Jump to wherever the quote closes.
+      _stride_quotes "$_s_line" stop
+      if [ -n "$_SR_Q" ]; then continue; fi
+      _s_line="$_SR_REST"
+    else
+      _stride_seg_eval
+      if [ -n "$_s_hit" ]; then break; fi
+      _stride_seg_reset
+    fi
+
+    # A logical line with no /api/tasks/ can never produce a hit; only its
+    # quote-state effect matters. Once a variable holding an API URL has been
+    # recorded, though, a later line can name it without mentioning the path.
+    case "$_s_line" in
+      */api/tasks/*) : ;;
+      # A line carrying an assignment must be tokenised even when it names no
+      # API path: skipping it hides the FIRST of two assignments, so the second
+      # looks like a first, no ambiguity sentinel is recorded, and a
+      # branch-dependent URL resolves after all. That is the whole multi-line
+      # layout — `if $DRY; then URL=noop; else URL=…/complete; fi` — which the
+      # one-line tests cannot reach.
+      [A-Za-z_]*=*|*' '[A-Za-z_]*=*|*'	'[A-Za-z_]*=*) : ;;
+      *) if [ -z "$_s_vars" ]; then _stride_quotes "$_s_line"; continue; fi ;;
+    esac
+
+    set -- $_s_line
+    for _s_tok do
+      _s_qb="$_SR_Q"
+      _stride_quotes "$_s_tok"
+      # A token that BEGAN inside a quoted string is payload text, never syntax.
+      if [ -n "$_s_qb" ]; then continue; fi
+
+      case "$_s_tok" in
+        *'$('*) _s_tok="${_s_tok##*\$\(}"
+                _stride_seg_eval
+                if [ -n "$_s_hit" ]; then break; fi
+                _stride_seg_reset
+                if [ -z "$_s_tok" ]; then continue; fi ;;
+        *'`'*)  _s_tok="${_s_tok##*\`}"
+                _stride_seg_eval
+                if [ -n "$_s_hit" ]; then break; fi
+                _stride_seg_reset
+                if [ -z "$_s_tok" ]; then continue; fi ;;
+      esac
+
+      case "$_s_tok" in
+        ';'|';;'|'&'|'&&'|'|'|'||'|'|&'|'('|')'|'{'|'}'|'!'|then|else|elif|do|done|fi)
+          _stride_seg_eval
+          if [ -n "$_s_hit" ]; then break; fi
+          _stride_seg_reset
+          continue ;;
+        *\;*)                       # `cd foo;curl ...` with no space
+          # `URL=...;` puts the assignment and the separator in one token, so
+          # capture the prefix before discarding it.
+          _s_pre="${_s_tok%%\;*}"
+          case "$_s_pre" in
+            [A-Za-z_]*=*)
+              case "${_s_pre%%=*}" in
+                *[!A-Za-z0-9_]*) : ;;
+                *) _stride_record_var "$_s_pre" ;;
+              esac ;;
+          esac
+          _stride_seg_eval
+          if [ -n "$_s_hit" ]; then break; fi
+          _stride_seg_reset
+          _s_tok="${_s_tok##*\;}"
+          if [ -z "$_s_tok" ]; then continue; fi ;;
+      esac
+
+      if [ "$_s_pos" -eq 1 ]; then
+        # `(curl ...)` in a subshell — the paren opens a new command position.
+        # NOT `{`: it is a reserved word requiring a following space, so it
+        # already arrives as its own separator token. Stripping it here would
+        # only make a syntactically broken `{curl` route.
+        while :; do case "$_s_tok" in \(*) _s_tok="${_s_tok#?}" ;; *) break ;; esac; done
+        if [ -z "$_s_tok" ]; then continue; fi
+        case "$_s_tok" in
+          -*) continue ;;                                   # nice -n, timeout -k
+          [0-9]*) case "$_s_tok" in *[!0-9smhd.]*) : ;; *) continue ;; esac ;;
+        esac
+        case "$_s_tok" in                                   # VAR=value prefix
+          [A-Za-z_]*=*)
+            case "${_s_tok%%=*}" in
+              *[!A-Za-z0-9_]*) : ;;
+              *) _stride_record_var "$_s_tok"; continue ;;
+            esac ;;
+        esac
+        case "${_s_tok##*/}" in
+          env|sudo|command|builtin|exec|nohup|nice|stdbuf|timeout|time|if|while|until)
+            continue ;;
+          curl|curl.exe|wget|wget.exe)
+            _s_client="${_s_tok##*/}"; _s_client="${_s_client%.exe}"
+            _s_pos=0; continue ;;
+          *)
+            _s_pos=0; _s_client=""; continue ;;             # another program owns it
+        esac
+      fi
+
+      [ -n "$_s_client" ] || continue
+
+      if [ -n "$_s_next" ]; then
+        case "$_s_next" in
+          method) _s_method="$_s_tok" ;;
+          url)    _stride_take_url "$_s_tok" ;;
+          *)      : ;;                                      # consumed option value
+        esac
+        _s_next=""
+        continue
+      fi
+
+      case "$_s_tok" in
+        -X|--request)  _s_next=method; continue ;;
+        --url)         _s_next=url; continue ;;
+        -G|--get)      _s_method=GET; continue ;;
+        --method=*)    _s_method="${_s_tok#--method=}"; continue ;;
+        --request=*)   _s_method="${_s_tok#--request=}"; continue ;;
+        --url=*)       _stride_take_url "${_s_tok#--url=}"; continue ;;
+        -X*)           _s_method="${_s_tok#-X}"; continue ;;
+        -d|--data|--data-raw|--data-binary|--data-ascii|--data-urlencode|-F|--form|-T|--upload-file)
+          [ -n "$_s_implied" ] || _s_implied=POST
+          _s_next=value; continue ;;
+        --data=*|--data-raw=*|--data-binary=*|--data-ascii=*|--data-urlencode=*|--post-data*|--post-file*|--body-data*|--body-file*|-d*)
+          [ -n "$_s_implied" ] || _s_implied=POST
+          continue ;;
+        -H|--header|-o|--output|-u|--user|-A|--user-agent|-e|--referer|-b|--cookie|-c|--cookie-jar|-w|--write-out|-m|--max-time|--connect-timeout|--retry|--retry-delay|-x|--proxy|-E|--cert|--key|--cacert|--capath|-K|--config|--resolve|--interface|--limit-rate|--oauth2-bearer|-D|--dump-header|--trace|--trace-ascii|--stderr|--netrc-file|--form-string|--cert-type|--key-type|--pinnedpubkey|--proxy-user|--noproxy|--unix-socket|--output-dir|--range|-r)
+          _s_next=value; continue ;;
+        -[!-]*X)       _s_next=method; continue ;;          # bundled -sSX PATCH
+        -*)            continue ;;
+        # A redirection target is not a request URL. `curl ... > /tmp/api/tasks/9/complete`
+        # must not be read as one.
+        '>'|'>>'|'>|'|'<'|'&>'|'&>>'|[0-9]'>'|[0-9]'>>'|[0-9]'<'|[0-9]'>&'|'&')
+          _s_next=value; continue ;;
+        *'>'*|*'<'*)   continue ;;                          # attached, e.g. >/tmp/f
+        *)             _stride_take_url "$_s_tok"; continue ;;
+      esac
+    done
+    if [ -n "$_s_hit" ]; then break; fi
+  done
+  if [ -z "$_s_hit" ]; then _stride_seg_eval; fi
+  [ "$_s_hadf" -eq 1 ] || set +f
+  if [ -n "$_s_hit" ]; then printf '%s\n' "$_s_hit"; fi
+  return 0
+}
+
+# THE single routing entry point (D220). $1 = pre|post (empty for an id-only
+# query), $2 = the Bash command. Sets STRIDE_ROUTE_ENDPOINT / STRIDE_ROUTE_HOOK /
+# STRIDE_ROUTE_TASK_ID; prints nothing, so callers need no subshell. All three
+# routing sites read those globals, so they cannot drift apart.
+stride_route_command() {
+  _sr_phase="$1"
+  _sr_cmd="$2"
+  STRIDE_ROUTE_ENDPOINT=""
+  STRIDE_ROUTE_HOOK=""
+  STRIDE_ROUTE_TASK_ID=""
+  # Fast path: the overwhelming majority of Bash calls never mention the API.
+  case "$_sr_cmd" in */api/tasks/*) : ;; *) return 0 ;; esac
+  _sr_hit=$(_stride_strip_heredocs "$_sr_cmd" | _stride_scan_stream)
+  [ -n "$_sr_hit" ] || return 0
+  STRIDE_ROUTE_ENDPOINT="${_sr_hit%%:*}"
+  STRIDE_ROUTE_TASK_ID="${_sr_hit#*:}"
+  case "$_sr_phase:$STRIDE_ROUTE_ENDPOINT" in
+    post:claim)         STRIDE_ROUTE_HOOK=before_doing ;;
+    post:mark_reviewed) STRIDE_ROUTE_HOOK=after_review ;;
+    post:complete)      STRIDE_ROUTE_HOOK=before_review ;;
+    pre:complete)       STRIDE_ROUTE_HOOK=after_doing ;;
+  esac
+  return 0
+}
+
 # (D127) Resolve the authoritative task id for the CURRENT completion from the
 # /complete or /mark_reviewed URL in the command, independent of the env cache.
 # Those URLs always carry /api/tasks/<id>/<action>, so the changed_files upload
@@ -460,19 +1047,18 @@ record_diff_upload_state() {
 # changed_files root cause (G321/D126: the diff was PUT to the previous task).
 # Returns empty when the command carries no such URL (e.g. the claim path, whose
 # URL has no id); callers fall back to the env-cache TASK_ID in that case.
+# (D220) Shares the ONE parser with routing, so an id can never be scraped out
+# of a command that did not actually issue the request — the `echo` that drove a
+# live changed_files PUT against task 999999999 went through this path. The
+# published globals are saved and restored so callers see no side effect.
 task_id_from_command() {
-  local _rest
-  case "$1" in
-    */api/tasks/*/complete*|*/api/tasks/*/mark_reviewed*)
-      _rest="${1#*/api/tasks/}"
-      _rest="${_rest%%/*}"
-      case "$_rest" in
-        "" | *[!0-9]*) printf '' ;;
-        *) printf '%s' "$_rest" ;;
-      esac
-      ;;
-    *) printf '' ;;
-  esac
+  local _sv_ep="$STRIDE_ROUTE_ENDPOINT" _sv_hk="$STRIDE_ROUTE_HOOK" \
+        _sv_id="$STRIDE_ROUTE_TASK_ID" _out
+  stride_route_command "" "$1"
+  _out="$STRIDE_ROUTE_TASK_ID"
+  STRIDE_ROUTE_ENDPOINT="$_sv_ep"; STRIDE_ROUTE_HOOK="$_sv_hk"
+  STRIDE_ROUTE_TASK_ID="$_sv_id"
+  printf '%s' "$_out"
 }
 
 # Helper: persist the per-file diff snapshot, then fire-and-forget PUT it to
@@ -1543,32 +2129,25 @@ if [ -z "$COMMAND" ]; then
   exit 0
 fi
 
-# --- Determine which Stride hook to run ---
+# --- Determine which Stride hook to run (D220) ---
 # Routing:
 #   post + /api/tasks/claim        → before_doing
 #   pre  + /api/tasks/:id/complete → after_doing  (blocks completion if it fails)
 #   post + /api/tasks/:id/complete → before_review
 #   post + /api/tasks/:id/mark_reviewed → after_review
+#
+# stride_route_command is the ONLY place the command text is inspected for
+# routing: it requires the call to actually ISSUE the request (client in command
+# position, endpoint as the tail of a URL in argument position, matching method)
+# rather than merely mention it. The after-goal gate below reads its published
+# STRIDE_ROUTE_ENDPOINT so the two cannot drift.
 
-HOOK_NAME=""
+stride_route_command "$PHASE" "$COMMAND"
+HOOK_NAME="$STRIDE_ROUTE_HOOK"
+
 # (W1453) Set when an after_goal entry is routed; defers the after_review
 # env-cache cleanup so the agent can still read GOAL_* for the follow-up PATCH.
 AFTER_GOAL_ROUTED=false
-
-case "$PHASE" in
-  post)
-    case "$COMMAND" in
-      */api/tasks/claim*)          HOOK_NAME="before_doing" ;;
-      */api/tasks/*/mark_reviewed*) HOOK_NAME="after_review" ;;
-      */api/tasks/*/complete*)      HOOK_NAME="before_review" ;;
-    esac
-    ;;
-  pre)
-    case "$COMMAND" in
-      */api/tasks/*/complete*) HOOK_NAME="after_doing" ;;
-    esac
-    ;;
-esac
 
 # Not a Stride API call — exit cleanly
 if [ -z "$HOOK_NAME" ]; then
@@ -1710,9 +2289,11 @@ fi
 # goal completion when neither path can detect it. A non-zero section exit is
 # surfaced via the structured JSON shape, never as a non-zero script exit (the
 # primary curl already succeeded).
+# (D220) Gate on the endpoint the router already resolved, never on the raw
+# command text — a mention of a completion URL is not a completion call.
 if [ "$PHASE" = "post" ]; then
-  case "$COMMAND" in
-    */api/tasks/*/complete*|*/api/tasks/*/mark_reviewed*)
+  case "$STRIDE_ROUTE_ENDPOINT" in
+    complete|mark_reviewed)
       route_after_goal "$RESPONSE_PAYLOAD"
       ;;
   esac

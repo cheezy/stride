@@ -139,6 +139,454 @@ function Save-CanonicalResponse {
     }
 }
 
+# --- Bash-command routing (D220) ---
+# Decision-identical mirror of stride-hook.sh's stride_route_command and its
+# _stride_* helpers. THE COMMAND TEXT IS UNTRUSTED ROUTING INPUT: a changed_files
+# PUT carries a raw code diff, and a heredoc writing documentation can contain
+# the completion curl verbatim, so containment is not evidence of issuance.
+# Requires (1) curl/wget in command position outside quotes and heredoc bodies,
+# (2) the endpoint as the TAIL of a URL in an ARGUMENT position, (3) a method
+# consistent with the endpoint. Fails closed: anything unparseable routes
+# nowhere, because running the wrong section runs real git state changes while
+# running none only misses a gate.
+# THESE TWO FILES MUST STAY IN LOCKSTEP — see hooks/stride-hook.sh.
+
+$script:StrideQuoteState = ''
+$script:StrideQuoteRest  = ''
+
+# Advance the quote state ('' | sq | dq) across $Text. With -StopWhenClosed,
+# stop as soon as the state returns to '' and leave the remainder in
+# $script:StrideQuoteRest.
+#
+# Backslash escapes ARE modelled, and must be: outside single quotes a backslash
+# escapes the next character, so a JSON payload's \" does NOT close the enclosing
+# double quote. Ignoring that flips the tracker OUT of quoting on an odd number
+# of \" and lets payload text be scanned as syntax — a FAIL-OPEN bug.
+function Update-StrideQuoteState {
+    param([string]$Text, [switch]$StopWhenClosed)
+    $script:StrideQuoteRest = ''
+    if ($Text.IndexOf("'") -lt 0 -and $Text.IndexOf('"') -lt 0 -and $Text.IndexOf('\') -lt 0) { return }
+    # Index of the character most recently consumed AS an escape. The aq test
+    # below must not treat an escaped `\$` as introducing ANSI-C quoting — bash
+    # reads `\$'a\'b` as a literal dollar followed by a PLAIN single-quoted
+    # string, so the `\'` closes it. The sh mirror gets this right for free
+    # because it consumes the escaped character before testing the prefix.
+    $escapedAt = -1
+    for ($i = 0; $i -lt $Text.Length; $i++) {
+        $c = $Text[$i]
+        if ($c -eq '\') {
+            # No escapes inside plain single quotes; everywhere else \x makes x literal.
+            if ($script:StrideQuoteState -cne 'sq') { $escapedAt = $i + 1; $i++ }
+            continue
+        }
+        if ($c -ne '"' -and $c -ne "'") { continue }
+        if ($script:StrideQuoteState -ceq '') {
+            if ($c -eq "'") {
+                # $'...' is ANSI-C quoting, where \' does NOT close the string.
+                $script:StrideQuoteState = if ($i -gt 0 -and $Text[$i - 1] -eq '$' -and ($i - 1) -ne $escapedAt) { 'aq' } else { 'sq' }
+            } else {
+                $script:StrideQuoteState = 'dq'
+            }
+        } elseif ($script:StrideQuoteState -ceq 'sq' -or $script:StrideQuoteState -ceq 'aq') {
+            if ($c -eq "'") { $script:StrideQuoteState = '' }
+        } else {
+            if ($c -eq '"') { $script:StrideQuoteState = '' }
+        }
+        if ($StopWhenClosed -and $script:StrideQuoteState -ceq '') {
+            $script:StrideQuoteRest = $Text.Substring($i + 1)
+            return
+        }
+    }
+}
+
+# Return $CommandText with every heredoc BODY removed. The opening line is KEPT
+# (a curl can legitimately read its payload from `-d @- <<'JSON'`). This is what
+# stops an agent writing documentation ABOUT the completion curl from being
+# routed as one.
+# Apply bash's quote removal to a heredoc delimiter word. NOT a delete-all-quotes
+# reduction: bash KEEPS what a backslash escapes and KEEPS quoted contents, so
+# `E\'F` is the delimiter E'F. Deleting them yields a SHORTER word, and if that
+# shorter word appears in the body before bash's real terminator the queue
+# dequeues early and the rest of the body is scanned as syntax. `''` and `""`
+# still reduce to the empty string, preserving the first-empty-line rule.
+function Get-StrideHeredocDelim {
+    param([string]$Word)
+    $o = New-Object System.Text.StringBuilder
+    $state = ''
+    $any = $false
+    $unsafe = $false
+    $stop = @(' ', "`t", ';', '|', '&', '(', ')', '<', '>')
+    $i = 0
+    for (; $i -lt $Word.Length; $i++) {
+        $c = $Word[$i]
+        if ($state -ceq 'sq') {
+            if ($c -eq "'") { $state = '' } else { [void]$o.Append($c) }
+            continue
+        }
+        if ($state -ceq 'aq') {
+            if ($c -eq "'") { $state = '' }
+            elseif ($c -eq '\') {
+                # Inside $'…' bash INTERPRETS escapes (\n is a newline, \x41 is
+                # A). We do not implement that table; for \' \" \\ the ANSI-C
+                # meaning IS the next character, so those agree. Anything else
+                # would render SHORTER than bash's delimiter and dequeue the body
+                # early — mark it unsafe so it never terminates instead.
+                if ($i + 1 -lt $Word.Length) {
+                    $i++
+                    $n = $Word[$i]
+                    if ($n -ne "'" -and $n -ne '"' -and $n -ne '\') { $unsafe = $true }
+                    [void]$o.Append($n)
+                }
+            }
+            else { [void]$o.Append($c) }
+            continue
+        }
+        if ($state -ceq 'dq') {
+            if ($c -eq '"') { $state = '' }
+            elseif ($c -eq '\') {
+                # Inside " " bash removes the backslash ONLY before $ ` " \ .
+                $n = if ($i + 1 -lt $Word.Length) { $Word[$i + 1] } else { [char]0 }
+                if ($n -eq '$' -or $n -eq '`' -or $n -eq '"' -or $n -eq '\') {
+                    $i++; [void]$o.Append($n)
+                } else { [void]$o.Append('\') }
+            }
+            else { [void]$o.Append($c) }
+            continue
+        }
+        if ($stop -ccontains [string]$c) { break }
+        $any = $true
+        if ($c -eq '\') { if ($i + 1 -lt $Word.Length) { $i++; [void]$o.Append($Word[$i]) }; continue }
+        if ($c -eq "'") { $state = 'sq'; continue }
+        if ($c -eq '"') { $state = 'dq'; continue }
+        if ($c -eq '$') {
+            $n = if ($i + 1 -lt $Word.Length) { $Word[$i + 1] } else { [char]0 }
+            if ($n -eq "'") { $state = 'aq'; $i++; continue }
+            if ($n -eq '"') { $state = 'dq'; $i++; continue }
+            [void]$o.Append('$'); continue
+        }
+        [void]$o.Append($c)
+    }
+    return [pscustomobject]@{ Delim = $o.ToString(); Any = $any; Unsafe = $unsafe; Consumed = $i }
+}
+
+function Remove-StrideHeredocBodies {
+    param([string]$CommandText)
+    $out = New-Object System.Collections.Generic.List[string]
+    # FIFO of pending openers, not a single value: bash allows several on one
+    # line and consumes their bodies in order.
+    $queue = New-Object System.Collections.Generic.Queue[object]
+    # Quote state carried across lines, so a `<<` inside a string is not read as
+    # an opener. Saved/restored because Get-StrideRoute uses the same tracker.
+    $savedQ = $script:StrideQuoteState
+    $script:StrideQuoteState = ''
+    foreach ($line in [regex]::Split($CommandText, "\r?\n")) {
+        if ($queue.Count -gt 0) {
+            $head = $queue.Peek()
+            # An Unsafe delimiter is one we could not derive exactly (ANSI-C
+            # escapes we do not interpret). It never matches, so the body is
+            # swallowed to EOF — fail-closed, rather than dequeuing early on a
+            # rendering that is not bash's.
+            if ($head.Unsafe) { continue }
+            # bash strips only TABS for <<- ; stripping spaces too would let a
+            # space-indented lookalike end the body early for us but not for bash.
+            $t = if ($head.Dash) { $line.TrimStart("`t".ToCharArray()) } else { $line }
+            if ($t -ceq $head.Delim) { [void]$queue.Dequeue() }
+            continue
+        }
+        $out.Add($line)
+        # Walk the line left to right: `<<<` is a here-string that must skip only
+        # ITSELF, every opener on the line must be registered, and a `<<` inside
+        # a quoted string is text rather than a redirection.
+        $pos = 0
+        foreach ($m in [regex]::Matches($line, '<<(<?)(-?)[ \t]*')) {
+            if ($m.Index -lt $pos) { continue }
+            Update-StrideQuoteState -Text $line.Substring($pos, $m.Index - $pos)
+            $pos = $m.Index + 2
+            if ($script:StrideQuoteState -cne '') { continue }
+            if ($m.Groups[1].Value -ceq '<') { continue }   # here-string
+            $w = Get-StrideHeredocDelim $line.Substring($m.Index + $m.Length)
+            # Guard on "a word was present": `<<''` and `<<""` are valid heredocs
+            # whose body ends at the first EMPTY line.
+            if (-not $w.Any) { continue }
+            [void]$queue.Enqueue([pscustomobject]@{
+                Dash = ($m.Groups[2].Value -ceq '-'); Delim = $w.Delim; Unsafe = $w.Unsafe })
+            $pos = $m.Index + $m.Length + $w.Consumed
+        }
+        if ($pos -lt $line.Length) { Update-StrideQuoteState -Text $line.Substring($pos) }
+    }
+    $script:StrideQuoteState = $savedQ
+    return ($out -join "`n")
+}
+
+# A fresh shell segment: new command position, no client, no URL yet.
+function New-StrideSegment {
+    return @{ Pos = $true; Client = ''; Method = ''; Implied = '';
+              Endpoint = ''; TaskId = ''; UrlSeen = $false; Next = '' }
+}
+
+# Classify a candidate URL ARGUMENT. Only the FIRST argument-position token
+# containing /api/tasks/ is considered (curl's own request-URL semantic), so a
+# later bare word inside a payload can neither override nor supply a target. The
+# endpoint must be the TAIL of the path, which is why a completion URL embedded
+# in a JSON value is not a request target.
+function Set-StrideSegmentUrl {
+    param($Seg, [string]$Token, $Vars)
+    if ($Seg.UrlSeen) { return }
+    $u = $Token.TrimStart('"', "'", '\', '(').TrimEnd('"', "'", '\', ',', ';', ')', '`')
+    # (D220) Pitfall 2 — the URL "may be written in a shell variable rather than
+    # as a literal". `URL="$STRIDE_API_URL/api/tasks/$TASK_ID/complete"; curl -X
+    # PATCH "$URL"` routed before this change and must keep routing.
+    if ($u.StartsWith('$')) {
+        $n = $u.Substring(1)
+        if ($n.StartsWith('{')) { $n = $n.Substring(1) }
+        if ($n.EndsWith('}'))   { $n = $n.Substring(0, $n.Length - 1) }
+        if ($n -cmatch '^[A-Za-z0-9_]+$' -and $Vars.ContainsKey($n)) { $u = $Vars[$n] }
+    }
+    if ($u -cnotlike '*/api/tasks/*') { return }
+    $Seg.UrlSeen = $true
+    $u = ($u -split '\?')[0]
+    $u = ($u -split '#')[0]
+    # Strip ONE trailing slash, as the sh mirror's ${u%/} does.
+    if ($u.EndsWith('/')) { $u = $u.Substring(0, $u.Length - 1) }
+    $i = $u.IndexOf('/api/tasks/')
+    $rest = $u.Substring($i + '/api/tasks/'.Length)
+    if ($rest -ceq 'claim') { $Seg.Endpoint = 'claim'; $Seg.TaskId = ''; return }
+    $slash = $rest.IndexOf('/')
+    if ($slash -lt 0) { return }
+    $id  = $rest.Substring(0, $slash)
+    $act = $rest.Substring($slash + 1)
+    if ($act -cne 'complete' -and $act -cne 'mark_reviewed') { return }
+    if ($id -ceq '') { return }
+    $Seg.Endpoint = $act
+    # (D127) Only a NUMERIC id is authoritative; $TASK_ID interpolation leaves it
+    # empty and callers fall back to the env cache, exactly as before D220.
+    $Seg.TaskId = if ($id -cmatch '^[0-9]+$') { $id } else { '' }
+}
+
+# Record NAME=VALUE seen in command position, but only when VALUE names the API.
+function Add-StrideVar {
+    param($Vars, [string]$Token)
+    $n = $Token.Substring(0, $Token.IndexOf('='))
+    if ($n -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$') { return }
+    # A SECOND assignment to the same name means the effective value depends on
+    # control flow we do not evaluate — store an empty sentinel so the lookup
+    # declines to resolve rather than guessing which branch bash took. EVERY name
+    # is recorded, even when its value does not name the API, so the sentinel is
+    # order-INDEPENDENT (recording only API-valued names missed the common
+    # `if $DRY; then URL=noop; else URL=…/complete; fi` ordering).
+    if ($Vars.ContainsKey($n)) { $Vars[$n] = ''; return }
+    $v = $Token.Substring($Token.IndexOf('=') + 1).Trim('"', "'", ';')
+    if ($v -cnotlike '*/api/tasks/*') { $v = '' }
+    $Vars[$n] = $v
+}
+
+# Decide whether the accumulated segment is a real lifecycle call.
+function Test-StrideSegment {
+    param($Seg)
+    if ($Seg.Client -ceq '' -or $Seg.Endpoint -ceq '') { return $null }
+    $m = $Seg.Method
+    if ($m -ceq '') { $m = $Seg.Implied }
+    if ($m -ceq '') { $m = 'GET' }
+    $m = ($m -replace '["'']', '').ToUpperInvariant()
+    # -X "$METHOD" cannot be resolved statically. Allow it — a silent non-firing
+    # after_doing removes the quality gate entirely — but only when the call also
+    # carries a BODY, which every documented lifecycle curl does and a read-only
+    # probe of the same URL does not.
+    if ($m -ceq '' -or $m.Contains('$') -or $m.Contains('`')) {
+        $m = if ($Seg.Implied -cne '') { 'UNKNOWN' } else { 'GET' }
+    }
+    if ($Seg.Endpoint -ceq 'claim') {
+        if ($m -cne 'POST' -and $m -cne 'UNKNOWN') { return $null }
+    } else {
+        if ($m -cne 'PATCH' -and $m -cne 'POST' -and $m -cne 'UNKNOWN') { return $null }
+    }
+    return [pscustomobject]@{ Endpoint = $Seg.Endpoint; TaskId = $Seg.TaskId }
+}
+
+# THE single routing entry point (D220). $Phase is pre|post ('' for an id-only
+# query). Returns Endpoint / HookName / TaskId; all routing sites read it, so
+# they cannot drift apart.
+function Get-StrideRoute {
+    param([string]$Phase, [string]$CommandText)
+
+    $route = [pscustomobject]@{ Endpoint = ''; HookName = ''; TaskId = '' }
+    # Fast path: the overwhelming majority of Bash calls never mention the API.
+    if (-not $CommandText -or ($CommandText -cnotlike '*/api/tasks/*')) { return $route }
+
+    $script:StrideQuoteState = ''
+    $seg  = New-StrideSegment
+    $hit  = $null
+    $pend = ''
+    # Ordinal comparer, NOT a bare @{}: PowerShell hashtables match keys
+    # case-insensitively, which would resolve $url against a URL= assignment that
+    # bash would never resolve — a fail-open divergence from the sh mirror.
+    $vars = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+    $optValue = @('-H','--header','-o','--output','-u','--user','-A','--user-agent',
+        '-e','--referer','-b','--cookie','-c','--cookie-jar','-w','--write-out',
+        '-m','--max-time','--connect-timeout','--retry','--retry-delay','-x','--proxy',
+        '-E','--cert','--key','--cacert','--capath','-K','--config','--resolve',
+        '--interface','--limit-rate','--oauth2-bearer','-D','--dump-header','--trace',
+        '--trace-ascii','--stderr','--netrc-file','--form-string','--cert-type',
+        '--key-type','--pinnedpubkey','--proxy-user','--noproxy','--unix-socket',
+        '--output-dir','--range','-r')
+    # A redirection target is not a request URL. This pattern reproduces the sh
+    # mirror's case list EXACTLY, including every file descriptor 0-9 — an
+    # enumeration of only 0-2 left `3> /path/api/tasks/9/complete` unconsumed,
+    # so the redirect target reached the URL classifier and supplied both the
+    # section and the task id.
+    $redirOp = '^(>|>>|>\||<|&>|&>>|&|[0-9](>|>>|<|>&))$'
+    $dataOpt = @('-d','--data','--data-raw','--data-binary','--data-ascii',
+        '--data-urlencode','-F','--form','-T','--upload-file')
+    $prefix = @('env','sudo','command','builtin','exec','nohup','nice','stdbuf',
+        'timeout','time','if','while','until')
+    $sep = @(';',';;','&','&&','|','||','|&','(',')','{','}','!',
+        'then','else','elif','do','done','fi')
+
+    foreach ($rawIn in [regex]::Split((Remove-StrideHeredocBodies $CommandText), "\r?\n")) {
+        # Drop a trailing CR before anything else, exactly as the sh mirror does,
+        # so a CRLF command's URL token is not left with a \r that no tail matches.
+        $raw = if ($rawIn.EndsWith("`r")) { $rawIn.Substring(0, $rawIn.Length - 1) } else { $rawIn }
+        # Join backslash continuations FIRST: the documented completion curl
+        # spans five physical lines and its URL is not always on the curl line.
+        if ($raw.EndsWith('\')) { $pend += $raw.Substring(0, $raw.Length - 1) + ' '; continue }
+        $line = $pend + $raw
+        $pend = ''
+
+        if ($script:StrideQuoteState -cne '') {
+            # Inside a multi-line quoted payload: no command position exists here.
+            Update-StrideQuoteState -Text $line -StopWhenClosed
+            if ($script:StrideQuoteState -cne '') { continue }
+            $line = $script:StrideQuoteRest
+        } else {
+            $hit = Test-StrideSegment $seg
+            if ($hit) { break }
+            $seg = New-StrideSegment
+        }
+
+        # Once a variable holding an API URL has been recorded, a later line can
+        # name it without mentioning the path, so the fast path must not skip it.
+        # A line carrying an assignment must be tokenised even when it names no
+        # API path, or the FIRST of two assignments is hidden and the second
+        # looks like a first — no sentinel, and a branch-dependent URL resolves.
+        if ($line -cnotlike '*/api/tasks/*' -and $vars.Count -eq 0 -and
+            $line -cnotmatch '(^|\s)[A-Za-z_][A-Za-z0-9_]*=') {
+            Update-StrideQuoteState -Text $line; continue
+        }
+
+        foreach ($t in ($line -split '\s+')) {
+            if ($t -ceq '') { continue }
+            $tok = $t
+            $qb = $script:StrideQuoteState
+            Update-StrideQuoteState -Text $tok
+            # A token that BEGAN inside a quoted string is payload text, never syntax.
+            if ($qb -cne '') { continue }
+
+            # Mirror the sh `case` ordering exactly: $( wins over a backtick.
+            if ($tok.Contains('$(')) {
+                $tok = $tok.Substring($tok.LastIndexOf('$(') + 2)
+                $hit = Test-StrideSegment $seg
+                if ($hit) { break }
+                $seg = New-StrideSegment
+                if ($tok -ceq '') { continue }
+            } elseif ($tok.Contains('`')) {
+                $tok = $tok.Substring($tok.LastIndexOf('`') + 1)
+                $hit = Test-StrideSegment $seg
+                if ($hit) { break }
+                $seg = New-StrideSegment
+                if ($tok -ceq '') { continue }
+            }
+            if ($sep -ccontains $tok) {
+                $hit = Test-StrideSegment $seg
+                if ($hit) { break }
+                $seg = New-StrideSegment
+                continue
+            }
+            if ($tok.Contains(';')) {
+                # `URL=...;` puts the assignment and the separator in one token.
+                $pre = $tok.Substring(0, $tok.IndexOf(';'))
+                if ($pre -cmatch '^[A-Za-z_][A-Za-z0-9_]*=') { Add-StrideVar $vars $pre }
+                $hit = Test-StrideSegment $seg
+                if ($hit) { break }
+                $seg = New-StrideSegment
+                $tok = $tok.Substring($tok.LastIndexOf(';') + 1)
+                if ($tok -ceq '') { continue }
+            }
+
+            if ($seg.Pos) {
+                # `(curl ...)` in a subshell — the paren opens a command position.
+                # NOT `{`: it is a reserved word requiring a following space, so
+                # it already arrives as its own separator token.
+                while ($tok.StartsWith('(')) { $tok = $tok.Substring(1) }
+                if ($tok -ceq '') { continue }
+                if ($tok -clike '-*') { continue }
+                if ($tok -cmatch '^[0-9][0-9smhd.]*$') { continue }
+                if ($tok -cmatch '^[A-Za-z_][A-Za-z0-9_]*=') { Add-StrideVar $vars $tok; continue }
+                # sh splits the basename on '/' only and matches curl/wget/.exe
+                # literally — mirror that rather than also splitting on '\'.
+                $base = $tok.Substring($tok.LastIndexOf('/') + 1)
+                if ($prefix -ccontains $base) { continue }
+                if ($base -ceq 'curl' -or $base -ceq 'curl.exe' -or
+                    $base -ceq 'wget' -or $base -ceq 'wget.exe') {
+                    $seg.Client = $base -creplace '\.exe$', ''
+                    $seg.Pos = $false; continue
+                }
+                # Another program owns this segment.
+                $seg.Pos = $false; $seg.Client = ''; continue
+            }
+            if ($seg.Client -ceq '') { continue }
+
+            if ($seg.Next -cne '') {
+                if ($seg.Next -ceq 'method') { $seg.Method = $tok }
+                elseif ($seg.Next -ceq 'url') { Set-StrideSegmentUrl $seg $tok $vars }
+                $seg.Next = ''
+                continue
+            }
+
+            if ($tok -ceq '-X' -or $tok -ceq '--request') { $seg.Next = 'method'; continue }
+            if ($tok -ceq '--url')                        { $seg.Next = 'url'; continue }
+            if ($tok -ceq '-G' -or $tok -ceq '--get')     { $seg.Method = 'GET'; continue }
+            if ($tok -clike '--method=*')  { $seg.Method = $tok.Substring(9);  continue }
+            if ($tok -clike '--request=*') { $seg.Method = $tok.Substring(10); continue }
+            if ($tok -clike '--url=*')     { Set-StrideSegmentUrl $seg $tok.Substring(6) $vars; continue }
+            if ($tok -clike '-X*')         { $seg.Method = $tok.Substring(2);  continue }
+            if ($dataOpt -ccontains $tok) {
+                if ($seg.Implied -ceq '') { $seg.Implied = 'POST' }
+                $seg.Next = 'value'; continue
+            }
+            if ($tok -clike '--data=*'     -or $tok -clike '--data-raw=*' -or
+                $tok -clike '--data-binary=*' -or $tok -clike '--data-ascii=*' -or
+                $tok -clike '--data-urlencode=*' -or
+                $tok -clike '--post-data*' -or $tok -clike '--post-file*' -or
+                $tok -clike '--body-data*' -or $tok -clike '--body-file*' -or
+                $tok -clike '-d*') {
+                if ($seg.Implied -ceq '') { $seg.Implied = 'POST' }
+                continue
+            }
+            if ($optValue -ccontains $tok) { $seg.Next = 'value'; continue }
+            if ($tok -cmatch '^-[^-].*X$') { $seg.Next = 'method'; continue }
+            if ($tok -clike '-*')          { continue }
+            if ($tok -cmatch $redirOp)     { $seg.Next = 'value'; continue }
+            if ($tok.Contains('>') -or $tok.Contains('<')) { continue }  # attached, e.g. >/tmp/f
+            Set-StrideSegmentUrl $seg $tok $vars
+        }
+        if ($hit) { break }
+    }
+    if (-not $hit) { $hit = Test-StrideSegment $seg }
+    if (-not $hit) { return $route }
+
+    $route.Endpoint = $hit.Endpoint
+    $route.TaskId   = $hit.TaskId
+    # Case-sensitive throughout, matching the sh mirror's `case` semantics.
+    if ($Phase -ceq 'post') {
+        if     ($hit.Endpoint -ceq 'claim')         { $route.HookName = 'before_doing' }
+        elseif ($hit.Endpoint -ceq 'mark_reviewed') { $route.HookName = 'after_review' }
+        elseif ($hit.Endpoint -ceq 'complete')      { $route.HookName = 'before_review' }
+    } elseif ($Phase -ceq 'pre' -and $hit.Endpoint -ceq 'complete') {
+        $route.HookName = 'after_doing'
+    }
+    return $route
+}
+
 # Exit early if no phase argument or no .stride.md
 if (-not $Phase) { exit 0 }
 if (-not (Test-Path $StrideMd)) { exit 0 }
@@ -161,31 +609,19 @@ try {
 
 if (-not $Command) { exit 0 }
 
-# --- Determine which Stride hook to run ---
+# --- Determine which Stride hook to run (D220) ---
 # Routing:
 #   post + /api/tasks/claim        → before_doing
 #   pre  + /api/tasks/:id/complete → after_doing  (blocks completion if it fails)
 #   post + /api/tasks/:id/complete → before_review
 #   post + /api/tasks/:id/mark_reviewed → after_review
+#
+# Get-StrideRoute is the ONLY place the command text is inspected for routing: it
+# requires the call to actually ISSUE the request rather than merely mention it.
+# The after-goal gate below reads $StrideRoute.Endpoint so the two cannot drift.
 
-$HookName = ''
-
-switch ($Phase) {
-    'post' {
-        if ($Command -match '/api/tasks/claim') {
-            $HookName = 'before_doing'
-        } elseif ($Command -match '/api/tasks/[^/]+/mark_reviewed') {
-            $HookName = 'after_review'
-        } elseif ($Command -match '/api/tasks/[^/]+/complete') {
-            $HookName = 'before_review'
-        }
-    }
-    'pre' {
-        if ($Command -match '/api/tasks/[^/]+/complete') {
-            $HookName = 'after_doing'
-        }
-    }
-}
+$StrideRoute = Get-StrideRoute -Phase $Phase -CommandText $Command
+$HookName = $StrideRoute.HookName
 
 # Not a Stride API call — exit cleanly
 if (-not $HookName) { exit 0 }
@@ -790,12 +1226,12 @@ function Write-DiffUploadState {
 # the env cache — the confirmed empty-changed_files root cause (G321/D126: the
 # diff was PUT to the previous task). Returns '' for the claim path (whose URL
 # has no id); callers fall back to the env-cache TASK_ID then.
+# (D220) Shares the ONE parser with routing, so an id can never be scraped out of
+# a command that did not actually issue the request — the `echo` that drove a
+# live changed_files PUT against task 999999999 went through this path.
 function Get-TaskIdFromCommand {
     param([string]$CommandText)
-    if ($CommandText -match '/api/tasks/([0-9]+)/(?:complete|mark_reviewed)') {
-        return $Matches[1]
-    }
-    return ''
+    return (Get-StrideRoute -Phase '' -CommandText $CommandText).TaskId
 }
 
 # Fire-and-forget upload of the per-file diff snapshot to the Stride server.
@@ -1404,7 +1840,10 @@ if ($primaryRc -ne 0) {
 # server's grace-window worker still covers goal completion when neither path
 # can detect it. A non-zero section exit is surfaced via the structured JSON
 # shape, never as a non-zero script exit (the primary curl already succeeded).
-if ($Phase -eq 'post' -and ($Command -match '/api/tasks/[^/]+/(complete|mark_reviewed)')) {
+# (D220) Gate on the endpoint the router already resolved, never on the raw
+# command text — a mention of a completion URL is not a completion call.
+if ($Phase -eq 'post' -and
+    ($StrideRoute.Endpoint -ceq 'complete' -or $StrideRoute.Endpoint -ceq 'mark_reviewed')) {
     Invoke-AfterGoalRouting -Payload $responsePayload
 }
 

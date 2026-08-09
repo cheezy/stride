@@ -396,7 +396,7 @@ produces.
 
 ### Branch A: Goal / Large Undecomposed Task
 
-If the task is a **goal**, has **large complexity without child tasks**, or has a **25+ hour estimate**:
+When the resolved row's **Decompose** column says YES (today: goal type, `large` complexity with no child tasks, or a 25+ hour estimate — read the column, not this gloss):
 
 1. **Claude Code:** Dispatch `stride:task-decomposer` agent with the task's title, description, acceptance_criteria, key_files, where_context, and patterns_to_follow
 2. **Other environments:** Manually analyze the task scope, break it into subtasks, and create them via `POST /api/tasks/batch`
@@ -528,7 +528,7 @@ Legacy + structured fields coexist in the same map; the server persists `reviewe
 1. The task's `security_considerations` list is **non-empty** — a placeholder entry such as `"None — no security surface"` does NOT count as a real consideration; follow the non-empty trigger and skip when the list carries no actual surface to assess, AND
 2. The **`stride-security-review` plugin is available** in this session.
 
-If either condition is false, **skip this sub-step entirely and use the task-reviewer's prose `security_considerations` verdict as the sole source — no failure.** On a **review-skipped path** there is no such prose verdict to fall back to — the small 0-1 `key_files` task routed here from "Small tasks (0-1 key_files): Skip review" below reaches this branch with no reviewer at all — and that is equally fine: simply continue with no security verdict recorded. The specialist mitigation check is additive; its absence never blocks completion.
+If either condition is false, **skip this sub-step entirely and use the task-reviewer's prose `security_considerations` verdict as the sole source — no failure.** On a **review-skipped path** there is no such prose verdict to fall back to — the review-skipped task routed here from "When the resolved row's Review column says Skip" below reaches this branch with no reviewer at all — and that is equally fine: simply continue with no security verdict recorded. The specialist mitigation check is additive; its absence never blocks completion.
 
 **Why this sub-step exists.** The task-reviewer already records a `security_considerations` section verdict, but as a generalist. When the `stride-security-review` plugin is installed, this sub-step runs the *specialist* security-reviewer against each of the task's `security_considerations`, folds a per-consideration verdict into the completion payload, and routes any un-addressed consideration through the same gate that already blocks on a failed section — so a real, unmitigated security implication cannot reach Done.
 

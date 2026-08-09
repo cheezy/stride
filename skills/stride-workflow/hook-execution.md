@@ -88,7 +88,7 @@ echo "Goal $GOAL_IDENTIFIER ($GOAL_TITLE) finished"
 
 ### Timeout Source
 
-The timeout for `after_goal` comes from the server-supplied `hook.timeout` field on the hook payload (in milliseconds). The executor MUST honor this value — it must not clamp it down, extend it, or substitute a hard-coded default. The server constrains `hook.timeout` for all blocking hooks to the **60-120s window** (`before_doing` and `before_review` use 60s; `after_doing` uses 120s); `after_goal` is delivered with a value in the same range (typically 60s for notification-style hooks, 120s if the server provisioned a heavier budget).
+The timeout for `after_goal` comes from the server-supplied `hook.timeout` field on the hook payload (in milliseconds). The executor MUST honor this value — it must not clamp it down, extend it, or substitute a hard-coded default. The server sends **600s for every blocking hook**, including `after_goal` (D229). That figure is a hang detector rather than a performance gate: a section's commands belong to whoever wrote the `.stride.md`, and the executor must never kill one for being slow. It is sized above every measured legitimate run — cold `before_doing` 80s, cold `after_doing` 138s (200s+ with coverage), roughly 1.9x those again under load — and is clamped to 890s under the 900s `hooks.json` outer ceiling.
 
 Pseudocode for the wrapper applied to the matched command list:
 

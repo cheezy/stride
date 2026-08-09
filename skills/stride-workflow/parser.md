@@ -8,11 +8,19 @@ The parser recognizes these five hook sections:
 
 | Section | Trigger | Blocking | Timeout |
 |---|---|---|---|
-| `## before_doing` | After `POST /api/tasks/claim` | yes | 60s |
-| `## after_doing` | Before `PATCH /api/tasks/:id/complete` | yes | 120s |
-| `## before_review` | After `PATCH /api/tasks/:id/complete` | yes | 60s |
-| `## after_review` | After `PATCH /api/tasks/:id/mark_reviewed` | no | 60s |
-| `## after_goal` | After the final task in a goal completes | yes | 60s |
+| `## before_doing` | After `POST /api/tasks/claim` | yes | 600s |
+| `## after_doing` | Before `PATCH /api/tasks/:id/complete` | yes | 600s |
+| `## before_review` | After `PATCH /api/tasks/:id/complete` | yes | 600s |
+| `## after_review` | After `PATCH /api/tasks/:id/mark_reviewed` | no | 600s |
+| `## after_goal` | After the final task in a goal completes | yes | 600s |
+
+**These are hang detectors, not performance gates (D229).** A section's commands
+belong to whoever wrote the `.stride.md`, and the executor must never kill one
+for being slow. The figures are sized well above every measured legitimate run —
+a cold `before_doing` at 80s, a cold `after_doing` at 138s (200s+ when it runs
+coverage), and roughly 1.9x those again under concurrent load — so only a
+genuinely stuck command trips them. Budgets are clamped to 890s, under the 900s
+`hooks.json` outer ceiling.
 
 Sections not in this list are ignored — they parse cleanly but never execute, because no lifecycle event sets `$HOOK_NAME` to their name.
 

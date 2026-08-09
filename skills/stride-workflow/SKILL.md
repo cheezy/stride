@@ -733,7 +733,7 @@ gh pr create \
 ```
 ````
 
-`## after_goal` is not coupled to PR creation. Other valid uses include posting to Slack with `curl`, archiving artifacts, kicking off a release pipeline, or running a project-level smoke test. The blocking semantics (60s timeout, non-zero exit keeps the goal In Progress for retry) apply to whatever command you choose.
+`## after_goal` is not coupled to PR creation. Other valid uses include posting to Slack with `curl`, archiving artifacts, kicking off a release pipeline, or running a project-level smoke test. The blocking semantics (600s timeout, non-zero exit keeps the goal In Progress for retry) apply to whatever command you choose.
 
 ### Hook Failure Diagnosis (Claude Code)
 

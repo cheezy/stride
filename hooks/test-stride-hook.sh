@@ -4096,7 +4096,7 @@ if command -v jq > /dev/null 2>&1; then
     RESPONSE_PAYLOAD=""
     resolve_section_budget before_review
   )
-  assert_eq "15d: empty payload falls back to the 60s default" "60" "$BUDGET_DEFAULT_BR"
+  assert_eq "15d: empty payload falls back to the 600s default" "600" "$BUDGET_DEFAULT_BR"
 
   BUDGET_DEFAULT_AD=$(
     # shellcheck disable=SC1090
@@ -4105,7 +4105,7 @@ if command -v jq > /dev/null 2>&1; then
     RESPONSE_PAYLOAD=""
     resolve_section_budget after_doing
   )
-  assert_eq "15d: after_doing default is 120s" "120" "$BUDGET_DEFAULT_AD"
+  assert_eq "15d: after_doing default is 600s (D229: hang detector, not a perf gate)" "600" "$BUDGET_DEFAULT_AD"
 
   BUDGET_ENV_WINS=$(
     # shellcheck disable=SC1090
@@ -4124,7 +4124,7 @@ if command -v jq > /dev/null 2>&1; then
     RESPONSE_PAYLOAD='{"data":{},"hooks":[{"name":"before_review","timeout":999000000}]}'
     resolve_section_budget before_review
   )
-  assert_eq "15d: oversized server value clamps to 290s under the outer ceiling" "290" "$BUDGET_CLAMPED"
+  assert_eq "15d: oversized server value clamps to 890s under the outer ceiling" "890" "$BUDGET_CLAMPED"
 
   BUDGET_NO_JQ=$(
     # shellcheck disable=SC1090
@@ -4133,7 +4133,7 @@ if command -v jq > /dev/null 2>&1; then
     RESPONSE_PAYLOAD='{"data":{},"hooks":[{"name":"before_review","timeout":90000}]}'
     resolve_section_budget before_review
   )
-  assert_eq "15d: no jq degrades to the documented default" "60" "$BUDGET_NO_JQ"
+  assert_eq "15d: no jq degrades to the documented default" "600" "$BUDGET_NO_JQ"
 fi
 
 # 15d2: Server-supplied timeout enforced end-to-end (no env override).

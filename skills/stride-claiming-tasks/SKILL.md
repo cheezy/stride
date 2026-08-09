@@ -161,7 +161,7 @@ Before claiming any task, verify these files exist:
 3. **Review task details** - Read description, acceptance criteria, key files
 4. **Check task completeness** - If key_files is empty OR testing_strategy is missing OR verification_steps is empty, invoke stride-enriching-tasks to enrich the task before proceeding (see Enrichment Check below)
 5. **Read .stride.md before_doing section** - Get the setup command
-6. **Execute before_doing hook AUTOMATICALLY** (blocking, 60s timeout)
+6. **Execute before_doing hook AUTOMATICALLY** (blocking, 600s timeout)
    - Execute each line from `.stride.md` `## before_doing` one at a time via direct Bash tool calls — NO permission prompts
    - Capture: `exit_code`, `output`, `duration_ms`
 7. **If before_doing fails:** FIX ISSUES, do NOT proceed
@@ -218,7 +218,7 @@ Task well-specified? ─NO→ Invoke stride-enriching-tasks
     ↓
 Read .stride.md before_doing section
     ↓
-Execute before_doing (60s timeout, blocking)
+Execute before_doing (600s timeout, blocking)
     ↓
 Success (exit_code=0)? ─NO→ Fix Issues → Retry before_doing
     ↓ YES
@@ -559,7 +559,7 @@ CLAUDE CODE CLAIMING WORKFLOW (automatic hooks):
 OTHER ENVIRONMENTS (manual hooks):
 ├─ 1-6. Same as above ✓
 ├─ 7. Read before_doing hook from .stride.md ✓
-├─ 8. Execute before_doing (60s timeout, blocking) ✓
+├─ 8. Execute before_doing (600s timeout, blocking) ✓
 ├─ 9. Capture exit_code, output, duration_ms ✓
 ├─ 10. Hook succeeds? → Call POST /api/tasks/claim WITH result ✓
 ├─ 11. Hook fails? → Fix issues, retry, never skip ✓

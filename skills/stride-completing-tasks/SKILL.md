@@ -175,12 +175,12 @@ This gate is **not bypassable** by submitting a self-reported skip (`dispatched:
 
 1. **Finish your work** - All implementation complete
 2. **Read .stride.md after_doing section** - Get the validation command
-3. **Execute after_doing hook** (blocking, 120s timeout)
+3. **Execute after_doing hook** (blocking, 600s timeout)
    - Execute each line from `.stride.md` `## after_doing` one at a time via direct Bash tool calls — NO permission prompts
    - Capture: `exit_code`, `output`, `duration_ms`
 4. **If after_doing fails:** FIX ISSUES, do NOT proceed
 5. **Read .stride.md before_review section** - Get the PR/doc command
-6. **Execute before_review hook** (blocking, 60s timeout)
+6. **Execute before_review hook** (blocking, 600s timeout)
    - Execute each line from `.stride.md` `## before_review` one at a time via direct Bash tool calls — NO permission prompts
    - Capture: `exit_code`, `output`, `duration_ms`
 7. **If before_review fails:** FIX ISSUES, do NOT proceed
@@ -211,7 +211,7 @@ Step 5.6 / Phase 3.6: Harden findings into checks (optional, gated)
     ↓
 Read .stride.md after_doing section
     ↓
-Execute after_doing (120s timeout, blocking)
+Execute after_doing (600s timeout, blocking)
     ↓
 Success (exit_code=0)?
     ↓ NO
@@ -224,7 +224,7 @@ Success (exit_code=0)?
     ↓ YES
 Read .stride.md before_review section
     ↓
-Execute before_review (60s timeout, blocking)
+Execute before_review (600s timeout, blocking)
     ↓
 Success (exit_code=0)?
     ↓ NO
@@ -239,7 +239,7 @@ Call PATCH /api/tasks/:id/complete WITH both hook results
     ↓
 needs_review=true? ─YES→ STOP (wait for human review)
     ↓ NO
-Execute after_review (60s timeout, blocking)
+Execute after_review (600s timeout, blocking)
     ↓
 Success? ─NO→ Log warning, task still complete
     ↓ YES
@@ -700,7 +700,7 @@ After the complete endpoint succeeds:
 
 ### If needs_review=false:
 1. Task moves to Done column immediately
-2. Execute after_review hook (60s timeout, blocking)
+2. Execute after_review hook (600s timeout, blocking)
 3. **AUTOMATICALLY invoke stride-claiming-tasks skill to claim next task**
 4. **Continue working WITHOUT prompting the user**
 
@@ -847,9 +847,9 @@ CLAUDE CODE COMPLETION WORKFLOW (automatic hooks):
 
 OTHER ENVIRONMENTS (manual hooks):
 ├─ 1. Work is complete ✓
-├─ 2. Execute after_doing (120s timeout, blocking) ✓
+├─ 2. Execute after_doing (600s timeout, blocking) ✓
 ├─ 3. Hook fails? → FIX, retry, DO NOT proceed ✓
-├─ 4. Execute before_review (60s timeout, blocking) ✓
+├─ 4. Execute before_review (600s timeout, blocking) ✓
 ├─ 5. Hook fails? → FIX, retry, DO NOT proceed ✓
 ├─ 6. Both succeed? → Call PATCH /api/tasks/:id/complete WITH both results ✓
 ├─ 7. needs_review=true? → STOP, wait for human ✓

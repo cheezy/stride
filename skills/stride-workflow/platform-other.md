@@ -45,13 +45,13 @@ Walk through your changes against:
 
 **Execute each hook immediately -- no permission prompts, no confirmation.**
 
-1. **after_doing hook** (blocking, 120s timeout):
+1. **after_doing hook** (blocking, 600s timeout):
    - Read `.stride.md` `## after_doing` section
    - Execute each command line one at a time via Bash
    - Capture `exit_code`, `output`, `duration_ms`
    - If fails: fix issues, re-run until success. Do NOT proceed while failing.
 
-2. **before_review hook** (blocking, 60s timeout):
+2. **before_review hook** (blocking, 600s timeout):
    - Read `.stride.md` `## before_review` section
    - Execute each command line one at a time via Bash
    - Capture `exit_code`, `output`, `duration_ms`

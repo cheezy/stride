@@ -27,6 +27,32 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ### Fixed
 
+- **D229 — a fresh clone could neither claim nor complete, because the budgets killed the developer's own hooks.** Measured on a genuine clone with no `deps/` and no `_build/`: `before_doing` **80s against a 60s budget**, `after_doing` **138s against 120s**. Both blocking sections were killed, so a new contributor, a new machine or CI could not get through a single task. It stayed invisible because every figure anyone had ever taken was warm, on a machine carrying an uncommitted `STRIDE_HOOK_TIMEOUT_OVERRIDE=200`.
+
+  Per-command, cold — the expensive parts are not where anyone assumed:
+
+  | `before_doing` | cold |
+  |---|---|
+  | `mix deps.get` | 4s |
+  | `mix hex.outdated` | 0s |
+  | `mix deps.audit` | **45s** |
+  | `mix hex.audit` | 1s |
+  | `mix ecto.migrate` | **30s** |
+
+  `deps.audit` is expensive because its task lives in `_build/dev`, so it *triggers* the dependency compile; remove it and `ecto.migrate` absorbs the identical cost (measured separately at 82s). One caveat stated rather than buried: `deps.get` was only 4s because this machine has a warm `~/.hex` cache — on a machine that has never built an Elixir project it would be far larger, so these are "fresh clone, experienced machine" figures.
+
+  **The fix is entirely on the budget side. No `.stride.md` hook body was touched.** A developer's hook commands are theirs, and the executor's job is to detect a *hung* command, not to police how long a legitimate quality gate takes. Budgets are now hang detectors:
+
+  - `hooks/hooks.json` — the Bash hook ceiling **300s → 900s** (the Skill gate stays at 10s)
+  - `hooks/stride-hook.sh` — the inner clamp **290s → 890s**, and `default_budget_for_section` now returns **600s for every section** rather than 120s/60s
+  - `lib/kanban/hooks.ex` — all five server-advertised timeouts **→ 600_000ms**
+
+  600s is roughly 3x the worst legitimate run on record (170s, `after_doing` under concurrent load per D230) and ~4x the cold measurements above, so a genuinely stuck command still trips it while nothing real does. The documented contract in `parser.md`, `hook-execution.md` and the four skill files now states 600s throughout; the older 60/120s figures in `docs/runner-path-end-to-end-w2066.md` are left as the dated record they are.
+
+  **Found while verifying, filed as D235:** the hook suite inherits `STRIDE_HOOK_TIMEOUT_OVERRIDE` and never neutralises it, so on this machine it reported **507 passed / 9 failed** while the identical tree gives **516 passed / 0 failed** under `env -u`. Every phantom failure sat on the budget assertions — the very tests that should have caught D223, D228, D229 and D230 were the ones nobody could trust.
+
+  **Prompt text, plugin config and server config; no `skills_version` bump.** Note this supersedes D223's approach: that task changed the developer's `after_doing` body to fit the budget, which was the wrong lever and not mine to pull.
+
 - **D224 — the instruction to record a real `after_doing` duration described something that cannot happen.** Every completion persisted `after_doing` and `before_review` as `duration_ms: 0`, and W1455's note blamed the agent for not copying the measured figure "when you can see it". Exploration found the figure is never visible on a successful run: `stride-hook.sh:1705-1718` measures a real `duration_ms` and writes it to bare **stdout**, then exits 0 — and Claude Code's PreToolUse contract routes exit-0 stdout to the transcript, not to the model. Only exit 2 feeds output back, and the script never populates `hookSpecificOutput.additionalContext`, the one field that would change that.
 
   This repo had already established the same fact from the other direction: *"A hook that **passes** is invisible to the subagent… Do not read silence as a pass"* (`hook-execution.md:244-256`). Nobody connected it to the telemetry.

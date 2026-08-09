@@ -1250,9 +1250,13 @@ self_heal_changed_files_upload() {
 
 # Documented per-section budget in seconds.
 default_budget_for_section() {
+  # (D229) These are HANG DETECTORS, not performance gates. A developer's
+  # .stride.md commands are theirs; the executor must never kill one for being
+  # slow. Sized well above every measured legitimate run — cold before_doing
+  # 80s, cold after_doing 138s (200s+ with --cover), and ~1.9x that again under
+  # concurrent load — so only a genuinely stuck command trips them.
   case "$1" in
-    after_doing) printf '120' ;;
-    *)           printf '60'  ;;
+    *) printf '600' ;;
   esac
 }
 
@@ -1276,7 +1280,7 @@ extract_hook_timeout_ms() {
 #   STRIDE_HOOK_TIMEOUT_OVERRIDE (integer seconds; test/ops escape hatch)
 #   > server hook-entry timeout (ms, rounded up to whole seconds)
 #   > documented default.
-# Clamped to 290s so no inner budget can reach the 300s hooks.json outer
+# Clamped to 890s so no inner budget can reach the 900s hooks.json outer
 # ceiling (dormant for spec-compliant 60-120s server values). after_doing
 # runs at PRE phase — no tool_response exists yet, so it always resolves
 # to the documented 120s default.
@@ -1291,7 +1295,7 @@ resolve_section_budget() {
     fi
   fi
   [ -z "$_budget" ] && _budget=$(default_budget_for_section "$_section")
-  [ "$_budget" -gt 290 ] && _budget=290
+  [ "$_budget" -gt 890 ] && _budget=890
   printf '%s' "$_budget"
 }
 

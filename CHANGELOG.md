@@ -39,6 +39,18 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
   | `mix hex.audit` | 1s |
   | `mix ecto.migrate` | **30s** |
 
+  And `after_doing`, per command, on a clone where `before_doing`'s work had already run (deps fetched, `:dev` compiled) — which is exactly the state `after_doing` finds:
+
+  | `after_doing` | cold |
+  |---|---|
+  | `mix test` | **136s** |
+  | `mix format --check-formatted` | 1s |
+  | `mix credo --strict` | 10s |
+  | `mix sobelow` | 1s |
+  | **section** | **148s** against the old 120s budget |
+
+  That 136s reconciles with the 138s single-command reading taken earlier under the same conditions. It does **not** reconcile with the 172s cold `mix test` recorded in `.stride_dev.md` — that figure came from a different baseline (the main working repo with only `_build/test` wiped, `deps/` and `:dev` warm, on a machine doing other work). The spread is real and is not explained by anything measured here; treat 136–172s as the honest cold band for that command rather than picking one.
+
   `deps.audit` is expensive because its task lives in `_build/dev`, so it *triggers* the dependency compile; remove it and `ecto.migrate` absorbs the identical cost (measured separately at 82s). One caveat stated rather than buried: `deps.get` was only 4s because this machine has a warm `~/.hex` cache — on a machine that has never built an Elixir project it would be far larger, so these are "fresh clone, experienced machine" figures.
 
   **The fix is entirely on the budget side. No `.stride.md` hook body was touched.** A developer's hook commands are theirs, and the executor's job is to detect a *hung* command, not to police how long a legitimate quality gate takes. Budgets are now hang detectors:
@@ -47,7 +59,17 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
   - `hooks/stride-hook.sh` — the inner clamp **290s → 890s**, and `default_budget_for_section` now returns **600s for every section** rather than 120s/60s
   - `lib/kanban/hooks.ex` — all five server-advertised timeouts **→ 600_000ms**
 
-  600s is roughly 3x the worst legitimate run on record (170s, `after_doing` under concurrent load per D230) and ~4x the cold measurements above, so a genuinely stuck command still trips it while nothing real does. The documented contract in `parser.md`, `hook-execution.md` and the four skill files now states 600s throughout; the older 60/120s figures in `docs/runner-path-end-to-end-w2066.md` are left as the dated record they are.
+  - `hooks/stride-hook.ps1` — **the PowerShell mirror, same three changes.** `stride-hook.sh` delegates to it whenever Windows is detected, and `after_doing` resolves at PRE phase where no server value arrives, so leaving it would have left D229 entirely unfixed on Windows while every doc claimed otherwise. Caught in review; this is the mirror-drift failure this repo has hit before.
+
+  600s is roughly 3x the worst legitimate run on record (170s, `after_doing` under concurrent load per D230) and ~4x the cold measurements above, so a genuinely stuck command still trips it while nothing real does.
+
+  **The cost, stated rather than implied.** A genuinely wedged command now blocks for 600s instead of 60s, and the harness holds a session for 900s instead of 300s — time-to-diagnose on the failure path gets 10x and 3x worse respectively. That is the deliberate trade: the budget's job is to catch a hang eventually, not to catch a slow command quickly, and killing legitimate work was costing far more than a slow hang detection does.
+
+  **Bounding the sizing honestly.** The multiplier above is computed against measurements taken on a machine with a warm `~/.hex` cache, which the same paragraph notes is not worst-case. A true first-build machine — one that has never fetched a hex package — is outside the verified envelope, and nothing here bounds it. 600s is sized for the fresh-clone-experienced-machine case; if a first-build machine turns out to exceed it, that is a measurement someone should take rather than a number to guess at now.
+
+  **On shipping this to every plugin user.** `.stride_dev.md` previously recorded the counter-argument — that raising the shared default "ships to every plugin user rather than fixing this repo" — and this change reverses that judgement deliberately rather than by oversight. Three things changed since: the developer's hook bodies are now off-limits, which removes every repo-local lever; `after_doing` resolves at PRE phase, so only the local default ever reaches it; and a user without `jq` falls through to the default for all five sections, so they hit the identical cold breach. A per-repo fix was not available. The documented contract in `parser.md`, `hook-execution.md` and the four skill files now states 600s throughout; the older 60/120s figures in `docs/runner-path-end-to-end-w2066.md` are left as the dated record they are.
+
+  **The budget assertions are now hermetic.** This change adds four assertions expecting 600/600/890/600, and they could not have passed in the author's own environment: the suite inherits `STRIDE_HOOK_TIMEOUT_OVERRIDE` and `resolve_section_budget` gives it top precedence. Six budget subshells and the one end-to-end invocation now strip it, leaving the case that deliberately tests the override winning intact. The suite reports **516 passed / 0 failed both with the override set and with it unset** — previously 507/9 versus 516/0.
 
   **Found while verifying, filed as D235:** the hook suite inherits `STRIDE_HOOK_TIMEOUT_OVERRIDE` and never neutralises it, so on this machine it reported **507 passed / 9 failed** while the identical tree gives **516 passed / 0 failed** under `env -u`. Every phantom failure sat on the budget assertions — the very tests that should have caught D223, D228, D229 and D230 were the ones nobody could trust.
 

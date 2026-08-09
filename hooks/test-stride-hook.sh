@@ -4074,15 +4074,19 @@ if command -v jq > /dev/null 2>&1; then
   BUDGET_SRV=$(
     # shellcheck disable=SC1090
     source "$HOOK_SCRIPT" 2>/dev/null || true
+    unset STRIDE_HOOK_TIMEOUT_OVERRIDE   # (D229/D235) assert the committed default
     HAS_JQ=true
     RESPONSE_PAYLOAD='{"data":{},"hooks":[{"name":"before_review","timeout":90000}]}'
     resolve_section_budget before_review
   )
-  assert_eq "15d: server 90000ms overrides the 60s default" "90" "$BUDGET_SRV"
+  assert_eq "15d: server 90000ms overrides the 600s default" "90" "$BUDGET_SRV"
 
   BUDGET_SINGULAR=$(
     # shellcheck disable=SC1090
     source "$HOOK_SCRIPT" 2>/dev/null || true
+    unset STRIDE_HOOK_TIMEOUT_OVERRIDE   # (D229/D235) the suite must assert the
+                                         # committed default, not whatever the
+                                         # developer's environment happens to set
     HAS_JQ=true
     RESPONSE_PAYLOAD='{"data":{},"hook":{"name":"before_doing","timeout":30000}}'
     resolve_section_budget before_doing
@@ -4092,6 +4096,9 @@ if command -v jq > /dev/null 2>&1; then
   BUDGET_DEFAULT_BR=$(
     # shellcheck disable=SC1090
     source "$HOOK_SCRIPT" 2>/dev/null || true
+    unset STRIDE_HOOK_TIMEOUT_OVERRIDE   # (D229/D235) the suite must assert the
+                                         # committed default, not whatever the
+                                         # developer's environment happens to set
     HAS_JQ=true
     RESPONSE_PAYLOAD=""
     resolve_section_budget before_review
@@ -4101,6 +4108,9 @@ if command -v jq > /dev/null 2>&1; then
   BUDGET_DEFAULT_AD=$(
     # shellcheck disable=SC1090
     source "$HOOK_SCRIPT" 2>/dev/null || true
+    unset STRIDE_HOOK_TIMEOUT_OVERRIDE   # (D229/D235) the suite must assert the
+                                         # committed default, not whatever the
+                                         # developer's environment happens to set
     HAS_JQ=true
     RESPONSE_PAYLOAD=""
     resolve_section_budget after_doing
@@ -4120,6 +4130,9 @@ if command -v jq > /dev/null 2>&1; then
   BUDGET_CLAMPED=$(
     # shellcheck disable=SC1090
     source "$HOOK_SCRIPT" 2>/dev/null || true
+    unset STRIDE_HOOK_TIMEOUT_OVERRIDE   # (D229/D235) the suite must assert the
+                                         # committed default, not whatever the
+                                         # developer's environment happens to set
     HAS_JQ=true
     RESPONSE_PAYLOAD='{"data":{},"hooks":[{"name":"before_review","timeout":999000000}]}'
     resolve_section_budget before_review
@@ -4129,6 +4142,9 @@ if command -v jq > /dev/null 2>&1; then
   BUDGET_NO_JQ=$(
     # shellcheck disable=SC1090
     source "$HOOK_SCRIPT" 2>/dev/null || true
+    unset STRIDE_HOOK_TIMEOUT_OVERRIDE   # (D229/D235) the suite must assert the
+                                         # committed default, not whatever the
+                                         # developer's environment happens to set
     HAS_JQ=false
     RESPONSE_PAYLOAD='{"data":{},"hooks":[{"name":"before_review","timeout":90000}]}'
     resolve_section_budget before_review
@@ -4151,7 +4167,7 @@ STRIDE
     '{tool_input: {command: "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete"}, tool_response: {stdout: $inner, stderr: "", interrupted: false}}')
   SRV_STDERR_FILE=$(mktemp)
   SRV_START=$(date +%s)
-  OUTPUT=$(echo "$SRV_JSON" | CLAUDE_PROJECT_DIR="$SRV_PROJ" bash "$HOOK_SCRIPT" post 2>"$SRV_STDERR_FILE")
+  OUTPUT=$(echo "$SRV_JSON" | env -u STRIDE_HOOK_TIMEOUT_OVERRIDE CLAUDE_PROJECT_DIR="$SRV_PROJ" bash "$HOOK_SCRIPT" post 2>"$SRV_STDERR_FILE")
   EXIT_CODE=$?
   SRV_WALL=$(( $(date +%s) - SRV_START ))
   SRV_STDERR=$(cat "$SRV_STDERR_FILE")

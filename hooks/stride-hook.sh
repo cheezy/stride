@@ -1241,12 +1241,12 @@ self_heal_changed_files_upload() {
 }
 
 # --- Per-hook command timeouts (W1454) ---
-# parser.md's budget table is the contract: before_doing 60s, after_doing
-# 120s, before_review 60s, after_review 60s, after_goal 60s. The budget is
+# parser.md's budget table is the contract: 600s for every section (D229 —
+# a hang detector, not a performance gate). The budget is
 # per SECTION (wall clock across all its commands), not per command — each
 # command is wrapped with the REMAINING budget so a section can never exceed
 # its table value regardless of command count, keeping every inner budget
-# under the 300s hooks.json outer ceiling.
+# under the 900s hooks.json outer ceiling.
 
 # Documented per-section budget in seconds.
 default_budget_for_section() {
@@ -1281,9 +1281,9 @@ extract_hook_timeout_ms() {
 #   > server hook-entry timeout (ms, rounded up to whole seconds)
 #   > documented default.
 # Clamped to 890s so no inner budget can reach the 900s hooks.json outer
-# ceiling (dormant for spec-compliant 60-120s server values). after_doing
+# ceiling (dormant for spec-compliant 600s server values). after_doing
 # runs at PRE phase — no tool_response exists yet, so it always resolves
-# to the documented 120s default.
+# to the documented 600s default.
 resolve_section_budget() {
   local _section="$1" _budget="" _ms=""
   if [[ "${STRIDE_HOOK_TIMEOUT_OVERRIDE:-}" =~ ^[0-9]+$ ]] && [ "${STRIDE_HOOK_TIMEOUT_OVERRIDE}" -gt 0 ]; then

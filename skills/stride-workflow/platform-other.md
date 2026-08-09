@@ -75,7 +75,7 @@ OTHER ENVIRONMENTS (Cursor, Windsurf, Continue):
 │     └─ Otherwise → Self-review against acceptance criteria + pitfalls
 ├─ 5.5 Manual & Exploratory Testing (optional, gated):
 │     └─ No Agent tool → Always fall back (note manual tests as human responsibility)
-├─ 6. Hooks: Execute after_doing (120s) + before_review (60s) manually
+├─ 6. Hooks: Execute after_doing (600s) + before_review (600s) manually
 ├─ 7. Complete: PATCH /api/tasks/:id/complete with ALL fields + hook results
 └─ 8. Loop: needs_review=false → Step 1 | needs_review=true → STOP
 ```

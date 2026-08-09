@@ -958,11 +958,14 @@ function Get-HookTimeoutMsFromPayload {
 # (W1454) Resolve the section budget in seconds. Precedence:
 #   STRIDE_HOOK_TIMEOUT_OVERRIDE (integer seconds; test/ops escape hatch)
 #   > server hook-entry timeout (ms, rounded up to whole seconds)
-#   > documented default (before_doing 60, after_doing 120, before_review 60,
-#     after_review 60, after_goal 60 — parser.md's table).
-# Clamped to 290s so no inner budget can reach the 300s hooks.json outer
+#   > documented default (600s for every section — parser.md's table).
+# (D229) These are HANG DETECTORS, not performance gates. A developer's
+# .stride.md commands are theirs; the executor must never kill one for being
+# slow. Sized well above every measured legitimate run — cold before_doing 80s,
+# cold after_doing 138s (200s+ with coverage), ~1.9x that again under load.
+# Clamped to 890s so no inner budget can reach the 900s hooks.json outer
 # ceiling. after_doing runs at PRE phase — no tool_response exists yet, so it
-# always resolves to the documented 120s default.
+# always resolves to the documented 600s default.
 function Resolve-SectionBudget {
     param([string]$Section)
 
@@ -975,9 +978,9 @@ function Resolve-SectionBudget {
         if ($ms) { $budget = [long][math]::Ceiling($ms / 1000.0) }
     }
     if ($budget -le 0) {
-        $budget = if ($Section -eq 'after_doing') { 120 } else { 60 }
+        $budget = 600
     }
-    if ($budget -gt 290) { $budget = 290 }
+    if ($budget -gt 890) { $budget = 890 }
     return [int]$budget
 }
 

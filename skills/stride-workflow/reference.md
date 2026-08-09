@@ -122,7 +122,7 @@ STEP 5.6: Harden findings into checks (Optional, Gated)
   v
 STEP 6: Execute Hooks
   [Claude Code] Automatic -- just make the curl call in Step 7
-  [Other]       Execute after_doing (120s), then before_review (60s)
+  [Other]       Execute after_doing (600s), then before_review (600s)
   Hook fails?   --> Fix, re-run, do NOT proceed
   |
   v

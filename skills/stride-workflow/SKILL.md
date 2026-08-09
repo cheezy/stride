@@ -659,11 +659,11 @@ The five recognized `.stride.md` hook sections, in lifecycle order:
 
 | Hook | Fires | Blocking | Timeout | Purpose |
 |---|---|:---:|---|---|
-| `## before_doing` | After `POST /api/tasks/claim` succeeds | yes | 60s | Pull latest, install deps, ensure clean working tree |
-| `## after_doing` | Before `PATCH /api/tasks/:id/complete` runs | yes | 120s | Run tests, lint, build — quality gate before completion |
-| `## before_review` | After `PATCH /api/tasks/:id/complete` succeeds | yes | 60s | Generate PR, post artifacts, notify reviewers |
-| `## after_review` | After `PATCH /api/tasks/:id/mark_reviewed` succeeds | yes | 60s | Merge, deploy, cleanup |
-| `## after_goal` | After the parent goal's final child task completes | yes | 60s | Project-level rollups, goal-completion notifications, archival |
+| `## before_doing` | After `POST /api/tasks/claim` succeeds | yes | 600s | Pull latest, install deps, ensure clean working tree |
+| `## after_doing` | Before `PATCH /api/tasks/:id/complete` runs | yes | 600s | Run tests, lint, build — quality gate before completion |
+| `## before_review` | After `PATCH /api/tasks/:id/complete` succeeds | yes | 600s | Generate PR, post artifacts, notify reviewers |
+| `## after_review` | After `PATCH /api/tasks/:id/mark_reviewed` succeeds | yes | 600s | Merge, deploy, cleanup |
+| `## after_goal` | After the parent goal's final child task completes | yes | 600s | Project-level rollups, goal-completion notifications, archival |
 
 Blocking hooks abort the action if they fail. A missing `## after_goal` section parses as a clean no-op (`exit_code: 0`, empty output) — older `.stride.md` files that predate the section keep working without modification.
 

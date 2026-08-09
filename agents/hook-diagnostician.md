@@ -293,7 +293,7 @@ Suggested fix: Check which command is slow. Common causes:
 
 ## after_goal Failure Guidance
 
-`after_goal` is the fifth blocking hook (60s budget). It fires after the parent goal's final child task completes, and its failure semantics differ from the four task-scoped hooks:
+`after_goal` is the fifth blocking hook (600s budget). It fires after the parent goal's final child task completes, and its failure semantics differ from the four task-scoped hooks:
 
 - **A failed after_goal does NOT roll back or block the child task** — the task that triggered it is already complete. The failure is recorded on the parent goal's `after_goal_attempts` audit log and the **goal stays In Progress** instead of transitioning to Done.
 - **The failure is re-triggerable.** After the underlying issue is fixed, the agent re-runs the `## after_goal` section and POSTs the fresh result to `PATCH /api/tasks/:goal_id/after_goal`. A `2xx` with `exit_code: 0` then flips the goal to Done.

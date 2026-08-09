@@ -37,8 +37,8 @@ triggers):
 
 | Event | Matcher | Script | Timeout |
 |-------|---------|--------|---------|
-| `PreToolUse` | `Bash` | `stride-hook.sh pre` | 300s |
-| `PostToolUse` | `Bash` | `stride-hook.sh post` | 300s |
+| `PreToolUse` | `Bash` | `stride-hook.sh pre` | 900s |
+| `PostToolUse` | `Bash` | `stride-hook.sh post` | 900s |
 | `PreToolUse` | `Skill` | `stride-skill-gate.sh` | 10s |
 
 ### Lifecycle dispatch

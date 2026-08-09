@@ -12,9 +12,17 @@ run: `b5737c98`; after: `2cf4dab1`. Hook mode during the run: **`stride_dev`**
 The runner path carries a real task from claim to Done with a complete
 completion payload, a populated diff and a fast-forward branch merge; the
 `after_doing` gate was observed **blocking** a completion, not merely passing
-one; the documented `hook_blocked` resume path was exercised and works — and
-`after_goal` under dispatcher mode and a reviewer `changes_requested` round
-remain **unexercised** and are named as gaps below.
+one — though by an unplanned timeout rather than by the fault this run planted;
+and the documented `hook_blocked` resume path was exercised and works.
+
+The run's most consequential result was not one it set out to check: the
+`after_doing` section **exceeds its own default budget** and is survivable only
+because of an uncommitted per-machine override, which means a fresh clone cannot
+complete a task at all (finding 1, **D223**).
+
+`after_goal` under dispatcher mode, a reviewer `changes_requested` round *inside
+a runner*, and a `needs_review=true` stop all remain **unexercised** and are
+named as gaps below.
 
 ## Why this document exists
 
@@ -215,55 +223,69 @@ is that these did *not* change.
 | 2 | **Server holds no completion** | `completed_at=null`, `workflow_steps=0`, `reviewer_result=null`, col 127 | `completed_at=null`, `completed_by_id=null`, **`workflow_steps=0`**, **`reviewer_result=null`**, **col 128 / `in_progress`** | **The load-bearing reading.** Not "an error appeared" — *no completion exists on the server* |
 | 3 | Git: `before_review` never ran | branch absent, `main=30aa57c4` | branch `W2073` **still present**, `main` **still `30aa57c4`**, 0 commits, tree dirty with 2 modified files | The commit (command 5/5) was never reached and nothing merged |
 
-**Attribution, stated honestly.** The block had **two independent causes**, not
-only the probe. `mix test --cover` also **exceeded the `after_doing` budget**.
-AC2 is satisfied either way — both are genuine `after_doing` failures and the
-completion provably did not happen — but the block is not cleanly attributable
-to the injected fault alone. That timeout is a real finding in its own right and
-is carried into [Recommendations](#recommendations).
-
-**The budget, measured rather than assumed.** This paragraph has now been wrong
-twice, in the same way both times, and both errors were caught in review rather
-than by the run. They are recorded rather than quietly amended, because the
-failure mode is the subject of this document: *a plausible number compared
-against the wrong denominator.*
-
-- **Round 1** claimed a **200s** budget with ~30s of headroom, taken from the
-  runner's own record. No 200s budget exists anywhere. It conflated
-  runner-reported *phase wall-clock* with *hook execution time*.
-- **Round 2** claimed **119s against 120s → one second of headroom**. The 120s
-  is real, but it is not `mix test --cover`'s budget. It conflated *one
-  command's duration* with *the whole section's shared budget*.
+**Attribution — resolved from the hook's own message, after three wrong
+attempts.** Earlier drafts claimed the block "had two independent causes". That
+is mechanically impossible: `run_with_budget` wraps command 1/5 in
+`timeout -k 5 <budget>`, so exactly one of two things happens — the command
+completes and returns `mix`'s exit code (2, the probe's failure), or it is killed
+and returns 124, in which case the probe's failure is *never reached*. The two
+are exclusive, and the discriminating observable was textual and available the
+whole time (`stride-hook.sh:1665-1672` emits one of two distinct strings).
 
 | Observable | Reading |
 |---|---|
-| Configured budget, server side | **120 000 ms** — `lib/kanban/hooks.ex:17`, `"after_doing" => %{blocking: true, timeout: 120_000}` |
-| Configured budget, hook side | **120 s** — `stride/hooks/stride-hook.sh:1254`; clamped to 290s at `:1294`. **No 200s budget exists anywhere** |
-| **Budget scope** | **Per SECTION, not per command** — `stride-hook.sh:1246-1248`: "The budget is per SECTION (wall clock across all its commands), not per command." Each command is wrapped with the **remaining** budget (`:1578-1603`), and a command that starts with nothing left is failed unrun with `120s section budget exhausted before this command started` (`:1587-1593`) |
-| `mix test --cover`, warm build, timed standalone | **119 s**, exit 0 — **not comparable to the section budget**, since four more commands share it |
-| Did the full section ever fit? | **Yes.** The commit is command **5/5**, and both green runs produced it — `30aa57c4` and `2cf4dab1`, carrying `after_doing`'s exact subject template. All five commands completed inside 120s, so in those runs the test command took materially less than the standalone 119s |
+| The hook's own stderr, red run | **`Stride after_doing hook command 1/5 timed out after 200s budget`** — the `TIMED_OUT=true` branch |
 
-**What is actually established.** The budget is 120s for the whole section. A
-standalone warm `mix test --cover` was measured at 119s. Both green runs fit all
-five commands inside the budget, so their test runs were faster than that
-standalone figure. The red run exhausted the budget at command 1/5.
+**So the proximate cause was the timeout, and the injected probe was never
+reached.** The runner learned of the probe separately, by investigating after the
+block — which is why its record named both. AC2 is unaffected: the gate failed,
+it blocked, and no completion exists on the server. But the *designed* experiment
+did not fire. The probe was verified to fail the suite in pre-flight (`exit=2`,
+1 failure in 7456) and would have blocked the completion had command 1/5
+returned; it did not get the chance.
 
-**What is not established, and is left open rather than guessed at.** Why the
-standalone measurement (119s) so far exceeds what the same command must have
-taken inside the passing runs is **not explained by anything measured here**.
-Build warmth is the obvious candidate — the attempt-2 runner reported
-pre-warming the test build — but no timing was captured inside the hook to
-confirm it, so the true in-hook duration and the real margin are unknown. The
-fragility is real and is arguably *understated* by "one second of headroom": a
-command that can take ~119s standalone shares a 120s budget with four others,
-and it exhausted that budget in one of three runs. But the margin cannot be
-quantified from these runs, and D223 asks for it to be measured rather than
-inferred.
+**The budget, and three wrong answers about it.** This section has now been wrong
+three times, and every error was caught in review rather than by the run. They
+are kept on the page because the failure mode *is* this document's subject: **a
+plausible number compared against the wrong denominator.**
 
-**The transferable lesson**, which is why both errors are kept on the page:
-runner-reported `phase_ms` is phase wall-clock, not hook execution time; and a
-standalone command timing is not a reading against a section budget. Neither
-comparison is valid, and both produce numbers that look like measurements.
+- **Round 1** — "200s budget, ~30s headroom", taken from the runner's record.
+  Rejected as unverified.
+- **Round 2** — "119s against 120s, one second of headroom". Wrong: 120s is the
+  *default*, and it is a **section** budget, not one command's.
+- **Round 3** — "120s section budget, margin unknown". Still wrong, because
+  nobody checked for an override. Both the author and the reviewer asserted "no
+  200s budget exists anywhere" after reading only the default path.
+
+| Observable | Reading |
+|---|---|
+| Default budget, server side | **120 000 ms** — `lib/kanban/hooks.ex:17` |
+| Default budget, hook side | **120 s** — `stride/hooks/stride-hook.sh:1254`; clamped to 290s at `:1294` |
+| **Effective budget here** | **200 s** — `STRIDE_HOOK_TIMEOUT_OVERRIDE=200` in `.claude/settings.local.json:163`, which `resolve_section_budget` gives precedence over both the server value and the default (`stride-hook.sh:1285-1286`). Confirmed reaching the hook: it emitted `200s budget` in its own failure message |
+| **Budget scope** | **Per SECTION, not per command** — `stride-hook.sh:1245-1247`: "The budget is per SECTION (wall clock across all its commands), not per command." Each command is wrapped with the **remaining** budget (`:1578-1603`); a command starting with none left is failed unrun (`:1587-1593`) |
+| Green-run section duration | **~169 s** (`phase_ms.after_doing`, W2072) — fits inside 200s, corroborated by the command-5/5 commit existing |
+| `mix test --cover`, warm, standalone | **119 s**, exit 0 |
+| Red-run outcome | **Timed out at 200s**, command 1/5, exit 124 |
+
+**What is established.** The effective budget here is 200s because of a local
+override; the default is 120s. The section runs ~169s. It fit twice and timed
+out once.
+
+**The finding this reframing exposes, which none of the earlier versions saw.**
+The section takes **~169s against a 120s default**. This repo completes tasks
+*only* because a local `STRIDE_HOOK_TIMEOUT_OVERRIDE=200` is set in a
+`settings.local.json` — a file that is per-machine and not shared. On any
+machine without that override, `after_doing` would exceed its budget on every
+task and no completion could ever succeed. That is a substantially bigger problem
+than the "narrow headroom" all three earlier drafts described, and it was hidden
+precisely because the override made the local symptom mild.
+
+**The transferable lesson**, and why every wrong version is kept above:
+runner-reported `phase_ms` is not hook execution time; a single command's timing
+is not a reading against a section budget; and a configured default is not an
+effective value until you have checked for an override. Each error produced a
+number that looked like a measurement. The only one that settled anything was the
+hook's own emitted string.
 
 **The runner did not remove the instrument.** The known hazard for this design is
 that a runner told to act on a hook failure investigates, finds an unrelated
@@ -341,18 +363,17 @@ a reconstruction.
 
 Four, surfaced by the runs rather than sought:
 
-1. **`after_doing`'s 120s section budget is shared across five commands, and one
-   of them can take ~119s standalone.** The budget covers `mix test --cover`,
-   `mix format --check-formatted`, `mix credo --strict`, `mix sobelow` and the
-   commit *together*; a standalone warm `mix test --cover` was measured at 119s;
-   and the budget was exhausted at command 1/5 during the red run, blocking the
-   completion. Both green runs did fit all five commands inside it, so the
-   in-hook test duration is lower than the standalone figure — by an unmeasured
-   amount. The block is indistinguishable from a real test failure, so every
-   occurrence costs a diagnosis. **The margin is not quantified here**, and the
-   quantification is part of what D223 asks for. This finding's numbers were
-   wrong twice before this statement; see
-   [the budget](#the-gate-in-its-failing-direction) for both errors.
+1. **The `after_doing` section exceeds its own default budget, and only a local
+   per-machine override hides it.** The section runs **~169s**; the default
+   budget is **120s**; this machine sets `STRIDE_HOOK_TIMEOUT_OVERRIDE=200` in
+   `.claude/settings.local.json`, which is not shared and not committed. On any
+   machine without that override, `after_doing` would exceed its budget on every
+   task and **no completion could succeed at all**. Even with it, the margin is
+   ~31s and the section timed out once in three runs. A timeout is also
+   indistinguishable from a real test failure to anyone reading the result, so
+   every occurrence costs a diagnosis. This finding's numbers were wrong three
+   times before this statement; see
+   [the budget](#the-gate-in-its-failing-direction) for all three.
 2. **`stride-workflow` SKILL.md disagrees with itself on the planner.** The
    Step 3 matrix row `small, 2+ key_files` says Plan = Skip; Branch C's second
    bullet dispatches Plan at 3+ acceptance-criteria lines. Both tasks matched
@@ -393,10 +414,13 @@ work it inherited.
 6. The red run blocked on `after_doing` command **1/5**. The other four
    commands' blocking is inferred from `stride-hook.sh` stopping at the first
    non-zero (test 5h), not observed live.
-7. **The red block is not cleanly attributable to the injected fault.** The
-   budget exhaustion was an independent, unplanned second cause. Whether it
-   would have blocked attempt 1 on its own is **not** established — see the
-   budget table under
+7. **The designed experiment did not fire.** The block's proximate cause was the
+   200s timeout, not the injected probe — command 1/5 was killed at the budget
+   and never returned the probe's failure. AC2 still holds on its own observable
+   (no completion exists on the server), but the demonstration was produced by
+   an unplanned timeout rather than by the fault this run planted. The probe was
+   verified red in pre-flight and would have blocked the completion; it did not
+   get the chance. See
    [the gate section](#the-gate-in-its-failing-direction).
 8. `changed_files` was populated (2 files, real diffs, `http_code=200`) on
    attempt 1 **even though that attempt never completed** — the diff capture is
@@ -417,14 +441,21 @@ work it inherited.
     value shown — a weaker standard than this document demands of its other
     negatives. The returned records' `task_identifier` and phase telemetry
     corroborate it, but it is not durably evidenced the way AC2's observable 2 is.
-13. **This document's budget figures were wrong twice**, in the same way both
-    times, and both errors were caught in review rather than by the run — first
-    a non-existent 200s budget taken from a runner's record, then a real 120s
-    budget compared against one command's standalone timing when it is shared
-    across five. Recorded because a verification document that silently fixed
-    its own numbers would be asking for more trust than it earned — and because
-    the error class is the document's own subject: a plausible number compared
-    against the wrong denominator.
+13. **This document's budget figures were wrong three times**, and every error
+    was caught in review rather than by the run — an unverified 200s taken from
+    a runner's record; then 120s compared against one command's standalone
+    timing when it is a five-command section budget; then 120s again, by an
+    author *and* a reviewer who both asserted "no 200s budget exists" after
+    reading only the default path and neither checking for an override. The
+    first answer turned out to be right for the wrong reason. Recorded because a
+    verification document that silently fixed its own numbers would be asking
+    for more trust than it earned — and because the error class is this
+    document's own subject: a plausible number compared against the wrong
+    denominator, and a configured default mistaken for an effective value.
+14. **The verification ran with a non-default hook budget.** Every reading here
+    was taken with `STRIDE_HOOK_TIMEOUT_OVERRIDE=200` in effect. A run on a
+    machine without that override would behave differently — and per finding 1,
+    would not complete at all.
 
 ## Security
 
@@ -516,13 +547,16 @@ Ordered by return. Findings 1–4 and the moduledoc error were filed as defects
    (finding 3). This is the only finding whose failure mode is a *wrong verdict
    reaching the Review queue* rather than a missing number. A `failed` section
    with an empty `issues[]` should be impossible to emit.
-3. **Get `after_doing` off its budget ceiling** — **D223** (finding 1). The 120s
-   is a *section* budget shared by five commands, one of which takes ~119s
-   standalone, and it was exhausted at command 1/5 in one of three runs. Split
-   coverage out of the blocking gate, or raise the budget — but **measure the
-   section first**, because this document could not quantify the real margin and
-   twice got the arithmetic wrong trying. D223's premise has been corrected
-   twice and now asks for that measurement explicitly.
+3. **Get the `after_doing` section under its *default* budget** — **D223**
+   (finding 1). This is now the most urgent of the five, and its severity was
+   invisible until the override was found: the section runs ~169s against a
+   120s default, so the repo is only completable on machines carrying an
+   uncommitted `settings.local.json` override. Either bring the section under
+   120s (split coverage out of the blocking gate) or raise the *shared,
+   committed* budget so the override is not load-bearing — and **measure the
+   section per-command first**, because this document got the arithmetic wrong
+   three times before finding the override. D223's premise has been corrected
+   three times and now asks for that measurement explicitly.
 4. **Copy the real `after_doing` duration** into the completion payload per
    W1455, and reconstruct `phase_ms` on the resume path — **D224** (finding 4
    and the resume-path omission).

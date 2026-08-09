@@ -19,7 +19,7 @@ Read this whenever Platform Detection resolved to **Other Environments** — you
 4. If hook fails (non-zero exit): fix the issue, re-run -- do NOT proceed
 5. Call `POST /api/tasks/claim` with the captured `before_doing_result`
 
-## Step 3: Explore the Codebase (Decision Matrix) — Branch C only (medium+, or 2+ key_files)
+## Step 3: Explore the Codebase (Decision Matrix) — Branch C only (any row whose Explore column is not Skip)
 
 #### Other Environments: Manual Exploration
 

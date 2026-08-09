@@ -270,7 +270,7 @@ The `hooks.json` PostToolUse handler automatically executes `.stride.md` `## bef
 
 ## Step 3: Explore the Codebase (Decision Matrix)
 
-**This step is NOT optional for medium+ tasks. The decision matrix determines what happens.**
+**The decision matrix determines what happens — and where it says YES, the step is not optional.**
 
 ### Decision Matrix
 
@@ -301,17 +301,26 @@ the matrix. Resolve it top-down:
 
 1. **Branch A row first.** Goal type, large-and-undecomposed, or a 25+ hour
    estimate routes to decomposition and no other row applies.
-2. **Then the type row.** `Defect type` overrides the complexity rows for any
-   task whose type is `defect` — the row exists to say something about defects
-   specifically, so it outranks the complexity label. Its `Skip (unless large)`
-   resolves as: a **large** defect gets `Plan = YES`; every other defect gets
-   `Plan = Skip`.
-3. **Then the complexity row** — `small` (by `key_files`), `medium`, or `large`.
-4. **`Complexity absent or unrecognised` only when `complexity` is missing or
+2. **Then `small, 0-1 key_files`, whatever the task's type.** This row is an
+   economics floor, not a statement about work kind: a one-file change is a
+   one-file change whether it is labelled `work` or `defect`, and the Isolate
+   derivation below rests on that row dispatching nothing. A defect this small
+   does not become worth three subagents by being a defect.
+3. **Then `Defect type`,** for any remaining defect — it outranks the `medium`
+   and `large` complexity rows, because the row exists to say something about
+   defects specifically. Its `Skip (unless large)` resolves as: a **large**
+   defect gets `Plan = YES`; every other defect gets `Plan = Skip`.
+4. **Then the complexity row** — `small, 2+ key_files`, `medium`, or `large`.
+5. **`Complexity absent or unrecognised` only when `complexity` is missing or
    not one of the three known values** — it is a fallback, never a tiebreaker.
 
 Exactly one row survives that order for every task, which is what makes "read
-the column" a complete instruction rather than an assumption.
+the column" a complete instruction rather than an assumption. **Note step 2's
+placement is deliberate and load-bearing:** putting the type row above it would
+flip Explore, Review and Isolate to YES for every small one-file defect, which
+would silently contradict Branch B and falsify the Isolate derivation's premise
+below. Resolving an ambiguity should not change behaviour, and this order is the
+one that does not.
 
 **The Isolate column is read only in dispatcher mode** (Step 1.5); when that gate
 has not fired there is nothing to isolate and the column is inert. **Inline means
@@ -395,11 +404,11 @@ If the task is a **goal**, has **large complexity without child tasks**, or has 
 
 **Do NOT implement goals directly. Decompose first.**
 
-### Branch B: Small Task, 0-1 Key Files
+### Branch B: the resolved row says Skip for Explore, Plan and Review
 
 Skip exploration, planning, and review. Proceed directly to Step 4 (Implementation).
 
-### Branch C: All Other Tasks (medium+, OR 2+ key_files)
+### Branch C: every other row
 
 #### Claude Code: Dispatch Subagents
 

@@ -43,7 +43,7 @@ This skill requires the Claude Code Agent tool with access to subagent types. If
 
 ## The Iron Law
 
-**DISPATCH SUBAGENTS BASED ON TASK COMPLEXITY — NEVER SKIP FOR MEDIUM/LARGE TASKS, NEVER ADD OVERHEAD FOR SIMPLE TASKS**
+**DISPATCH THE SUBAGENTS THE MATRIX ROW SAYS TO DISPATCH — NEVER SKIP ONE IT SAYS RUN, NEVER ADD ONE IT SAYS SKIP**
 
 ## The Critical Mistake
 
@@ -147,7 +147,7 @@ The decomposer will return an ordered list of child tasks with:
 
 ## Phase 1: Exploration (After Claim, Before Coding)
 
-**When:** Task complexity is medium or large, OR task has 2+ key_files.
+**When:** the decision matrix above says `Run` in the **stride:task-explorer** column for this task's row, resolved by `stride-workflow` Step 3's Row precedence rule. **Read the column; do not re-derive the condition here** (D221).
 
 **What to do:** Dispatch the `stride:task-explorer` agent, passing the task metadata.
 
@@ -178,7 +178,7 @@ The Plan agent will return an ordered implementation plan. Follow this plan duri
 
 ## Phase 3: Code Review (After Implementation, Before Hooks)
 
-**When:** Task complexity is medium or large, OR task has 2+ key_files. Skip only for small tasks with 0-1 key_files.
+**When:** the decision matrix above says `Run` in the **stride:task-reviewer** column for this task's row, resolved by `stride-workflow` Step 3's Row precedence rule. **Read the column; do not re-derive the condition here** (D221).
 
 **What to do:** Dispatch the `stride:task-reviewer` agent, passing the git diff AND **every review field the task supplies — NO EXCEPTIONS, never a subset:** `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `behaviour_test_matrix`, `description`, `what`, and `why`. This input list is owned by the reviewer's contract — keep it in sync with the "You will receive" line in `stride/agents/task-reviewer.md` and the Code Review step in `stride-workflow`; do not maintain a shorter list here. Omitting a supplied field (most often `security_considerations`) is the D60 defect where a task's security considerations came back `not_assessed`.
 
@@ -282,7 +282,7 @@ Is it a goal OR large+undecomposed OR 25+ hours?
                     |                              dispatch: the security considerations-
                     |                              mode dispatch nor Phase 3.5)
                     |
-                    +--> Medium/Large OR 2+ key_files?
+                    +--> Does the matrix say Run in the explorer column?
                             |
                             v
                         Dispatch stride:task-explorer
@@ -358,7 +358,7 @@ Is it a goal OR large+undecomposed OR 25+ hours?
 | "Exploration is slow" | Explorer runs in 10-30 seconds | Skipping costs 1+ hour of undirected reading |
 | "Planning is overkill" | Plans catch wrong approaches early | Coding without a plan doubles rework rate |
 | "I'll catch issues in tests" | Tests miss acceptance criteria gaps | Reviewer catches what tests can't |
-| "This small task has 3 key_files" | 2+ key_files = explore | Missing context causes merge conflicts |
+| "This small task has 3 key_files" | The matrix decides, by row | Missing context causes merge conflicts |
 
 ## Quick Reference Card
 

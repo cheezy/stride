@@ -162,7 +162,7 @@ This gate is **not bypassable** by submitting a self-reported skip (`dispatched:
 ### Claude Code (Automatic Hooks)
 
 1. **Finish your work** - All implementation complete
-2. **Pre-completion code review (Claude Code Only)** - If the task meets the `stride-subagent-workflow` skill's decision matrix for code review (medium+ complexity OR 2+ key_files), dispatch the `stride:task-reviewer` agent. Fix any Critical or Important issues. Save the reviewer's output to include as `review_report` in the completion request.
+2. **Pre-completion code review (Claude Code Only)** - If the `stride-workflow` Step 3 decision matrix says YES in the **Review** column for this task's row (resolved by its Row precedence rule), dispatch the `stride:task-reviewer` agent. **Read the column; do not re-derive the condition here** (D221). Fix any Critical or Important issues. Save the reviewer's output to include as `review_report` in the completion request.
 3. **Call `PATCH /api/tasks/:id/complete` directly** - Include `after_doing_result` and `before_review_result` with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}` — copying the real `duration_ms` from the PreToolUse `after_doing` stdout JSON when it is visible to you (`0` stays the documented fallback; `before_review` fires after the curl so its duration is never known at request time). The hooks.json system will:
    - PreToolUse: automatically execute `.stride.md` `## after_doing` BEFORE the curl runs (blocks if it fails)
    - PostToolUse: automatically execute `.stride.md` `## before_review` AFTER the curl succeeds
@@ -196,7 +196,7 @@ Work Complete
     ↓
 [Claude Code Only] Check decision matrix for code review
     ↓
-Medium+ OR 2+ key_files? ─YES→ Dispatch stride:task-reviewer
+Matrix says YES in the Review column? ─YES→ Dispatch stride:task-reviewer
     ↓ NO (or no subagent access)          ↓
     ↓                              Issues found? ─YES→ Fix issues
     ↓                                     ↓ NO            ↓

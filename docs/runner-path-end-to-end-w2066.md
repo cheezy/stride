@@ -263,22 +263,40 @@ plausible number compared against the wrong denominator.**
 | Default budget, hook side | **120 s** — `stride/hooks/stride-hook.sh:1254`; clamped to 290s at `:1294` |
 | **Effective budget here** | **200 s** — `STRIDE_HOOK_TIMEOUT_OVERRIDE=200` in `.claude/settings.local.json:163`, which `resolve_section_budget` gives precedence over both the server value and the default (`stride-hook.sh:1285-1286`). Confirmed reaching the hook: it emitted `200s budget` in its own failure message |
 | **Budget scope** | **Per SECTION, not per command** — `stride-hook.sh:1245-1247`: "The budget is per SECTION (wall clock across all its commands), not per command." Each command is wrapped with the **remaining** budget (`:1578-1603`); a command starting with none left is failed unrun (`:1587-1593`) |
-| Green-run section duration | **~169 s** (`phase_ms.after_doing`, W2072) — fits inside 200s, corroborated by the command-5/5 commit existing |
-| `mix test --cover`, warm, standalone | **119 s**, exit 0 |
-| Red-run outcome | **Timed out at 200s**, command 1/5, exit 124 |
+| `mix test --cover`, warm, standalone | **119 s**, exit 0 — command **1 of 5**, timed directly, no `phase_ms` involved |
+| Red-run outcome | **Timed out at 200s**, command 1/5, exit 124 — so that command alone exceeded 200s |
+| Green-run section duration | **≤ ~169 s** — `phase_ms.after_doing` (W2072) is an **upper bound**, since the phase encloses the hook section *plus* runner overhead. Corroboration only; not load-bearing |
 
-**What is established.** The effective budget here is 200s because of a local
-override; the default is 120s. The section runs ~169s. It fit twice and timed
-out once.
+**What is established, without relying on `phase_ms`.** The effective budget here
+is 200s because of a local override; the committed default is 120s. Two readings
+carry the finding, and neither is a phase measurement:
 
-**The finding this reframing exposes, which none of the earlier versions saw.**
-The section takes **~169s against a 120s default**. This repo completes tasks
-*only* because a local `STRIDE_HOOK_TIMEOUT_OVERRIDE=200` is set in a
-`settings.local.json` — a file that is per-machine and not shared. On any
-machine without that override, `after_doing` would exceed its budget on every
-task and no completion could ever succeed. That is a substantially bigger problem
-than the "narrow headroom" all three earlier drafts described, and it was hidden
-precisely because the override made the local symptom mild.
+1. **`mix test --cover` alone measures 119s warm** — and it is command 1 of 5.
+   `format`, `credo --strict`, `sobelow` and the commit share the same section
+   budget. 119s plus those four exceeds a 120s default with near-certainty.
+2. **In the red run, command 1/5 alone exceeded 200s** — far past the 120s
+   default, on its own, before any other command ran.
+
+**The finding this exposes, which none of the earlier versions saw.** This repo
+completes tasks *only* because `STRIDE_HOOK_TIMEOUT_OVERRIDE=200` is set in a
+`settings.local.json` — a file that is per-machine and not committed. On any
+machine without it — a fresh clone, a new contributor, CI — `after_doing` would
+exceed its budget and no completion could succeed. That is a substantially bigger
+problem than the "narrow headroom" every earlier draft described, and it was
+hidden precisely because the override made the local symptom mild.
+
+**What is not established.** The three timing readings — 119s (standalone warm,
+command 1), ≤169s (whole section, phase reading), and >200s (command 1 alone,
+red run) — span roughly a factor of 1.7 for substantially the same work. Command
+1 alone exceeding 200s in one run while the entire five-command section came in
+under ~169s in another is **not explained by anything measured here**. Build
+warmth is the untested candidate; the red run's `elixir_code_server`
+`:gen_server.call` EXIT hints at an intermittent hang rather than steady
+slowness. **No in-hook per-command timing was ever captured**, so the true
+section duration and the real margin under either budget remain unmeasured —
+which is exactly what D223's first acceptance criteria now ask someone to
+measure. The margin under the 200s override is **at least ~31s and unknown**,
+not the "~31s" an earlier draft asserted.
 
 **The transferable lesson**, and why every wrong version is kept above:
 runner-reported `phase_ms` is not hook execution time; a single command's timing
@@ -364,16 +382,20 @@ a reconstruction.
 Four, surfaced by the runs rather than sought:
 
 1. **The `after_doing` section exceeds its own default budget, and only a local
-   per-machine override hides it.** The section runs **~169s**; the default
-   budget is **120s**; this machine sets `STRIDE_HOOK_TIMEOUT_OVERRIDE=200` in
-   `.claude/settings.local.json`, which is not shared and not committed. On any
-   machine without that override, `after_doing` would exceed its budget on every
-   task and **no completion could succeed at all**. Even with it, the margin is
-   ~31s and the section timed out once in three runs. A timeout is also
-   indistinguishable from a real test failure to anyone reading the result, so
-   every occurrence costs a diagnosis. This finding's numbers were wrong three
-   times before this statement; see
-   [the budget](#the-gate-in-its-failing-direction) for all three.
+   per-machine override hides it.** The committed default is **120s**;
+   `mix test --cover` alone measures **119s** warm and is command **1 of 5**,
+   with `format`, `credo --strict`, `sobelow` and the commit sharing the same
+   section budget; and in the red run that one command exceeded **200s** by
+   itself. This machine sets `STRIDE_HOOK_TIMEOUT_OVERRIDE=200` in
+   `.claude/settings.local.json`, which is neither shared nor committed. On any
+   machine without that override, `after_doing` would exceed its budget and
+   **no completion could succeed at all**. A timeout is also indistinguishable
+   from a real test failure to anyone reading the result, so every occurrence
+   costs a diagnosis. The margin under the override is **at least ~31s and
+   unmeasured** — no in-hook per-command timing was ever captured. This
+   finding's numbers were wrong three times before this statement; see
+   [the budget](#the-gate-in-its-failing-direction) for all three, and note that
+   nothing above rests on a `phase_ms` reading.
 2. **`stride-workflow` SKILL.md disagrees with itself on the planner.** The
    Step 3 matrix row `small, 2+ key_files` says Plan = Skip; Branch C's second
    bullet dispatches Plan at 3+ acceptance-criteria lines. Both tasks matched
@@ -489,6 +511,13 @@ the process arguments.
 ```bash
 cd /Users/cheezy/dev/elixir/kanban
 
+# 0. CHECK THE HOOK BUDGET FIRST — every reading below assumes the override.
+printenv STRIDE_HOOK_TIMEOUT_OVERRIDE          # expect 200
+#    Set in .claude/settings.local.json, which is per-machine and NOT committed.
+#    On a machine without it the budget is the 120s default, and per finding 1
+#    after_doing is expected to TIME OUT — which looks exactly like a real test
+#    failure. Do not start diagnosing a red gate before checking this line.
+
 # 1. Baseline, then switch to real hooks. The tree MUST be clean afterwards or
 #    before_doing blocks every claim.
 git rev-parse main; git branch --list; git status --short
@@ -549,14 +578,15 @@ Ordered by return. Findings 1–4 and the moduledoc error were filed as defects
    with an empty `issues[]` should be impossible to emit.
 3. **Get the `after_doing` section under its *default* budget** — **D223**
    (finding 1). This is now the most urgent of the five, and its severity was
-   invisible until the override was found: the section runs ~169s against a
-   120s default, so the repo is only completable on machines carrying an
-   uncommitted `settings.local.json` override. Either bring the section under
-   120s (split coverage out of the blocking gate) or raise the *shared,
-   committed* budget so the override is not load-bearing — and **measure the
-   section per-command first**, because this document got the arithmetic wrong
-   three times before finding the override. D223's premise has been corrected
-   three times and now asks for that measurement explicitly.
+   invisible until the override was found: a single command measures 119s
+   against a 120s default shared by five, so the repo is only completable on
+   machines carrying an uncommitted `settings.local.json` override. Either bring
+   the section under 120s (split coverage out of the blocking gate) or raise the
+   *shared, committed* budget so the override is not load-bearing — and
+   **measure the section per-command first**, because this document got the
+   arithmetic wrong three times before finding the override, and the readings it
+   does have span a factor of 1.7. D223's premise has been corrected three times
+   and now asks for that measurement explicitly.
 4. **Copy the real `after_doing` duration** into the completion payload per
    W1455, and reconstruct `phase_ms` on the resume path — **D224** (finding 4
    and the resume-path omission).

@@ -1852,6 +1852,19 @@ function Invoke-StrideSection {
                     commands_completed = $secCompletedCmds
                     commands_remaining = $secRemainingCmds
                 }
+                # (D228) after_goal only: carry the PostToolUse context field so
+                # a failed goal push is not silent. The field is added at
+                # CONSTRUCTION here because this script writes the JSON straight
+                # to the host stream and then returns — there is no post-hoc
+                # augmentation point like the bash twin has. Other sections are
+                # untouched: before_review already propagates as a non-zero
+                # script exit, so it needs no help being noticed.
+                if ($Section -eq 'after_goal') {
+                    $failureResult['hookSpecificOutput'] = [ordered]@{
+                        hookEventName    = 'PostToolUse'
+                        additionalContext = (Get-AfterGoalFailureContext)
+                    }
+                }
                 # Write JSON directly to the host stdout stream rather than
                 # via the function's output pipeline — otherwise the caller's
                 # $primaryRc = Invoke-StrideSection ... assignment captures
@@ -1940,6 +1953,42 @@ function Test-AfterGoalInResponse {
     Test-PayloadHasAfterGoal -Payload (Get-ResponsePayload -InputJson $InputJson)
 }
 
+# (D228) Mirrors the bash twin's after_goal_failure_context /
+# report_after_goal_failure. A failing after_goal means `git push origin main`
+# did not run, so the goal work is local only — while the server's grace-window
+# worker marks the goal Done anyway, because it treats ABSENCE of a report as
+# success and has no git access to know better.
+function Get-AfterGoalFailureContext {
+    $goal = $env:GOAL_IDENTIFIER
+    if (-not $goal) { $goal = $env:GOAL_ID }
+    if (-not $goal) { $goal = 'unknown' }
+    return "Stride after_goal FAILED for goal $goal. The ``## after_goal`` section did not complete, so its ``git push origin main`` did NOT run — the goal work is committed LOCALLY ONLY. The server grace-window worker will still mark the goal Done; that is bookkeeping and pushes nothing. Verify with ``git log origin/main..main --oneline`` (expect empty) and push, or re-run the after_goal commands."
+}
+
+# Loud stderr notice plus a durable marker under .stride/ — already gitignored,
+# already excluded from the diff snapshot, and not touched by the after_review
+# cleanup block (which would delete a marker placed in the root state files).
+function Write-AfterGoalUnresolved {
+    $ctx = Get-AfterGoalFailureContext
+    [Console]::Error.WriteLine("stride-hook: AFTER_GOAL UNRESOLVED — $ctx")
+    try {
+        $dir = Join-Path $ProjectDir '.stride'
+        if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
+        }
+        $lines = @(
+            'unresolved=yes'
+            'pushed=no'
+            "goal_id=$($env:GOAL_ID)"
+            "goal_identifier=$($env:GOAL_IDENTIFIER)"
+            "detail=$ctx"
+        )
+        Set-Content -Path (Join-Path $dir 'after-goal-unresolved') -Value $lines -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        # Best-effort — the stderr notice above already carries the report.
+    }
+}
+
 # --- After-goal execution (shared by the D118 fast path and the D119 fresh call) ---
 # Export GOAL_* from the given payload and run the local ## after_goal section as
 # a blocking hook, restoring HOOK_NAME afterward. Centralised so both detection
@@ -1951,7 +2000,13 @@ function Invoke-AfterGoalSection {
     Set-AfterGoalEnv -Payload $Payload
     $savedHookNameEnv = [System.Environment]::GetEnvironmentVariable('HOOK_NAME', 'Process')
     [System.Environment]::SetEnvironmentVariable('HOOK_NAME', 'after_goal', 'Process')
-    $null = Invoke-StrideSection -Section 'after_goal'
+    # (D228) The exit code is still swallowed — deliberately, since the
+    # completion call itself succeeded — but the failure is no longer silent:
+    # the JSON carries the PostToolUse context (added in Invoke-StrideSection),
+    # and the two channels below survive regardless of whether the harness
+    # honours that field.
+    $agRc = Invoke-StrideSection -Section 'after_goal'
+    if ($agRc -ne 0) { Write-AfterGoalUnresolved }
     [System.Environment]::SetEnvironmentVariable('HOOK_NAME', $savedHookNameEnv, 'Process')
 }
 

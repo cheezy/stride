@@ -27,6 +27,35 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ### Fixed
 
+- **D228 — a goal whose `after_goal` failed said nothing, and the board still showed it shipped.** `after_goal` ends in `git push origin main`. If the section failed, the push never ran — and nothing reported it. The failure is swallowed on purpose (`run_stride_section` returns 2, but a non-zero *script* exit would misreport a completion curl that genuinely succeeded, which test 10d pins). The consequence of exit 0, though, is that the existing stderr diagnostic reaches only the raw transcript. Meanwhile the server's grace-window worker treats **absence of a report as success**, flips the goal to Done, and has no git access to know a push never landed. So the work stayed local and the board said otherwise.
+
+  **The budget half of this defect was already fixed by D229, which is worth stating because the task was filed against the old numbers.** It reported a 60s budget, a 290s clamp and a 300s ceiling, and warned against exceeding them; all three changed when budgets became hang detectors. Measured against the current 600s:
+
+  | `after_goal` | warm | cold `_build` |
+  |---|---|---|
+  | `mix compile --warning-as-errors` | 1s | **82s** |
+  | `mix deps.unlock --unused` | 0s | 1s |
+  | `mix format` | 1s | 0s |
+  | `mix gettext.extract --check-up-to-date` | **36s** | 33s |
+  | `mix dark_mode.scan` | 1s | 1s |
+  | `mix dark_mode.contrast --enforce` | 1s | 1s |
+  | `mix test` | **79s** | **159s** |
+  | `mix credo --strict` | 12s | 12s |
+  | git checkout / fetch / rebase | 1s | — |
+  | **section** | **132s** | **289s** |
+
+  Both fit 600s, cold with ~2x headroom. The 79s `mix test` corroborates the 77s the report cited; the genuinely new figure is `gettext.extract --check-up-to-date` at **36s**, which the task listed among the unmeasured steps and turns out to be the second-largest cost — larger than `compile` and `credo` together on a warm build. **No hook body was touched**: those commands are the developer's.
+
+  **What this change actually does** is make the failure impossible to miss, without altering the exit-code contract:
+
+  - `hookSpecificOutput.additionalContext` — the documented PostToolUse channel for surfacing text to the model *without* blocking. Merged into the existing structured object so stdout stays a single JSON document, and pretty-printed rather than compacted, because the parser contract and the suite both match on the spaced form.
+  - A loud stderr line naming the consequence, in the W1658 idiom: the push did not run, the work is local only, and the grace worker will still mark the goal Done.
+  - A durable `unresolved=yes` / `pushed=no` marker under `.stride/` — chosen because that directory is already gitignored, already excluded from the diff snapshot, and **not** deleted by the `after_review` cleanup block, which would have wiped a marker placed in any of the root state files.
+
+  **One thing is unverified and is stated rather than assumed.** The docs confirm `additionalContext` is supported for PostToolUse on exit 0, but do not confirm that Claude Code tolerates extra top-level keys beside its own contract. If it does not, that field is ignored and behaviour is exactly what it is today — the stderr line and the durable marker carry the report either way. The merge can only add visibility, never remove it.
+
+  The PowerShell mirror has the identical swallow, so it got the same three channels — and was verified by **executing** both a failing and a succeeding `after_goal` through `pwsh`, not by reading. Ten new assertions (Test Group 24), including four that assert a *successful* `after_goal` stays quiet, because a warning that fires on healthy goals trains the reader to ignore it. **545 passed / 0 failed**, with the five new-behaviour assertions confirmed to fail against the pre-fix script.
+
 - **D226 — a nested claim silently gave one task another task's diff.** `.stride-env-cache` is one file for the whole repo, keyed by nothing, and every claim rewrote the shared `TASK_BASE_REF`. So a claim that happened *inside* another task's window replaced that task's diff anchor. Dispatcher mode makes this the normal shape rather than an exotic one: a task whose work is to dispatch runners necessarily claims inside its own window.
 
   Observed, and still visible in the board today: **W2066** claimed at `b5737c98`, dispatched runners for W2072 and W2073, and completed against W2073's base — uploading `lib/kanban_web/avatar_palette.ex` and `test/kanban_web/avatar_palette_test.exs` onto itself with `http_code=200` and no error anywhere. W2066's own deliverable was entirely in the gitignored `stride/` subrepo, so its true `changed_files` is empty; instead a reviewer opening it sees two files that have nothing to do with it. Nothing reported a problem, which is the part that makes it dangerous.

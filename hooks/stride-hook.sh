@@ -2258,6 +2258,77 @@ ${_key}=''"
 # a blocking hook, restoring HOOK_NAME afterward. Centralised so both detection
 # paths run the section identically — and, because route_after_goal invokes
 # exactly one path, exactly once (de-dup).
+# (D228) An after_goal failure used to be completely silent to the agent.
+#
+# The swallow itself is deliberate and stays: `run_stride_section` returns 2 on
+# a failing command, but a non-zero SCRIPT exit would misreport the completion
+# curl, which genuinely succeeded — test 10d pins that. The bug is that exit 0
+# also means the stderr diagnostic reaches only the raw transcript, so nothing
+# told anyone that `git push origin main` never ran. Meanwhile the server's
+# grace-window worker treats ABSENCE of a report as success and flips the goal
+# to Done — it has no git access and cannot know a push did not land. So the
+# work silently stays local and the board says it shipped.
+#
+# Three channels, none of which changes the exit code:
+#   1. hookSpecificOutput.additionalContext — the documented PostToolUse
+#      channel for surfacing text to the model WITHOUT blocking. Merged into
+#      the existing structured object so stdout stays a single JSON document.
+#   2. a loud stderr line naming the consequence, in the W1658 idiom.
+#   3. a durable marker under .stride/, which is already gitignored AND already
+#      excluded from the diff snapshot, and which the after_review cleanup
+#      block does not delete.
+#
+# UNVERIFIED, stated rather than assumed: the docs confirm additionalContext is
+# supported for PostToolUse on exit 0, but do NOT confirm that Claude Code
+# tolerates extra top-level keys beside its own contract. If it does not, the
+# merge is simply ignored and behaviour is exactly what it is today — the
+# stderr line and the durable marker carry the report regardless. The merge can
+# only add visibility, never remove it.
+after_goal_failure_context() {
+  printf 'Stride after_goal FAILED for goal %s. The `## after_goal` section did not complete, so its `git push origin main` did NOT run — the goal work is committed LOCALLY ONLY. The server grace-window worker will still mark the goal Done; that is bookkeeping and pushes nothing. Verify with `git log origin/main..main --oneline` (expect empty) and push, or re-run the after_goal commands.' \
+    "${GOAL_IDENTIFIER:-${GOAL_ID:-unknown}}"
+}
+
+# Merge the PostToolUse context field into the section's structured JSON so a
+# single object carries both. Falls back to the original text unchanged when jq
+# is absent or the payload does not parse — never drops the domain output.
+augment_after_goal_failure_json() {
+  local _json="$1" _ctx _merged
+  [ "${HAS_JQ:-false}" = "true" ] || { printf '%s' "$_json"; return 0; }
+  [ -n "$_json" ] || { printf '%s' "$_json"; return 0; }
+  _ctx=$(after_goal_failure_context)
+  # NOT `jq -c`: run_stride_section emits pretty-printed JSON and both the
+  # documented parser contract and the suite match on the spaced form, so
+  # compacting here would silently change the shape every consumer reads.
+  _merged=$(printf '%s' "$_json" | jq \
+    --arg ctx "$_ctx" \
+    '. + {hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $ctx}}' 2>/dev/null || true)
+  if [ -n "$_merged" ]; then
+    printf '%s' "$_merged"
+  else
+    printf '%s' "$_json"
+  fi
+}
+
+# Loud stderr notice plus a durable marker. Both survive whether or not the
+# JSON merge above is honoured by the harness.
+report_after_goal_failure() {
+  local _dir="$PROJECT_DIR/.stride" _ctx
+  _ctx=$(after_goal_failure_context)
+  printf 'stride-hook: AFTER_GOAL UNRESOLVED — %s\n' "$_ctx" >&2
+  mkdir -p "$_dir" 2>/dev/null || return 0
+  # Plain key=value, matching .stride-diff-upload-state's existing convention
+  # rather than inventing a second one — and it sidesteps hand-rolled JSON
+  # escaping for a value that contains both quotes and backticks.
+  {
+    printf 'unresolved=yes\n'
+    printf 'pushed=no\n'
+    printf 'goal_id=%s\n' "${GOAL_ID:-}"
+    printf 'goal_identifier=%s\n' "${GOAL_IDENTIFIER:-}"
+    printf 'detail=%s\n' "$_ctx"
+  } > "$_dir/after-goal-unresolved" 2>/dev/null || true
+}
+
 run_after_goal_section() {
   local _payload="$1"
   AFTER_GOAL_ROUTED=true
@@ -2268,7 +2339,18 @@ run_after_goal_section() {
   export_after_goal_env "$_payload"
   local _routed_hook_name="$HOOK_NAME"
   export HOOK_NAME="after_goal"
-  run_stride_section "after_goal" || true
+  # (D228) Capture the section's stdout so a failure can be augmented into ONE
+  # JSON document rather than emitting a second object beside it. stderr is not
+  # captured, so the section's own diagnostics still reach the hook output
+  # exactly as before. The exit code is still swallowed — deliberately.
+  local _ag_out _ag_rc
+  _ag_out=$(run_stride_section "after_goal")
+  _ag_rc=$?
+  if [ "$_ag_rc" -ne 0 ]; then
+    _ag_out=$(augment_after_goal_failure_json "$_ag_out")
+    report_after_goal_failure
+  fi
+  [ -n "$_ag_out" ] && printf '%s\n' "$_ag_out"
   HOOK_NAME="$_routed_hook_name"
   export HOOK_NAME
 }

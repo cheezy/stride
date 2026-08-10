@@ -5776,6 +5776,74 @@ assert_eq "23j: the outer task gets its own work, plus the D236 range residual" 
 rm -rf "$D226_W" "$D226_WSTUB"
 
 # ============================================================
+# Test Group 24: D228 — a failing after_goal must not be silent
+# ============================================================
+# after_goal runs `git push origin main`. Its failure is deliberately NOT a
+# non-zero script exit (10d pins that, because the completion curl succeeded) —
+# but on exit 0 stderr reaches only the transcript, so nothing told anyone the
+# push never ran, while the server's grace-window worker marked the goal Done
+# regardless. These cover the three report channels, and 24d guards against the
+# opposite failure: crying wolf on a SUCCESSFUL after_goal.
+echo ""
+echo "=== Test Group 24: D228 a failing after_goal reports visibly ==="
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: jq missing — Group 24 requires jq"
+else
+  d228_project() { # $1 = dir, $2 = after_goal body
+    mkdir -p "$1"
+    {
+      printf '## before_review\n```bash\necho "before_review_ran"\n```\n\n'
+      printf '## after_goal\n```bash\n%s\n```\n' "$2"
+    } > "$1/.stride.md"
+  }
+  D228_INPUT=$(ag_e2e_input \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" \
+    '[{"name":"before_review"},{"name":"after_goal"}]')
+
+  # 24a/24b/24c: the failing case — all three channels fire.
+  D228_FAIL_DIR="$TMPDIR_TEST/d228-fail"
+  d228_project "$D228_FAIL_DIR" "bash -c 'exit 11'"
+  D228_FAIL_OUT=$(echo "$D228_INPUT" | CLAUDE_PROJECT_DIR="$D228_FAIL_DIR" \
+    bash "$HOOK_SCRIPT" post 2> "$D228_FAIL_DIR/stderr.txt")
+  D228_FAIL_RC=$?
+  D228_FAIL_ERR=$(cat "$D228_FAIL_DIR/stderr.txt" 2>/dev/null)
+  D228_MARKER=$(cat "$D228_FAIL_DIR/.stride/after-goal-unresolved" 2>/dev/null)
+
+  assert_exit "24a: a failing after_goal still exits 0 (10d's contract is kept)" \
+    0 "$D228_FAIL_RC"
+  assert_contains "24a: the failure JSON carries the PostToolUse context field" \
+    '"hookEventName": "PostToolUse"' "$D228_FAIL_OUT"
+  assert_contains "24a: the context names the push that did not happen" \
+    'git push origin main' "$D228_FAIL_OUT"
+  assert_contains "24b: a durable marker records the unresolved push" \
+    "unresolved=yes" "$D228_MARKER"
+  assert_contains "24b: the marker states the push did not land" \
+    "pushed=no" "$D228_MARKER"
+  assert_contains "24c: the failure is announced loudly on stderr" \
+    "AFTER_GOAL UNRESOLVED" "$D228_FAIL_ERR"
+  # stdout must remain ONE json document — a second object beside it would
+  # break every consumer that parses the hook's output.
+  D228_OBJ_COUNT=$(printf '%s' "$D228_FAIL_OUT" | jq -s 'length' 2>/dev/null)
+  assert_eq "24a: stdout stays parseable as a single JSON stream" "2" "$D228_OBJ_COUNT"
+
+  # 24d: the SUCCESS case must stay quiet. A report channel that fires on a
+  # healthy goal is worse than none — it trains the reader to ignore it.
+  D228_OK_DIR="$TMPDIR_TEST/d228-ok"
+  d228_project "$D228_OK_DIR" "echo after_goal_ran"
+  D228_OK_OUT=$(echo "$D228_INPUT" | CLAUDE_PROJECT_DIR="$D228_OK_DIR" \
+    bash "$HOOK_SCRIPT" post 2> "$D228_OK_DIR/stderr.txt")
+  D228_OK_ERR=$(cat "$D228_OK_DIR/stderr.txt" 2>/dev/null)
+
+  assert_eq "24d: a successful after_goal writes no unresolved marker" \
+    "" "$(ls "$D228_OK_DIR/.stride/after-goal-unresolved" 2>/dev/null)"
+  assert_eq "24d: a successful after_goal adds no PostToolUse context" \
+    "" "$(printf '%s' "$D228_OK_OUT" | grep -c 'hookSpecificOutput' | tr -d ' ' | sed 's/^0$//')"
+  assert_eq "24d: a successful after_goal prints no UNRESOLVED warning" \
+    "" "$(printf '%s' "$D228_OK_ERR" | grep -c 'AFTER_GOAL UNRESOLVED' | tr -d ' ' | sed 's/^0$//')"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

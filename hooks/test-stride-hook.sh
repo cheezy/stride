@@ -5392,6 +5392,154 @@ ID_OUT=$(
 assert_eq "22b: task ids come only from accepted request URLs" "7777|||" "$ID_OUT"
 
 # ============================================================
+# Test Group 23: D226 — per-task snapshot base isolation
+# ============================================================
+# A nested claim used to overwrite the shared TASK_BASE_REF, so an outer task
+# completed with an inner task's diff anchor. W2066 shipped W2073's two files
+# with HTTP 200 and no error. Dispatcher mode makes the nesting routine, so
+# these cases guard the normal path, not an exotic one.
+echo ""
+echo "=== Test Group 23: D226 per-task snapshot base isolation ==="
+
+# Drive a real claim through the hook so the identity rewrite AND
+# finalize_before_doing both run — the truncating rewrite is itself one of the
+# places the per-task record has to survive.
+d226_claim() { # $1 = project dir, $2 = numeric task id
+  local _resp _in
+  _resp=$(printf '{"data":{"id":%s,"identifier":"W%s","title":"t","status":"in_progress","complexity":"small","priority":"high"}}' "$2" "$2")
+  _in=$(jq -nc --arg cmd "curl -X POST https://stride.example.com/api/tasks/claim" --arg out "$_resp" \
+    '{tool_input:{command:$cmd},tool_response:{stdout:$out}}')
+  echo "$_in" | CLAUDE_PROJECT_DIR="$1" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+}
+
+d226_fixture() { # $1 = dir
+  (
+    cd "$1" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+.stride-diff-upload-state
+.stride-dirty-baseline
+curl-call.txt
+GITIGNORE
+    printf '## before_doing\n```bash\ntrue\n```\n\n## after_doing\n```bash\ntrue\n```\n' > .stride.md
+    echo "v1" > tracked.txt
+    git add .gitignore tracked.txt > /dev/null
+    git commit -q -m "v1"
+  )
+}
+
+# 23a/23b: the defect. Outer claims, does its own work, a NESTED claim lands,
+# then the outer task completes. It must diff from ITS OWN base — before this
+# fix the nested claim's base won and outer.txt vanished from the snapshot.
+D226_DIR=$(mktemp -d)
+D226_STUB=$(mktemp -d)
+make_curl_stub "$D226_STUB" "$D226_DIR/curl-call.txt" 0
+d226_fixture "$D226_DIR"
+d226_claim "$D226_DIR" 100
+(
+  cd "$D226_DIR" || exit 1
+  echo "outer" > outer.txt
+  git add outer.txt > /dev/null
+  git commit -q -m "outer task work"
+)
+d226_claim "$D226_DIR" 200
+D226_CACHE=$(cat "$D226_DIR/.stride-env-cache" 2>/dev/null)
+assert_contains "23a: a nested claim preserves the outer task's per-task base record" \
+  "TASK_BASE_REF_100=" "$D226_CACHE"
+(
+  cd "$D226_DIR" || exit 1
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/100/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_STUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+)
+D226_PATHS=$(jq -r '.[].path' "$D226_DIR/.stride-changed-files.json" 2>/dev/null)
+assert_contains "23b: the outer task diffs from its own base after a nested claim" \
+  "outer.txt" "$D226_PATHS"
+rm -rf "$D226_DIR" "$D226_STUB"
+
+# 23c: fail-closed. No per-task record exists (an older cache), and the shared
+# base is stamped as another task's. Refuse rather than upload a foreign diff,
+# and say so — silence is the actual defect being fixed.
+D226_R=$(mktemp -d)
+D226_RSTUB=$(mktemp -d)
+make_curl_stub "$D226_RSTUB" "$D226_R/curl-call.txt" 0
+d226_fixture "$D226_R"
+(
+  cd "$D226_R" || exit 1
+  echo "foreign" > foreign.txt
+  git add foreign.txt > /dev/null
+  git commit -q -m "another task's work"
+)
+D226_R_BASE=$(git -C "$D226_R" rev-parse HEAD~1)
+D226_R_OUT=$(
+  cd "$D226_R" || exit 1
+  printf "TASK_ID='999'\nTASK_BASE_REF='%s'\nTASK_BASE_REF_TRUSTED='1'\nTASK_BASE_REF_OWNER='999'\n" \
+    "$D226_R_BASE" > .stride-env-cache
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/300/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_RSTUB:$PATH" bash "$HOOK_SCRIPT" pre 2>&1
+)
+assert_contains "23c: a base owned by another task is refused, and announced" \
+  "REFUSING" "$D226_R_OUT"
+assert_eq "23c: the refusal uploads an empty snapshot, never the foreign diff" \
+  "[]" "$(jq -c '.' "$D226_R/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D226_R" "$D226_RSTUB"
+
+# 23d: upgrade safety. A cache written BEFORE this fix carries no owner stamp,
+# so nothing proves the base is foreign — it must still be used. Refusing on
+# absence would break diff capture for every task already in flight.
+D226_BC=$(mktemp -d)
+D226_BCSTUB=$(mktemp -d)
+make_curl_stub "$D226_BCSTUB" "$D226_BC/curl-call.txt" 0
+d226_fixture "$D226_BC"
+D226_BC_BASE=$(git -C "$D226_BC" rev-parse HEAD)
+(
+  cd "$D226_BC" || exit 1
+  echo "work" > work.txt
+  git add work.txt > /dev/null
+  git commit -q -m "task work"
+  printf "TASK_ID='400'\nTASK_BASE_REF='%s'\nTASK_BASE_REF_TRUSTED='1'\n" "$D226_BC_BASE" > .stride-env-cache
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/400/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_BCSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+)
+D226_BC_PATHS=$(jq -r '.[].path' "$D226_BC/.stride-changed-files.json" 2>/dev/null)
+assert_contains "23d: an ownerless legacy base is still used, not refused" \
+  "work.txt" "$D226_BC_PATHS"
+rm -rf "$D226_BC" "$D226_BCSTUB"
+
+# 23e: the records are per-task, so they must not accumulate forever in a
+# long-lived checkout. Seed more than the cap and confirm it holds.
+D226_CAP=$(mktemp -d)
+(
+  cd "$D226_CAP" || exit 1
+  git init -q
+  git config user.email "test@test.local"
+  git config user.name "Test"
+  echo "v1" > a.txt
+  git add a.txt > /dev/null
+  git commit -q -m "v1"
+  {
+    echo "TASK_ID='9001'"
+    for i in $(seq 1 25); do echo "TASK_BASE_REF_$i='deadbeef$i'"; done
+  } > .stride-env-cache
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2> /dev/null
+  PROJECT_DIR="$PWD"
+  ENV_CACHE="$PWD/.stride-env-cache"
+  HAS_JQ=false
+  HOOK_NAME=before_doing
+  TASK_ID=9001
+  finalize_before_doing
+)
+D226_CAP_N=$(grep -c '^TASK_BASE_REF_[0-9]' "$D226_CAP/.stride-env-cache" 2>/dev/null)
+assert_eq "23e: per-task base records stay bounded (19 carried + this task)" \
+  "20" "$D226_CAP_N"
+rm -rf "$D226_CAP"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

@@ -27,6 +27,23 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ### Fixed
 
+- **D226 — a nested claim silently gave one task another task's diff.** `.stride-env-cache` is one file for the whole repo, keyed by nothing, and every claim rewrote the shared `TASK_BASE_REF`. So a claim that happened *inside* another task's window replaced that task's diff anchor. Dispatcher mode makes this the normal shape rather than an exotic one: a task whose work is to dispatch runners necessarily claims inside its own window.
+
+  Observed, and still visible in the board today: **W2066** claimed at `b5737c98`, dispatched runners for W2072 and W2073, and completed against W2073's base — uploading `lib/kanban_web/avatar_palette.ex` and `test/kanban_web/avatar_palette_test.exs` onto itself with `http_code=200` and no error anywhere. W2066's own deliverable was entirely in the gitignored `stride/` subrepo, so its true `changed_files` is empty; instead a reviewer opening it sees two files that have nothing to do with it. Nothing reported a problem, which is the part that makes it dangerous.
+
+  **Two complementary halves, because either alone leaves a hole:**
+
+  - **Isolation.** The anchor is now recorded per task id (`TASK_BASE_REF_<id>`) alongside the shared key, and those records are carried across later claims — so an outer task keeps its own base at any nesting depth. Depth is not bounded by anything today, so the fix does not assume the parent is the outer task.
+  - **Fail-closed validation.** The base now carries an owner stamp, and at capture time a base owned by a *different* task than the one completing is **refused** — an empty snapshot is uploaded instead, announced on stderr and recorded durably as `refused_base=yes`. A wrong diff presented as correct is worse than no diff, and `[]` is already a valid shape in this pipeline (test 8d).
+
+  The refusal is deliberately narrow. A cache written before this fix carries no owner stamp, so nothing proves its base is foreign and it is still used — refusing on mere absence would break diff capture for every task already in flight at upgrade. Isolation is what makes the normal path correct; refusal is the backstop for when it somehow is not.
+
+  Two rewrite sites had to stop erasing the records to make isolation real: the claim-time identity refresh (which truncates the cache) and `finalize_before_doing`'s own rewrite. The records are capped at 20 so a long-lived checkout cannot grow the cache without bound. Everything stays inside the existing cache file on purpose — a new dotfile would need a `.gitignore` entry in every consuming project, which the plugin cannot add on a user's behalf.
+
+  **The Windows mirror, stated precisely rather than as a blanket claim.** `stride-hook.ps1` has the *write* half of the defect identically, and it is mirrored — verified by executing two real claims through `pwsh` and confirming the outer task's record survives the nested one, not by reading the code. It has **no read half to fix**: that script never runs `git diff TASK_BASE_REF` to build a snapshot, it re-uploads the one on disk, so there is nothing there to refuse. The write half is mirrored for cache-format parity across executors. This is not "D226 is fully ported to Windows," and the code says so where a future reader will hit it.
+
+  Six new assertions (Test Group 23) cover isolation, the refusal, the loud announcement, legacy-cache back-compat, and the record cap. **522 passed / 0 failed.** They were also run against the pre-fix script as a negative control, because a green test that would not have caught the bug proves nothing — the isolation cases fail there, as they must.
+
 - **D229 — a fresh clone could neither claim nor complete, because the budgets killed the developer's own hooks.** Measured on a genuine clone with no `deps/` and no `_build/`: `before_doing` **80s against a 60s budget**, `after_doing` **138s against 120s**. Both blocking sections were killed, so a new contributor, a new machine or CI could not get through a single task. It stayed invisible because every figure anyone had ever taken was warm, on a machine carrying an uncommitted `STRIDE_HOOK_TIMEOUT_OVERRIDE=200`.
 
   Per-command, across three baselines — a fresh clone on a machine with a warm `~/.hex`; the same fresh clone with `HEX_HOME` pointed at an empty directory, so the registry and every package tarball are re-fetched over the network; and the same clone once warm. The expensive parts are not where anyone assumed:

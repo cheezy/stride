@@ -755,6 +755,18 @@ if ($HookName -eq 'before_doing') {
         # pulled work (D132/W1678). Invoke-FinalizeBeforeDoing writes the base
         # (and the dirty baseline) after the section finishes.
         if ($taskJson) {
+            # (D226) This rewrite TRUNCATES the cache, so carry the per-task
+            # base-ref records across it — a nested claim must not erase an
+            # outer task's anchor. The shared TASK_BASE_REF / _TRUSTED /
+            # _OWNER keys are still dropped here, exactly as D142 requires.
+            $keptBaseRecords = @()
+            if (Test-Path $EnvCache) {
+                $keptBaseRecords = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object {
+                    $_ -match '^TASK_BASE_REF_[A-Za-z0-9_]+=' -and
+                    $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and
+                    $_ -notmatch '^TASK_BASE_REF_OWNER='
+                } | Select-Object -Last 20)
+            }
             $cacheLines = @(
                 "TASK_ID=$($taskJson.id)"
                 "TASK_IDENTIFIER=$($taskJson.identifier)"
@@ -762,7 +774,7 @@ if ($HookName -eq 'before_doing') {
                 "TASK_STATUS=$($taskJson.status)"
                 "TASK_COMPLEXITY=$($taskJson.complexity)"
                 "TASK_PRIORITY=$($taskJson.priority)"
-            )
+            ) + $keptBaseRecords
             $cacheLines | Set-Content -Path $EnvCache -Encoding UTF8
         } elseif (Test-Path $EnvCache) {
             # (W1086/D142) No parseable response and no usable persisted
@@ -771,7 +783,10 @@ if ($HookName -eq 'before_doing') {
             # TASK_BASE_REF (and its trust marker) NOW — even if this process
             # dies before Invoke-FinalizeBeforeDoing rewrites it, a base from
             # a previous task or session must never survive a claim.
-            $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' -and $_ -notmatch '^TASK_BASE_REF_TRUSTED=' })
+            # (D226) TASK_BASE_REF_OWNER goes with the base it stamps; the
+            # per-task TASK_BASE_REF_<id> records are kept, since they belong
+            # to tasks other than this claim.
+            $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' -and $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and $_ -notmatch '^TASK_BASE_REF_OWNER=' })
             if ($preserved.Count -gt 0) {
                 $preserved | Set-Content -Path $EnvCache -Encoding UTF8
             } else {
@@ -1279,6 +1294,18 @@ function Invoke-FinalizeAfterDoing {
 # already succeeded — PostToolUse cannot veto it). Skips silently when HEAD
 # is unresolvable (not a git repo) — the pre-section strip already removed
 # any inherited TASK_BASE_REF in that case.
+# (D226) PARITY NOTE, stated precisely rather than as a blanket claim. The
+# defect has two halves. The WRITE half — a nested claim overwriting the
+# shared TASK_BASE_REF — happens here identically to the bash twin, and is
+# mirrored below. The READ half — a foreign base silently driving the diff
+# capture — CANNOT occur in this script, because it has no capture step at
+# all: Invoke-FinalizeAfterDoing re-uploads the on-disk snapshot and never
+# runs `git diff TASK_BASE_REF` to build one. So there is no
+# select_task_snapshot_base equivalent here and nothing to refuse; the write
+# half is mirrored for cache-format parity, so a cache written on Windows and
+# read by the bash executor (or vice versa) carries the same ownership
+# information. Do not read this as "D226 is fully ported to Windows" — the
+# read-side guard has no counterpart to port.
 function Invoke-FinalizeBeforeDoing {
     if ($HookName -ne 'before_doing') { return }
     $baseRef = ''
@@ -1293,14 +1320,42 @@ function Invoke-FinalizeBeforeDoing {
         # TASK_BASE_REF_TRUSTED marks a base written by THIS post-before_doing
         # capture (the task branch point by construction) — the bash twin's
         # resolve_snapshot_base skips its branch-point rule for marked bases.
+        # (D226) An owner stamp and a per-task record ride alongside the shared
+        # keys, and earlier tasks' records are carried across, so a nested
+        # claim cannot make an outer task's anchor unrecoverable. Kept in
+        # cache-format parity with the bash twin even though THIS script has
+        # no read half to protect — see the asymmetry note below.
+        $owner = $env:TASK_ID
+        $ownerKey = ''
+        if ($owner) { $ownerKey = 'TASK_BASE_REF_' + ($owner -replace '[^A-Za-z0-9_]', '_') }
         $preserved = @()
+        $records = @()
         if (Test-Path $EnvCache) {
-            $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' -and $_ -notmatch '^TASK_BASE_REF_TRUSTED=' })
+            $existing = @(Get-Content $EnvCache -Encoding UTF8)
+            $preserved = @($existing | Where-Object {
+                $_ -notmatch '^TASK_BASE_REF=' -and
+                $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and
+                $_ -notmatch '^TASK_BASE_REF_OWNER=' -and
+                $_ -notmatch '^TASK_BASE_REF_[A-Za-z0-9_]+='
+            })
+            $records = @($existing | Where-Object {
+                $_ -match '^TASK_BASE_REF_[A-Za-z0-9_]+=' -and
+                $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and
+                $_ -notmatch '^TASK_BASE_REF_OWNER=' -and
+                ($ownerKey -eq '' -or $_ -notmatch ('^' + [regex]::Escape($ownerKey) + '='))
+            } | Select-Object -Last 19)
         }
-        $newLines = $preserved + "TASK_BASE_REF=$baseRef" + "TASK_BASE_REF_TRUSTED=1"
+        $newLines = $preserved + $records + "TASK_BASE_REF=$baseRef" + "TASK_BASE_REF_TRUSTED=1"
+        if ($ownerKey) {
+            $newLines = $newLines + "TASK_BASE_REF_OWNER=$owner" + "$ownerKey=$baseRef"
+        }
         $newLines | Set-Content -Path $EnvCache -Encoding UTF8
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF', $baseRef, 'Process')
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_TRUSTED', '1', 'Process')
+        if ($ownerKey) {
+            [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_OWNER', $owner, 'Process')
+            [System.Environment]::SetEnvironmentVariable($ownerKey, $baseRef, 'Process')
+        }
         # (W1457→D142) The dirty baseline moves with the base capture:
         # post-pull paths hashed against the post-pull base, so the exclusion
         # set and the diff anchor can never disagree.

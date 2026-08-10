@@ -1061,6 +1061,66 @@ task_id_from_command() {
   printf '%s' "$_out"
 }
 
+# (D226) Per-task base-ref records.
+#
+# `.stride-env-cache` is ONE file for the whole repo, keyed by nothing, and
+# every claim rewrites the shared TASK_BASE_REF. A NESTED claim therefore
+# replaces the outer task's diff anchor with the inner task's — and dispatcher
+# mode makes that routine rather than exotic, because a task whose work is to
+# dispatch runners necessarily claims inside its own window. Observed: W2066
+# claimed at b5737c98, dispatched runners for W2072/W2073, and completed with
+# W2073's base — uploading W2073's two files onto W2066 with HTTP 200 and no
+# error anywhere.
+#
+# The anchor is therefore recorded per task id as well as in the shared key,
+# and those records are PRESERVED across later claims, so an outer task keeps
+# its own base at any nesting depth (depth is not bounded by anything today).
+# A flat `TASK_BASE_REF_<id>` line keeps this inside the existing cache on
+# purpose: a new dotfile would need a `.gitignore` entry in every consuming
+# project, which the plugin cannot add on the user's behalf.
+task_base_ref_key() {
+  printf 'TASK_BASE_REF_%s' "$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')"
+}
+
+# Prints the base recorded by the given task's OWN claim, or empty when none
+# is on record (an older cache, or a claim whose response never parsed).
+task_base_ref_for() {
+  local _k _v
+  [ -n "${1:-}" ] || return 0
+  _k=$(task_base_ref_key "$1")
+  _v="${!_k:-}"
+  printf '%s' "$_v"
+}
+
+# (D226) Choose the diff anchor for the task actually being completed, in
+# precedence order:
+#   1. the per-task record written by THAT task's own claim — survives any
+#      number of nested claims, so the outer task keeps its own base;
+#   2. the shared TASK_BASE_REF, when nothing proves it belongs elsewhere —
+#      caches written before this fix carry no owner stamp, and refusing them
+#      would break diff capture for every task already in flight on upgrade;
+#   3. REFUSE, when the shared base carries an owner stamp naming a DIFFERENT
+#      task. A wrong diff presented as correct is worse than no diff, and the
+#      pipeline already treats `[]` as a valid shape (test 8d).
+# Prints the base on stdout; returns 1 for the refusal case. The refusal is
+# announced on stderr because silence is the actual defect being fixed here.
+select_task_snapshot_base() {
+  local _tid="${1:-}" _own _owner
+  _own=$(task_base_ref_for "$_tid")
+  if [ -n "$_own" ]; then
+    printf '%s' "$_own"
+    return 0
+  fi
+  _owner="${TASK_BASE_REF_OWNER:-}"
+  if [ -n "$_tid" ] && [ -n "$_owner" ] && [ "$_owner" != "$_tid" ]; then
+    printf 'stride-hook: REFUSING the changed_files diff for task %s — cached TASK_BASE_REF %s was written by task %s, so the captured diff would belong to another task. Uploading an empty snapshot instead.\n' \
+      "$_tid" "${TASK_BASE_REF:-<empty>}" "$_owner" >&2
+    return 1
+  fi
+  printf '%s' "${TASK_BASE_REF:-}"
+  return 0
+}
+
 # Helper: persist the per-file diff snapshot, then fire-and-forget PUT it to
 # the Stride server. Runs only for after_doing; capture and upload failures
 # are both non-fatal. URL and token are resolved by resolve_stride_api_url /
@@ -1072,7 +1132,15 @@ task_id_from_command() {
 # invoke finalize_after_doing in isolation.
 finalize_after_doing() {
   if [ "${HOOK_NAME:-}" = "after_doing" ]; then
-    local snapshot _tid
+    local snapshot _tid _base_candidate
+    # (D127) Target the task id from the /complete URL, not the env cache, so a
+    # stale TASK_ID from a hidden claim response cannot route the diff to the
+    # wrong task. Fall back to the env-cache TASK_ID only if the URL carries no id.
+    # (D226) Resolved BEFORE the base is chosen — the base now depends on which
+    # task is completing, which it did not when this ran after the resolution.
+    _tid=$(task_id_from_command "${COMMAND:-}")
+    [ -n "$_tid" ] || _tid="${TASK_ID:-}"
+
     # (D142) Run the base through the trust guard ONCE per process and
     # memoize the judgment. The refresh call runs AFTER the section's
     # commands — an ## after_doing that pushes the default branch moves
@@ -1086,17 +1154,24 @@ finalize_after_doing() {
     # so it reaches the hook output instead of being swallowed by the
     # capture call's 2>/dev/null.
     if [ "${SNAP_BASE_RESOLVED_DONE:-false}" != "true" ]; then
-      SNAP_BASE_RESOLVED=$( (cd "$PROJECT_DIR" 2>/dev/null && resolve_snapshot_base "${TASK_BASE_REF:-}") || printf '%s' "${TASK_BASE_REF:-}")
+      # (D226) Pick the anchor for THIS task first. A refusal (the shared base
+      # demonstrably belongs to another task) short-circuits capture entirely:
+      # an empty snapshot is a valid shape, another task's diff is not.
+      if _base_candidate=$(select_task_snapshot_base "$_tid"); then
+        SNAP_BASE_RESOLVED=$( (cd "$PROJECT_DIR" 2>/dev/null && resolve_snapshot_base "$_base_candidate") || printf '%s' "$_base_candidate")
+        SNAP_BASE_REFUSED=false
+      else
+        SNAP_BASE_RESOLVED=""
+        SNAP_BASE_REFUSED=true
+      fi
       SNAP_BASE_RESOLVED_DONE=true
     fi
-    snapshot=$(capture_changed_files "${SNAP_BASE_RESOLVED:-}" 2>/dev/null || printf '[]')
+    if [ "${SNAP_BASE_REFUSED:-false}" = "true" ]; then
+      snapshot='[]'
+    else
+      snapshot=$(capture_changed_files "${SNAP_BASE_RESOLVED:-}" 2>/dev/null || printf '[]')
+    fi
     printf '%s\n' "$snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
-
-    # (D127) Target the task id from the /complete URL, not the env cache, so a
-    # stale TASK_ID from a hidden claim response cannot route the diff to the
-    # wrong task. Fall back to the env-cache TASK_ID only if the URL carries no id.
-    _tid=$(task_id_from_command "${COMMAND:-}")
-    [ -n "$_tid" ] || _tid="${TASK_ID:-}"
 
     # No-op silently if any prerequisite is missing — preserves the on-disk
     # snapshot for legacy --argjson cf consumers.
@@ -1115,6 +1190,13 @@ finalize_after_doing() {
         # re-checks the same preconditions itself. (D142) The resolved base
         # rides along so the self-heal reuses this task window's judgment.
         record_diff_upload_state "$_tid" "$_http_code" "${SNAP_BASE_RESOLVED:-}"
+        # (D226) A refusal is durable, not just a line on stderr that scrolls
+        # away — the same reasoning as W1658's unresolved marker. It also stops
+        # the before_review self-heal from re-capturing against the foreign
+        # base and quietly undoing the refusal on its fresh budget.
+        if [ "${SNAP_BASE_REFUSED:-false}" = "true" ]; then
+          printf 'refused_base=yes\n' >> "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+        fi
       fi
     fi
   fi
@@ -1133,7 +1215,7 @@ finalize_after_doing() {
 # strip already removed any inherited TASK_BASE_REF in that case.
 finalize_before_doing() {
   [ "${HOOK_NAME:-}" = "before_doing" ] || return 0
-  local _base_ref _preserved
+  local _base_ref _preserved _records _owner _key
   _base_ref=$( (cd "$PROJECT_DIR" && git rev-parse HEAD) 2>/dev/null || true)
   [ -n "$_base_ref" ] || return 0
   # TASK_BASE_REF_TRUSTED marks a base written by THIS post-before_doing
@@ -1142,14 +1224,34 @@ finalize_before_doing() {
   # that pushes its own task commits before completing would otherwise make
   # a correct base look like it predates the branch point. Inherited caches
   # (older plugin, previous session) lack the marker and get the full guard.
-  _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' "$ENV_CACHE" 2>/dev/null || true)
+  # (D226) The shared keys are rewritten as before, but an owner stamp and a
+  # per-task record ride alongside so a later NESTED claim cannot make this
+  # task's anchor unrecoverable. Earlier tasks' records are carried across
+  # untouched — that is what lets the OUTER task keep its own base — and
+  # capped so the cache cannot grow without bound over a long-lived checkout.
+  _owner="${TASK_ID:-}"
+  _key=$(task_base_ref_key "$_owner")
+  _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
+    -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)
+  _records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
+    | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' -e "^$_key=" \
+    | tail -n 19 || true)
   {
     [ -n "$_preserved" ] && printf '%s\n' "$_preserved"
+    [ -n "$_records" ] && printf '%s\n' "$_records"
     echo "TASK_BASE_REF=$(sq_escape "$_base_ref")"
     echo "TASK_BASE_REF_TRUSTED='1'"
+    if [ -n "$_owner" ]; then
+      echo "TASK_BASE_REF_OWNER=$(sq_escape "$_owner")"
+      echo "$_key=$(sq_escape "$_base_ref")"
+    fi
   } > "$ENV_CACHE" 2>/dev/null || true
   export TASK_BASE_REF="$_base_ref"
   export TASK_BASE_REF_TRUSTED="1"
+  if [ -n "$_owner" ]; then
+    export TASK_BASE_REF_OWNER="$_owner"
+    export "$_key=$_base_ref"
+  fi
   # (W1457→D142) The dirty baseline moves with the base capture: post-pull
   # paths hashed against the post-pull base, so the exclusion set and the
   # diff anchor can never disagree.
@@ -1214,13 +1316,24 @@ self_heal_changed_files_upload() {
   # when no persisted judgment exists (process killed before any PUT) run
   # the trust guard fresh — the retry must never resurrect a stale base the
   # primary capture would have refused.
-  local _snapshot _http_code _snap_base
+  local _snapshot _http_code _snap_base _sel _refused=false
   if [ "$_state_task" = "$_tid" ] && [ -n "$_state_base" ]; then
     _snap_base="$_state_base"
+  elif _sel=$(select_task_snapshot_base "$_tid"); then
+    # (D226) Same per-task anchor selection as the primary capture. Without
+    # this the retry would re-derive the shared TASK_BASE_REF and re-upload
+    # the very diff the primary capture refused — on a fresh budget, after
+    # the refusal notice had already scrolled past.
+    _snap_base=$( (cd "$PROJECT_DIR" 2>/dev/null && resolve_snapshot_base "$_sel") || printf '%s' "$_sel")
   else
-    _snap_base=$( (cd "$PROJECT_DIR" 2>/dev/null && resolve_snapshot_base "${TASK_BASE_REF:-}") || printf '%s' "${TASK_BASE_REF:-}")
+    _snap_base=""
+    _refused=true
   fi
-  _snapshot=$( (cd "$PROJECT_DIR" && capture_changed_files "$_snap_base") 2>/dev/null || printf '[]')
+  if [ "$_refused" = "true" ]; then
+    _snapshot='[]'
+  else
+    _snapshot=$( (cd "$PROJECT_DIR" && capture_changed_files "$_snap_base") 2>/dev/null || printf '[]')
+  fi
   printf '%s\n' "$_snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
   _http_code=$(upload_changed_files_snapshot "$_tid" "$_api_base" "$_token")
   record_diff_upload_state "$_tid" "$_http_code" "$_snap_base"
@@ -2204,10 +2317,19 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
   fi
 
   if [ -n "$TASK_JSON" ]; then
+    # (D226) This rewrite TRUNCATES the cache, so carry the per-task base-ref
+    # records across it. Without this a nested claim erases the outer task's
+    # anchor here — before finalize_before_doing ever runs — and the isolation
+    # fix would protect nothing. The shared TASK_BASE_REF / _TRUSTED / _OWNER
+    # keys are still dropped, exactly as D142 requires.
+    _kept_base_records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
+      | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
+      | tail -n 20 || true)
     # Values are single-quote escaped via sq_escape (W1453) so titles with
     # spaces, quotes, or dollar signs survive the `set -a` sourcing without
     # any shell interpretation.
     {
+      [ -n "$_kept_base_records" ] && printf '%s\n' "$_kept_base_records"
       echo "TASK_ID=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.id // empty')")"
       echo "TASK_IDENTIFIER=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.identifier // empty')")"
       echo "TASK_TITLE=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.title // empty')")"
@@ -2221,7 +2343,12 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # TASK_ID) but STRIP the inherited TASK_BASE_REF (and its trust marker)
     # NOW — even if this process dies before finalize_before_doing rewrites
     # it, a base from a previous task or session must never survive a claim.
-    _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' "$ENV_CACHE" 2>/dev/null || true)
+    # (D226) TASK_BASE_REF_OWNER goes with the base it stamps — leaving it
+    # behind would let a stripped cache still claim ownership. The per-task
+    # TASK_BASE_REF_<id> records are deliberately kept: they belong to tasks
+    # other than this claim and are the whole point of the isolation.
+    _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
+      -e '^TASK_BASE_REF_OWNER=' "$ENV_CACHE" 2>/dev/null || true)
     if [ -n "$_preserved" ]; then
       printf '%s\n' "$_preserved" > "$ENV_CACHE" 2>/dev/null || true
     else

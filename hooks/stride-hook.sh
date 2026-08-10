@@ -2151,6 +2151,24 @@ extract_response_payload() {
 # later invocation. TASK_BASE_REF is excluded: it is a client-only diff
 # anchor owned by the claim branch (W1086). Values go through jq's @sh so
 # embedded quotes and newlines cannot escape the single-quoting.
+# (D226) The jq filter below fences the TASK_BASE_REF namespace by PREFIX
+# rather than by equality. D142 excluded TASK_BASE_REF as a client-only diff
+# anchor; D226 added TASK_BASE_REF_OWNER, _UNPROVEN, _TRUSTED and the per-task
+# TASK_BASE_REF_<id> records to the same family, and each one defeats a
+# different rule in the base selection. Fencing the namespace declares that the
+# client owns it, and covers the next key added without anyone remembering to
+# update the filter.
+#
+# The match is case-SENSITIVE here and case-INsensitive in the ps1 twin, and
+# that difference is deliberate: each matches the variable semantics of its own
+# platform. Bash variables are case-sensitive, so Task_Base_Ref_100 lands in a
+# different variable and cannot collide with the names the guard reads; Windows
+# environment variables are case-insensitive, so that same key WOULD be found
+# there. Do not harmonize the two — making the ps1 side case-sensitive re-opens
+# the hole it closes.
+#
+# NOTE for editors: the filter is a single-quoted shell string, so it cannot
+# contain an apostrophe. Comments belong here, not inside it.
 extract_hook_env() {
   local _payload="$1" _name="$2"
   [ "$HAS_JQ" = "true" ] || return 0

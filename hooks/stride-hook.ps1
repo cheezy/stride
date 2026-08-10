@@ -1028,6 +1028,13 @@ function Get-HookEnvFromPayload {
             # defeats a different precedence rule in the base selection. A
             # server-supplied hook-env block must not be able to steer the
             # guard's own inputs.
+            # `-like` is case-INsensitive here DELIBERATELY, where the bash
+            # twin's jq startswith() is case-sensitive. Windows environment
+            # variables are case-insensitive, so a `Task_Base_Ref_100` key
+            # WOULD be found by GetEnvironmentVariable('TASK_BASE_REF_100');
+            # bash variables are case-sensitive, so the same key is inert
+            # there. Do not harmonize these — making this one case-sensitive
+            # re-opens the hole it closes.
             if ($key -eq 'HOOK_NAME' -or $key -like 'TASK_BASE_REF*') { continue }
             $envMap[$key] = [string]$prop.Value
         }

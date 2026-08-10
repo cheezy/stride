@@ -1479,6 +1479,44 @@ if (Test-Path $agMarkerFail) {
     $script:Pass++
 }
 
+# 8d4 (D228): the OTHER way a section exits 0 — it had nothing to run. An empty
+# or absent ## after_goal pushed nothing, so it must not erase a real report.
+# 8d3 recovers with a non-empty body and so cannot see this branch; plugin mode
+# ships exactly the empty fence, making it the live configuration.
+$agProjEmpty = Join-Path $TmpDir 'after-goal-e2e-empty'
+New-Item -ItemType Directory -Path $agProjEmpty -Force | Out-Null
+Set-Content -Path (Join-Path $agProjEmpty '.stride.md') -Value @'
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_goal
+```bash
+bash -c 'exit 11'
+```
+'@ -Encoding UTF8
+$null = Invoke-HookScript -InputJson $agInputPresent -Phase 'post' -ProjectDir $agProjEmpty
+$agMarkerEmpty = Join-Path $agProjEmpty '.stride/after-goal-unresolved'
+Set-Content -Path (Join-Path $agProjEmpty '.stride.md') -Value @'
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_goal
+```bash
+```
+'@ -Encoding UTF8
+$null = Invoke-HookScript -InputJson $agInputPresent -Phase 'post' -ProjectDir $agProjEmpty
+if (Test-Path $agMarkerEmpty) {
+    Write-Host "  PASS: 8d4 (D228): an EMPTY after_goal does not erase the marker" -ForegroundColor Green
+    $script:Pass++
+} else {
+    Write-Host "  FAIL: 8d4 (D228): an EMPTY after_goal erased the marker, but nothing was pushed" -ForegroundColor Red
+    $script:Fail++
+}
+
 # 8e: mark_reviewed URL also routes after_goal (parity with /complete).
 $agInputMr = Build-AfterGoalInput `
     -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed' `

@@ -2356,11 +2356,27 @@ run_after_goal_section() {
   if [ "$_ag_rc" -ne 0 ]; then
     _ag_out=$(augment_after_goal_failure_json "$_ag_out")
     report_after_goal_failure
-  else
-    # (D228) Clear the marker when a later after_goal succeeds. A durable
-    # channel that is only ever written becomes a permanent `unresolved=yes`
-    # — the same cry-wolf failure the success-path tests guard the transient
-    # channels against, just slower to notice.
+  elif [ -n "$_ag_out" ]; then
+    # (D228) Clear the marker only when the section actually RAN and passed.
+    #
+    # `run_stride_section` returns 0 for two different things: commands ran and
+    # passed, and there were NO commands to run (the empty/absent-section early
+    # return). Gating the clear on the exit code alone conflated them, so an
+    # empty `## after_goal` deleted a real report without any push having
+    # happened — and plugin mode ships exactly that empty fence, so a mode swap
+    # after a failure erased the evidence. Review caught it; I introduced it.
+    #
+    # Output presence is the discriminator because the no-commands path returns
+    # BEFORE emitting any JSON, while a real success emits its object. That is
+    # sound here specifically: `route_after_goal` gates on HAS_JQ, so this
+    # function only ever runs with jq available to produce that object. And the
+    # failure direction is the safe one — if the object were ever missing after
+    # a real success, the marker merely persists (stale), never erases.
+    #
+    # The ps1 twin cannot use this test: it writes its JSON straight to the
+    # host stream, so there is nothing to capture. It carries an explicit
+    # ran-commands flag instead. Same semantics, different mechanism, recorded
+    # here so the two are not "harmonised" into one broken shape.
     rm -f "$PROJECT_DIR/.stride/after-goal-unresolved" 2>/dev/null || true
   fi
   [ -n "$_ag_out" ] && printf '%s\n' "$_ag_out"

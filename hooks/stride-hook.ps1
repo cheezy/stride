@@ -26,6 +26,10 @@ $EnvCache = Join-Path $ProjectDir '.stride-env-cache'
 # claim block set it.
 $script:TaskIdentityRefreshed = $false
 $script:TaskOwnerId = ''
+# (D228) Whether the most recent Invoke-StrideSection actually executed
+# commands. A section with no commands returns 0 too, and callers that treat
+# "exit 0" as "it ran and passed" get that wrong — see the after_goal marker.
+$script:LastSectionRanCommands = $false
 
 # (D226) Atomic env-cache write, mirroring the bash twin's write_env_cache.
 # Every truncating write goes through here so no reader can observe a partial
@@ -1627,6 +1631,12 @@ function Invoke-StrideSection {
     $rawContent = $rawContent -replace "`r`n", "`n"
     $sectionLines = $rawContent -split "`n"
 
+    # (D228) Reset PER CALL, not per script. Several sections run in one
+    # invocation — before_review then after_goal — so a flag left set by an
+    # earlier non-empty section would make a later EMPTY one look like it ran.
+    # That is exactly how the first attempt at this failed its own test.
+    $script:LastSectionRanCommands = $false
+
     $secCommands = ''
     $secFound = $false
     $secCapture = $false
@@ -1658,8 +1668,14 @@ function Invoke-StrideSection {
 
     if (-not $secCommands.Trim()) {
         Invoke-FinalizeAfterDoing
+        # (D228) Leaves $script:LastSectionRanCommands false — this returns 0
+        # WITHOUT running anything, and callers must be able to tell that apart
+        # from a genuine ran-and-passed 0. The bash twin distinguishes the two
+        # by output presence, which is unavailable here because the JSON goes
+        # straight to the host stream.
         return 0
     }
+    $script:LastSectionRanCommands = $true
 
     # (W1456) Join backslash-continued physical lines into logical lines
     # first (the backslash-newline pair is removed, per shell semantics);
@@ -2008,10 +2024,11 @@ function Invoke-AfterGoalSection {
     $agRc = Invoke-StrideSection -Section 'after_goal'
     if ($agRc -ne 0) {
         Write-AfterGoalUnresolved
-    } else {
-        # (D228) Clear a stale marker when a later after_goal succeeds — a
-        # durable channel that is only ever written becomes a permanent
-        # false positive. Mirrors the bash twin.
+    } elseif ($script:LastSectionRanCommands) {
+        # (D228) Clear only when the section actually RAN and passed. An empty
+        # or absent ## after_goal also returns 0 without running anything, and
+        # plugin mode ships exactly that empty fence — gating on the exit code
+        # alone erased a real report after a mode swap.
         $agMarker = Join-Path (Join-Path $ProjectDir '.stride') 'after-goal-unresolved'
         if (Test-Path $agMarker) {
             Remove-Item -Force -LiteralPath $agMarker -ErrorAction SilentlyContinue

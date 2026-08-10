@@ -5787,8 +5787,12 @@ rm -rf "$D226_W" "$D226_WSTUB"
 echo ""
 echo "=== Test Group 24: D228 a failing after_goal reports visibly ==="
 
-if ! command -v jq > /dev/null 2>&1; then
-  echo "  SKIP: jq missing — Group 24 requires jq"
+# python3 is required as well as jq: 24e's strict-parse check uses it, and if
+# it were missing the pipeline would fail into the else-branch and assert
+# "multiple" without having parsed anything — a vacuous pass, the same shape as
+# the jq -s guard this group replaced.
+if ! command -v jq > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+  echo "  SKIP: jq or python3 missing — Group 24 requires both"
 else
   d228_project() { # $1 = dir, $2 = after_goal body
     mkdir -p "$1"
@@ -5858,6 +5862,32 @@ else
     "unresolved=yes" "$D228_CLR_BEFORE"
   assert_eq "24f: a later successful after_goal clears the marker" \
     "" "$(ls "$D228_CLR_DIR/.stride/after-goal-unresolved" 2>/dev/null)"
+
+  # 24g: the other way a section exits 0 — it had NOTHING TO RUN. An empty or
+  # absent `## after_goal` pushed nothing, so it must not erase a real report.
+  # 24f alone could not see this: it recovers with a non-empty body, so it
+  # asserts "the marker is gone" without ever asking what removed it. Plugin
+  # mode ships an empty after_goal fence, so this is the live configuration.
+  D228_EMPTY_DIR="$TMPDIR_TEST/d228-empty"
+  d228_project "$D228_EMPTY_DIR" "bash -c 'exit 11'"
+  echo "$D228_INPUT" | CLAUDE_PROJECT_DIR="$D228_EMPTY_DIR" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  # Same project, after_goal fence now EMPTY (plugin mode's shape).
+  {
+    printf '## before_review\n```bash\necho "before_review_ran"\n```\n\n'
+    printf '## after_goal\n```bash\n```\n'
+  } > "$D228_EMPTY_DIR/.stride.md"
+  echo "$D228_INPUT" | CLAUDE_PROJECT_DIR="$D228_EMPTY_DIR" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_contains "24g: an EMPTY after_goal does not erase the marker (nothing was pushed)" \
+    "unresolved=yes" "$(cat "$D228_EMPTY_DIR/.stride/after-goal-unresolved" 2>/dev/null)"
+
+  # ...and the same for a section that is absent entirely.
+  D228_ABSENT_DIR="$TMPDIR_TEST/d228-absent"
+  d228_project "$D228_ABSENT_DIR" "bash -c 'exit 11'"
+  echo "$D228_INPUT" | CLAUDE_PROJECT_DIR="$D228_ABSENT_DIR" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  printf '## before_review\n```bash\necho "before_review_ran"\n```\n' > "$D228_ABSENT_DIR/.stride.md"
+  echo "$D228_INPUT" | CLAUDE_PROJECT_DIR="$D228_ABSENT_DIR" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_contains "24g: an ABSENT after_goal does not erase the marker either" \
+    "unresolved=yes" "$(cat "$D228_ABSENT_DIR/.stride/after-goal-unresolved" 2>/dev/null)"
 
   # 24d: the SUCCESS case must stay quiet. A report channel that fires on a
   # healthy goal is worse than none — it trains the reader to ignore it.

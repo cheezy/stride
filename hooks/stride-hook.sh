@@ -2270,20 +2270,23 @@ ${_key}=''"
 # work silently stays local and the board says it shipped.
 #
 # Three channels, none of which changes the exit code:
-#   1. hookSpecificOutput.additionalContext — the documented PostToolUse
-#      channel for surfacing text to the model WITHOUT blocking. Merged into
-#      the existing structured object so stdout stays a single JSON document.
-#   2. a loud stderr line naming the consequence, in the W1658 idiom.
-#   3. a durable marker under .stride/, which is already gitignored AND already
-#      excluded from the diff snapshot, and which the after_review cleanup
-#      block does not delete.
+#   1. a loud stderr line naming the consequence, in the W1658 idiom.
+#   2. a durable marker under .stride/, which is already gitignored AND already
+#      excluded from the diff snapshot, which the after_review cleanup block
+#      does not delete, and which is CLEARED when a later after_goal succeeds.
+#   3. hookSpecificOutput.additionalContext, merged into after_goal's own
+#      structured object — BEST-EFFORT ONLY, see the limitation below.
 #
-# UNVERIFIED, stated rather than assumed: the docs confirm additionalContext is
-# supported for PostToolUse on exit 0, but do NOT confirm that Claude Code
-# tolerates extra top-level keys beside its own contract. If it does not, the
-# merge is simply ignored and behaviour is exactly what it is today — the
-# stderr line and the durable marker carry the report regardless. The merge can
-# only add visibility, never remove it.
+# THE LIMITATION, measured rather than assumed. Claude Code parses hook stdout
+# as ONE JSON document. When a primary section (## before_review) also ran and
+# emitted its own object, stdout carries TWO concatenated documents, a strict
+# parse fails with "Extra data", and the field is never read. That is this
+# repo's own configuration. So channel 3 lands only when after_goal's object is
+# the sole document on stdout, and channels 1 and 2 are what carry the report
+# in the common case. An earlier version of this comment claimed the merge kept
+# stdout to a single document; that was wrong, and review caught it. Making the
+# whole stdout a single document is a wider change to a contract other
+# consumers read — filed separately rather than smuggled in here.
 after_goal_failure_context() {
   printf 'Stride after_goal FAILED for goal %s. The `## after_goal` section did not complete, so its `git push origin main` did NOT run — the goal work is committed LOCALLY ONLY. The server grace-window worker will still mark the goal Done; that is bookkeeping and pushes nothing. Verify with `git log origin/main..main --oneline` (expect empty) and push, or re-run the after_goal commands.' \
     "${GOAL_IDENTIFIER:-${GOAL_ID:-unknown}}"
@@ -2297,9 +2300,13 @@ augment_after_goal_failure_json() {
   [ "${HAS_JQ:-false}" = "true" ] || { printf '%s' "$_json"; return 0; }
   [ -n "$_json" ] || { printf '%s' "$_json"; return 0; }
   _ctx=$(after_goal_failure_context)
-  # NOT `jq -c`: run_stride_section emits pretty-printed JSON and both the
-  # documented parser contract and the suite match on the spaced form, so
-  # compacting here would silently change the shape every consumer reads.
+  # NOT `jq -c`: run_stride_section emits pretty-printed JSON and the existing
+  # bash suite matches on the spaced form, so compacting here would change the
+  # shape those assertions read. Note the ps1 twin emits the COMPACT form via
+  # ConvertTo-Json -Compress and its own suite asserts that — so the contract
+  # is evidently whitespace-tolerant across platforms, and any consumer must
+  # treat it as such. Keeping the spaced form here is about not churning this
+  # side, not about a contract that forbids the other.
   _merged=$(printf '%s' "$_json" | jq \
     --arg ctx "$_ctx" \
     '. + {hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $ctx}}' 2>/dev/null || true)
@@ -2349,6 +2356,12 @@ run_after_goal_section() {
   if [ "$_ag_rc" -ne 0 ]; then
     _ag_out=$(augment_after_goal_failure_json "$_ag_out")
     report_after_goal_failure
+  else
+    # (D228) Clear the marker when a later after_goal succeeds. A durable
+    # channel that is only ever written becomes a permanent `unresolved=yes`
+    # — the same cry-wolf failure the success-path tests guard the transient
+    # channels against, just slower to notice.
+    rm -f "$PROJECT_DIR/.stride/after-goal-unresolved" 2>/dev/null || true
   fi
   [ -n "$_ag_out" ] && printf '%s\n' "$_ag_out"
   HOOK_NAME="$_routed_hook_name"

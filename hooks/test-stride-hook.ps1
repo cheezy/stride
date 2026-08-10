@@ -1436,6 +1436,49 @@ Assert-Contains "8d: structured failed JSON references after_goal on stdout" '"h
 Assert-Contains "8d: structured failed JSON has status:failed" '"status":"failed"' $r.Stdout
 Assert-Contains "8d: structured failed JSON carries non-zero exit_code" '"exit_code":11' $r.Stdout
 
+# 8d2 (D228): a failing after_goal means `git push origin main` never ran, so
+# it must not be silent. Mirrors bash Test Group 24. Manual pwsh execution is
+# not a regression guard — these are.
+Assert-Contains "8d2 (D228): failure JSON carries the PostToolUse context field" `
+    '"hookEventName":"PostToolUse"' $r.Stdout
+Assert-Contains "8d2 (D228): the context names the push that did not happen" `
+    'git push origin main' $r.Stdout
+Assert-Contains "8d2 (D228): the failure is announced loudly on stderr" `
+    'AFTER_GOAL UNRESOLVED' $r.Stderr
+$agMarkerFail = Join-Path $agProjFail '.stride/after-goal-unresolved'
+$agMarkerText = if (Test-Path $agMarkerFail) { (Get-Content $agMarkerFail -Raw) } else { '' }
+Assert-Contains "8d2 (D228): a durable marker records the unresolved push" `
+    'unresolved=yes' $agMarkerText
+Assert-Contains "8d2 (D228): the marker states the push did not land" `
+    'pushed=no' $agMarkerText
+
+# 8d3 (D228): the SUCCESS path must stay quiet AND clear a stale marker. A
+# channel that fires on healthy goals trains the reader to ignore it, and a
+# marker that is only ever written becomes a permanent false positive.
+Set-Content -Path (Join-Path $agProjFail '.stride.md') -Value @'
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_goal
+```bash
+echo after_goal_recovered
+```
+'@ -Encoding UTF8
+$r2 = Invoke-HookScript -InputJson $agInputPresent -Phase 'post' -ProjectDir $agProjFail
+Assert-NotContains "8d3 (D228): a successful after_goal adds no PostToolUse context" `
+    'hookSpecificOutput' $r2.Stdout
+Assert-NotContains "8d3 (D228): a successful after_goal prints no UNRESOLVED warning" `
+    'AFTER_GOAL UNRESOLVED' $r2.Stderr
+if (Test-Path $agMarkerFail) {
+    Write-Host "  FAIL: 8d3 (D228): a later successful after_goal should clear the marker" -ForegroundColor Red
+    $script:Fail++
+} else {
+    Write-Host "  PASS: 8d3 (D228): a later successful after_goal clears the marker" -ForegroundColor Green
+    $script:Pass++
+}
+
 # 8e: mark_reviewed URL also routes after_goal (parity with /complete).
 $agInputMr = Build-AfterGoalInput `
     -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed' `

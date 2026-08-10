@@ -2006,7 +2006,17 @@ function Invoke-AfterGoalSection {
     # and the two channels below survive regardless of whether the harness
     # honours that field.
     $agRc = Invoke-StrideSection -Section 'after_goal'
-    if ($agRc -ne 0) { Write-AfterGoalUnresolved }
+    if ($agRc -ne 0) {
+        Write-AfterGoalUnresolved
+    } else {
+        # (D228) Clear a stale marker when a later after_goal succeeds — a
+        # durable channel that is only ever written becomes a permanent
+        # false positive. Mirrors the bash twin.
+        $agMarker = Join-Path (Join-Path $ProjectDir '.stride') 'after-goal-unresolved'
+        if (Test-Path $agMarker) {
+            Remove-Item -Force -LiteralPath $agMarker -ErrorAction SilentlyContinue
+        }
+    }
     [System.Environment]::SetEnvironmentVariable('HOOK_NAME', $savedHookNameEnv, 'Process')
 }
 

@@ -5822,10 +5822,42 @@ else
     "pushed=no" "$D228_MARKER"
   assert_contains "24c: the failure is announced loudly on stderr" \
     "AFTER_GOAL UNRESOLVED" "$D228_FAIL_ERR"
-  # stdout must remain ONE json document — a second object beside it would
-  # break every consumer that parses the hook's output.
-  D228_OBJ_COUNT=$(printf '%s' "$D228_FAIL_OUT" | jq -s 'length' 2>/dev/null)
-  assert_eq "24a: stdout stays parseable as a single JSON stream" "2" "$D228_OBJ_COUNT"
+  # 24e: the KNOWN limitation, pinned rather than papered over. Claude Code
+  # parses hook stdout as ONE document; when a primary section also emitted
+  # JSON, stdout is two concatenated documents and a strict parse fails, so
+  # the context field is not read. An earlier version of this group asserted
+  # `jq -s length == 2` and called it "stdout stays a single document" — but
+  # `jq -s` slurps a STREAM, so it cannot detect concatenation at all, and 2
+  # was the value both before and after the change. It pinned the broken
+  # state. These two assertions state the truth in both directions.
+  # A STRICT parser is required here. `jq .` and `jq -s` both accept a
+  # concatenated stream, which is exactly how the previous version of this
+  # guard fooled itself — python's json.loads rejects trailing data.
+  if printf '%s' "$D228_FAIL_OUT" | python3 -c 'import json,sys; json.loads(sys.stdin.read())' > /dev/null 2>&1; then
+    D228_STRICT="single"
+  else
+    D228_STRICT="multiple"
+  fi
+  assert_eq "24e: with a primary section present, stdout is NOT a single document" \
+    "multiple" "$D228_STRICT"
+  # ...and after_goal's own object is still well-formed and carries the field,
+  # so the channel works whenever it IS the only document.
+  D228_AG_CTX=$(printf '%s' "$D228_FAIL_OUT" | jq -rs '.[] | select(.hook=="after_goal") | .hookSpecificOutput.hookEventName' 2>/dev/null)
+  assert_eq "24e: after_goal's own object is well-formed and carries the field" \
+    "PostToolUse" "$D228_AG_CTX"
+
+  # 24f: the durable marker is CLEARED by a later successful after_goal —
+  # otherwise a one-off failure leaves a permanent unresolved=yes.
+  D228_CLR_DIR="$TMPDIR_TEST/d228-clear"
+  d228_project "$D228_CLR_DIR" "bash -c 'exit 11'"
+  echo "$D228_INPUT" | CLAUDE_PROJECT_DIR="$D228_CLR_DIR" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  D228_CLR_BEFORE=$(cat "$D228_CLR_DIR/.stride/after-goal-unresolved" 2>/dev/null)
+  d228_project "$D228_CLR_DIR" "echo recovered"
+  echo "$D228_INPUT" | CLAUDE_PROJECT_DIR="$D228_CLR_DIR" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_contains "24f: the marker is written on the failing run" \
+    "unresolved=yes" "$D228_CLR_BEFORE"
+  assert_eq "24f: a later successful after_goal clears the marker" \
+    "" "$(ls "$D228_CLR_DIR/.stride/after-goal-unresolved" 2>/dev/null)"
 
   # 24d: the SUCCESS case must stay quiet. A report channel that fires on a
   # healthy goal is worse than none — it trains the reader to ignore it.

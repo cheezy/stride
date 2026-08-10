@@ -2337,6 +2337,15 @@ report_after_goal_failure() {
 }
 
 run_after_goal_section() {
+  # (D228) Self-gate rather than trust the callers. Both current call sites
+  # already gate on jq, but the marker logic below breaks ASYMMETRICALLY if one
+  # ever does not: report_after_goal_failure is pure printf/mkdir and needs no
+  # jq, while the CLEAR needs jq to produce the object it tests. An ungated
+  # caller would therefore write markers that can never be cleared — round 1's
+  # permanent `unresolved=yes`, reintroduced by construction. Nine other
+  # functions in this script self-gate the same way, including the sibling
+  # augment_after_goal_failure_json.
+  [ "${HAS_JQ:-false}" = "true" ] || return 0
   local _payload="$1"
   AFTER_GOAL_ROUTED=true
   # (W1453) Export GOAL_* (server-supplied, with the parent-id fallback for
@@ -2373,10 +2382,15 @@ run_after_goal_section() {
     # failure direction is the safe one — if the object were ever missing after
     # a real success, the marker merely persists (stale), never erases.
     #
-    # The ps1 twin cannot use this test: it writes its JSON straight to the
-    # host stream, so there is nothing to capture. It carries an explicit
-    # ran-commands flag instead. Same semantics, different mechanism, recorded
-    # here so the two are not "harmonised" into one broken shape.
+    # WHY BASH CANNOT USE THE PS1'S FLAG — the load-bearing constraint, since
+    # the jq argument above would otherwise invite exactly the wrong fix.
+    # `_ag_out=$(run_stride_section "after_goal")` is a COMMAND SUBSTITUTION,
+    # so any global the function sets is discarded with the subshell. A reader
+    # who accepts the jq reasoning could reasonably conclude "then set a flag
+    # like the ps1 and drop the jq dependence" — and silently break clearing,
+    # because the flag never propagates back. The ps1 can use a flag precisely
+    # because it writes its JSON to the host stream and needs no subshell.
+    # Same semantics, different mechanism, structural rather than a preference.
     rm -f "$PROJECT_DIR/.stride/after-goal-unresolved" 2>/dev/null || true
   fi
   [ -n "$_ag_out" ] && printf '%s\n' "$_ag_out"

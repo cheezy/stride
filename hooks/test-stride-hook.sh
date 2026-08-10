@@ -5612,6 +5612,39 @@ assert_eq "23k: no record is written under the stale cached id" \
   "" "$(printf '%s' "$D226_WF_CACHE" | grep -c '^TASK_BASE_REF_100=' | tr -d ' ' | sed 's/^0$//')"
 rm -rf "$D226_WF"
 
+# 23l: BOTH claims decline the gate. The outer task then has no record, and a
+# declining claim also strips any previous owner stamp — so without the
+# unproven marker the absence reads exactly like a legacy cache and the
+# foreign base is handed out with nothing to contradict it. The two declines
+# share one systematic cause (an oversized claim response), so this is the
+# same failure repeating rather than two coincidences.
+D226_UP=$(mktemp -d)
+D226_UPSTUB=$(mktemp -d)
+make_curl_stub "$D226_UPSTUB" "$D226_UP/curl-call.txt" 0
+d226_fixture "$D226_UP"
+D226_UP_OUT=$(
+  cd "$D226_UP" || exit 1
+  # Outer claim: truncated response, so the gate declines.
+  echo '{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":100,\"identi"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  echo "outer" > outer.txt
+  git add outer.txt > /dev/null
+  git commit -q -m "outer task work"
+  # Nested claim: truncated too — same cause, same window.
+  echo '{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":200,\"identi"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  echo "nested" > nested.txt
+  git add nested.txt > /dev/null
+  git commit -q -m "nested task work"
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/100/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_UPSTUB:$PATH" bash "$HOOK_SCRIPT" pre 2>&1
+)
+assert_contains "23l: an unprovable base is refused rather than handed out" \
+  "REFUSING" "$D226_UP_OUT"
+assert_eq "23l: the outer task uploads empty, never the nested task's diff" \
+  "[]" "$(jq -c '.' "$D226_UP/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D226_UP" "$D226_UPSTUB"
+
 # 23g: the self-heal's refusal branch — an entire code path that had no test.
 # before_review runs on a fresh budget and would otherwise re-capture against
 # the foreign base, undoing the primary refusal after its notice scrolled by.

@@ -32,8 +32,14 @@ $script:TaskOwnerId = ''
 # cache. The temp is staged in .stride/ — already hard-excluded from capture
 # and from project gitignores, unlike a sibling .stride-env-cache.XXXX — and
 # on the same filesystem, so Move-Item is a rename. On any failure the
-# PREVIOUS cache survives intact, and the failure is announced rather than
-# swallowed.
+# PREVIOUS cache survives, and the failure is announced rather than swallowed.
+#
+# One host caveat, stated because it is easy to verify on the wrong one:
+# stride-hook.sh execs `powershell.exe` (Windows PowerShell 5.1), not `pwsh`.
+# .NET Framework has no File.Move(src, dst, overwrite), so 5.1 implements
+# `-Force` as delete-then-move. "Never partial" still holds there — a reader
+# sees the old cache or none — but "never absent" does not: a crash inside
+# that window leaves no cache, which degrades safely to the HEAD~1 fallback.
 function Write-EnvCache {
     param([string[]]$Lines)
     $stageDir = Join-Path $ProjectDir '.stride'
@@ -1461,18 +1467,25 @@ function Invoke-FinalizeBeforeDoing {
                 $_ -notmatch '^TASK_BASE_REF=' -and
                 $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and
                 $_ -notmatch '^TASK_BASE_REF_OWNER=' -and
+                $_ -notmatch '^TASK_BASE_REF_UNPROVEN=' -and
                 $_ -notmatch '^TASK_BASE_REF_[A-Za-z0-9_]+='
             })
             $records = @($existing | Where-Object {
                 $_ -match '^TASK_BASE_REF_[A-Za-z0-9_]+=' -and
                 $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and
                 $_ -notmatch '^TASK_BASE_REF_OWNER=' -and
+                $_ -notmatch '^TASK_BASE_REF_UNPROVEN=' -and
                 ($ownerKey -eq '' -or $_ -notmatch ('^' + [regex]::Escape($ownerKey) + '='))
             } | Select-Object -Last 19)
         }
         $newLines = $preserved + $records + "TASK_BASE_REF=$baseRef" + "TASK_BASE_REF_TRUSTED=1"
         if ($ownerKey) {
             $newLines = $newLines + "TASK_BASE_REF_OWNER=$owner" + "$ownerKey=$baseRef"
+        } else {
+            # (D226) Marks a base written without a provable owner, so a later
+            # completion can tell it apart from a pre-fix cache. Mirrors the
+            # bash twin's TASK_BASE_REF_UNPROVEN.
+            $newLines = $newLines + "TASK_BASE_REF_UNPROVEN=1"
         }
         Write-EnvCache -Lines $newLines | Out-Null
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF', $baseRef, 'Process')
@@ -1480,6 +1493,10 @@ function Invoke-FinalizeBeforeDoing {
         if ($ownerKey) {
             [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_OWNER', $owner, 'Process')
             [System.Environment]::SetEnvironmentVariable($ownerKey, $baseRef, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_UNPROVEN', $null, 'Process')
+        } else {
+            [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_UNPROVEN', '1', 'Process')
+            [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_OWNER', $null, 'Process')
         }
         # (W1457→D142) The dirty baseline moves with the base capture:
         # post-pull paths hashed against the post-pull base, so the exclusion

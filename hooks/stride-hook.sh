@@ -1168,6 +1168,19 @@ select_task_snapshot_base() {
       "$_tid" "${TASK_BASE_REF:-<empty>}" "$_owner" >&2
     return 1
   fi
+  # A base whose claim could not prove WHOSE it was. Without this the absence
+  # of a stamp reads identically to a legacy cache, and rule 2 hands out the
+  # base anyway — so two claims that both declined the gate (one systematic
+  # cause, an oversized response, happening twice in a window) leave an outer
+  # task diffing from a nested claim's base with nothing to contradict. The
+  # marker is what separates "written by this version, owner unknown" from
+  # "written before this version existed": a legacy cache has neither marker
+  # nor record, so it still captures and pitfall 1 stands.
+  if [ -n "$_tid" ] && [ "${TASK_BASE_REF_UNPROVEN:-}" = "1" ]; then
+    printf 'stride-hook: REFUSING the changed_files diff for task %s — cached TASK_BASE_REF %s was written by a claim that could not prove which task it belonged to, and no base is recorded for this task. Uploading an empty snapshot instead.\n' \
+      "$_tid" "${TASK_BASE_REF:-<empty>}" >&2
+    return 1
+  fi
   printf '%s' "${TASK_BASE_REF:-}"
   return 0
 }
@@ -1297,7 +1310,8 @@ finalize_before_doing() {
     [ -n "$_key" ] || _owner=""
   fi
   _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
-    -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)
+    -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_UNPROVEN=' \
+    -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)
   # The cap keeps a long-lived checkout from growing the cache without bound.
   # `tail` drops the OLDEST record, which is the outer task's — and that
   # eviction order is what makes the cap safe: an outer task that outlives the
@@ -1325,6 +1339,10 @@ finalize_before_doing() {
     if [ -n "$_owner" ]; then
       echo "TASK_BASE_REF_OWNER=$(sq_escape "$_owner")"
       echo "$_key=$(sq_escape "$_base_ref")"
+    else
+      # Marks a base this version wrote without being able to prove its owner,
+      # so a later completion can tell it apart from a pre-fix cache.
+      echo "TASK_BASE_REF_UNPROVEN='1'"
     fi
   } | write_env_cache || true
   export TASK_BASE_REF="$_base_ref"
@@ -1332,6 +1350,10 @@ finalize_before_doing() {
   if [ -n "$_owner" ]; then
     export TASK_BASE_REF_OWNER="$_owner"
     export "$_key=$_base_ref"
+    unset TASK_BASE_REF_UNPROVEN
+  else
+    export TASK_BASE_REF_UNPROVEN="1"
+    unset TASK_BASE_REF_OWNER
   fi
   # (W1457→D142) The dirty baseline moves with the base capture: post-pull
   # paths hashed against the post-pull base, so the exclusion set and the
@@ -2471,7 +2493,7 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # TASK_BASE_REF_<id> records are deliberately kept: they belong to tasks
     # other than this claim and are the whole point of the isolation.
     _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
-      -e '^TASK_BASE_REF_OWNER=' "$ENV_CACHE" 2>/dev/null || true)
+      -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_UNPROVEN=' "$ENV_CACHE" 2>/dev/null || true)
     if [ -n "$_preserved" ]; then
       printf '%s\n' "$_preserved" | write_env_cache || true
     else

@@ -1143,8 +1143,27 @@ function Invoke-ChangedFilesUpload {
             # the baseline filter below must never drop them (D137 silently
             # lost 4 tracked edits and an untracked migration whose content
             # matched their claim-time hashes after the auto-commit).
+            # (D226) Prefer the base recorded by THIS task's own claim. The
+            # shared TASK_BASE_REF is the nested task's after a nested claim,
+            # and feeding a foreign range to the override below misfires in
+            # BOTH directions — real task work that was dirty at claim gets
+            # dropped (the D137 loss D142 exists to prevent), and foreign
+            # paths get retained. This script builds no snapshot, but it does
+            # read the base, so the read needs the same per-task selection the
+            # bash twin applies.
             $committedRange = @()
-            $cfBase = [System.Environment]::GetEnvironmentVariable('TASK_BASE_REF', 'Process')
+            $cfBase = ''
+            if ($TaskId) {
+                $ownKey = 'TASK_BASE_REF_' + ($TaskId -replace '[^A-Za-z0-9_]', '_')
+                $cfBase = [System.Environment]::GetEnvironmentVariable($ownKey, 'Process')
+                # Records written by the bash twin are sq_escape'd and the
+                # cache loader keeps the literal quotes, so strip them.
+                if ($cfBase) { $cfBase = $cfBase.Trim("'") }
+            }
+            if (-not $cfBase) {
+                $cfBase = [System.Environment]::GetEnvironmentVariable('TASK_BASE_REF', 'Process')
+                if ($cfBase) { $cfBase = $cfBase.Trim("'") }
+            }
             if ($cfBase) {
                 try {
                     $committedRange = @(& git -C $ProjectDir diff --name-only $cfBase HEAD 2>$null)
@@ -1294,18 +1313,21 @@ function Invoke-FinalizeAfterDoing {
 # already succeeded — PostToolUse cannot veto it). Skips silently when HEAD
 # is unresolvable (not a git repo) — the pre-section strip already removed
 # any inherited TASK_BASE_REF in that case.
-# (D226) PARITY NOTE, stated precisely rather than as a blanket claim. The
-# defect has two halves. The WRITE half — a nested claim overwriting the
-# shared TASK_BASE_REF — happens here identically to the bash twin, and is
-# mirrored below. The READ half — a foreign base silently driving the diff
-# capture — CANNOT occur in this script, because it has no capture step at
-# all: Invoke-FinalizeAfterDoing re-uploads the on-disk snapshot and never
-# runs `git diff TASK_BASE_REF` to build one. So there is no
-# select_task_snapshot_base equivalent here and nothing to refuse; the write
-# half is mirrored for cache-format parity, so a cache written on Windows and
-# read by the bash executor (or vice versa) carries the same ownership
-# information. Do not read this as "D226 is fully ported to Windows" — the
-# read-side guard has no counterpart to port.
+# (D226) PARITY NOTE. An earlier version of this comment claimed this script
+# had "no read half to fix". That was WRONG and review caught it: this script
+# does not BUILD a snapshot, but Invoke-ChangedFilesUpload does READ
+# TASK_BASE_REF and run `git diff --name-only <base> HEAD` to drive D142's
+# committed-range override. A foreign base there silently drops real task work
+# or retains foreign paths. That read is now routed through the per-task
+# record, so both halves are covered here:
+#   WRITE half — a nested claim overwriting the shared TASK_BASE_REF happens
+#     identically to the bash twin, and is mirrored below.
+#   READ half — smaller than the bash twin's (no capture step to protect, so
+#     no select_task_snapshot_base equivalent and nothing to REFUSE), but the
+#     base selection it does perform now prefers this task's own record.
+# The refusal path itself has no counterpart here, because there is no diff
+# built on this side to refuse. State that precisely rather than claiming
+# blanket parity — the last blanket claim in this comment was false.
 function Invoke-FinalizeBeforeDoing {
     if ($HookName -ne 'before_doing') { return }
     $baseRef = ''

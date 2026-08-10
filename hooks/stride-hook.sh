@@ -1078,8 +1078,17 @@ task_id_from_command() {
 # A flat `TASK_BASE_REF_<id>` line keeps this inside the existing cache on
 # purpose: a new dotfile would need a `.gitignore` entry in every consuming
 # project, which the plugin cannot add on the user's behalf.
+# The per-task keys share a namespace with TASK_BASE_REF_TRUSTED and
+# TASK_BASE_REF_OWNER, so an id sanitizing to either would emit a record line
+# that sets the trust flag or the owner from server data. Ids are integers, so
+# this is theoretical — and it costs two lines to keep it that way.
 task_base_ref_key() {
-  printf 'TASK_BASE_REF_%s' "$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')"
+  local _s
+  _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
+  case "$_s" in
+    "" | TRUSTED | OWNER) return 0 ;;
+  esac
+  printf 'TASK_BASE_REF_%s' "$_s"
 }
 
 # Prints the base recorded by the given task's OWN claim, or empty when none
@@ -1215,7 +1224,7 @@ finalize_after_doing() {
 # strip already removed any inherited TASK_BASE_REF in that case.
 finalize_before_doing() {
   [ "${HOOK_NAME:-}" = "before_doing" ] || return 0
-  local _base_ref _preserved _records _owner _key
+  local _base_ref _preserved _records _owner _key _tmp_cache
   _base_ref=$( (cd "$PROJECT_DIR" && git rev-parse HEAD) 2>/dev/null || true)
   [ -n "$_base_ref" ] || return 0
   # TASK_BASE_REF_TRUSTED marks a base written by THIS post-before_doing
@@ -1229,23 +1238,55 @@ finalize_before_doing() {
   # task's anchor unrecoverable. Earlier tasks' records are carried across
   # untouched — that is what lets the OUTER task keep its own base — and
   # capped so the cache cannot grow without bound over a long-lived checkout.
-  _owner="${TASK_ID:-}"
-  _key=$(task_base_ref_key "$_owner")
+  # (D226) Ownership is stamped ONLY when this claim parsed its own identity.
+  # On the unparsed path TASK_ID still holds the PREVIOUS task's id, so
+  # stamping would overwrite that task's record with this claim's HEAD and
+  # then vouch for it — a matching owner that silently defeats the refusal.
+  # Writing neither leaves the outer task's record intact and correct, and the
+  # nested task falls back to the shared base, which is genuinely its own.
+  _owner=""
+  _key=""
+  if [ "${TASK_IDENTITY_REFRESHED:-0}" = "1" ]; then
+    _owner="${TASK_ID:-}"
+    [ -n "$_owner" ] && _key=$(task_base_ref_key "$_owner")
+    [ -n "$_key" ] || _owner=""
+  fi
   _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
     -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)
-  _records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
-    | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' -e "^$_key=" \
-    | tail -n 19 || true)
-  {
-    [ -n "$_preserved" ] && printf '%s\n' "$_preserved"
-    [ -n "$_records" ] && printf '%s\n' "$_records"
-    echo "TASK_BASE_REF=$(sq_escape "$_base_ref")"
-    echo "TASK_BASE_REF_TRUSTED='1'"
-    if [ -n "$_owner" ]; then
-      echo "TASK_BASE_REF_OWNER=$(sq_escape "$_owner")"
-      echo "$_key=$(sq_escape "$_base_ref")"
-    fi
-  } > "$ENV_CACHE" 2>/dev/null || true
+  # The cap keeps a long-lived checkout from growing the cache without bound.
+  # `tail` drops the OLDEST record, which is the outer task's — and that
+  # eviction order is what makes the cap safe: an outer task that outlives the
+  # cap loses its record, falls through to the shared base, finds an owner
+  # stamp naming a different task, and REFUSES loudly. Degradation is to
+  # no-diff, never to wrong-diff. Do not reverse this order.
+  if [ -n "$_key" ]; then
+    _records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
+      | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' -e "^$_key=" \
+      | tail -n 19 || true)
+  else
+    _records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
+      | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
+      | tail -n 20 || true)
+  fi
+  # (D226) Written atomically: every cache update is a read-modify-write, and
+  # two concurrent claims — the shape parallel dispatched runners produce —
+  # would otherwise interleave a partial file. A true race still loses one
+  # task's record (last writer wins), which degrades to a refusal rather than
+  # a wrong diff, but a reader can never observe a half-written cache.
+  _tmp_cache=$(mktemp "${ENV_CACHE}.XXXXXX" 2>/dev/null || printf '')
+  if [ -n "$_tmp_cache" ]; then
+    {
+      [ -n "$_preserved" ] && printf '%s\n' "$_preserved"
+      [ -n "$_records" ] && printf '%s\n' "$_records"
+      echo "TASK_BASE_REF=$(sq_escape "$_base_ref")"
+      echo "TASK_BASE_REF_TRUSTED='1'"
+      if [ -n "$_owner" ]; then
+        echo "TASK_BASE_REF_OWNER=$(sq_escape "$_owner")"
+        echo "$_key=$(sq_escape "$_base_ref")"
+      fi
+    } > "$_tmp_cache" 2>/dev/null || true
+    mv -f "$_tmp_cache" "$ENV_CACHE" 2>/dev/null || rm -f "$_tmp_cache" 2>/dev/null || true
+  fi
   export TASK_BASE_REF="$_base_ref"
   export TASK_BASE_REF_TRUSTED="1"
   if [ -n "$_owner" ]; then
@@ -1337,6 +1378,12 @@ self_heal_changed_files_upload() {
   printf '%s\n' "$_snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
   _http_code=$(upload_changed_files_snapshot "$_tid" "$_api_base" "$_token")
   record_diff_upload_state "$_tid" "$_http_code" "$_snap_base"
+  # (D226) record_diff_upload_state TRUNCATES the state file, so a refusal
+  # that reaches the retry must be re-stamped or the durable record is erased
+  # by the very path that most needs it on file.
+  if [ "$_refused" = "true" ]; then
+    printf 'refused_base=yes\n' >> "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+  fi
   # (W1658) before_review is the LAST retry. If it still did not land, the diff
   # is definitively lost for this task — surface it LOUDLY (distinct from the
   # per-attempt warning in upload_changed_files_snapshot) and mark the state file
@@ -2316,7 +2363,28 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     fi
   fi
 
+  # (D226) Whether THIS call's OWN response proved the task identity — which
+  # is a stricter question than whether an identity was resolved at all, and
+  # the distinction is load-bearing. The shared resolver prefers the canonical
+  # response file, and that file SURVIVES ACROSS CALLS. So a nested claim
+  # whose stdout is truncated resolves the PREVIOUS claim's payload and
+  # reports the outer task's id. Stamping ownership from that is worse than
+  # not stamping: it overwrites the outer task's record with the nested
+  # claim's HEAD and then vouches for it, so the owner MATCHES at completion,
+  # the refusal never fires, and the outer task uploads a purely foreign diff
+  # — W2066 exactly. Measured, not theorised; review caught it.
+  #
+  # Identity refresh itself is unchanged, so D118/W1609 truncation recovery
+  # still works. Only the ownership stamp is gated, and the cost of withholding
+  # it is nil: the task falls back to the shared TASK_BASE_REF, which on its
+  # own claim is genuinely its own base.
+  TASK_IDENTITY_REFRESHED=0
+  _own_call_payload=$(unwrap_tool_response "$INPUT" 2>/dev/null || true)
   if [ -n "$TASK_JSON" ]; then
+    if [ -n "$_own_call_payload" ] \
+      && echo "$_own_call_payload" | jq -e '.data.id // .id' > /dev/null 2>&1; then
+      TASK_IDENTITY_REFRESHED=1
+    fi
     # (D226) This rewrite TRUNCATES the cache, so carry the per-task base-ref
     # records across it. Without this a nested claim erases the outer task's
     # anchor here — before finalize_before_doing ever runs — and the isolation

@@ -5539,6 +5539,152 @@ assert_eq "23e: per-task base records stay bounded (19 carried + this task)" \
   "20" "$D226_CAP_N"
 rm -rf "$D226_CAP"
 
+# 23f: the path review found, where the first version of this fix was DEFEATED.
+# A nested claim whose response does not parse leaves the PREVIOUS task's
+# TASK_ID in place. Stamping ownership from it would overwrite the outer
+# task's record with the nested claim's HEAD and then vouch for it — a
+# matching owner that never refuses, uploading a purely foreign diff. Only a
+# claim that actually parsed its own identity may stamp.
+D226_TR=$(mktemp -d)
+D226_TRSTUB=$(mktemp -d)
+make_curl_stub "$D226_TRSTUB" "$D226_TR/curl-call.txt" 0
+d226_fixture "$D226_TR"
+d226_claim "$D226_TR" 100
+(
+  cd "$D226_TR" || exit 1
+  echo "outer" > outer.txt
+  git add outer.txt > /dev/null
+  git commit -q -m "outer task work"
+  # A nested claim whose stdout is truncated mid-JSON — the documented
+  # oversized-response failure mode, likeliest in dispatcher mode.
+  echo '{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":200,\"identi"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  echo "nested" > nested.txt
+  git add nested.txt > /dev/null
+  git commit -q -m "nested task work"
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/100/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_TRSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+)
+D226_TR_PATHS=$(jq -r '.[].path' "$D226_TR/.stride-changed-files.json" 2>/dev/null)
+assert_contains "23f: an unparsed nested claim cannot poison the outer task's record" \
+  "outer.txt" "$D226_TR_PATHS"
+rm -rf "$D226_TR" "$D226_TRSTUB"
+
+# 23g: the self-heal's refusal branch — an entire code path that had no test.
+# before_review runs on a fresh budget and would otherwise re-capture against
+# the foreign base, undoing the primary refusal after its notice scrolled by.
+D226_SH=$(mktemp -d)
+D226_SHSTUB=$(mktemp -d)
+make_curl_stub "$D226_SHSTUB" "$D226_SH/curl-call.txt" 0
+d226_fixture "$D226_SH"
+(
+  cd "$D226_SH" || exit 1
+  echo "foreign" > foreign.txt
+  git add foreign.txt > /dev/null
+  git commit -q -m "another task's work"
+)
+D226_SH_BASE=$(git -C "$D226_SH" rev-parse HEAD~1)
+D226_SH_OUT=$(
+  cd "$D226_SH" || exit 1
+  printf '## before_review\n```bash\ntrue\n```\n' > .stride.md
+  # The self-heal resolves credentials BEFORE it captures, and returns early
+  # without them — so the refusal branch is unreachable unless the fixture
+  # supplies an auth file.
+  printf '**API URL:** `https://stride.example.com`\n**API Token:** `tok`\n' > .stride_auth.md
+  printf "TASK_ID='999'\nTASK_BASE_REF='%s'\nTASK_BASE_REF_TRUSTED='1'\nTASK_BASE_REF_OWNER='999'\n" \
+    "$D226_SH_BASE" > .stride-env-cache
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/300/complete"},"tool_response":{"stdout":"ok"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_SHSTUB:$PATH" bash "$HOOK_SCRIPT" post 2>&1
+)
+assert_contains "23g: the before_review self-heal refuses a foreign base too" \
+  "REFUSING" "$D226_SH_OUT"
+assert_eq "23g: the self-heal retry uploads empty, not the foreign diff" \
+  "[]" "$(jq -c '.' "$D226_SH/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D226_SH" "$D226_SHSTUB"
+
+# 23h: TWO nested claims in sequence — W2066's actual shape, which the task's
+# edge_cases names explicitly. 23a/23b only exercise one.
+D226_TWO=$(mktemp -d)
+D226_TWOSTUB=$(mktemp -d)
+make_curl_stub "$D226_TWOSTUB" "$D226_TWO/curl-call.txt" 0
+d226_fixture "$D226_TWO"
+d226_claim "$D226_TWO" 100
+(
+  cd "$D226_TWO" || exit 1
+  echo "outer" > outerA.txt
+  git add outerA.txt > /dev/null
+  git commit -q -m "outer work"
+)
+d226_claim "$D226_TWO" 200
+d226_claim "$D226_TWO" 300
+(
+  cd "$D226_TWO" || exit 1
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/100/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_TWOSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+)
+D226_TWO_PATHS=$(jq -r '.[].path' "$D226_TWO/.stride-changed-files.json" 2>/dev/null)
+assert_contains "23h: the outer task survives TWO nested claims in sequence" \
+  "outerA.txt" "$D226_TWO_PATHS"
+rm -rf "$D226_TWO" "$D226_TWOSTUB"
+
+# 23i: no .stride-env-cache at all — the task's third named edge case. Nothing
+# to select from and no owner to contradict, so capture must proceed on the
+# existing HEAD~1 fallback rather than refusing or erroring.
+D226_NC=$(mktemp -d)
+D226_NCSTUB=$(mktemp -d)
+make_curl_stub "$D226_NCSTUB" "$D226_NC/curl-call.txt" 0
+d226_fixture "$D226_NC"
+D226_NC_OUT=$(
+  cd "$D226_NC" || exit 1
+  echo "work" > work.txt
+  git add work.txt > /dev/null
+  git commit -q -m "task work"
+  rm -f .stride-env-cache
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/500/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_NCSTUB:$PATH" bash "$HOOK_SCRIPT" pre 2>&1
+)
+assert_eq "23i: a missing env cache does not trigger a refusal" \
+  "" "$(printf '%s' "$D226_NC_OUT" | grep -c 'REFUSING' | tr -d ' ' | sed 's/^0$//')"
+assert_contains "23i: a missing env cache still captures via the HEAD~1 fallback" \
+  "work.txt" "$(jq -r '.[].path' "$D226_NC/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D226_NC" "$D226_NCSTUB"
+
+# 23j: the W2066 replay, promoted from a manual run to an assertion. This pins
+# BOTH facts: the outer task now gets its own work (the D226 fix), AND it
+# still over-collects its children's commits (the D236 residual). Pinning the
+# residual is the point — without it, a later change could worsen silently.
+D226_W=$(mktemp -d)
+D226_WSTUB=$(mktemp -d)
+make_curl_stub "$D226_WSTUB" "$D226_W/curl-call.txt" 0
+d226_fixture "$D226_W"
+d226_claim "$D226_W" 100
+(
+  cd "$D226_W" || exit 1
+  echo x > outerA.txt
+  git add outerA.txt > /dev/null
+  git commit -q -m outerA
+)
+d226_claim "$D226_W" 200
+(
+  cd "$D226_W" || exit 1
+  echo x > fileB.txt
+  git add fileB.txt > /dev/null
+  git commit -q -m fileB
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/200/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_WSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+)
+D226_W_B=$(jq -r '[.[].path] | sort | join(",")' "$D226_W/.stride-changed-files.json" 2>/dev/null)
+assert_eq "23j: a nested task captures exactly its own file" "fileB.txt" "$D226_W_B"
+(
+  cd "$D226_W" || exit 1
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/100/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_WSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+)
+D226_W_A=$(jq -r '[.[].path] | sort | join(",")' "$D226_W/.stride-changed-files.json" 2>/dev/null)
+assert_eq "23j: the outer task gets its own work, plus the D236 range residual" \
+  "fileB.txt,outerA.txt" "$D226_W_A"
+rm -rf "$D226_W" "$D226_WSTUB"
+
 # ============================================================
 # Summary
 # ============================================================

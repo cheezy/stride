@@ -3221,6 +3221,81 @@ echo "ran"
 }
 
 # ============================================================
+# ============================================================
+# Test Group 18: D230 — a budget kill must not look like a test failure
+# ============================================================
+# Mirror of test-stride-hook.sh Test Group 25. The distinction already existed
+# on both executors; nothing pinned it for the route that gates completion
+# (pre + /complete -> after_doing), so it could regress silently on either side.
+Write-Host ""
+Write-Host "=== Test Group 18: D230 timeout vs test failure on the after_doing gate ==="
+
+$d230Complete = '{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete"}}'
+
+# 18a: a genuine command failure blocks the completion and is NOT a timeout.
+$d230FailProj = Join-Path $TmpDir 'g18-genuine-failure'
+New-Item -ItemType Directory -Path $d230FailProj -Force | Out-Null
+Set-Content -Path (Join-Path $d230FailProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "suite starting"
+false
+touch should_not_exist.txt
+```
+'@ -Encoding UTF8
+$rFail = Invoke-HookScript -InputJson $d230Complete -Phase 'pre' -ProjectDir $d230FailProj
+Assert-Exit "18a: a genuine after_doing failure still blocks the completion" 2 $rFail.ExitCode
+Assert-Contains "18a: stderr says FAILED ON, not timed out" `
+    "Stride after_doing hook failed on command 2/3" $rFail.Stderr
+Assert-Contains "18a: the failure JSON marks timed_out FALSE" '"timed_out":false' $rFail.Stdout
+Assert-NotContains "18a: a genuine failure is never reported as exit 124" `
+    '"exit_code":124' $rFail.Stdout
+
+# 18b: the same route, killed by the budget instead.
+$d230ToProj = Join-Path $TmpDir 'g18-budget-kill'
+New-Item -ItemType Directory -Path $d230ToProj -Force | Out-Null
+Set-Content -Path (Join-Path $d230ToProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "suite starting"
+sleep 30
+touch should_not_exist.txt
+```
+'@ -Encoding UTF8
+$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = '1'
+try {
+    $rTo = Invoke-HookScript -InputJson $d230Complete -Phase 'pre' -ProjectDir $d230ToProj
+} finally {
+    Remove-Item Env:STRIDE_HOOK_TIMEOUT_OVERRIDE -ErrorAction SilentlyContinue
+}
+Assert-Exit "18b: a budget kill also blocks the completion" 2 $rTo.ExitCode
+Assert-Contains "18b: stderr says TIMED OUT and names the budget" `
+    "Stride after_doing hook command 2/3 timed out after 1s budget" $rTo.Stderr
+Assert-Contains "18b: the failure JSON marks timed_out TRUE" '"timed_out":true' $rTo.Stdout
+Assert-Contains "18b: the failure JSON carries exit 124" '"exit_code":124' $rTo.Stdout
+
+# 18c: both outcomes block, so the exit code cannot tell them apart — the
+# diagnostic value rests entirely on these two signals differing.
+if ($rFail.Stdout -match '"timed_out":false' -and $rTo.Stdout -match '"timed_out":true') {
+    Write-Host "  PASS: 18c: the two outcomes are distinguishable by timed_out" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 18c: timed_out does not distinguish the two outcomes" -ForegroundColor Red
+    $script:FAIL++
+}
+if ($rFail.Stderr -match 'failed on command' -and $rTo.Stderr -match 'timed out after') {
+    Write-Host "  PASS: 18c: ...and by the stderr wording, which a human reads first" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 18c: stderr wording does not distinguish the two outcomes" -ForegroundColor Red
+    $script:FAIL++
+}
+
+# 18d: what never ran is reported, not silently dropped.
+Assert-Contains "18d: a budget kill lists what never ran" '"commands_remaining"' $rTo.Stdout
+Assert-Contains "18d: a genuine failure lists what never ran too" '"commands_remaining"' $rFail.Stdout
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

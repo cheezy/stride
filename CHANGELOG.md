@@ -27,6 +27,39 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ### Fixed
 
+- **D230 — the `after_doing` gate breached its budget whenever the machine was busy.** Not a stress case: this repo's own workflow assumes two clones and a running Phoenix dev server, so contention is the ordinary condition. The cost was a recurring silent tax — a budget kill and a real test failure look the same to whoever reads the result, so every occurrence bought a diagnosis before anyone learned the tests were fine.
+
+  **Measured on an Apple M2, 8 cores, 16 GB** — the core count is recorded because a duration without one cannot be compared to anything:
+
+  | `after_doing` | idle | 4 burners |
+  |---|---|---|
+  | `mix test` | 77s | **126s** |
+  | `mix format --check-formatted` | 2s | 3s |
+  | `mix credo --strict` | 12s | 21s |
+  | `mix sobelow --config .sobelow-conf` | 1s | 4s |
+  | **section** | **92s** | **154s** |
+
+  That reproduces the reported effect: 154s against the **120s** budget this defect was filed under is a breach, and the 1.67x slowdown sits close to the 88s→170s already on record. `mix test` is 84% of the loaded section, so the section's duration is the suite's duration — no reordering or trimming of the other three commands can change the outcome.
+
+  **No budget change, and no `mix.exs` change.** D229 already moved every section to 600s, so the measured 154s fits with ~3.9x headroom and the task's "do not exceed 290s/300s" pitfall is written against numbers that no longer exist. Adding `--max-cases` to throttle ExUnit was the other option on the table — `mix.exs` sets none today, so ExUnit oversubscribes a loaded box at `schedulers_online * 2` — but it would slow every idle run to fix a breach that no longer occurs. Neither lever is pulled, and no hook body was touched.
+
+  **The unexplained flake is reproduced and identified, which was the real find.** The record carried a lead: one loaded run exited 2 while another under the same load passed, and the failing test was never captured. Six loaded runs captured it twice — and both failures were the same thing, in the same module, and **not a test bug**:
+
+  ```
+  DBConnection.ConnectionError: could not checkout the connection owned by #PID<...>
+  ... request was dropped from queue after 270ms
+      Ecto.Repo.Preloader.fetch_query/8
+      Task.Supervised.invoke_mfa/2
+  ```
+
+  Ecto's **parallel preloader** spawns Tasks that each check out a sandbox connection. Under contention those checkouts queue past DBConnection's default 50ms `queue_target` and the pool starts *dropping* requests. Both runs still reported **7460/7461 passing** — one spurious failure, no assertion actually wrong. That is precisely the diagnostic tax this defect exists to remove: a load-induced failure indistinguishable from a real one.
+
+  Fixed by widening `queue_target` to 500ms and `queue_interval` to 5s in the test pool. It tolerates contention without hiding anything — a genuinely stuck query still fails, just after 500ms rather than 50ms. **Verified with the same seeds under the same load: 2/6 failures before, 0/6 after**, with seeds 1002 and 1004 — the two that failed — both passing.
+
+  **A budget kill must never read as a test failure**, which is the harm underneath the whole defect. The mechanism already existed (a `timed_out` boolean and distinct stderr wording) but nothing pinned it for the route that actually gates completion, `pre` + `/complete` → `after_doing`, so it could regress silently. Twelve assertions on each executor now pin both outcomes side by side: both block with exit 2, so the exit code cannot tell them apart and the entire diagnostic value rests on those two signals differing.
+
+  Those tests guard behaviour that already worked, so there is no pre-fix commit they would fail against — the usual negative control does not apply, and that is exactly the situation where an assertion can quietly be unable to fail. So they were **mutation-tested** instead: forcing `timed_out` true kills only the two `timed_out` assertions, and collapsing the two stderr messages into one kills only the two wording assertions. Each mutation is caught by precisely the assertions guarding the property it broke. **Bash 562 passed / 0 failed, PowerShell 449 passed / 0 failed.**
+
 - **D228 — a goal whose `after_goal` failed said nothing, and the board still showed it shipped.** `after_goal` ends in `git push origin main`. If the section failed, the push never ran — and nothing reported it. The failure is swallowed on purpose (`run_stride_section` returns 2, but a non-zero *script* exit would misreport a completion curl that genuinely succeeded, which test 10d pins). The consequence of exit 0, though, is that the existing stderr diagnostic reaches only the raw transcript. Meanwhile the server's grace-window worker treats **absence of a report as success**, flips the goal to Done, and has no git access to know a push never landed. So the work stayed local and the board said otherwise.
 
   **The budget half of this defect was already fixed by D229, which is worth stating because the task was filed against the old numbers.** It reported a 60s budget, a 290s clamp and a 300s ceiling, and warned against exceeding them; all three changed when budgets became hang detectors. Measured against the current 600s:

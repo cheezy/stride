@@ -5906,6 +5906,91 @@ else
 fi
 
 # ============================================================
+# Test Group 25: D230 — a budget kill must not look like a test failure
+# ============================================================
+# The recurring cost D230 describes is diagnostic, not mechanical: when the
+# after_doing gate is killed by its budget on a busy machine, the result must
+# not be mistaken for "the tests failed", or every occurrence buys a wasted
+# investigation. The mechanism to tell them apart already exists — a timed_out
+# boolean and distinct stderr wording — but nothing pinned it for the route
+# that actually gates completion (pre + /complete -> after_doing), so it could
+# regress silently. These fix that, and pin that a genuine failure still blocks.
+echo ""
+echo "=== Test Group 25: D230 timeout vs test failure on the after_doing gate ==="
+
+# The route under test: PreToolUse on a /complete curl is what maps to
+# after_doing and can veto the completion.
+D230_COMPLETE='{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete"}}'
+
+# 25a: a genuine command failure. Blocks the completion (exit 2), and is
+# explicitly NOT marked as a timeout.
+D230_FAIL_PROJ="$TMPDIR_TEST/d230-genuine-failure"
+mkdir -p "$D230_FAIL_PROJ"
+cat > "$D230_FAIL_PROJ/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+echo "suite starting"
+false
+touch should_not_exist.txt
+```
+STRIDE
+D230_FAIL_ERR=$(mktemp)
+D230_FAIL_OUT=$(echo "$D230_COMPLETE" | CLAUDE_PROJECT_DIR="$D230_FAIL_PROJ" \
+  bash "$HOOK_SCRIPT" pre 2>"$D230_FAIL_ERR")
+D230_FAIL_RC=$?
+D230_FAIL_STDERR=$(cat "$D230_FAIL_ERR"); rm -f "$D230_FAIL_ERR"
+
+assert_exit "25a: a genuine after_doing failure still blocks the completion" 2 "$D230_FAIL_RC"
+assert_contains "25a: stderr says FAILED ON, not timed out" \
+  "Stride after_doing hook failed on command 2/3" "$D230_FAIL_STDERR"
+assert_contains "25a: the failure JSON marks timed_out FALSE" '"timed_out": false' "$D230_FAIL_OUT"
+assert_eq "25a: a genuine failure is never reported as exit 124" \
+  "" "$(printf '%s' "$D230_FAIL_OUT" | grep -c '"exit_code": 124' | tr -d ' ' | sed 's/^0$//')"
+
+# 25b: the SAME route, killed by the budget instead. Also blocks, but is
+# marked as a timeout and names the budget rather than the command's own exit.
+D230_TO_PROJ="$TMPDIR_TEST/d230-budget-kill"
+mkdir -p "$D230_TO_PROJ"
+cat > "$D230_TO_PROJ/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+echo "suite starting"
+sleep 30
+touch should_not_exist.txt
+```
+STRIDE
+D230_TO_ERR=$(mktemp)
+D230_TO_OUT=$(echo "$D230_COMPLETE" | CLAUDE_PROJECT_DIR="$D230_TO_PROJ" \
+  STRIDE_HOOK_TIMEOUT_OVERRIDE=1 bash "$HOOK_SCRIPT" pre 2>"$D230_TO_ERR")
+D230_TO_RC=$?
+D230_TO_STDERR=$(cat "$D230_TO_ERR"); rm -f "$D230_TO_ERR"
+
+assert_exit "25b: a budget kill also blocks the completion" 2 "$D230_TO_RC"
+assert_contains "25b: stderr says TIMED OUT and names the budget" \
+  "Stride after_doing hook command 2/3 timed out after 1s budget" "$D230_TO_STDERR"
+assert_contains "25b: the failure JSON marks timed_out TRUE" '"timed_out": true' "$D230_TO_OUT"
+assert_contains "25b: the failure JSON carries exit 124" '"exit_code": 124' "$D230_TO_OUT"
+
+# 25c: the discriminator itself. Both outcomes block, so the exit code cannot
+# tell them apart — the whole diagnostic value rests on these two differing.
+# Asserting them side by side is what makes the distinction a contract rather
+# than an accident of two separately-written branches.
+assert_eq "25c: the two outcomes are distinguishable by timed_out" \
+  "false|true" \
+  "$(printf '%s' "$D230_FAIL_OUT" | grep -o '"timed_out": [a-z]*' | head -n1 | awk '{print $2}')|$(printf '%s' "$D230_TO_OUT" | grep -o '"timed_out": [a-z]*' | head -n1 | awk '{print $2}')"
+assert_eq "25c: ...and by the stderr wording, which a human reads first" \
+  "failed on|timed out" \
+  "$(printf '%s' "$D230_FAIL_STDERR" | grep -o 'failed on' | head -n1)|$(printf '%s' "$D230_TO_STDERR" | grep -o 'timed out' | head -n1)"
+
+# 25d: commands after the killed one are reported as remaining, not silently
+# dropped — otherwise a reader cannot tell the suite never ran from the suite
+# passing. Both outcomes must carry it.
+assert_contains "25d: a budget kill lists what never ran" \
+  '"commands_remaining"' "$D230_TO_OUT"
+assert_contains "25d: a genuine failure lists what never ran too" \
+  '"commands_remaining"' "$D230_FAIL_OUT"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

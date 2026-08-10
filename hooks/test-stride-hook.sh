@@ -5570,6 +5570,48 @@ assert_contains "23f: an unparsed nested claim cannot poison the outer task's re
   "outer.txt" "$D226_TR_PATHS"
 rm -rf "$D226_TR" "$D226_TRSTUB"
 
+# 23k: the identity-site cache write FAILS while .stride/ stays writable, so
+# the gate correctly passes for the nested task but the cache still holds the
+# outer task's TASK_ID. Stamping from the sourced TASK_ID would then overwrite
+# the outer's record and vouch for it — the original hole, reached through the
+# helper added to make writes safe. The stamp must come from the id the gate
+# validated, so the outer's record has to survive untouched.
+# Driven directly rather than through a partially-failing filesystem: the
+# invariant is that the stamp follows the VALIDATED id, so the test sets the
+# two apart (cache says task 100, gate validated 200) and asserts which one
+# wins. A filesystem-level repro is not reproducible enough to gate on — make
+# the project dir unwritable and BOTH writes fail, which hides the bug rather
+# than exposing it.
+D226_WF=$(mktemp -d)
+(
+  cd "$D226_WF" || exit 1
+  git init -q
+  git config user.email "test@test.local"
+  git config user.name "Test"
+  echo "v1" > a.txt
+  git add a.txt > /dev/null
+  git commit -q -m "v1"
+  printf "TASK_ID='100'\n" > .stride-env-cache
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2> /dev/null
+  PROJECT_DIR="$PWD"
+  ENV_CACHE="$PWD/.stride-env-cache"
+  HAS_JQ=false
+  HOOK_NAME=before_doing
+  # The cache (and so TASK_ID) still names the OUTER task, because its write
+  # failed; the gate validated the NESTED task's id from this call's payload.
+  TASK_ID=100
+  TASK_IDENTITY_REFRESHED=1
+  TASK_OWNER_ID=200
+  finalize_before_doing
+)
+D226_WF_CACHE=$(cat "$D226_WF/.stride-env-cache" 2>/dev/null)
+assert_contains "23k: the owner stamp follows the validated id, not the cached TASK_ID" \
+  "TASK_BASE_REF_OWNER='200'" "$D226_WF_CACHE"
+assert_eq "23k: no record is written under the stale cached id" \
+  "" "$(printf '%s' "$D226_WF_CACHE" | grep -c '^TASK_BASE_REF_100=' | tr -d ' ' | sed 's/^0$//')"
+rm -rf "$D226_WF"
+
 # 23g: the self-heal's refusal branch — an entire code path that had no test.
 # before_review runs on a fresh budget and would otherwise re-capture against
 # the foreign base, undoing the primary refusal after its notice scrolled by.

@@ -19,11 +19,41 @@ $Phase = if ($args.Count -gt 0) { $args[0] } else { '' }
 $ProjectDir = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } else { '.' }
 $StrideMd = Join-Path $ProjectDir '.stride.md'
 $EnvCache = Join-Path $ProjectDir '.stride-env-cache'
-# (D226) Whether THIS call's own response proved the task identity. Mirrors
-# stride-hook.sh's TASK_IDENTITY_REFRESHED. Declared here because Set-StrictMode
-# makes reading an unset variable an error, and the gate is read on every
-# before_doing route whether or not the claim block set it.
+# (D226) Whether THIS call's own response proved the task identity, and the id
+# it proved. Mirrors stride-hook.sh's TASK_IDENTITY_REFRESHED / TASK_OWNER_ID.
+# Declared here because Set-StrictMode makes reading an unset variable an
+# error, and the gate is read on every before_doing route whether or not the
+# claim block set it.
 $script:TaskIdentityRefreshed = $false
+$script:TaskOwnerId = ''
+
+# (D226) Atomic env-cache write, mirroring the bash twin's write_env_cache.
+# Every truncating write goes through here so no reader can observe a partial
+# cache. The temp is staged in .stride/ — already hard-excluded from capture
+# and from project gitignores, unlike a sibling .stride-env-cache.XXXX — and
+# on the same filesystem, so Move-Item is a rename. On any failure the
+# PREVIOUS cache survives intact, and the failure is announced rather than
+# swallowed.
+function Write-EnvCache {
+    param([string[]]$Lines)
+    $stageDir = Join-Path $ProjectDir '.stride'
+    $tmp = ''
+    try {
+        if (-not (Test-Path $stageDir)) {
+            New-Item -ItemType Directory -Path $stageDir -Force -ErrorAction Stop | Out-Null
+        }
+        $tmp = Join-Path $stageDir ("env-cache." + [System.IO.Path]::GetRandomFileName())
+        Set-Content -Path $tmp -Value $Lines -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $tmp -Destination $EnvCache -Force -ErrorAction Stop
+        return $true
+    } catch {
+        if ($tmp -and (Test-Path $tmp)) {
+            Remove-Item -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
+        }
+        [Console]::Error.WriteLine('stride-hook: could not commit an env-cache write; keeping the previous cache')
+        return $false
+    }
+}
 # (D118) Canonical API-response snapshot. When present, after_goal detection,
 # env forwarding, and the claim env-cache refresh prefer it over the harness-
 # truncatable tool_response.stdout. Best-effort fast path only — the reliability
@@ -794,7 +824,22 @@ if ($HookName -eq 'before_doing') {
         }
         if ($taskJson -and $ownCallId -and ($ownCallId -eq [string]$taskJson.id)) {
             $script:TaskIdentityRefreshed = $true
+            # Carry the VALIDATED id forward, never re-read $env:TASK_ID
+            # later: that comes from the cache, loaded AFTER the identity
+            # write, so the two agree only when that write landed.
+            $script:TaskOwnerId = $ownCallId
         }
+        # Equivalence with the bash gate, mapped branch by branch so a future
+        # edit cannot break it silently:
+        #   object with `stdout`   -> $response.stdout | ConvertFrom-Json   ==  jq has("stdout") -> .stdout
+        #   string                 -> ConvertFrom-Json                      ==  jq -r raw string
+        #   object without `stdout`-> the object directly                   ==  jq -r emits its JSON text, re-parsed
+        # Arrays, scalars, and unparseable stdout deliberately fall through
+        # to "not refreshed" — both implementations fail CLOSED there. One
+        # known mechanism difference: jq accepts a concatenated value stream
+        # where ConvertFrom-Json throws, so bash may gate true where this
+        # gates false; bash's multi-line stamp then cannot match the
+        # URL-derived task id, so it refuses. Different routes, both safe.
 
         if ($taskJson) {
             # (D226) This rewrite TRUNCATES the cache, so carry the per-task
@@ -817,7 +862,7 @@ if ($HookName -eq 'before_doing') {
                 "TASK_COMPLEXITY=$($taskJson.complexity)"
                 "TASK_PRIORITY=$($taskJson.priority)"
             ) + $keptBaseRecords
-            $cacheLines | Set-Content -Path $EnvCache -Encoding UTF8
+            Write-EnvCache -Lines $cacheLines | Out-Null
         } elseif (Test-Path $EnvCache) {
             # (W1086/D142) No parseable response and no usable persisted
             # file: keep the existing TASK_ identity lines (a later
@@ -830,7 +875,7 @@ if ($HookName -eq 'before_doing') {
             # to tasks other than this claim.
             $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' -and $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and $_ -notmatch '^TASK_BASE_REF_OWNER=' })
             if ($preserved.Count -gt 0) {
-                $preserved | Set-Content -Path $EnvCache -Encoding UTF8
+                Write-EnvCache -Lines $preserved | Out-Null
             } else {
                 Remove-Item -Force $EnvCache -ErrorAction SilentlyContinue
             }
@@ -1396,7 +1441,7 @@ function Invoke-FinalizeBeforeDoing {
         $owner = ''
         $ownerKey = ''
         if ($script:TaskIdentityRefreshed) {
-            $owner = $env:TASK_ID
+            $owner = $script:TaskOwnerId
             if ($owner) {
                 $sanitized = $owner -replace '[^A-Za-z0-9_]', '_'
                 # The per-task keys share a namespace with the TRUSTED and
@@ -1429,7 +1474,7 @@ function Invoke-FinalizeBeforeDoing {
         if ($ownerKey) {
             $newLines = $newLines + "TASK_BASE_REF_OWNER=$owner" + "$ownerKey=$baseRef"
         }
-        $newLines | Set-Content -Path $EnvCache -Encoding UTF8
+        Write-EnvCache -Lines $newLines | Out-Null
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF', $baseRef, 'Process')
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_TRUSTED', '1', 'Process')
         if ($ownerKey) {

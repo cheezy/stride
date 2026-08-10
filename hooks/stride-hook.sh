@@ -1103,7 +1103,15 @@ write_env_cache() {
     printf 'stride-hook: could not stage an env-cache write; keeping the previous cache\n' >&2
     return 1
   fi
-  cat > "$_tmp" 2>/dev/null || true
+  # `cat`'s status is checked, not discarded: a write error after partial
+  # output (ENOSPC, EIO) would otherwise leave a truncated temp that the
+  # rename then commits OVER a good cache — turning "keep the previous cache
+  # on failure" into exactly the corruption it promises to prevent.
+  if ! cat > "$_tmp" 2>/dev/null; then
+    rm -f "$_tmp" 2>/dev/null || true
+    printf 'stride-hook: could not stage an env-cache write; keeping the previous cache\n' >&2
+    return 1
+  fi
   if ! mv -f "$_tmp" "$ENV_CACHE" 2>/dev/null; then
     rm -f "$_tmp" 2>/dev/null || true
     printf 'stride-hook: could not commit an env-cache write; keeping the previous cache\n' >&2
@@ -1278,10 +1286,13 @@ finalize_before_doing() {
   # then vouch for it — a matching owner that silently defeats the refusal.
   # Writing neither leaves the outer task's record intact and correct, and the
   # nested task falls back to the shared base, which is genuinely its own.
+  # Stamped from the id the gate VALIDATED, never from the sourced TASK_ID —
+  # see the gate's own comment. A failed cache write then costs the identity
+  # refresh but can never desynchronize the stamp from the base it vouches for.
   _owner=""
   _key=""
   if [ "${TASK_IDENTITY_REFRESHED:-0}" = "1" ]; then
-    _owner="${TASK_ID:-}"
+    _owner="${TASK_OWNER_ID:-}"
     [ -n "$_owner" ] && _key=$(task_base_ref_key "$_owner")
     [ -n "$_key" ] || _owner=""
   fi
@@ -2413,12 +2424,21 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
   # .stride/) while this call's stdout is valid JSON, a presence test passes
   # while TASK_ID still holds the PREVIOUS task's — the original defect shape.
   TASK_IDENTITY_REFRESHED=0
+  TASK_OWNER_ID=""
   _own_call_payload=$(unwrap_tool_response "$INPUT" 2>/dev/null || true)
   if [ -n "$TASK_JSON" ]; then
     _own_call_id=$(echo "$_own_call_payload" | jq -r '.data.id // .id // empty' 2>/dev/null || true)
     _resolved_id=$(echo "$TASK_JSON" | jq -r '.id // empty' 2>/dev/null || true)
     if [ -n "$_own_call_id" ] && [ "$_own_call_id" = "$_resolved_id" ]; then
       TASK_IDENTITY_REFRESHED=1
+      # (D226) Carry the VALIDATED id forward in-process. The stamp must not
+      # be re-read from TASK_ID later: that value comes from the cache, which
+      # is sourced AFTER the identity rewrite, so the two agree only when that
+      # write landed. When it does not — a read-only project dir, ENOSPC —
+      # TASK_ID is still the previous task's while this claim writes its own
+      # base, which re-creates the original silent-foreign-diff hole through
+      # the very helper added to make writes safe. Measured; review caught it.
+      TASK_OWNER_ID="$_resolved_id"
     fi
     # (D226) This rewrite TRUNCATES the cache, so carry the per-task base-ref
     # records across it. Without this a nested claim erases the outer task's

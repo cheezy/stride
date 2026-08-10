@@ -1021,7 +1021,14 @@ function Get-HookEnvFromPayload {
         foreach ($prop in $envObj.PSObject.Properties) {
             $key = $prop.Name
             if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
-            if ($key -eq 'HOOK_NAME' -or $key -eq 'TASK_BASE_REF') { continue }
+            # (D226) Fenced by PREFIX, not equality. D142 excluded
+            # TASK_BASE_REF as a client-only diff anchor; D226 added
+            # TASK_BASE_REF_OWNER, _UNPROVEN, _TRUSTED and the per-task
+            # TASK_BASE_REF_<id> records to that same family, and each one
+            # defeats a different precedence rule in the base selection. A
+            # server-supplied hook-env block must not be able to steer the
+            # guard's own inputs.
+            if ($key -eq 'HOOK_NAME' -or $key -like 'TASK_BASE_REF*') { continue }
             $envMap[$key] = [string]$prop.Value
         }
         break

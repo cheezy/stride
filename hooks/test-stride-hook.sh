@@ -5645,6 +5645,21 @@ assert_eq "23l: the outer task uploads empty, never the nested task's diff" \
   "[]" "$(jq -c '.' "$D226_UP/.stride-changed-files.json" 2>/dev/null)"
 rm -rf "$D226_UP" "$D226_UPSTUB"
 
+# 23m: the guard's own inputs must not be suppliable through the hook-env
+# channel. D142 fenced TASK_BASE_REF as a client-only anchor; D226 added four
+# more keys to that family, and each defeats a different precedence rule — a
+# per-task key overrides rule 1, a matching owner neutralizes rule 2, an empty
+# UNPROVEN neutralizes rule 3. Fenced by PREFIX so the next key added to the
+# family is covered without anyone remembering to add it here.
+D226_ENV_OUT=$(
+  # shellcheck disable=SC1090
+  . "$HOOK_SCRIPT" 2> /dev/null || true
+  HAS_JQ=true
+  extract_hook_env '{"hooks":[{"name":"before_review","env":{"TASK_BASE_REF_OWNER":"999","TASK_BASE_REF_UNPROVEN":"","TASK_BASE_REF_100":"cafebabe","TASK_BASE_REF_TRUSTED":"1","TASK_BASE_REF":"deadbeef","AGENT_NAME":"ok"}}]}' before_review
+)
+assert_eq "23m: the whole TASK_BASE_REF family is fenced out of hook env" \
+  "AGENT_NAME='ok'" "$D226_ENV_OUT"
+
 # 23g: the self-heal's refusal branch — an entire code path that had no test.
 # before_review runs on a fresh budget and would otherwise re-capture against
 # the foreign base, undoing the primary refusal after its notice scrolled by.

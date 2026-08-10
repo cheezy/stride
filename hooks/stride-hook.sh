@@ -1128,7 +1128,7 @@ task_base_ref_key() {
   local _s
   _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
   case "$_s" in
-    "" | TRUSTED | OWNER) return 0 ;;
+    "" | TRUSTED | OWNER | UNPROVEN) return 0 ;;
   esac
   printf 'TASK_BASE_REF_%s' "$_s"
 }
@@ -1320,11 +1320,13 @@ finalize_before_doing() {
   # no-diff, never to wrong-diff. Do not reverse this order.
   if [ -n "$_key" ]; then
     _records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
-      | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' -e "^$_key=" \
+      | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
+        -e '^TASK_BASE_REF_UNPROVEN=' -e "^$_key=" \
       | tail -n 19 || true)
   else
     _records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
       | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
+        -e '^TASK_BASE_REF_UNPROVEN=' \
       | tail -n 20 || true)
   fi
   # (D226) Atomic, via the shared writer. A true race still loses one task's
@@ -2163,7 +2165,7 @@ extract_hook_env() {
     | if type == "object" then . else {} end
     | to_entries[]
     | select(.key | test("^[A-Za-z_][A-Za-z0-9_]*$"))
-    | select(.key != "HOOK_NAME" and .key != "TASK_BASE_REF")
+    | select(.key != "HOOK_NAME" and (.key | startswith("TASK_BASE_REF") | not))
     | .key + "=" + (.value | tostring | @sh)
   ' 2>/dev/null || true
 }
@@ -2469,6 +2471,7 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # keys are still dropped, exactly as D142 requires.
     _kept_base_records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
       | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
+        -e '^TASK_BASE_REF_UNPROVEN=' \
       | tail -n 20 || true)
     # Values are single-quote escaped via sq_escape (W1453) so titles with
     # spaces, quotes, or dollar signs survive the `set -a` sourcing without

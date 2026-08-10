@@ -1078,6 +1078,40 @@ task_id_from_command() {
 # A flat `TASK_BASE_REF_<id>` line keeps this inside the existing cache on
 # purpose: a new dotfile would need a `.gitignore` entry in every consuming
 # project, which the plugin cannot add on the user's behalf.
+# (D226) Every write of the env cache goes through here, so no reader can ever
+# observe a half-written file. Three sites used to truncate in place — and a
+# reader mid-write is not hypothetical, because parallel dispatched runners
+# genuinely claim concurrently.
+#
+# The temp file lives in `.stride/`, not beside the cache: `.stride/` is
+# already hard-excluded from capture_changed_files AND from typical project
+# gitignores, whereas `.stride-env-cache.aB3xY9` matches neither, so a process
+# killed between create and rename would otherwise leave a stray file that
+# lands in the NEXT task's uploaded diff and gets swept into a commit by any
+# `after_doing` running `git add -A`. Budget kills are documented reality here
+# (D229), so that window is real. Same filesystem either way, so `mv` remains
+# a rename(2).
+#
+# On any failure the PREVIOUS cache survives intact — never truncated, never
+# absent. Reads the new content from stdin.
+write_env_cache() {
+  local _tmp
+  mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null || true
+  _tmp=$(mktemp "$PROJECT_DIR/.stride/env-cache.XXXXXX" 2>/dev/null || printf '')
+  if [ -z "$_tmp" ]; then
+    cat > /dev/null 2>&1 || true
+    printf 'stride-hook: could not stage an env-cache write; keeping the previous cache\n' >&2
+    return 1
+  fi
+  cat > "$_tmp" 2>/dev/null || true
+  if ! mv -f "$_tmp" "$ENV_CACHE" 2>/dev/null; then
+    rm -f "$_tmp" 2>/dev/null || true
+    printf 'stride-hook: could not commit an env-cache write; keeping the previous cache\n' >&2
+    return 1
+  fi
+  return 0
+}
+
 # The per-task keys share a namespace with TASK_BASE_REF_TRUSTED and
 # TASK_BASE_REF_OWNER, so an id sanitizing to either would emit a record line
 # that sets the trust flag or the owner from server data. Ids are integers, so
@@ -1268,25 +1302,20 @@ finalize_before_doing() {
       | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
       | tail -n 20 || true)
   fi
-  # (D226) Written atomically: every cache update is a read-modify-write, and
-  # two concurrent claims — the shape parallel dispatched runners produce —
-  # would otherwise interleave a partial file. A true race still loses one
-  # task's record (last writer wins), which degrades to a refusal rather than
-  # a wrong diff, but a reader can never observe a half-written cache.
-  _tmp_cache=$(mktemp "${ENV_CACHE}.XXXXXX" 2>/dev/null || printf '')
-  if [ -n "$_tmp_cache" ]; then
-    {
-      [ -n "$_preserved" ] && printf '%s\n' "$_preserved"
-      [ -n "$_records" ] && printf '%s\n' "$_records"
-      echo "TASK_BASE_REF=$(sq_escape "$_base_ref")"
-      echo "TASK_BASE_REF_TRUSTED='1'"
-      if [ -n "$_owner" ]; then
-        echo "TASK_BASE_REF_OWNER=$(sq_escape "$_owner")"
-        echo "$_key=$(sq_escape "$_base_ref")"
-      fi
-    } > "$_tmp_cache" 2>/dev/null || true
-    mv -f "$_tmp_cache" "$ENV_CACHE" 2>/dev/null || rm -f "$_tmp_cache" 2>/dev/null || true
-  fi
+  # (D226) Atomic, via the shared writer. A true race still loses one task's
+  # record (last writer wins) — which degrades to a REFUSAL rather than a
+  # wrong diff, since the surviving owner stamp will name someone else — but
+  # no reader can observe a partial file.
+  {
+    [ -n "$_preserved" ] && printf '%s\n' "$_preserved"
+    [ -n "$_records" ] && printf '%s\n' "$_records"
+    echo "TASK_BASE_REF=$(sq_escape "$_base_ref")"
+    echo "TASK_BASE_REF_TRUSTED='1'"
+    if [ -n "$_owner" ]; then
+      echo "TASK_BASE_REF_OWNER=$(sq_escape "$_owner")"
+      echo "$_key=$(sq_escape "$_base_ref")"
+    fi
+  } | write_env_cache || true
   export TASK_BASE_REF="$_base_ref"
   export TASK_BASE_REF_TRUSTED="1"
   if [ -n "$_owner" ]; then
@@ -2378,11 +2407,17 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
   # still works. Only the ownership stamp is gated, and the cost of withholding
   # it is nil: the task falls back to the shared TASK_BASE_REF, which on its
   # own claim is genuinely its own base.
+  # The gate compares IDS, not mere presence. Proving that this call carried
+  # some id is weaker than proving it carried the SAME id that reached
+  # TASK_ID: if capture_canonical_response's write fails (an unwritable
+  # .stride/) while this call's stdout is valid JSON, a presence test passes
+  # while TASK_ID still holds the PREVIOUS task's — the original defect shape.
   TASK_IDENTITY_REFRESHED=0
   _own_call_payload=$(unwrap_tool_response "$INPUT" 2>/dev/null || true)
   if [ -n "$TASK_JSON" ]; then
-    if [ -n "$_own_call_payload" ] \
-      && echo "$_own_call_payload" | jq -e '.data.id // .id' > /dev/null 2>&1; then
+    _own_call_id=$(echo "$_own_call_payload" | jq -r '.data.id // .id // empty' 2>/dev/null || true)
+    _resolved_id=$(echo "$TASK_JSON" | jq -r '.id // empty' 2>/dev/null || true)
+    if [ -n "$_own_call_id" ] && [ "$_own_call_id" = "$_resolved_id" ]; then
       TASK_IDENTITY_REFRESHED=1
     fi
     # (D226) This rewrite TRUNCATES the cache, so carry the per-task base-ref
@@ -2404,7 +2439,7 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
       echo "TASK_STATUS=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.status // empty')")"
       echo "TASK_COMPLEXITY=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.complexity // empty')")"
       echo "TASK_PRIORITY=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.priority // empty')")"
-    } > "$ENV_CACHE" 2>/dev/null || true
+    } | write_env_cache || true
   elif [ -f "$ENV_CACHE" ]; then
     # (W1086/D142) No parseable response and no usable persisted file: keep
     # the existing TASK_ identity lines (a later completion can still recover
@@ -2418,7 +2453,7 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
       -e '^TASK_BASE_REF_OWNER=' "$ENV_CACHE" 2>/dev/null || true)
     if [ -n "$_preserved" ]; then
-      printf '%s\n' "$_preserved" > "$ENV_CACHE" 2>/dev/null || true
+      printf '%s\n' "$_preserved" | write_env_cache || true
     else
       rm -f "$ENV_CACHE" 2>/dev/null || true
     fi

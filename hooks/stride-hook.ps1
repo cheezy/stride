@@ -19,6 +19,11 @@ $Phase = if ($args.Count -gt 0) { $args[0] } else { '' }
 $ProjectDir = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } else { '.' }
 $StrideMd = Join-Path $ProjectDir '.stride.md'
 $EnvCache = Join-Path $ProjectDir '.stride-env-cache'
+# (D226) Whether THIS call's own response proved the task identity. Mirrors
+# stride-hook.sh's TASK_IDENTITY_REFRESHED. Declared here because Set-StrictMode
+# makes reading an unset variable an error, and the gate is read on every
+# before_doing route whether or not the claim block set it.
+$script:TaskIdentityRefreshed = $false
 # (D118) Canonical API-response snapshot. When present, after_goal detection,
 # env forwarding, and the claim env-cache refresh prefer it over the harness-
 # truncatable tool_response.stdout. Best-effort fast path only — the reliability
@@ -754,6 +759,43 @@ if ($HookName -eq 'before_doing') {
         # anchor the diff at the PRE-pull commit and span another clone's
         # pulled work (D132/W1678). Invoke-FinalizeBeforeDoing writes the base
         # (and the dirty baseline) after the section finishes.
+        # (D226) Ownership may be stamped ONLY when THIS call's own response
+        # carried the SAME id that was resolved. Read-CanonicalResponse
+        # survives across calls, so a truncated nested claim otherwise
+        # resolves the PREVIOUS claim's payload, reports the outer task's id,
+        # overwrites that task's record with this claim's HEAD and then
+        # vouches for it — the owner then MATCHES at completion, the refusal
+        # never fires, and the outer task carries a foreign base. Measured on
+        # the bash twin; this is the same gate, because the same resolver
+        # shape produces the same defect here.
+        $ownCallId = ''
+        if ($response) {
+            $ownObj = $null
+            try {
+                if ($response -is [PSCustomObject] -and $response.PSObject.Properties.Name -contains 'stdout') {
+                    $ownObj = $response.stdout | ConvertFrom-Json
+                } elseif ($response -is [string]) {
+                    $ownObj = $response | ConvertFrom-Json
+                } elseif ($response -is [PSCustomObject]) {
+                    $ownObj = $response
+                }
+            } catch {
+                $ownObj = $null
+            }
+            if ($ownObj) {
+                $ownProps = $ownObj.PSObject.Properties.Name
+                if (($ownProps -contains 'data') -and $ownObj.data -and
+                    ($ownObj.data.PSObject.Properties.Name -contains 'id') -and $ownObj.data.id) {
+                    $ownCallId = [string]$ownObj.data.id
+                } elseif (($ownProps -contains 'id') -and $ownObj.id) {
+                    $ownCallId = [string]$ownObj.id
+                }
+            }
+        }
+        if ($taskJson -and $ownCallId -and ($ownCallId -eq [string]$taskJson.id)) {
+            $script:TaskIdentityRefreshed = $true
+        }
+
         if ($taskJson) {
             # (D226) This rewrite TRUNCATES the cache, so carry the per-task
             # base-ref records across it — a nested claim must not erase an
@@ -1344,12 +1386,28 @@ function Invoke-FinalizeBeforeDoing {
         # resolve_snapshot_base skips its branch-point rule for marked bases.
         # (D226) An owner stamp and a per-task record ride alongside the shared
         # keys, and earlier tasks' records are carried across, so a nested
-        # claim cannot make an outer task's anchor unrecoverable. Kept in
-        # cache-format parity with the bash twin even though THIS script has
-        # no read half to protect — see the asymmetry note below.
-        $owner = $env:TASK_ID
+        # claim cannot make an outer task's anchor unrecoverable.
+        #
+        # Stamped ONLY when this call's own response proved the identity (see
+        # the gate in the claim block). Withholding costs nothing: the task
+        # falls back to the shared TASK_BASE_REF, which on its own claim is
+        # genuinely its own base. Stamping from an unproven identity is what
+        # makes the refusal fire on the wrong side.
+        $owner = ''
         $ownerKey = ''
-        if ($owner) { $ownerKey = 'TASK_BASE_REF_' + ($owner -replace '[^A-Za-z0-9_]', '_') }
+        if ($script:TaskIdentityRefreshed) {
+            $owner = $env:TASK_ID
+            if ($owner) {
+                $sanitized = $owner -replace '[^A-Za-z0-9_]', '_'
+                # The per-task keys share a namespace with the TRUSTED and
+                # OWNER markers; an id sanitizing to either would set those
+                # from data. Ids are integers, so this stays theoretical.
+                if ($sanitized -and $sanitized -ne 'TRUSTED' -and $sanitized -ne 'OWNER') {
+                    $ownerKey = 'TASK_BASE_REF_' + $sanitized
+                }
+            }
+            if (-not $ownerKey) { $owner = '' }
+        }
         $preserved = @()
         $records = @()
         if (Test-Path $EnvCache) {

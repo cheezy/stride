@@ -5984,11 +5984,32 @@ assert_eq "25c: ...and by the stderr wording, which a human reads first" \
 
 # 25d: commands after the killed one are reported as remaining, not silently
 # dropped — otherwise a reader cannot tell the suite never ran from the suite
-# passing. Both outcomes must carry it.
-assert_contains "25d: a budget kill lists what never ran" \
-  '"commands_remaining"' "$D230_TO_OUT"
-assert_contains "25d: a genuine failure lists what never ran too" \
-  '"commands_remaining"' "$D230_FAIL_OUT"
+# passing. Assert the CONTENT, not merely the key: an empty commands_remaining
+# would satisfy a key-presence check while telling the reader nothing.
+assert_contains "25d: a budget kill names the command that never ran" \
+  'touch should_not_exist.txt' "$D230_TO_OUT"
+assert_contains "25d: a genuine failure names it too" \
+  'touch should_not_exist.txt' "$D230_FAIL_OUT"
+
+# 25e: and it really did not run. "Reported as remaining" and "never executed"
+# are different properties; both fixtures plant this sentinel precisely so the
+# second can be checked, and only asserting the first would leave the sentinel
+# as inert scaffolding. Test 15a asserts this for its own fixture; these two
+# had copied the fixture without the assertion.
+if [ -f "$D230_TO_PROJ/should_not_exist.txt" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 25e: a budget kill must not run later commands"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 25e: a budget kill does not run later commands"
+  PASS=$((PASS + 1))
+fi
+if [ -f "$D230_FAIL_PROJ/should_not_exist.txt" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 25e: a genuine failure must not run later commands"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 25e: a genuine failure does not run later commands"
+  PASS=$((PASS + 1))
+fi
 
 # ============================================================
 # Summary

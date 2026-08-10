@@ -3221,7 +3221,6 @@ echo "ran"
 }
 
 # ============================================================
-# ============================================================
 # Test Group 18: D230 — a budget kill must not look like a test failure
 # ============================================================
 # Mirror of test-stride-hook.sh Test Group 25. The distinction already existed
@@ -3291,9 +3290,31 @@ if ($rFail.Stderr -match 'failed on command' -and $rTo.Stderr -match 'timed out 
     $script:FAIL++
 }
 
-# 18d: what never ran is reported, not silently dropped.
-Assert-Contains "18d: a budget kill lists what never ran" '"commands_remaining"' $rTo.Stdout
-Assert-Contains "18d: a genuine failure lists what never ran too" '"commands_remaining"' $rFail.Stdout
+# 18d: what never ran is reported, not silently dropped. Assert the CONTENT —
+# an empty commands_remaining would satisfy a key-presence check while telling
+# the reader nothing.
+Assert-Contains "18d: a budget kill names the command that never ran" `
+    'touch should_not_exist.txt' $rTo.Stdout
+Assert-Contains "18d: a genuine failure names it too" `
+    'touch should_not_exist.txt' $rFail.Stdout
+
+# 18e: and it really did not run. "Reported as remaining" and "never executed"
+# are different properties; the fixture plants this sentinel so the second can
+# be checked, and 11a already asserts it for its own fixture.
+if (Test-Path (Join-Path $d230ToProj 'should_not_exist.txt')) {
+    Write-Host "  FAIL: 18e: a budget kill must not run later commands" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 18e: a budget kill does not run later commands" -ForegroundColor Green
+    $script:PASS++
+}
+if (Test-Path (Join-Path $d230FailProj 'should_not_exist.txt')) {
+    Write-Host "  FAIL: 18e: a genuine failure must not run later commands" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 18e: a genuine failure does not run later commands" -ForegroundColor Green
+    $script:PASS++
+}
 
 # ============================================================
 # Summary

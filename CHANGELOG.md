@@ -41,7 +41,20 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
   That reproduces the reported effect: 154s against the **120s** budget this defect was filed under is a breach, and the 1.67x slowdown sits close to the 88s→170s already on record. `mix test` is 84% of the loaded section, so the section's duration is the suite's duration — no reordering or trimming of the other three commands can change the outcome.
 
-  **No budget change, and no `mix.exs` change.** D229 already moved every section to 600s, so the measured 154s fits with ~3.9x headroom and the task's "do not exceed 290s/300s" pitfall is written against numbers that no longer exist. Adding `--max-cases` to throttle ExUnit was the other option on the table — `mix.exs` sets none today, so ExUnit oversubscribes a loaded box at `schedulers_online * 2` — but it would slow every idle run to fix a breach that no longer occurs. Neither lever is pulled, and no hook body was touched.
+  **The override that made all of this invisible is now removed.** `.claude/settings.local.json` still carried `STRIDE_HOOK_TIMEOUT_OVERRIDE=200`, which takes **top precedence over the 600s default** — so this machine was running the gate at 200s against a measured 154s loaded section: **1.30x headroom, not the 3.9x the committed budget provides.** The first version of this entry reasoned as though the override were already gone and claimed 3.9x for the deployed state; that was wrong, and review caught it. `.stride_dev.md` had recorded that the override "must be removed when D228 and D229 land" — both landed, so removing it was the due last step of that sequence rather than a new decision. The `/tmp`-clone measurement itself was unaffected (a clone carries no `settings.local.json`, which is exactly what AC1's "with no override set" asks for); only the conclusion drawn about the deployed machine was.
+
+  **Both declared edge cases were measured, and they come out opposite ways:**
+
+  | edge case | section | vs 600s |
+  |---|---|---|
+  | cold `_build` + 4 burners (compounds with D229) | **~275s** (`mix test` 247s, of which ~113s is compilation) | fits |
+  | ~1 effective core (7 burners on 8) | **617–647s** (`mix test` 593s, 563s on a second pass) | **breaches** |
+
+  The compounding case the task worried about is the *safe* one — a cold build under load stays well inside budget, because compilation is largely serial and does not multiply with the suite's own contention. The case that breaks it is the one that looked more theoretical: losing effective parallelism.
+
+  On that first starved pass `mix test` exited 2, and **I lost the output** — the measurement script reused one log path across all four commands, so sobelow's output overwrote it. That is precisely the failure mode the original observation recorded ("the failing test was never captured"), repeated. A re-run with the log retained **passed cleanly**: 7461 tests, zero failures, zero `DBConnection` errors. So the starved-core exit 2 is **recorded as unreproduced** — one occurrence, uncaptured, one clean retry — and is explicitly *not* attributed to the checkout mechanism identified above, which showed no errors on that run. So the honest statement of AC1 is bounded, not absolute: **600s holds at 8 cores under moderate load (154s, 3.9x headroom) and does NOT hold once effective parallelism collapses to roughly one core.** A 2-core CI box is a realistic instance of that, so this is a limit worth knowing rather than a laboratory artefact. It is recorded rather than fixed: raising the budget further would ship to every plugin user to accommodate a machine configuration this repo has not otherwise established as a target, and that is a decision for the human rather than a side effect of this defect.
+
+  **No budget change, and no `mix.exs` change.** With the override gone the section genuinely resolves at 600s, so the measured 154s fits with ~3.9x headroom at 8 cores and the task's "do not exceed 290s/300s" pitfall is written against numbers that no longer exist. Adding `--max-cases` to throttle ExUnit was the other option — `mix.exs` sets none, so ExUnit oversubscribes a loaded box at `schedulers_online * 2` — but it would slow every idle run to fix a breach that no longer occurs, and `mix test` being 84% of the section means throttling trades wall clock for wall clock rather than saving it. Neither lever is pulled, and no hook body was touched.
 
   **The unexplained flake is reproduced and identified, which was the real find.** The record carried a lead: one loaded run exited 2 while another under the same load passed, and the failing test was never captured. Six loaded runs captured it twice — and both failures were the same thing, in the same module, and **not a test bug**:
 
@@ -54,7 +67,21 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
   Ecto's **parallel preloader** spawns Tasks that each check out a sandbox connection. Under contention those checkouts queue past DBConnection's default 50ms `queue_target` and the pool starts *dropping* requests. Both runs still reported **7460/7461 passing** — one spurious failure, no assertion actually wrong. That is precisely the diagnostic tax this defect exists to remove: a load-induced failure indistinguishable from a real one.
 
-  Fixed by widening `queue_target` to 500ms and `queue_interval` to 5s in the test pool. It tolerates contention without hiding anything — a genuinely stuck query still fails, just after 500ms rather than 50ms. **Verified with the same seeds under the same load: 2/6 failures before, 0/6 after**, with seeds 1002 and 1004 — the two that failed — both passing.
+  Fixed by widening `queue_target` to 500ms in the test pool. **`queue_interval` is left at its 1000ms default**: an earlier version also raised it to 5s, which is a 5x widening of the sustained-pressure window that the evidence — drops at 124–270ms — does not support. Raising the target is what the measurements justify; raising the window was not.
+
+  The comment in `config/test.exs` originally claimed "a genuinely stuck query still fails, just after 500ms rather than 50ms." That misdescribes the mechanism and has been corrected. `queue_target` is not a failure deadline; it feeds a **load-shedding heuristic** that sheds only once queue delay stays above the target across a `queue_interval` window. The hard deadline for a checkout is `:timeout` (15s default), which this change does not touch — so the boundary at which a genuinely stuck query fails is unchanged. The real cost is narrower and is now named in the file: a pool-starvation or connection-leak regression that used to surface fast and loud as a dropped checkout must now sustain >500ms of delay, and may instead present as a slow suite.
+
+  **Evidence, stated at the strength it actually has — which is short of proof.** All runs are loaded, same machine, same four burners:
+
+  | config | failures |
+  |---|---|
+  | unchanged (baseline) | **2/6** |
+  | `queue_target` + `queue_interval` | 0/6 |
+  | **`queue_target` alone (shipped)** | **0/12** |
+
+  By the rule of three, 0/12 bounds the residual failure rate at **≤25%** with 95% confidence — better than the ≤50% that six runs bought, and still not a tight bound. One-sided Fisher against the baseline gives **p ≈ 0.098**: suggestive, *not* significant at α = 0.05. Calling this "verified" would overstate it, and an earlier draft of this entry did.
+
+  The matched-seed framing was also weaker than it read: `--seed` controls ExUnit's test *ordering*, not process scheduling or connection timing, so a timing-dependent checkout flake is not seed-deterministic — 1002 and 1004 were runs that happened to fail, not reliably-failing seeds. What the evidence does support: the mechanism is identified from the stack trace rather than inferred from the rate, and the change targets that mechanism directly. The rate is corroboration, not the argument.
 
   **A budget kill must never read as a test failure**, which is the harm underneath the whole defect. The mechanism already existed (a `timed_out` boolean and distinct stderr wording) but nothing pinned it for the route that actually gates completion, `pre` + `/complete` → `after_doing`, so it could regress silently. Twelve assertions on each executor now pin both outcomes side by side: both block with exit 2, so the exit code cannot tell them apart and the entire diagnostic value rests on those two signals differing.
 

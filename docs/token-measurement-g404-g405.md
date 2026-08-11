@@ -370,107 +370,172 @@ Ordered by return, largest first.
 
 The G406 dispatcher path runs each task in a `stride:task-runner` subagent so the
 main loop holds only a bounded handoff record. This section measures it against
-the post-G404 baseline above. Method per `token-baseline.md`: `message.usage`
-only, de-duplicated by message id, subagent totals included.
+the post-G404 baseline above.
 
-**The headline first, because it is not the flattering number.** Raw totals show
-a **55.8%** saving. Normalised for task size, the two-task figure is **−0.3%** —
-parity. The design estimated 34–46%; the raw figure beats it and the like-for-like
-figure does not reach it. Both are below.
+**Method**, per `token-baseline.md`: `message.usage` only, de-duplicated by
+message id, `TOTAL_IN` = `input + cache_creation + cache_read` with output
+reported separately, so both sides of every comparison mean the same thing.
+Subagents are walked **recursively** — each runner dispatches its own explorer
+and reviewer, and the standard `baseline.py` walks only one level.
+
+**The headline, worst number first.** On the metric `token-baseline.md` names as
+most robust — `cache_creation_input_tokens`, what newly entered a context — the
+dispatcher path is **25.5% worse**. On total input per request it is **8.6%
+better**. On raw totals it is 51.7% better, but that figure measures task size,
+not architecture. The design estimated 34–46%; nothing here reaches that.
 
 ## How little of this path has ever run
 
 Across **every** session transcript on this machine there are **four** real
-`stride:task-runner` dispatches: one availability probe, and three here —
-W2072, W2073, and a resume of W2073 after its first attempt was blocked. So the
+`stride:task-runner` dispatches: one availability probe, and three here — W2072,
+W2073, and a resume of W2073 after its first attempt was blocked. So the
 dispatcher path has ever carried **two distinct tasks**.
 
-That is the same shape as G405, which "shipped a working feature that no client
-ever called". The feature works; it is barely exercised. Any percentage below
-rests on n=2.
+That is the shape G405 had — a working feature no client called. Every
+percentage below rests on n=2, and the mechanism claims are correspondingly weak.
 
 ## The runs
 
-Session `bf444983…`, dispatches at records 204, 255 and 272 — all before the
-session's compaction record at 1936, so the measured window is one continuous
+Session `bf444983…`, dispatches at records 204, 255 and 272; that session's only
+compaction record is at 1936, so the measured window is one continuous
 conversation, as the method requires.
 
-| Context | Requests | cache_creation | cache_read | Output | Total input |
+**Main-loop window rule**, stated because it differs from the baseline's: the
+baseline attributed a task's whole claim→complete range to it. On the dispatcher
+path the main loop's *only* task-specific cost is the dispatch record and its
+handoff result, so that is what is attributed. The turn that consumes the
+handoff and decides what to do next is ordinary main-loop conversation and is
+not charged to either task, on either side of the comparison.
+
+| Context | Req | cache_creation | cache_read | Output | TOTAL_IN |
 |---|---:|---:|---:|---:|---:|
-| W2072 main-loop window | 1 | 1,852 | 163,375 | 1,692 | 166,921 |
-| W2073 main-loop window | 1 | 3,092 | 182,232 | 1,616 | 186,942 |
-| W2073 resume window | 1 | 3,858 | 190,595 | 1,558 | 196,013 |
-| W2072 runner | 40 | 216,542 | 5,237,781 | 3,085 | 5,457,482 |
-| W2073 runner | 25 | 179,873 | 2,896,998 | 1,359 | 3,078,276 |
-| W2073 runner (attempt 2) | 17 | 171,311 | 2,101,032 | 863 | 2,273,237 |
-| **Two-task total (new path)** | **85** | **576,528** | **10,772,013** | **10,173** | **11,358,871** |
+| W2072 main-loop window | 1 | 1,852 | 163,375 | 1,692 | 165,229 |
+| W2072 runner | 40 | 216,542 | 5,237,781 | 3,085 | 5,454,397 |
+| W2072 runner → reviewer | 4 | 146,842 | 144,001 | 8 | 290,851 |
+| W2072 runner → explorer | 3 | 57,985 | 105,306 | 7 | 163,297 |
+| W2073 main-loop window | 1 | 3,092 | 182,232 | 1,616 | 185,326 |
+| W2073 runner | 25 | 179,873 | 2,896,998 | 1,359 | 3,076,917 |
+| W2073 runner → reviewer | 3 | 67,641 | 145,552 | 9 | 213,199 |
+| W2073 runner → explorer | 3 | 61,215 | 106,402 | 9 | 167,623 |
+| W2073 resume window | 1 | 3,858 | 190,595 | 1,558 | 194,455 |
+| W2073 runner (att 2) | 17 | 171,311 | 2,101,032 | 863 | 2,272,374 |
+| W2073 runner (att 2) → explorer | 2 | 57,918 | 47,795 | 7 | 105,717 |
+| W2073 runner (att 2) → reviewer | 2 | 62,089 | 72,127 | 6 | 134,220 |
+| **Two-task total** | **102** | **1,030,218** | **11,393,196** | **10,219** | **12,423,605** |
 | **Baseline, positions 1+2** | **193** | **820,778** | **24,902,496** | **88,893** | **25,726,142** |
 
-W2073's resume is included. It inflates the new path — a task that needed two
-attempts is not a favourable case — and excluding it would be picking the
-flattering number.
+W2073's resume is included. A task that needed two attempts is not a favourable
+case, and excluding it would be picking the flattering number.
 
-## Why the raw 55.8% is not the answer
+**The runners' own subagents are the tier most easily missed** — six contexts,
+17 requests, 1,074,953 tokens. An earlier version of this section omitted them,
+which is pitfall 3 verbatim, and the omission was asymmetric because the
+baseline rows include their four subagents each. It also ran *against* the
+result: correcting it moved the per-request figure from −0.3% to +8.6%.
 
-**Output tokens came out 88.6% lower** (10,173 against 88,893). Isolation does
-not change output — moving work into a subagent does not make the model write
-less. So that gap is not a saving; it is evidence the two sets of tasks are not
-the same size. The request counts say it plainly: **85 against 193**. The new-path
-tasks were under half the work.
+## Why the raw 51.7% is not an architecture result
 
-Comparing them raw measures task size, not architecture. Normalising by request:
+**Output came out 88.5% lower** (10,219 against 88,893). Isolation does not
+change output — moving work into a subagent does not make the model write less.
+So that gap is not a saving; it is evidence the two task sets are different
+sizes. Request counts agree: **102 against 193**.
 
-| Run | Position | Total input | Requests | Per request |
+Normalising per request gives **+8.6%** (121,800 against 133,296). But that is
+an *intensity* metric, and the architecture under test changes the number and
+mix of requests — which is its mechanism. In the new path most requests are
+subagent requests with small fresh contexts; in the baseline most are main-loop
+requests carrying an accumulated conversation. Output per request is 100 against
+460, which says the request populations are not comparable units either.
+
+The honest position: 51.7% is a true **description** of what two sessions cost
+and an unsupportable **attribution** to architecture; +8.6% is the closest
+available like-for-like and still not a controlled comparison. At n=2 with
+different tasks there is no controlled comparison to be had — which is what
+recommendation 4 above already said.
+
+## The position effect belongs to the baseline, not to isolation
+
+| Run | Position | TOTAL_IN | Req | Per request |
 |---|---|---:|---:|---:|
-| W2072 | 1st | 5,624,403 | 41 | 137,180 |
-| W2073 (incl. resume) | 2nd | 5,734,468 | 44 | 130,328 |
+| W2072 | 1st | 6,073,774 | 48 | 126,536 |
+| W2073 (incl. resume) | 2nd | 6,349,831 | 54 | 117,589 |
 | W2055 (baseline) | 1st | 8,024,618 | 79 | 101,577 |
 | W2057 (baseline) | 2nd | 17,701,524 | 114 | 155,276 |
 
-- **Two-task, per request: −0.3%.** 133,633 against 133,296. Parity.
-- **Position 1: −35.1%.** The new path is *worse* — 137,180 against 101,577.
-- **Position 2: +16.1%.** The new path is better — 130,328 against 155,276.
+- **Position 1: −24.6%** — the new path is *worse*.
+- **Position 2: +24.3%** — the new path is better.
 
-The shape is the mechanism working as designed, with a cost the design under-weighted.
-Isolation stops the conversation accumulating, so it pays from position 2 onward.
-It also makes every runner start cold, so position 1 pays a premium it never
-recovers within a single task.
+An earlier version read this as "isolation pays from position 2 onward". That
+attributes to isolation something isolation cannot do: every runner starts at a
+fresh context, so the new path has **no position effect at all** — 126,536 to
+117,589 is task-to-task variation. The entire split comes from the *baseline*
+side climbing 101,577 → 155,276.
 
-## Re-discovery, measured (not just named)
+The correct statement is stronger and needs no n>2: **the new path is flat with
+position while the baseline rises, so the two lines cross between the first and
+second task.** Where they cross is what the two data points locate, roughly.
 
-`cache_creation_input_tokens` is what *newly entered* a context — the baseline
-document names it the most robust single comparison, and it is also where
-re-discovery shows up.
+## Re-discovery, measured
 
-Of the new path's **576,528** cache_creation, **567,726 — 98% — is inside the
-runners**, against 8,802 in the main loop. That is the isolated contexts loading
-skills, task bodies and files the main loop already had resident.
+`cache_creation_input_tokens` is what newly entered a context. Of the new path's
+**1,030,218**, some **1,021,466 — 99% — is inside the runners and their
+subagents**, against 8,752 in the main loop. That is the isolated contexts
+loading skills, task bodies and files the main loop already had resident.
 
-So re-discovery is not a rounding error against the saving; at position 1 it
-exceeds it. This is the answer to "how much of the modelled saving is returned":
-**at position 1, more than all of it; by position 2, about a quarter of it.**
+Against the baseline's 820,778, the new path creates **25.5% more** cache. This
+is the cold-start premium, and the framing matters: it is not a position-1 cost
+that later tasks recover. Every runner pays it, on every task, forever.
+
+At position 2 the saving is (155,276 − 117,589) × 54 = 2,035,098 tokens, against
+600,047 of runner cache_creation — so re-discovery returns **29.5%**, about a
+third, of what isolation saves there. At position 1 it exceeds the saving
+entirely.
+
+## Pricing mix
+
+Token counts are not costs. Applying the standard published multipliers — cache
+write 1.25×, cache read 0.1×, output 5× base input — as a stated assumption:
+
+- **Raw: 37.4% cheaper** (against 51.7% on tokens). Pricing shrinks the raw win,
+  because the win is mostly cheap cache reads.
+- **Per request: 18.4% more expensive.** Isolation trades cheap cache reads
+  (0.1×) for expensive cache writes (1.25×), and the +8.6% token saving inverts.
+
+That inversion is pitfall 4's real point, and it is the single most important
+line here for anyone deciding whether to turn this on.
 
 ## What this does and does not license
 
-- **Supported:** the dispatcher path reduces per-request context from the second
-  task onward, and reduces total main-loop growth substantially — the main-loop
-  windows are ~170–196K each regardless of how much work the runner did.
-- **Not supported:** a general "34–46% saving" claim. Like for like, two tasks
-  came out at parity, and the first task came out worse.
-- **Unknown:** everything beyond position 2. The curve suggests the saving keeps
-  growing with position, exactly as the baseline's position effect predicts, but
-  no session has ever run a third dispatched task, so that is a projection.
+- **Supported:** main-loop growth is bounded — the main-loop windows are
+  165–195K each regardless of how much work the runner did. The new path is flat
+  with position where the baseline rises.
+- **Not supported:** a 34–46% saving. Like for like it is +8.6% on tokens, −18.4%
+  on modelled cost, and −25.5% on the method's preferred metric.
+- **Unknown:** everything past position 2. The lines are flat and rising, so the
+  saving should keep growing — but no session has run a third dispatched task.
 
 ## Caveats
 
 1. **n = 2 distinct tasks**, one of which needed a resume.
-2. **Task sizes differ materially** from the baseline runs (85 vs 193 requests);
-   every conclusion above uses the per-request normalisation for that reason.
-3. **Pricing mix is not addressed.** These are token counts. Cache reads,
-   cache writes and output are not priced alike, and output — the most expensive
-   per token — is unchanged by isolation. A cost saving is therefore smaller than
-   any input-token percentage here, and this document does not compute one.
-4. **Position matching is approximate.** The baseline positions are positions in
-   a main-loop session; a runner's position is inside its own fresh context while
-   the main loop had already run part of a task. The mapping is defensible but
-   not exact, and it is the trap the baseline document names first.
+2. **Task sizes differ materially** (102 vs 193 requests); every conclusion uses
+   the per-request normalisation, which is itself imperfect for the reason above.
+3. **Pricing multipliers are assumed**, not read from an invoice.
+4. **Position matching is approximate.** A runner's position is inside its own
+   fresh context while the main loop had already run part of a task.
+
+## Reproduction
+
+```bash
+python3 stride/docs/scripts/w2067-recursive.py
+```
+
+The standard `baseline.py` will not reproduce these figures: it walks one level
+of subagents, and the dispatcher path needs two. The script above resolves each
+transcript's child `agentId`s and sums depth-first, de-duplicating by agent so a
+shared child is never counted twice.
+
+Two limits worth stating rather than discovering: the session and record numbers
+are hardcoded, and the subagent transcripts live under a session-scoped temp
+directory that is not durable. So this reproduces *this* measurement on *this*
+machine while those files survive; it is a record of method, not a portable
+tool. The recursive walk is the part worth carrying into `baseline.py`.

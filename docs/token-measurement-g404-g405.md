@@ -555,6 +555,12 @@ resulting non-durability as an unavoidable limit. It was not: the durable copies
 live under the project directory and carry the exact mapping, so the script now
 reads those and takes the session id as an argument.
 
+That correction left behind something better than the fix. The superseded
+`agentId` scrape and the `toolUseId` mapping are **independent mechanisms
+reading different files in different directories**, and they agree on all twelve
+rows. Two attributions converging is stronger evidence for these figures than
+either is alone — an accident of fixing a method violation, but a real one.
+
 Two guards, because this script exists to prevent an undercount and could
 commit one itself:
 

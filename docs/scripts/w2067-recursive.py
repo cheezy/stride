@@ -243,7 +243,11 @@ if sum(pos_tot[k] for k in IN_KEYS) != new_in:
     print("!! position TOTAL_IN disagrees with the two-task total", file=sys.stderr)
     sys.exit(1)
 if MISSING:
-    print("\n!! %d unresolved subagent(s) — figures are UNDERCOUNTED" % len(MISSING),
+# De-duplicated: walk() traverses the same agents twice (once for the totals,
+# once per position), so a raw len() reports a multiple of the traversal
+# count rather than a tally. The exit code was always right; the number
+# was not.
+    print("\n!! %d unresolved subagent(s) — figures are UNDERCOUNTED" % len(set(MISSING)),
           file=sys.stderr)
     sys.exit(1)
 print("\nchecks: positions sum to totals ({} requests, {:,} TOTAL_IN); no missing transcripts".format(

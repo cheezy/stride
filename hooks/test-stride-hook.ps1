@@ -8,6 +8,78 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# (D235) HERMETICITY GATE — mirrors the bash suite's gate.
+#
+# NAMES ARE REPORTED, VALUES ARE NOT. An earlier version printed `NAME=VALUE`,
+# which would echo a developer's secrets to stdout and into any captured CI log.
+#
+# The list is DERIVED from stride-hook.ps1 rather than copied from the bash
+# gate — the two hooks do not read the same set, and a copied list would be
+# authoritative-looking and wrong. stride-hook.ps1's only process-environment
+# reads are the four $env: names below; every other STRIDE_/TASK_ name in that
+# file appears in a comment or is parsed out of the env-cache FILE, not the
+# process environment. STRIDE_HOOK_TIMEOUT_OVERRIDE is kept regardless because
+# this suite's own cases set and clear it, so an ambient one still collides.
+#
+# RESTORES RATHER THAN DESTROYS. Remove-Item Env: is process-scoped, and a .ps1
+# run from an interactive prompt runs IN that session — clearing outright would
+# delete variables from the developer's shell for the rest of the session.
+# That is the precise hazard this mirror was written to fix, so it snapshots
+# first and restores in a finally block registered on exit.
+#
+# Set STRIDE_TEST_KEEP_ENV=1 to run against your own environment instead; the
+# results are then not hermetic and the gate says so.
+$script:StrideHookEnvVars = @(
+    'CLAUDE_PROJECT_DIR'
+    'GOAL_ID'
+    'GOAL_IDENTIFIER'
+    'TASK_ID'
+    'STRIDE_HOOK_TIMEOUT_OVERRIDE'
+)
+
+function Get-StrideInheritedHookVars {
+    $names = @()
+    foreach ($name in $script:StrideHookEnvVars) {
+        if ($null -ne (Get-Item -Path "Env:$name" -ErrorAction SilentlyContinue)) { $names += $name }
+    }
+    # TASK_BASE_REF_<id> is an open-ended family keyed by task id (D226), so a
+    # fixed list structurally cannot cover it — sweep the prefix instead.
+    foreach ($item in Get-ChildItem -Path Env: -ErrorAction SilentlyContinue) {
+        if ($item.Name -like 'TASK_BASE_REF_*') { $names += $item.Name }
+    }
+    $names | Sort-Object -Unique
+}
+
+$script:StrideSavedEnv = @{}
+# @() forces an array: Sort-Object returns a scalar for a single element, and
+# Set-StrictMode -Version Latest makes .Count on a scalar a hard error.
+$inheritedNames = @(Get-StrideInheritedHookVars)
+
+if ($inheritedNames.Count -gt 0) {
+    if ($env:STRIDE_TEST_KEEP_ENV -eq '1') {
+        Write-Host 'WARNING: STRIDE_TEST_KEEP_ENV=1 - running against your environment.'
+        Write-Host 'These hook-read variables are INHERITED and may change what the assertions measure:'
+        $inheritedNames | ForEach-Object { Write-Host "  $_" }
+        Write-Host 'Results are NOT hermetic. Unset STRIDE_TEST_KEEP_ENV to neutralise them.'
+    } else {
+        Write-Host 'NOTE: neutralising inherited hook variables so the suite asserts the'
+        Write-Host 'behaviour under test rather than your environment (D235):'
+        $inheritedNames | ForEach-Object { Write-Host "  $_" }
+        Write-Host 'Set STRIDE_TEST_KEEP_ENV=1 to keep them instead.'
+        foreach ($name in $inheritedNames) {
+            $script:StrideSavedEnv[$name] = (Get-Item -Path "Env:$name").Value
+            Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
+        }
+        # Restore on exit so an interactive session keeps the values it had.
+        $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
+            foreach ($kv in $script:StrideSavedEnv.GetEnumerator()) {
+                Set-Item -Path "Env:$($kv.Key)" -Value $kv.Value -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    Write-Host ''
+}
+
 $script:PASS = 0
 $script:FAIL = 0
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

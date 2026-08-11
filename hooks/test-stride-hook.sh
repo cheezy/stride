@@ -6,6 +6,115 @@
 
 set -uo pipefail
 
+# (D235) HERMETICITY GATE — neutralise every hook-read variable the developer's
+# environment might already hold, and say so out loud.
+#
+# stride-hook.sh reads each name below from the environment, and several take
+# precedence over the value a test is trying to assert: resolve_section_budget
+# checks STRIDE_HOOK_TIMEOUT_OVERRIDE FIRST, so with it set every budget
+# assertion silently resolved to the developer's value instead of the value
+# under test. That produced phantom failures on a machine where it was exported
+# — and they sat on exactly the budget behaviour D223, D228, D229 and D230 were
+# about, so the tests that should have surfaced those defects were the ones
+# being ignored. A suite that reports failures it cannot explain is a suite
+# people stop reading.
+#
+# NAMES ARE REPORTED, VALUES ARE NOT. An earlier version of this gate printed
+# `NAME=VALUE`, which would have echoed a developer's bearer token to stdout and
+# into any captured CI log — turning a private variable into printed output is
+# strictly worse than the silent-override problem this fixes. The name alone
+# makes the point.
+#
+# The list is DERIVED from stride-hook.sh, not guessed: every `${VAR:-}` read of
+# a name the script does not itself assign first. Names that appear only in
+# comments (STRIDE_API_TOKEN, STRIDE_API_URL) or are assigned unconditionally at
+# file scope before any read are deliberately absent — clearing them would be
+# harmless but would make this list look authoritative when it is not. A few
+# that ARE assigned at file scope are kept anyway, marked below, because the
+# sourced-function subshells reach them before that assignment runs.
+#
+# Silently unsetting would have been the smaller fix and the wrong one: the
+# developer who exported the variable deserves to know their environment is not
+# reaching the code under test. So this reports first, then neutralises.
+#
+# This does NOT disable deliberate overrides. Every case that tests a variable's
+# effect sets it inline on the invocation it belongs to
+# (`STRIDE_HOOK_TIMEOUT_OVERRIDE=5 bash "$HOOK_SCRIPT" ...`) or inside its own
+# subshell, both of which run after this gate. Set STRIDE_TEST_KEEP_ENV=1 to run
+# against your own environment instead — the results are then not hermetic, and
+# the gate says so.
+STRIDE_HOOK_ENV_VARS="
+CLAUDE_PROJECT_DIR
+GOAL_ID
+GOAL_IDENTIFIER
+HAS_JQ
+HOOK_NAME
+RESPONSE_PAYLOAD
+STRIDE_HOOK_TIME_SOURCE
+STRIDE_HOOK_TIMEOUT_OVERRIDE
+STRIDE_HOOK_TIMEOUT_TOOL
+TASK_BASE_REF
+TASK_BASE_REF_OWNER
+TASK_BASE_REF_TRUSTED
+TASK_BASE_REF_UNPROVEN
+TASK_ID
+TASK_IDENTITY_REFRESHED
+TASK_OWNER_ID
+"
+
+# stride_inherited_hook_vars — the inherited names, one per line, newest first.
+# A function so the gate's own test can call it rather than re-implementing the
+# detection it is meant to be checking.
+stride_inherited_hook_vars() {
+  local _v _found=""
+  for _v in $STRIDE_HOOK_ENV_VARS; do
+    if [ -n "${!_v+x}" ]; then _found="$_found  $_v
+"; fi
+  done
+  # TASK_BASE_REF_<id> is an open-ended family keyed by task id (D226), so a
+  # fixed list structurally cannot cover it — sweep the prefix instead.
+  for _v in $(compgen -v TASK_BASE_REF_ 2>/dev/null); do
+    case "$_v" in
+      TASK_BASE_REF_OWNER | TASK_BASE_REF_TRUSTED | TASK_BASE_REF_UNPROVEN) ;;
+      *) _found="$_found  $_v
+" ;;
+    esac
+  done
+  printf '%s' "$_found"
+}
+
+stride_clear_hook_vars() {
+  local _v
+  for _v in $STRIDE_HOOK_ENV_VARS; do unset "$_v"; done
+  for _v in $(compgen -v TASK_BASE_REF_ 2>/dev/null); do unset "$_v"; done
+}
+
+STRIDE_INHERITED_ENV="$(stride_inherited_hook_vars)"
+
+if [ -n "$STRIDE_INHERITED_ENV" ]; then
+  if [ "${STRIDE_TEST_KEEP_ENV:-}" = "1" ]; then
+    echo "WARNING: STRIDE_TEST_KEEP_ENV=1 — running against your environment."
+    echo "These hook-read variables are INHERITED and may change what the assertions measure:"
+    printf '%s' "$STRIDE_INHERITED_ENV"
+    echo "Results are NOT hermetic. Unset STRIDE_TEST_KEEP_ENV to neutralise them."
+  else
+    echo "NOTE: neutralising inherited hook variables so the suite asserts the"
+    echo "behaviour under test rather than your environment (D235):"
+    printf '%s' "$STRIDE_INHERITED_ENV"
+    echo "Set STRIDE_TEST_KEEP_ENV=1 to keep them instead."
+    stride_clear_hook_vars
+  fi
+  echo ""
+fi
+
+# --gate-probe: run the gate, report what survived, exit. Used by Test Group 26
+# so the gate is asserted through its real code path rather than a reimplementation.
+if [ "${1:-}" = "--gate-probe" ]; then
+  echo "AFTER_GATE:STRIDE_HOOK_TIMEOUT_OVERRIDE=${STRIDE_HOOK_TIMEOUT_OVERRIDE:-<unset>}"
+  echo "AFTER_GATE:TASK_BASE_REF_99=${TASK_BASE_REF_99:-<unset>}"
+  exit 0
+fi
+
 PASS=0
 FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -6010,6 +6119,88 @@ else
   echo -e "  ${GREEN}PASS${RESET}: 25e: a genuine failure does not run later commands"
   PASS=$((PASS + 1))
 fi
+
+# ============================================================
+# Test Group 26: the hermeticity gate itself (D235)
+# ============================================================
+# The gate is load-bearing for every budget assertion, and until now it was the
+# one thing in this file nothing asserted. Hand-verification does not survive
+# the next refactor.
+echo ""
+echo "=== Test Group 26: hermeticity gate (D235) ==="
+
+# 26a: it detects an inherited variable and names it.
+GATE_OUT=$(STRIDE_HOOK_TIMEOUT_OVERRIDE=200 bash "$0" --gate-probe 2>&1)
+assert_contains "26a: gate reports an inherited variable by name" \
+  "STRIDE_HOOK_TIMEOUT_OVERRIDE" "$GATE_OUT"
+
+# 26b: it reports the NAME and never the VALUE. A gate that echoes a bearer
+# token into a CI log is worse than the leak it fixes, so this is the assertion
+# that keeps the earlier mistake from coming back.
+#
+# It must cover BOTH reporting loops. The first version of this test set only a
+# TASK_BASE_REF_* variable, which the prefix sweep handles — so reintroducing
+# value-printing in the fixed-list loop left it green. A canary in each.
+GATE_SECRET=$(TASK_ID=s3cr3t-fixed-list TASK_BASE_REF_99=s3cr3t-prefix-sweep \
+  bash "$0" --gate-probe 2>&1)
+assert_contains "26b: gate names a fixed-list variable" "TASK_ID" "$GATE_SECRET"
+assert_contains "26b: gate names the dynamic base-ref variable" \
+  "TASK_BASE_REF_99" "$GATE_SECRET"
+for _canary in s3cr3t-fixed-list s3cr3t-prefix-sweep; do
+  if echo "$GATE_SECRET" | grep -qF "$_canary"; then
+    echo -e "  ${RED}FAIL${RESET}: 26b: gate must never print a VALUE ($_canary leaked)"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 26b: gate never prints a VALUE ($_canary)"
+    PASS=$((PASS + 1))
+  fi
+done
+unset _canary
+
+# 26c: it actually unsets, rather than only reporting.
+GATE_CLEARED=$(STRIDE_HOOK_TIMEOUT_OVERRIDE=200 bash "$0" --gate-probe 2>&1)
+assert_contains "26c: the inherited variable is cleared, not just reported" \
+  "AFTER_GATE:STRIDE_HOOK_TIMEOUT_OVERRIDE=<unset>" "$GATE_CLEARED"
+
+# 26d: the opt-out preserves it and says the run is not hermetic (pitfall 3).
+GATE_KEPT=$(STRIDE_HOOK_TIMEOUT_OVERRIDE=200 STRIDE_TEST_KEEP_ENV=1 bash "$0" --gate-probe 2>&1)
+assert_contains "26d: STRIDE_TEST_KEEP_ENV=1 preserves the value" \
+  "AFTER_GATE:STRIDE_HOOK_TIMEOUT_OVERRIDE=200" "$GATE_KEPT"
+assert_contains "26d: the opt-out warns the run is not hermetic" \
+  "NOT hermetic" "$GATE_KEPT"
+
+# 26e: a clean environment says nothing at all - no noise on the common path.
+GATE_QUIET=$(env -u STRIDE_HOOK_TIMEOUT_OVERRIDE -u TASK_ID -u HOOK_NAME bash "$0" --gate-probe 2>&1)
+if echo "$GATE_QUIET" | grep -qF "neutralising inherited"; then
+  echo -e "  ${RED}FAIL${RESET}: 26e: a clean environment must produce no gate output"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 26e: a clean environment produces no gate output"
+  PASS=$((PASS + 1))
+fi
+
+# 26f/26g: the two edge cases the task's testing_strategy named. Both are about
+# resolve_section_budget, not the gate, and neither may resolve to the ambient
+# value now that the gate has cleared it.
+(
+  unset STRIDE_HOOK_TIMEOUT_OVERRIDE
+  STRIDE_HOOK_TIMEOUT_OVERRIDE="not-a-number"
+  # shellcheck source=/dev/null
+  HAS_JQ=true RESPONSE_PAYLOAD='{}' source "$HOOK_SCRIPT" >/dev/null 2>&1 || true
+  echo "$(resolve_section_budget after_doing 2>/dev/null)" > "$TMPDIR_TEST/budget_nan"
+) 2>/dev/null || true
+assert_eq "26f: a non-numeric override falls back to the documented default" \
+  "600" "$(cat "$TMPDIR_TEST/budget_nan" 2>/dev/null)"
+
+(
+  unset STRIDE_HOOK_TIMEOUT_OVERRIDE
+  STRIDE_HOOK_TIMEOUT_OVERRIDE=0
+  # shellcheck source=/dev/null
+  HAS_JQ=true RESPONSE_PAYLOAD='{}' source "$HOOK_SCRIPT" >/dev/null 2>&1 || true
+  echo "$(resolve_section_budget after_doing 2>/dev/null)" > "$TMPDIR_TEST/budget_zero"
+) 2>/dev/null || true
+assert_eq "26g: an override of 0 is ignored, per resolve_section_budget" \
+  "600" "$(cat "$TMPDIR_TEST/budget_zero" 2>/dev/null)"
 
 # ============================================================
 # Summary

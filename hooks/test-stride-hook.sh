@@ -6226,6 +6226,128 @@ assert_eq "26g: an override of 0 is ignored, per resolve_section_budget" \
   "600" "$(cat "$TMPDIR_TEST/budget_zero" 2>/dev/null)"
 
 # ============================================================
+# Test Group 27: durable hook result file (D234)
+# ============================================================
+# run_stride_section emits its JSON to bare stdout and exits 0, and Claude
+# Code's PreToolUse contract sends exit-0 stdout to the transcript rather than
+# to the model — so on the success path there was nothing the agent could read
+# a duration back from, and the 0 it reported was honest. These cover the file
+# that makes a real figure obtainable.
+echo ""
+echo "=== Test Group 27: durable hook result (D234) ==="
+
+D234_CLAIM='{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}'
+D234_COMPLETE='{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete"}}'
+
+# 27a: a successful section writes the file, with the measured duration.
+D234_PROJ="$TMPDIR_TEST/d234-success"
+mkdir -p "$D234_PROJ"
+cat > "$D234_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+sleep 1
+```
+STRIDE
+OUTPUT=$(echo "$D234_CLAIM" | CLAUDE_PROJECT_DIR="$D234_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+D234_FILE="$D234_PROJ/.stride/.hook-result-before_doing.json"
+if [ -f "$D234_FILE" ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 27a: a successful section writes the durable result"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 27a: a successful section must write the durable result"
+  FAIL=$((FAIL + 1))
+fi
+D234_MS=$(jq -r '.duration_ms' "$D234_FILE" 2>/dev/null)
+assert_eq "27a: the file names the hook it belongs to" \
+  "before_doing" "$(jq -r '.hook' "$D234_FILE" 2>/dev/null)"
+assert_eq "27a: the persisted status is success" \
+  "success" "$(jq -r '.status' "$D234_FILE" 2>/dev/null)"
+# A 1s sleep must land well above zero. Asserting >0 rather than a range keeps
+# this off the wall clock, which is what makes the rest of this suite flaky.
+if [ -n "$D234_MS" ] && [ "$D234_MS" -gt 0 ] 2>/dev/null; then
+  echo -e "  ${GREEN}PASS${RESET}: 27a: the persisted duration_ms is a real measurement (${D234_MS}ms)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 27a: persisted duration_ms must be > 0, got '$D234_MS'"
+  FAIL=$((FAIL + 1))
+fi
+assert_eq "27a: stdout still carries the same duration (contract unchanged)" \
+  "$D234_MS" "$(echo "$OUTPUT" | jq -r '.duration_ms' 2>/dev/null)"
+
+# 27b: an EMPTY section writes nothing. This is plugin mode, it does no work,
+# and 0 is the truthful answer — a missing file must mean "keep 0", never an
+# error and never a licence to invent a figure.
+D234_EMPTY="$TMPDIR_TEST/d234-empty"
+mkdir -p "$D234_EMPTY"
+cat > "$D234_EMPTY/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+```
+STRIDE
+echo "$D234_CLAIM" | CLAUDE_PROJECT_DIR="$D234_EMPTY" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+if [ -f "$D234_EMPTY/.stride/.hook-result-before_doing.json" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 27b: an empty section must not write a result file"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 27b: an empty section writes no result file (0 stays truthful)"
+  PASS=$((PASS + 1))
+fi
+
+# 27c: one hook's result never overwrites another's. Separate paths make this
+# structural rather than something a writer has to remember.
+D234_TWO="$TMPDIR_TEST/d234-two-hooks"
+mkdir -p "$D234_TWO"
+cat > "$D234_TWO/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+echo after_doing_ran
+```
+
+## before_review
+```bash
+echo before_review_ran
+```
+STRIDE
+echo "$D234_COMPLETE" | CLAUDE_PROJECT_DIR="$D234_TWO" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+echo "$D234_COMPLETE" | CLAUDE_PROJECT_DIR="$D234_TWO" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "27c: after_doing keeps its own result" "after_doing" \
+  "$(jq -r '.hook' "$D234_TWO/.stride/.hook-result-after_doing.json" 2>/dev/null)"
+assert_eq "27c: before_review keeps its own result" "before_review" \
+  "$(jq -r '.hook' "$D234_TWO/.stride/.hook-result-before_review.json" 2>/dev/null)"
+
+# 27d: the failure path persists a duration too. Before D234 the failure JSON
+# carried no duration at all, because it was computed only after that branch
+# had already returned — so the ONLY duration the executor emitted was on the
+# one path whose output the agent cannot read.
+D234_FAIL="$TMPDIR_TEST/d234-fail"
+mkdir -p "$D234_FAIL"
+cat > "$D234_FAIL/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+sleep 1
+exit 7
+```
+STRIDE
+echo "$D234_COMPLETE" | CLAUDE_PROJECT_DIR="$D234_FAIL" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+D234_FF="$D234_FAIL/.stride/.hook-result-after_doing.json"
+assert_eq "27d: the failure path persists its result too" "failed" \
+  "$(jq -r '.status' "$D234_FF" 2>/dev/null)"
+D234_FMS=$(jq -r '.duration_ms' "$D234_FF" 2>/dev/null)
+if [ -n "$D234_FMS" ] && [ "$D234_FMS" -gt 0 ] 2>/dev/null; then
+  echo -e "  ${GREEN}PASS${RESET}: 27d: a failed hook carries a real duration_ms (${D234_FMS}ms)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 27d: failed duration_ms must be > 0, got '$D234_FMS'"
+  FAIL=$((FAIL + 1))
+fi
+
+# 27e: a later task overwrites the previous one's file for the SAME hook, which
+# is intended — the reader wants the current task's figure, not a history.
+echo "$D234_COMPLETE" | CLAUDE_PROJECT_DIR="$D234_TWO" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+assert_eq "27e: a re-run replaces the same hook's result rather than appending" "1" \
+  "$(jq -s 'length' "$D234_TWO/.stride/.hook-result-after_doing.json" 2>/dev/null)"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

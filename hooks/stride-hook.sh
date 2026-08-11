@@ -22,6 +22,40 @@ ENV_CACHE="$PROJECT_DIR/.stride-env-cache"
 # Best-effort fast path only — the reliability guarantee is D119's fresh call.
 RESPONSE_FILE="$PROJECT_DIR/.stride/.last-api-response.json"
 
+# (D234) Durable per-hook result. run_stride_section emits its structured JSON
+# to bare STDOUT and exits 0, but Claude Code's PreToolUse contract sends exit-0
+# stdout to the transcript, NOT to the model — only exit 2 feeds output back. So
+# on the success path there is nothing for the agent to read, and the
+# duration_ms it reports has to come from somewhere else. This file is that
+# somewhere.
+#
+# ONE FILE PER HOOK, not one keyed file: after_doing and before_review must not
+# overwrite each other, and separate paths make that structural rather than
+# something a writer has to remember.
+#
+# A MISSING FILE IS NORMAL AND MEANS "KEEP 0". In plugin mode every .stride.md
+# section body is empty, run_stride_section returns before doing any work and
+# emits nothing, and 0 is the truthful answer. Readers must never treat absence
+# as an error, a retry, or a licence to invent a figure.
+hook_result_file() {
+  printf '%s/.stride/.hook-result-%s.json' "$PROJECT_DIR" "$1"
+}
+
+# Best-effort and never fatal: a hook must not fail because a duration could not
+# be recorded. Written atomically so a reader never sees a half-file.
+write_hook_result() {
+  local _hook="$1" _json="$2" _dest _tmp
+  _dest=$(hook_result_file "$_hook")
+  mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null || return 0
+  _tmp=$(mktemp "$PROJECT_DIR/.stride/hook-result.XXXXXX" 2>/dev/null) || return 0
+  if printf '%s\n' "$_json" > "$_tmp" 2>/dev/null; then
+    mv -f "$_tmp" "$_dest" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+  else
+    rm -f "$_tmp" 2>/dev/null
+  fi
+  return 0
+}
+
 # (D220) Published by stride_route_command — the single source of truth for
 # "which Stride lifecycle endpoint, if any, is this Bash call actually issuing?".
 # Declared here because `set -u` is active and the after-goal gate reads
@@ -1803,6 +1837,7 @@ run_stride_section() {
   local _cmd_stdout_file _cmd_stderr_file _cmd_exit _cmd_stdout _cmd_stderr
   local _remaining_file _completed_json _remaining_json _output_json _end_secs _duration _i
   local _section_budget _remaining _elapsed _timed_out
+  local _duration_ms _hook_result
   _section_budget=$(resolve_section_budget "$_section")
 
   for _trimmed in "${_cmd_list[@]}"; do
@@ -1861,12 +1896,20 @@ run_stride_section() {
         done
       fi
 
+      # (D234) The duration is computed HERE, before the failure branch emits.
+      # Previously it was only computed further down, on the success path — so
+      # the one path that emitted a duration was the one whose output the agent
+      # cannot read, and the readable path carried none at all.
+      _duration_ms=$(( $(now_ms) - _start_ms ))
+      [ "$_duration_ms" -lt 0 ] && _duration_ms=0
+
       if [ "$HAS_JQ" = "true" ]; then
         _completed_json=$(jq -R . < "$_completed_file" | jq -s . 2>/dev/null || echo "[]")
         _remaining_json=$(jq -R . < "$_remaining_file" | jq -s . 2>/dev/null || echo "[]")
 
-        jq -n \
+        _hook_result=$(jq -n \
           --arg hook "$_section" \
+          --argjson duration_ms "$_duration_ms" \
           --arg failed "$_trimmed" \
           --argjson index "$_cmd_index" \
           --argjson exit_code "$_cmd_exit" \
@@ -1887,10 +1930,13 @@ run_stride_section() {
             stdout: $stdout,
             stderr: $stderr,
             commands_completed: $completed,
-            commands_remaining: $remaining
-          }'
+            commands_remaining: $remaining,
+            duration_ms: $duration_ms
+          }')
+        write_hook_result "$_section" "$_hook_result"
+        printf '%s\n' "$_hook_result"
       else
-        echo "HOOK=$_section STATUS=failed COMMAND=$_trimmed EXIT=$_cmd_exit TIMED_OUT=$_timed_out BUDGET=$_section_budget"
+        echo "HOOK=$_section STATUS=failed COMMAND=$_trimmed EXIT=$_cmd_exit TIMED_OUT=$_timed_out BUDGET=$_section_budget DURATION_MS=$_duration_ms"
       fi
 
       if [ "$_timed_out" = "true" ]; then
@@ -1919,7 +1965,9 @@ run_stride_section() {
   _duration=$((_end_secs - _start_secs))
   # (W1455) duration_ms is the hook-execution.md contract field. Guard
   # against clock weirdness — never emit a negative duration.
-  local _duration_ms
+
+  # (W1455) duration_ms is the hook-execution.md contract field. Guard against
+  # clock weirdness — never emit a negative duration.
   _duration_ms=$(( $(now_ms) - _start_ms ))
   [ "$_duration_ms" -lt 0 ] && _duration_ms=0
 
@@ -1930,7 +1978,7 @@ run_stride_section() {
     # duration_seconds is DEPRECATED in favor of duration_ms (the
     # hook-execution.md field name) — kept for one release for any
     # consumer still parsing it.
-    jq -n \
+    _hook_result=$(jq -n \
       --arg hook "$_section" \
       --argjson duration "$_duration" \
       --argjson duration_ms "$_duration_ms" \
@@ -1943,7 +1991,12 @@ run_stride_section() {
         commands_output: $outputs,
         duration_ms: $duration_ms,
         duration_seconds: $duration
-      }'
+      }')
+    # (D234) Persist BEFORE printing: stdout on the exit-0 path reaches the
+    # transcript, not the model, so the file is the only channel the agent can
+    # actually read this figure back from.
+    write_hook_result "$_section" "$_hook_result"
+    printf '%s\n' "$_hook_result"
   fi
 
   rm -f "$_completed_file" "$_output_file"

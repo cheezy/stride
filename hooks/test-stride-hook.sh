@@ -30,8 +30,9 @@ set -uo pipefail
 # comments (STRIDE_API_TOKEN, STRIDE_API_URL) or are assigned unconditionally at
 # file scope before any read are deliberately absent — clearing them would be
 # harmless but would make this list look authoritative when it is not. A few
-# that ARE assigned at file scope are kept anyway, marked below, because the
-# sourced-function subshells reach them before that assignment runs.
+# that ARE assigned at file scope are kept anyway — HAS_JQ, RESPONSE_PAYLOAD and
+# the SNAP_BASE_* memoisation globals — because the sourced-function subshells
+# read them with a `${VAR:-}` default before that assignment runs.
 #
 # Silently unsetting would have been the smaller fix and the wrong one: the
 # developer who exported the variable deserves to know their environment is not
@@ -50,6 +51,9 @@ GOAL_IDENTIFIER
 HAS_JQ
 HOOK_NAME
 RESPONSE_PAYLOAD
+SNAP_BASE_REFUSED
+SNAP_BASE_RESOLVED
+SNAP_BASE_RESOLVED_DONE
 STRIDE_HOOK_TIME_SOURCE
 STRIDE_HOOK_TIMEOUT_OVERRIDE
 STRIDE_HOOK_TIMEOUT_TOOL
@@ -95,12 +99,12 @@ if [ -n "$STRIDE_INHERITED_ENV" ]; then
   if [ "${STRIDE_TEST_KEEP_ENV:-}" = "1" ]; then
     echo "WARNING: STRIDE_TEST_KEEP_ENV=1 — running against your environment."
     echo "These hook-read variables are INHERITED and may change what the assertions measure:"
-    printf '%s' "$STRIDE_INHERITED_ENV"
+    printf '%s\n' "$STRIDE_INHERITED_ENV"
     echo "Results are NOT hermetic. Unset STRIDE_TEST_KEEP_ENV to neutralise them."
   else
     echo "NOTE: neutralising inherited hook variables so the suite asserts the"
     echo "behaviour under test rather than your environment (D235):"
-    printf '%s' "$STRIDE_INHERITED_ENV"
+    printf '%s\n' "$STRIDE_INHERITED_ENV"
     echo "Set STRIDE_TEST_KEEP_ENV=1 to keep them instead."
     stride_clear_hook_vars
   fi
@@ -6128,9 +6132,15 @@ fi
 # the next refactor.
 echo ""
 echo "=== Test Group 26: hermeticity gate (D235) ==="
+# Every probe below pins STRIDE_TEST_KEEP_ENV explicitly. The flag is itself a
+# suite-read variable the gate cannot neutralise (it IS the switch), so without
+# pinning, a child inherits it, takes the opt-out branch, and 26a/26c/26e turn
+# red for a developer using the documented escape hatch — the same defect class
+# this task exists to remove, landing on its own tests. 26d is the one case that
+# sets it deliberately.
 
 # 26a: it detects an inherited variable and names it.
-GATE_OUT=$(STRIDE_HOOK_TIMEOUT_OVERRIDE=200 bash "$0" --gate-probe 2>&1)
+GATE_OUT=$(STRIDE_TEST_KEEP_ENV= STRIDE_HOOK_TIMEOUT_OVERRIDE=200 bash "$0" --gate-probe 2>&1)
 assert_contains "26a: gate reports an inherited variable by name" \
   "STRIDE_HOOK_TIMEOUT_OVERRIDE" "$GATE_OUT"
 
@@ -6141,8 +6151,8 @@ assert_contains "26a: gate reports an inherited variable by name" \
 # It must cover BOTH reporting loops. The first version of this test set only a
 # TASK_BASE_REF_* variable, which the prefix sweep handles — so reintroducing
 # value-printing in the fixed-list loop left it green. A canary in each.
-GATE_SECRET=$(TASK_ID=s3cr3t-fixed-list TASK_BASE_REF_99=s3cr3t-prefix-sweep \
-  bash "$0" --gate-probe 2>&1)
+GATE_SECRET=$(STRIDE_TEST_KEEP_ENV= TASK_ID=s3cr3t-fixed-list \
+  TASK_BASE_REF_99=s3cr3t-prefix-sweep bash "$0" --gate-probe 2>&1)
 assert_contains "26b: gate names a fixed-list variable" "TASK_ID" "$GATE_SECRET"
 assert_contains "26b: gate names the dynamic base-ref variable" \
   "TASK_BASE_REF_99" "$GATE_SECRET"
@@ -6158,7 +6168,7 @@ done
 unset _canary
 
 # 26c: it actually unsets, rather than only reporting.
-GATE_CLEARED=$(STRIDE_HOOK_TIMEOUT_OVERRIDE=200 bash "$0" --gate-probe 2>&1)
+GATE_CLEARED=$(STRIDE_TEST_KEEP_ENV= STRIDE_HOOK_TIMEOUT_OVERRIDE=200 bash "$0" --gate-probe 2>&1)
 assert_contains "26c: the inherited variable is cleared, not just reported" \
   "AFTER_GATE:STRIDE_HOOK_TIMEOUT_OVERRIDE=<unset>" "$GATE_CLEARED"
 
@@ -6170,7 +6180,8 @@ assert_contains "26d: the opt-out warns the run is not hermetic" \
   "NOT hermetic" "$GATE_KEPT"
 
 # 26e: a clean environment says nothing at all - no noise on the common path.
-GATE_QUIET=$(env -u STRIDE_HOOK_TIMEOUT_OVERRIDE -u TASK_ID -u HOOK_NAME bash "$0" --gate-probe 2>&1)
+GATE_QUIET=$(env -u STRIDE_HOOK_TIMEOUT_OVERRIDE -u TASK_ID -u HOOK_NAME \
+  -u STRIDE_TEST_KEEP_ENV bash "$0" --gate-probe 2>&1)
 if echo "$GATE_QUIET" | grep -qF "neutralising inherited"; then
   echo -e "  ${RED}FAIL${RESET}: 26e: a clean environment must produce no gate output"
   FAIL=$((FAIL + 1))

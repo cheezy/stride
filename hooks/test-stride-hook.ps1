@@ -15,11 +15,12 @@ $ErrorActionPreference = 'Stop'
 #
 # The list is DERIVED from stride-hook.ps1 rather than copied from the bash
 # gate — the two hooks do not read the same set, and a copied list would be
-# authoritative-looking and wrong. stride-hook.ps1's only process-environment
-# reads are the four $env: names below; every other STRIDE_/TASK_ name in that
-# file appears in a comment or is parsed out of the env-cache FILE, not the
-# process environment. STRIDE_HOOK_TIMEOUT_OVERRIDE is kept regardless because
-# this suite's own cases set and clear it, so an ambient one still collides.
+# authoritative-looking and wrong. It must be derived from BOTH accessors: an
+# earlier version searched only `$env:NAME` and so missed TASK_BASE_REF and
+# HOOK_NAME, which that hook reads through
+# [System.Environment]::GetEnvironmentVariable(...,'Process') — its dominant
+# form. TASK_BASE_REF in particular selects the git range the diff walks, so an
+# ambient one silently changes what a snapshot captures.
 #
 # RESTORES RATHER THAN DESTROYS. Remove-Item Env: is process-scoped, and a .ps1
 # run from an interactive prompt runs IN that session — clearing outright would
@@ -30,11 +31,13 @@ $ErrorActionPreference = 'Stop'
 # Set STRIDE_TEST_KEEP_ENV=1 to run against your own environment instead; the
 # results are then not hermetic and the gate says so.
 $script:StrideHookEnvVars = @(
-    'CLAUDE_PROJECT_DIR'
-    'GOAL_ID'
-    'GOAL_IDENTIFIER'
-    'TASK_ID'
-    'STRIDE_HOOK_TIMEOUT_OVERRIDE'
+    'CLAUDE_PROJECT_DIR'      # $env:
+    'GOAL_ID'                 # $env:
+    'GOAL_IDENTIFIER'         # $env:
+    'HOOK_NAME'               # GetEnvironmentVariable, stride-hook.ps1
+    'STRIDE_HOOK_TIMEOUT_OVERRIDE'  # GetEnvironmentVariable
+    'TASK_BASE_REF'           # GetEnvironmentVariable — selects the diff range
+    'TASK_ID'                 # both forms
 )
 
 function Get-StrideInheritedHookVars {
@@ -70,15 +73,18 @@ if ($inheritedNames.Count -gt 0) {
             $script:StrideSavedEnv[$name] = (Get-Item -Path "Env:$name").Value
             Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
         }
-        # Restore on exit so an interactive session keeps the values it had.
-        $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
-            foreach ($kv in $script:StrideSavedEnv.GetEnumerator()) {
-                Set-Item -Path "Env:$($kv.Key)" -Value $kv.Value -ErrorAction SilentlyContinue
-            }
-        }
+        # Restored by the finally block at the end of this file. An earlier
+        # version registered a PowerShell.Exiting handler instead; that fires on
+        # ENGINE exit, not when a script returns, so in the very case the
+        # comment above describes — a .ps1 run from an interactive prompt — the
+        # developer's variables stayed cleared. The handler could not read
+        # $script:StrideSavedEnv from its own scope either.
     }
     Write-Host ''
 }
+
+# try/finally so the restore runs when this SCRIPT ends (see the gate above).
+try {
 
 $script:PASS = 0
 $script:FAIL = 0
@@ -3402,4 +3408,12 @@ Write-Host "========================================"
     Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
 }
 
-if ($script:FAIL -gt 0) { exit 1 } else { exit 0 }
+$script:StrideExitCode = if ($script:FAIL -gt 0) { 1 } else { 0 }
+
+} finally {
+    foreach ($kv in $script:StrideSavedEnv.GetEnumerator()) {
+        Set-Item -Path "Env:$($kv.Key)" -Value $kv.Value -ErrorAction SilentlyContinue
+    }
+}
+
+exit $script:StrideExitCode

@@ -382,7 +382,8 @@ and reviewer, and the standard `baseline.py` walks only one level.
 most robust — `cache_creation_input_tokens`, what newly entered a context — the
 dispatcher path is **25.5% worse**. On total input per request it is **8.6%
 better**. On raw totals it is 51.7% better, but that figure measures task size,
-not architecture. The design estimated 34–46%; nothing here reaches that.
+not architecture. The design estimated 34–46%; the raw figure beats it and no
+like-for-like figure reaches it.
 
 ## How little of this path has ever run
 
@@ -428,7 +429,7 @@ W2073's resume is included. A task that needed two attempts is not a favourable
 case, and excluding it would be picking the flattering number.
 
 **The runners' own subagents are the tier most easily missed** — six contexts,
-17 requests, 1,074,953 tokens. An earlier version of this section omitted them,
+17 requests, 1,074,907 tokens. An earlier version of this section omitted them,
 which is pitfall 3 verbatim, and the omission was asymmetric because the
 baseline rows include their four subagents each. It also ran *against* the
 result: correcting it moved the per-request figure from −0.3% to +8.6%.
@@ -472,14 +473,30 @@ fresh context, so the new path has **no position effect at all** — 126,536 to
 side climbing 101,577 → 155,276.
 
 The correct statement is stronger and needs no n>2: **the new path is flat with
-position while the baseline rises, so the two lines cross between the first and
-second task.** Where they cross is what the two data points locate, roughly.
+position while the baseline rises.** Where they cross, though, depends on which
+metric you ask — and the section's own headline metric disagrees with the one
+this comparison is drawn in:
+
+| Per position | tokens/req | cache_creation | modelled cost/req |
+|---|---:|---:|---:|
+| Position 1 | −24.6% | −7.2% | −26.1% |
+| Position 2 | **+24.3%** | **−42.5%** | **−14.6%** |
+
+- **On tokens per request the lines cross between task 1 and task 2.**
+- **On modelled cost they have not crossed by task 2** — the new path is still
+  14.6% more expensive, converging but not level.
+- **On `cache_creation` they diverge rather than converge**, because the resume
+  pays a second cold start at position 2.
+
+So the crossover is real on the metric it is stated in, and unmeasured on the
+metric that decides whether to turn this on. Where the cost lines cross is in
+the Unknown list below, not established here.
 
 ## Re-discovery, measured
 
 `cache_creation_input_tokens` is what newly entered a context. Of the new path's
-**1,030,218**, some **1,021,466 — 99% — is inside the runners and their
-subagents**, against 8,752 in the main loop. That is the isolated contexts
+**1,030,218**, some **1,021,416 — 99% — is inside the runners and their
+subagents**, against 8,802 in the main loop. That is the isolated contexts
 loading skills, task bodies and files the main loop already had resident.
 
 Against the baseline's 820,778, the new path creates **25.5% more** cache. This
@@ -496,9 +513,9 @@ entirely.
 Token counts are not costs. Applying the standard published multipliers — cache
 write 1.25×, cache read 0.1×, output 5× base input — as a stated assumption:
 
-- **Raw: 37.4% cheaper** (against 51.7% on tokens). Pricing shrinks the raw win,
+- **Raw: 37.5% cheaper** (against 51.7% on tokens). Pricing shrinks the raw win,
   because the win is mostly cheap cache reads.
-- **Per request: 18.4% more expensive.** Isolation trades cheap cache reads
+- **Per request: 18.3% more expensive.** Isolation trades cheap cache reads
   (0.1×) for expensive cache writes (1.25×), and the +8.6% token saving inverts.
 
 That inversion is pitfall 4's real point, and it is the single most important
@@ -509,10 +526,12 @@ line here for anyone deciding whether to turn this on.
 - **Supported:** main-loop growth is bounded — the main-loop windows are
   165–195K each regardless of how much work the runner did. The new path is flat
   with position where the baseline rises.
-- **Not supported:** a 34–46% saving. Like for like it is +8.6% on tokens, −18.4%
+- **Not supported:** a 34–46% saving. Like for like it is +8.6% on tokens, −18.3%
   on modelled cost, and −25.5% on the method's preferred metric.
-- **Unknown:** everything past position 2. The lines are flat and rising, so the
-  saving should keep growing — but no session has run a third dispatched task.
+- **Unknown:** everything past position 2, and **where the cost lines cross**.
+  On modelled cost the new path is still 14.6% more expensive at position 2, so
+  the crossover is somewhere beyond the measured range. The lines are flat and
+  rising, so it should arrive — but no session has run a third dispatched task.
 
 ## Caveats
 
@@ -530,12 +549,22 @@ python3 stride/docs/scripts/w2067-recursive.py
 ```
 
 The standard `baseline.py` will not reproduce these figures: it walks one level
-of subagents, and the dispatcher path needs two. The script above resolves each
-transcript's child `agentId`s and sums depth-first, de-duplicating by agent so a
-shared child is never counted twice.
+of subagents, and the dispatcher path needs two.
 
-Two limits worth stating rather than discovering: the session and record numbers
-are hardcoded, and the subagent transcripts live under a session-scoped temp
-directory that is not durable. So this reproduces *this* measurement on *this*
-machine while those files survive; it is a record of method, not a portable
-tool. The recursive walk is the part worth carrying into `baseline.py`.
+Attribution follows the documented rule rather than a heuristic. Children are
+resolved by **`toolUseId`** from `subagents/agent-*.meta.json`, matched against
+the tool_use ids each parent transcript actually issued — the same mechanism
+`token-baseline.md` specifies. An earlier version scraped `agentId` strings out
+of raw transcript text in a session-scoped temp directory, and documented the
+resulting non-durability as an unavoidable limit. It was not: the durable copies
+live under the project directory and carry the exact mapping, so the script now
+reads those and takes the session id as an argument.
+
+Two guards, because this script exists to prevent an undercount and could
+commit one itself:
+
+- a **missing child transcript is fatal and loud**, not silently zero — that is
+  the failure this measurement already made once;
+- the per-position and two-task views are **asserted to agree**, so a subagent
+  reachable from two parents cannot be counted once in one view and twice in
+  the other.

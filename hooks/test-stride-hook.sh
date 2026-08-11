@@ -6180,8 +6180,20 @@ assert_contains "26d: the opt-out warns the run is not hermetic" \
   "NOT hermetic" "$GATE_KEPT"
 
 # 26e: a clean environment says nothing at all - no noise on the common path.
-GATE_QUIET=$(env -u STRIDE_HOOK_TIMEOUT_OVERRIDE -u TASK_ID -u HOOK_NAME \
-  -u STRIDE_TEST_KEEP_ENV bash "$0" --gate-probe 2>&1)
+# The -u flags are built FROM the gate's own list rather than hand-maintained.
+# A hand-written subset drifts the moment a name is added — and under the
+# STRIDE_TEST_KEEP_ENV=1 opt-out the parent does not clear, so any unlisted
+# variable reaches this child and turns 26e red for a reason that is not about
+# the gate. That drift is the defect class this whole task exists to remove.
+GATE_UNSET_FLAGS=()
+for _v in $STRIDE_HOOK_ENV_VARS STRIDE_TEST_KEEP_ENV; do
+  GATE_UNSET_FLAGS+=(-u "$_v")
+done
+for _v in $(compgen -v TASK_BASE_REF_ 2>/dev/null); do
+  GATE_UNSET_FLAGS+=(-u "$_v")
+done
+unset _v
+GATE_QUIET=$(env "${GATE_UNSET_FLAGS[@]}" bash "$0" --gate-probe 2>&1)
 if echo "$GATE_QUIET" | grep -qF "neutralising inherited"; then
   echo -e "  ${RED}FAIL${RESET}: 26e: a clean environment must produce no gate output"
   FAIL=$((FAIL + 1))

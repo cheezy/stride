@@ -26,7 +26,7 @@ $ErrorActionPreference = 'Stop'
 # run from an interactive prompt runs IN that session — clearing outright would
 # delete variables from the developer's shell for the rest of the session.
 # That is the precise hazard this mirror was written to fix, so it snapshots
-# first and restores in a finally block registered on exit.
+# first and restores in a try/finally wrapped around the suite body.
 #
 # Set STRIDE_TEST_KEEP_ENV=1 to run against your own environment instead; the
 # results are then not hermetic and the gate says so.

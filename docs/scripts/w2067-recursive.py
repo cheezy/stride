@@ -82,8 +82,14 @@ META = load_meta()
 MISSING = []
 
 
-def tool_use_ids(path):
-    """tool_use ids issued from this transcript."""
+def agent_dispatch_ids(path):
+    """tool_use ids of AGENT dispatches issued from this transcript.
+
+    Filtered to Agent (as baseline.py does) so an unresolvable dispatch can be
+    named. Matching on every tool_use id would be harmless today — ids are
+    unique across transcripts — but it makes the guard below unwritable, because
+    a non-Agent id legitimately has no meta.
+    """
     ids = set()
     for line in open(path, errors="replace"):
         if '"tool_use"' not in line:
@@ -93,7 +99,7 @@ def tool_use_ids(path):
         except Exception:
             continue
         for c in (r.get("message", {}) or {}).get("content") or []:
-            if isinstance(c, dict) and c.get("type") == "tool_use":
+            if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "Agent":
                 ids.add(c.get("id"))
     return ids
 
@@ -113,7 +119,19 @@ def walk(agent, label, rows, seen):
     c, n = sum_usage(p)
     rows.append((label, n, c))
     tot, reqs = collections.Counter(c), n
-    issued = tool_use_ids(p)
+    issued = agent_dispatch_ids(p)
+    by_tool_use = {m.get("toolUseId"): child for child, m in META.items()}
+
+    # An Agent dispatch with no meta is NEVER REACHED by the loop below, so
+    # without this it is silently absent from the totals while the run still
+    # reports success. That is the same undercount this script exists to
+    # prevent, in the one position the missing-transcript guard cannot see.
+    for tid in sorted(issued):
+        if tid not in by_tool_use:
+            print("!! %s issued Agent dispatch %s with no subagent meta — "
+                  "its cost is UNCOUNTED" % (label, tid), file=sys.stderr)
+            MISSING.append(tid)
+
     for child, m in sorted(META.items()):
         if m.get("toolUseId") in issued and child not in seen:
             cc, cn = walk(child, "%s -> %s" % (label, m.get("agentType", child)), rows, seen)
@@ -216,10 +234,16 @@ print("  cost/request : {:+.1f}%".format(
     ((cost(bc) / BASE["req"]) - (cost(agg) / reqs)) / (cost(bc) / BASE["req"]) * 100))
 
 # The two views must agree; nothing may be counted once in one and twice in the other.
-assert pos_req == reqs, "position requests %d != total %d" % (pos_req, reqs)
-assert sum(pos_tot[k] for k in IN_KEYS) == new_in, "position TOTAL_IN disagrees with total"
+# Explicit, not `assert`: bare asserts vanish under `python3 -O`, and a guard
+# that a common interpreter flag removes is not a guard.
+if pos_req != reqs:
+    print("!! position requests %d != total %d" % (pos_req, reqs), file=sys.stderr)
+    sys.exit(1)
+if sum(pos_tot[k] for k in IN_KEYS) != new_in:
+    print("!! position TOTAL_IN disagrees with the two-task total", file=sys.stderr)
+    sys.exit(1)
 if MISSING:
-    print("\n!! %d subagent transcript(s) missing — figures are UNDERCOUNTED" % len(MISSING),
+    print("\n!! %d unresolved subagent(s) — figures are UNDERCOUNTED" % len(MISSING),
           file=sys.stderr)
     sys.exit(1)
 print("\nchecks: positions sum to totals ({} requests, {:,} TOTAL_IN); no missing transcripts".format(

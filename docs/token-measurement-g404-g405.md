@@ -463,9 +463,6 @@ recommendation 4 above already said.
 | W2055 (baseline) | 1st | 8,024,618 | 79 | 101,577 |
 | W2057 (baseline) | 2nd | 17,701,524 | 114 | 155,276 |
 
-- **Position 1: −24.6%** — the new path is *worse*.
-- **Position 2: +24.3%** — the new path is better.
-
 An earlier version read this as "isolation pays from position 2 onward". That
 attributes to isolation something isolation cannot do: every runner starts at a
 fresh context, so the new path has **no position effect at all** — 126,536 to
@@ -473,16 +470,14 @@ fresh context, so the new path has **no position effect at all** — 126,536 to
 side climbing 101,577 → 155,276.
 
 The correct statement is stronger and needs no n>2: **the new path is flat with
-position while the baseline rises.** Where they cross, though, depends on which
-metric you ask — and the section's own headline metric disagrees with the one
-this comparison is drawn in:
+position while the baseline rises.** Where the two lines cross, though, depends
+on which metric you ask:
 
 | Per position | tokens/req | cache_creation | modelled cost/req |
 |---|---:|---:|---:|
 | Position 1 | −24.6% | −7.2% | −26.1% |
 | Position 2 | **+24.3%** | **−42.5%** | **−14.6%** |
 
-- **On tokens per request the lines cross between task 1 and task 2.**
 - **On modelled cost they have not crossed by task 2** — the new path is still
   14.6% more expensive, converging but not level.
 - **On `cache_creation` they diverge rather than converge**, because the resume

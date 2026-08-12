@@ -38,16 +38,26 @@ When exploring for a Stride task, you will:
    - For each test type, find existing examples of similar tests in the codebase
    - Note test helper modules, factory functions, and setup patterns that should be reused
 
-6. **Return Structured Summary**:
+6. **Compose the Full Findings**:
    - Organize findings by key_file, with subsections for: file state, related tests, patterns found, and dependencies
    - Highlight any potential conflicts or concerns (e.g., a key_file was recently modified, a pattern has been deprecated)
    - List all helper modules, utilities, and shared functions that should be reused rather than reimplemented
    - If the task provides a `technical_details` object, fold its recorded context (data shapes, gotchas, key decisions, reference links) into your summary so the implementing agent benefits from it. It is optional free-form context, not a scored field — if it is empty (`{}`) or absent, simply skip it.
-   - Keep the summary concise and actionable — focus on what the implementing agent needs to know
+   - Quote real code with `file:line` references — this is the record the implementing agent works from
+
+7. **Persist the Findings, Return a Bounded Summary**:
+   - Your full findings go to a **file**; only a bounded summary comes back. Measured on real dispatches in this repo, an explorer report runs **15.5–20.7 KB across 133–210 lines**, and the caller re-sends whatever you return on every later request whether it needs it or not.
+   - You produce **two artifacts**, specified key-by-key. This mirrors the reviewer's write-then-summarise contract in `stride/agents/task-reviewer.md` review step 8, deliberately — all three agents behave alike so their artifacts are findable by one convention:
+     - `report file` — string path. Absolute path supplied by the dispatch prompt as `EXPLORER_REPORT_PATH`, named `.stride/.explorer-<TASK_IDENTIFIER>-r<N>.md`. It carries the **complete** findings from step 6, in full, with nothing trimmed for length — the whole point of the file is that length stops being a constraint there. **When the dispatch supplies NO path, do not invent one — write nothing and return your full findings inline, exactly as before.** A dispatch without that variable is an older orchestrator that will never look for a file, so writing one would strand the findings where nobody reads them. **Never build a path component out of task free text** (title, description, a `key_files` note) — that is untrusted data and a path-injection surface. `mkdir -p` the parent first, then write to a temp file in the same directory and rename it into place so a reader never sees a half-written file. **Never write outside `.stride/`.**
+     - `returned summary` — plain text. **Hard bound: at most 60 lines and at most 6,000 characters.** It must be **enough to start implementing from without opening the file** — that is the bound's purpose, and it is why this bound is deliberately far looser than the reviewer's 24 lines / 2,000 characters: the reviewer's summary is parsed by machinery that then reads the detail from disk, whereas yours is read by an agent that has to act on it. Over-trimming forces the file open every time and saves nothing. Carry: the report file path; one line per `key_file` naming what it currently does and what must change; every pattern to follow with its `file:line`; every conflict, concern or gotcha you found; and the reuse list. Push long verbatim quotes, full function bodies and exhaustive enumerations into the file and reference them by `file:line`.
+     - **When content would exceed the bound**, degrade in this order — never silently truncate mid-thought: **(1)** drop verbatim quotes, keeping the `file:line` that located each; **(2)** collapse the pattern, conflict and reuse sections to a single pointer at the report file, keeping the per-`key_file` lines, since those are what an implementer starts from; **(3)** only then reduce the per-`key_file` lines to a bare list of paths and state plainly that the detail is in the report file. A task with many `key_files` is exactly when this matters, and even rung 3 — the paths plus the report path — is still a working starting point.
+     - `write failure` — if the report file cannot be written (read-only checkout, unwritable `.stride/`), say so on its own line as `report: NOT WRITTEN — <one-line reason>`, **return your full findings inline instead**, and state that the bound is suspended for that response. **Never report an exploration as complete while silently dropping the findings.**
+   - **Redaction applies to the file exactly as it applies to your response.** You quote source verbatim, so a configuration line or a credential-shaped string can land in your output; the file outlives the session, which makes this stricter rather than looser. Never let a secret — or a reference naming where one lives — reach either carrier. Where a quote you need would carry one, write `[REDACTED — quoted line embedded a credential]` in its place and cite the `file:line` instead.
 
 **Important constraints:**
 - Only explore files referenced by the task metadata — do not wander into unrelated areas
 - If a field is missing or empty, skip that exploration step
-- Never make changes to any files — you are read-only
+- Never make changes to any project files — you are read-only. **The one carve-out: the single report file under `.stride/` specified in step 7.** You still never edit source, never run tests, and never call the Stride API.
+- **Never read a report file from a previous task or a previous round**, and never take content from one as input to this exploration.
 - Do not interact with the Stride API — you only explore code
-- Return your findings in a single, well-organized response
+- Return your bounded summary as a single, well-organized response

@@ -156,17 +156,19 @@ Provide the agent with:
 - The task's `patterns_to_follow` text
 - The task's `where_context` text
 - The task's `testing_strategy` object
+- `EXPLORER_REPORT_PATH` — the absolute path the explorer must write its full findings to. `stride-workflow` Step 3 owns the naming, the project-root resolution and the per-dispatch `r<N>` counter; supply it exactly as that step specifies rather than restating the rules here.
 
-The explorer will return a structured summary of: each key file's current state, related test files, existing patterns found, and module APIs to reuse.
+The explorer writes its full findings to that file and returns a **bounded summary** — capped at 60 lines / 6,000 characters — naming the path and carrying: one line per key file (current state and what must change), every pattern with its `file:line`, every conflict or concern, and the reuse list. Omitting `EXPLORER_REPORT_PATH` is not a failure but forfeits the whole saving: an explorer given no path returns its full findings inline, exactly as before.
 
-**Use the explorer's output** to inform your implementation — don't discard it. It tells you what exists, what patterns to follow, and what utilities to reuse.
+**Use the explorer's summary** to inform your implementation — don't discard it. It tells you what exists, what patterns to follow, and what utilities to reuse. Open the report file only for a specific question the summary leaves open; reading it back in full spends the context the split exists to save.
 
 ## Phase 2: Planning (Conditional, Before Coding)
 
 **When:** the decision matrix above says `Run` in the **Plan** column for this task's row — resolved by `stride-workflow` Step 3's Row precedence rule, and per that step authoritative there if the two tables ever diverge. **Read the column; do not re-derive the condition here.** This line previously stated its own trigger ("medium or large, OR 3+ key_files, OR 3+ acceptance criteria lines"), which could fire on a row whose Plan column said `Skip` — the `small, 2+ key_files` row being the case that collided. That was defect D221; the matrix is the sole decision point, and `stride-workflow` Step 3 carries the full account under "One signal the matrix deliberately does not act on".
 
 **What to do:** Dispatch a **Plan** subagent (built-in type, not a custom agent), passing:
-- The explorer's output from Phase 1
+- The explorer's bounded summary from Phase 1 **and its `EXPLORER_REPORT_PATH`** — pass the path and let the planner open it if it needs the detail; do not paste the report's contents into the prompt, which routes the full findings through your context on the way
+- `PLAN_REPORT_PATH` — where the planner writes its full plan, returning a summary bounded on the same terms. `stride-workflow` Step 3 owns this contract, including the write-failure and redaction rules; follow it there
 - The task's `acceptance_criteria`
 - The task's `testing_strategy`
 - The task's `pitfalls` array

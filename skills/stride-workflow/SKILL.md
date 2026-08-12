@@ -414,13 +414,21 @@ Skip exploration, planning, and review. Proceed directly to Step 4 (Implementati
 
 1. **Dispatch `stride:task-explorer`** with the task's `key_files`, `patterns_to_follow`, `where_context`, and `testing_strategy`. Wait for the result. Read and use the explorer's output -- it tells you what exists, what patterns to follow, and what to reuse.
 
-2. **When the decision matrix's `Plan` column says YES for this task's row:** Dispatch a **Plan** subagent with the explorer's output, `acceptance_criteria`, `testing_strategy`, `pitfalls`, and `verification_steps`. Follow the resulting plan during implementation. **Read the column; do not re-derive the condition here.** This bullet previously stated its own trigger ("medium+ OR 3+ key_files OR 3+ acceptance criteria lines"), which could fire on a row whose `Plan` column said Skip — see [the signal the matrix deliberately does not act on](#one-signal-the-matrix-deliberately-does-not-act-on).
+   **Supply `EXPLORER_REPORT_PATH`** — an **absolute** path `.stride/.explorer-<IDENTIFIER>-r<N>.md` under the project root. Resolve that root exactly as Step 5 does: walk up to the first ancestor containing `.stride.md`, because `CLAUDE_PROJECT_DIR` is not reliably set and a subagent starting in another cwd would guess wrong. Use the identifier only when it matches `[A-Za-z0-9_-]+`, else the numeric task id, and **never build a path component from task free text**. `<N>` is a 1-based counter incremented on **every** dispatch of the explorer for this task, including a re-dispatch after a crashed one, so two dispatches never share a path; on a resumed session, take the highest existing `r<N>` and use `N+1`. This is the same rule and the same convention as the reviewer's files — the three agents deliberately do not diverge.
+
+   The explorer writes its full findings there and returns a summary bounded at **60 lines / 6,000 characters** — looser than the reviewer's bound on purpose, because this summary is meant to be implemented from rather than parsed. **An older explorer ignores the variable and returns its full findings inline; that still works and needs no detection.** Read the report file only when the summary leaves a question open — the summary is designed so that usually it does not, and reading the whole file back into context spends exactly what this is saving.
+
+2. **When the decision matrix's `Plan` column says YES for this task's row:** Dispatch a **Plan** subagent with the explorer's bounded summary **and its `EXPLORER_REPORT_PATH`** (pass the path and let the planner open it if it needs the detail — do not paste the report's contents into the dispatch prompt, which would route the full findings through your context on the way), plus `acceptance_criteria`, `testing_strategy`, `pitfalls`, and `verification_steps`. Follow the resulting plan during implementation.
+
+   **Supply `PLAN_REPORT_PATH` too** — `.stride/.plan-<IDENTIFIER>-r<N>.md`, resolved and counted by the identical rule in bullet 1 — and instruct the planner to write its full plan there and return a summary bounded at **60 lines / 6,000 characters**, sufficient to begin implementing without opening the file, degrading by dropping detail rather than truncating mid-step. The same measured argument applies: a real plan report in this repo ran **34.8 KB across 256 lines**, larger than any explorer or reviewer report measured alongside it. Unlike the explorer and reviewer there is **no planner agent file** to carry this contract — `Plan` is the generic subagent — so this dispatch prompt is the only place it can be stated. That is exactly why it must state the whole contract rather than the convenient half: the other two agents can fall back on their own standing rules, and the planner has none.
+
+   So instruct it on both remaining clauses as well. **Write failure:** if the plan file cannot be written, say so on its own line as `plan: NOT WRITTEN — <one-line reason>`, return the full plan inline with the bound suspended, and never report planning as complete while silently dropping the plan. **Redaction:** a plan drawn from the explorer's report or from source the planner reads itself can carry configuration or credential-shaped strings into a file that outlives the session — never let a secret, or a reference naming where one lives, reach the plan file; write `[REDACTED — quoted line embedded a credential]` in its place and cite the `file:line` instead. The same back-compat rule holds throughout: if you cannot supply a path, ask for the plan inline, exactly as before. **Read the column; do not re-derive the condition here.** This bullet previously stated its own trigger ("medium+ OR 3+ key_files OR 3+ acceptance criteria lines"), which could fire on a row whose `Plan` column said Skip — see [the signal the matrix deliberately does not act on](#one-signal-the-matrix-deliberately-does-not-act-on).
 
 ---
 
 ## Step 4: Implementation
 
-**Now write code.** Use the explorer output and plan (if generated) to guide your work.
+**Now write code.** Use the explorer output and plan (if generated) to guide your work. Both are bounded summaries naming a report file under `.stride/`; work from the summaries, and open a report file only for a specific question the summary leaves open — reading either one back in full spends exactly the context the split was made to save.
 
 Follow:
 - `acceptance_criteria` -- your definition of done
@@ -825,13 +833,13 @@ When a blocking hook fails, dispatch `stride:hook-diagnostician` agent with the 
 
   `--rawfile` needs jq ≥ 1.6; use `--arg report "$(cat "$REPORT")"` otherwise — command substitution also never prints to your context.
 
-  **Delete the three artifacts once the PATCH has succeeded**, so the durable window is one task rather than the life of the checkout:
+  **Delete this task's `.stride/` working artifacts once the PATCH has succeeded**, so the durable window is one task rather than the life of the checkout — the reviewer's block, report and merged copy, plus the explorer and plan reports from Step 3:
 
   ```bash
-  rm -f "$BLOCK" "$REPORT" "$MERGED"
+  rm -f "$BLOCK" "$REPORT" "$MERGED" "$EXPLORER_REPORT_PATH" "$PLAN_REPORT_PATH"
   ```
 
-  They can quote diff content, and `<N>` increments every round, so without this a project accrues an unbounded on-disk corpus of diff excerpts. That matters most where the `.gitignore` mention in Step 0 went unheeded: a project whose `## after_doing` runs `git add -A` would otherwise sweep review blocks into a commit. **Do this only after a `2xx`** — on a failed or retried completion the files are still the payload's source. This is housekeeping, not a correctness dependency: nothing may read these files after Step 7, so their absence later is never an error.
+  They can quote diff content, and the explorer's report quotes source verbatim; `<N>` increments every round, so without this a project accrues an unbounded on-disk corpus of code excerpts. That matters most where the `.gitignore` mention in Step 0 went unheeded: a project whose `## after_doing` runs `git add -A` would otherwise sweep review blocks and exploration reports into a commit. **Do this only after a `2xx`** — on a failed or retried completion the files are still the payload's source. This is housekeeping, not a correctness dependency: nothing may read these files after Step 7, so their absence later is never an error.
 
 ---
 
@@ -1002,7 +1010,7 @@ The server is rolling out hard enforcement behind a feature flag `:strict_comple
 | **Grace (current)** | Missing or invalid results log a structured warning and the request succeeds | Emit the fields correctly now; the warning volume is a preview of the strict-mode rejection volume |
 | **Strict (after all 5 plugins release)** | Missing or invalid results return `422` with a `failures` list | Any agent not emitting valid fields is locked out of completion |
 
-**Why this matters for the orchestrator:** Steps 3 (explorer dispatch) and 5 (reviewer dispatch) already capture the durations and summaries needed for these fields. Persist those into `explorer_result` and `reviewer_result` in the Step 7 payload. When the decision matrix skips a step — or when you self-explore/self-review — submit the skip form with a reason from the enum and a substantive summary explaining what you did instead. See `stride-completing-tasks` for the exact shape, rejection examples, and minimum-length rule.
+**Why this matters for the orchestrator:** Steps 3 (explorer dispatch) and 5 (reviewer dispatch) already capture the durations and summaries needed for these fields. Persist those into `explorer_result` and `reviewer_result` in the Step 7 payload. **`explorer_result.summary` comes from the explorer's bounded returned summary, not from its report file** — the field is a short account of what was explored, and the 40-non-whitespace-character floor is met many times over by a summary bounded at 6,000. Never read the report file in order to fill it. When the decision matrix skips a step — or when you self-explore/self-review — submit the skip form with a reason from the enum and a substantive summary explaining what you did instead. See `stride-completing-tasks` for the exact shape, rejection examples, and minimum-length rule.
 
 ---
 

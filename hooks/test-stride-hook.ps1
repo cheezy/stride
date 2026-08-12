@@ -307,7 +307,7 @@ function Get-WallBudget {
 # landed on the SECOND command. That holds only while command 1 — a fork — fits
 # inside the budget, which is exactly what load inflates. At scale 1 this is 1s,
 # unchanged.
-$script:TimeoutTestBudget = 2 * $script:SuiteLoadScale
+$script:TimeoutTestBudget = [Math]::Min(2 * $script:SuiteLoadScale, 8)
 
 # 11d's section budget. CAPPED for the same reason as the bash twin: the section
 # is `sleep 2; sleep 30` = ~32s, so an unclamped 4x8=32s budget would expire only

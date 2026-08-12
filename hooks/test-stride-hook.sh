@@ -226,7 +226,8 @@ trap 'rm -rf "$TMPDIR_TEST"' EXIT
 # the machine is meaningfully busier than idle, rather than only under extreme
 # load.
 SUITE_LOAD_BASELINE_MS=250   # idle measures 130-175ms; 250 leaves room for jitter
-SUITE_WALL_BASELINE_S=90     # measured: 82-92s for the whole suite, idle
+SUITE_WALL_BASELINE_S=110    # measured post-D241: 109s idle (was 82-92s before the
+                             # budget floor rose and a second calibration pass was added)
 
 suite_now_ms() {
   if command -v perl > /dev/null 2>&1; then
@@ -316,6 +317,17 @@ wall_budget() {
 # budget stayed 1s. A floor of 2 puts a whole second of slack between the forks
 # and the boundary, and `sleep 30` still overruns it by 28s.
 TIMEOUT_TEST_BUDGET=$(( 2 * SUITE_LOAD_SCALE ))
+# CAPPED, for the same reason SPAN_TEST_BUDGET is, and the review caught that the
+# first version of this line was not. These cases have ~30s un-killed bodies
+# measured against `wall_budget 20 30`, which clamps at 27s — so an uncapped
+# budget grows while its own backstop stands still. Wall-at-kill is roughly
+# overhead + budget, which reaches the 27s cap near scale 12 on bash and scale 9
+# on pwsh, and the budget itself reaches the 30s body at scale 15, where the kill
+# stops firing altogether. That is not hypothetical: this defect's own record has
+# a pwsh run at ~17s overhead (11d "took 21s" against a 4s budget), which would
+# scale the budget to 34s and break the case the change exists to protect. At 8s
+# the budget sits 22s under the body and leaves the 27s wall cap 19s for overhead.
+[ "$TIMEOUT_TEST_BUDGET" -gt 8 ] && TIMEOUT_TEST_BUDGET=8
 
 # 15e's section budget, same treatment. Its command 1 is `sleep 2`, so the base
 # has to clear 2s of sleep PLUS the per-command fork and the same whole-second

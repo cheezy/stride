@@ -6343,9 +6343,45 @@ fi
 
 # 27e: a later task overwrites the previous one's file for the SAME hook, which
 # is intended — the reader wants the current task's figure, not a history.
+# Length alone cannot pin this: a write that silently no-ops leaves the PREVIOUS
+# file in place and still yields length 1. So the section body changes between
+# the two runs and the assertion reads it back out — freshness, not just shape.
+cat > "$D234_TWO/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+echo after_doing_RERUN
+```
+STRIDE
 echo "$D234_COMPLETE" | CLAUDE_PROJECT_DIR="$D234_TWO" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
 assert_eq "27e: a re-run replaces the same hook's result rather than appending" "1" \
   "$(jq -s 'length' "$D234_TWO/.stride/.hook-result-after_doing.json" 2>/dev/null)"
+assert_eq "27e: the replacement carries the SECOND run's data, not the first's" \
+  "echo after_doing_RERUN" \
+  "$(jq -r '.commands_completed[0]' "$D234_TWO/.stride/.hook-result-after_doing.json" 2>/dev/null)"
+
+# 27f: a claim clears the previous task's result files. They carry no task id,
+# and the documented reader rule covers only ABSENCE ("no file means the section
+# was empty, keep 0") — so a leftover is indistinguishable from this task's own
+# result. That is reachable, not theoretical: swapping .stride.md to plugin mode
+# empties every section, so the new task writes nothing and the old figure would
+# be read as its own.
+D234_CLEAR="$TMPDIR_TEST/d234-claim-clear"
+mkdir -p "$D234_CLEAR/.stride"
+echo '{"hook":"after_doing","status":"success","duration_ms":999999}' \
+  > "$D234_CLEAR/.stride/.hook-result-after_doing.json"
+cat > "$D234_CLEAR/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+```
+STRIDE
+echo "$D234_CLAIM" | CLAUDE_PROJECT_DIR="$D234_CLEAR" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+if [ -f "$D234_CLEAR/.stride/.hook-result-after_doing.json" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 27f: a claim must clear the previous task's hook results"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 27f: a claim clears the previous task's hook results (no stale figure)"
+  PASS=$((PASS + 1))
+fi
 
 # ============================================================
 # Summary

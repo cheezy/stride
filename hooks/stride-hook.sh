@@ -1963,9 +1963,6 @@ run_stride_section() {
 
   _end_secs=$(date +%s)
   _duration=$((_end_secs - _start_secs))
-  # (W1455) duration_ms is the hook-execution.md contract field. Guard
-  # against clock weirdness — never emit a negative duration.
-
   # (W1455) duration_ms is the hook-execution.md contract field. Guard against
   # clock weirdness — never emit a negative duration.
   _duration_ms=$(( $(now_ms) - _start_ms ))
@@ -2706,6 +2703,15 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
   rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
   rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
   rm -f "$PROJECT_DIR/.stride-dirty-baseline" 2>/dev/null || true
+  # (D234) The durable hook results belong to the task window too. They carry
+  # no task id, and the documented reader rule only covers ABSENCE ("no file
+  # means the section was empty, keep 0") — so a file left behind by the
+  # previous task is indistinguishable from this task's own. That is reachable,
+  # not theoretical: swapping .stride.md to plugin mode empties every section,
+  # so this task writes nothing and the previous task's figure survives to be
+  # read as this one's. Clearing here makes absence mean what the reader is
+  # told it means.
+  rm -f "$PROJECT_DIR"/.stride/.hook-result-*.json 2>/dev/null || true
 fi
 
 # Load cached env vars if available (all hooks benefit from this)

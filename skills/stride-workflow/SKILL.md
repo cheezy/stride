@@ -681,19 +681,20 @@ Include placeholder hook results in the request body:
 "before_review_result": {"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}
 ```
 
-**Hook durations: `before_doing` is now readable, `after_doing` and `before_review` are still `0` (W1455, D224, D234).**
+**Hook durations: every task-lifecycle hook result is `0`, and `after_goal` is the one place a real figure is both obtainable and persistable (W1455, D224, D234).**
 
 The executor measures a real `duration_ms` and writes it as JSON to **stdout**, then exits 0 — and Claude Code's PreToolUse contract sends exit-0 stdout to the transcript, **not to the model**. Only exit 2 feeds output back. This repo established that independently: see "A hook that *passes* is invisible" in [hook-execution.md](hook-execution.md) — *"Do not read silence as a pass."*
 
-**D234 made the figure durable.** Every section that actually runs now also writes its structured result to `.stride/.hook-result-<hook>.json` — one file per hook, so `after_doing` and `before_review` cannot overwrite each other — on both the success and the failure path. (The failure shape previously carried no duration at all; D234 computes it before that branch emits.) **An absent file means the section body was empty, the executor did no work, and `0` is truthful. Absence is never an error, never a retry, and never a licence to invent a figure.**
+**D234 made the figure durable.** Every section that actually runs now also writes its structured result to `.stride/.hook-result-<hook>.json` — one file per hook, so `after_doing` and `before_review` cannot overwrite each other — on both the success and the failure path. (The failure shape previously carried no duration at all; D234 computes it before that branch emits.) The file is cleared at claim time along with the other per-task artifacts, so a leftover from the previous task can never be read as this one's. **An absent file means the section body was empty, the executor did no work, and `0` is truthful. Absence is never an error, never a retry, and never a licence to invent a figure.**
 
-**What that does and does not fix — the distinction is about WHEN each hook fires, not about visibility:**
+**What that does and does not fix. The deciding question is not visibility — it is whether the request that would carry the figure is written BEFORE or AFTER the hook runs.** For all four task-lifecycle hooks the answer is "before", and no durable file can change that:
 
-- **`before_doing_result.duration_ms` — READ IT.** This hook fires as PreToolUse of the *claim* curl, so by the time you build the *completion* payload its file has existed for the whole task. Read `duration_ms` from `.stride/.hook-result-before_doing.json`; keep `0` only if the file is absent.
-- **`after_doing_result.duration_ms` — STILL `0`.** This hook fires as PreToolUse *of the very curl whose body already contains `after_doing_result`*. The payload is fully constructed before the hook runs, so the figure does not exist at write time **even in principle** — a durable file cannot change that, and reading the file at that moment would hand you the *previous* task's figure, which is worse than `0` because it is wrong rather than merely absent.
-- **`before_review_result.duration_ms` — STILL `0`.** It fires as PostToolUse of that same curl, so its duration does not exist at request time either.
+- **`before_doing_result.duration_ms` — `0`.** This hook fires as **PostToolUse of the claim curl** (`stride-hook.sh`, `post:claim → before_doing`) — the curl whose body already contains `before_doing_result`. Same structural impossibility as `after_doing` below. Its file *does* exist later in the task, but there is nowhere to put the number: the completion payload has no `before_doing_result` field, and `workflow_steps` has six fixed step names that do not include `before_doing`.
+- **`after_doing_result.duration_ms` — `0`.** This hook fires as PreToolUse *of the very curl whose body already contains `after_doing_result`*. The payload is fully constructed before the hook runs, so the figure does not exist at write time **even in principle** — and reading the file at that moment would hand you the *previous* task's figure, which is worse than `0` because it is wrong rather than merely absent.
+- **`before_review_result.duration_ms` — `0`.** It fires as PostToolUse of that same curl, so its duration does not exist at request time either.
+- **`after_goal` — READ IT. This is the one that works.** The `## after_goal` section runs as PostToolUse of `/complete`, and the agent then issues a **separate, later** `PATCH /api/tasks/$GOAL_ID/after_goal`. That request is written *after* the hook has already run, so the file exists by then — and the server requires `duration_ms` as a non-negative integer and stores it on the goal. Read it from `.stride/.hook-result-after_goal.json` when you build that body (see Step 8). Keep `0` only if the file is absent, which means the section was empty and did no work.
 
-**There is currently no follow-up PATCH that fixes the last two, and this is worth stating plainly so nobody re-derives it.** `after_doing_result` and `before_review_result` are not task schema fields; they are transient completion-request fields whose content is persisted into `workflow_steps` — and `workflow_steps` is on the `PATCH /api/tasks/:id` forbidden list (D227), so a post-completion correction is refused. Closing that gap needs a server-side change, not an agent-side workaround. **Do not invent either number.**
+**There is currently no follow-up PATCH that fixes the first three, and this is worth stating plainly so nobody re-derives it.** `after_doing_result` and `before_review_result` are not task schema fields; they are transient completion-request fields whose content is persisted into `workflow_steps` — and `workflow_steps` is on the `PATCH /api/tasks/:id` forbidden list (D227), so a post-completion correction is refused. `before_doing_result` is validated for shape on the claim and never persisted at all. Closing that gap needs a server-side change, not an agent-side workaround. **Do not invent any of these numbers.**
 
 If `after_doing` fails (PreToolUse returns exit 2), fix the issue and retry the curl. The hooks fire again automatically.
 
@@ -795,14 +796,28 @@ The dispatcher's own reading of this step is narrower: it does not read `needs_r
 
 When the just-completed task is the **final child of a parent goal**, the server bundles a fifth `after_goal` entry in the response of `/complete` (when `needs_review=false`) or `/mark_reviewed` (when `needs_review=true`), alongside the primary hooks. The plugin's hook script auto-detects this entry and executes the local `## after_goal` section as a blocking hook (same shape as `after_doing` / `before_review`).
 
-The hook captures `{exit_code, output, duration_ms}` and emits the structured result on stdout. To flip the parent goal to Done, the agent must then PATCH that result:
+The hook captures `{exit_code, output, duration_ms}` and emits the structured result on stdout — which, on the success path, you cannot read (see Step 6). **Read it from the durable file instead (D234):** `.stride/.hook-result-after_goal.json`, written by the same section run. This is the one hook whose real duration you can both obtain and persist, because this PATCH is a *separate, later* request — unlike the four task-lifecycle hook results, whose request bodies are written before their own hook runs.
 
 ```bash
+AFTER_GOAL_FILE="$CLAUDE_PROJECT_DIR/.stride/.hook-result-after_goal.json"
+if [ -f "$AFTER_GOAL_FILE" ]; then
+  AFTER_GOAL_RESULT_JSON=$(jq -c '{exit_code: (if .status == "success" then 0 else (.exit_code // 1) end),
+                                   output: (.commands_output // .stdout // "" | tostring),
+                                   duration_ms: (.duration_ms // 0)}' "$AFTER_GOAL_FILE")
+else
+  # Empty ## after_goal section (plugin mode): no work was done and no file was
+  # written. Without this branch jq exits 2, the substitution captures an empty
+  # string, and the curl below sends `-d ""`.
+  AFTER_GOAL_RESULT_JSON='{"exit_code": 0, "output": "", "duration_ms": 0}'
+fi
+
 curl -X PATCH "$STRIDE_API_URL/api/tasks/$GOAL_ID/after_goal" \
   -H "Authorization: Bearer $STRIDE_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$AFTER_GOAL_RESULT_JSON"
 ```
+
+**If the file is absent, the `## after_goal` section body was empty and did no work** — that is plugin mode, and the correct body is `{"exit_code": 0, "output": "", "duration_ms": 0}`. Absence is never an error and never a licence to invent a figure. The server validates `duration_ms` as a non-negative integer and stores it on the goal, so a fabricated number would land in the record permanently.
 
 `$GOAL_ID` is supplied in the hook's `GOAL_ID` / `GOAL_IDENTIFIER` env vars (see Step 6's env-var matrix). A `2xx` with `exit_code == 0` transitions the goal to Done. A `2xx` with `exit_code != 0` records the failure on the goal's `after_goal_attempts` audit log and leaves the goal In Progress for the user to investigate and re-trigger.
 

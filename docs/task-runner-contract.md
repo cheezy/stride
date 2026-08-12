@@ -753,10 +753,13 @@ already built.
    visible: on the blocked path the completion curl never executes and
    `before_review` never fires, so a runner wall-clocking that tool call
    brackets `after_doing` **alone**. That is exactly the isolation the success
-   path cannot achieve. (A failed hook's output IS readable, but it carries no
-   duration field — `stride-hook.sh:1651-1666`, with `_duration_ms` computed
-   only at `:1695`, after that branch returns — so visibility is not the
-   mechanism here.)
+   path cannot achieve. (**Updated by D234:** a failed hook's output is readable
+   AND now carries `duration_ms` — the value is computed before the failure
+   branch emits, and the same result is persisted to
+   `.stride/.hook-result-<hook>.json`. So on the `hook_blocked` path, prefer the
+   executor's own measured figure over wall-clocking the tool call. Before D234
+   that field did not exist on the failure shape, which is why this record
+   originally reached its figure by bracketing instead.)
 5. **`summary` versus `completion_summary`.** The record's `summary` SHOULD be the
    same paragraph submitted as `completion_summary`. If they differ, the persisted
    `completion_summary` is authoritative.

@@ -264,8 +264,14 @@ means it ran in a **previous** attempt and this one did not measure it. Never om
 inherited phase — `0` already means "nothing ran", so reusing it destroys the only distinction the field carries
 (D224). `after_doing` and `before_review` are routinely a truthful `0`: a passing hook's output never reaches you,
 and both fire outside the window in which you build the payload — do not invent a number for either. A *failed*
-hook is the one whose output you can see, and it carries no duration field at all, so there is nothing to copy
-from there either (D224/D234). The record above shows `0` for both for exactly this reason — a runner can wall-clock its own completion curl, but that one span contains `after_doing`, the request and `before_review` together and nothing can split them. The full rule is
+hook is the one whose output you can see, and **since D234 it carries a real `duration_ms`** — the value is now
+computed before the failure branch emits, and the same result is persisted to `.stride/.hook-result-<hook>.json`.
+So on the **`hook_blocked`** path, copy that measured figure into `phase_ms.after_doing` rather than wall-clocking
+the tool call. (Before D234 the failure shape carried no duration at all, which is why this record originally
+reached its figure by bracketing; do not re-derive the old rule from an older transcript.) The record above shows
+`0` on the *success* path for a different and still-current reason — a runner can wall-clock its own completion
+curl, but that one span contains `after_doing`, the request and `before_review` together and nothing can split
+them. The full rule is
 [`docs/task-runner-contract.md`](../docs/task-runner-contract.md) item 4.
 
 **Important constraints:**

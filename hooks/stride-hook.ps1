@@ -70,6 +70,54 @@ function Write-EnvCache {
 # guarantee is D119's hook-initiated fresh call.
 $ResponseFile = Join-Path $ProjectDir '.stride/.last-api-response.json'
 
+# (D234) Durable per-hook result — the mirror of the bash twin's
+# write_hook_result. Invoke-StrideSection writes its structured JSON straight to
+# the host stdout stream, but Claude Code's PreToolUse contract sends exit-0
+# stdout to the transcript, NOT to the model, so on the success path there is
+# nothing the agent can read a duration back from. This file is that channel.
+#
+# ONE FILE PER HOOK, not one keyed file: after_doing and before_review must not
+# overwrite each other, and separate paths make that structural rather than
+# something a writer has to remember.
+#
+# A MISSING FILE IS NORMAL AND MEANS "KEEP 0". In plugin mode every .stride.md
+# section body is empty, the section returns before doing any work and emits
+# nothing, and 0 is the truthful answer. Readers must never treat absence as an
+# error, a retry, or a licence to invent a figure.
+function Get-HookResultFile {
+    param([string]$Hook)
+    return (Join-Path $ProjectDir (".stride/.hook-result-{0}.json" -f $Hook))
+}
+
+# Best-effort and never fatal: a hook must not fail because a duration could not
+# be recorded. Written to a temp name then moved, so a reader never sees a
+# half-file. Both paths are in .stride/, so the move is same-volume.
+function Write-HookResult {
+    param([string]$Hook, [string]$Json)
+    # MUST be initialised before the try: Set-StrictMode -Version Latest (:14)
+    # makes reading an unset variable throw, so a failure in New-Item — before
+    # $_tmp is assigned — would throw AGAIN inside the catch and propagate out
+    # of the function, breaking the never-fatal guarantee on exactly the path
+    # the catch exists to absorb. Verified: without this the function throws
+    # "The variable '$_tmp' cannot be retrieved because it has not been set."
+    $_tmp = $null
+    try {
+        $_dir = Join-Path $ProjectDir '.stride'
+        if (-not (Test-Path -LiteralPath $_dir)) {
+            New-Item -ItemType Directory -Force -Path $_dir -ErrorAction Stop | Out-Null
+        }
+        $_dest = Get-HookResultFile -Hook $Hook
+        $_tmp = Join-Path $_dir ("hook-result.{0}.tmp" -f ([System.IO.Path]::GetRandomFileName()))
+        [System.IO.File]::WriteAllText($_tmp, $Json + "`n")
+        Move-Item -LiteralPath $_tmp -Destination $_dest -Force -ErrorAction Stop
+    } catch {
+        # Deliberately swallowed — see "never fatal" above.
+        if ($_tmp -and (Test-Path -LiteralPath $_tmp)) {
+            Remove-Item -LiteralPath $_tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # (W1453) Keys exported with an empty value. .NET's SetEnvironmentVariable
 # DELETES a Process env var when handed '', so the defined-but-empty contract
 # (hook-execution.md: omitted keys export as empty strings, preventing
@@ -891,15 +939,29 @@ if ($HookName -eq 'before_doing') {
             }
         }
 
-        # A claim always opens a new task window: clear the previous task's
-        # snapshot, upload state (W1095 — a stale 2xx would suppress the
-        # before_review self-heal retry), and dirty baseline unconditionally.
-        Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
-        Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
-        Remove-Item -Force (Join-Path $ProjectDir '.stride-dirty-baseline') -ErrorAction SilentlyContinue
     } catch {
         # Caching failure is non-fatal
     }
+
+    # A claim always opens a new task window: clear the previous task's
+    # snapshot, upload state (W1095 — a stale 2xx would suppress the
+    # before_review self-heal retry), and dirty baseline unconditionally.
+    #
+    # (D234) These sit OUTSIDE the try above, and the word "unconditionally" is
+    # why. Under Set-StrictMode -Version Latest (:14) reading an absent property
+    # throws, so `$json.tool_response` on a claim payload that carries no
+    # tool_response — a real shape, and the one the tests send — aborts the try
+    # at its first line and lands in the catch. Inside the try these clears were
+    # therefore skipped on exactly that path, silently, while the bash twin
+    # (no set -e, jq guarded with `|| true`) always reached its equivalents.
+    # That divergence was caught by ps1 test 19f, which failed before this move.
+    Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+    Remove-Item -Force (Join-Path $ProjectDir '.stride-dirty-baseline') -ErrorAction SilentlyContinue
+    # (D234) The durable hook results belong to the task window too. They carry
+    # no task id, and the reader rule only covers ABSENCE, so a file left behind
+    # by the previous task would be read as this one's.
+    Remove-Item -Force (Join-Path $ProjectDir '.stride/.hook-result-*.json') -ErrorAction SilentlyContinue
 }
 
 # Load cached env vars if available (all hooks benefit from this)
@@ -1855,6 +1917,14 @@ function Invoke-StrideSection {
                     $secRemainingCmds = $secCmdList[($secCmdIndex + 1)..($secCmdTotal - 1)]
                 }
 
+                # (D234) The duration is computed HERE, before the failure
+                # branch emits. Previously it was only computed further down on
+                # the success path — so the one path that emitted a duration was
+                # the one whose output the agent cannot read, and the readable
+                # path carried none at all. Mirrors the bash twin.
+                $secFailDurationMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $secStartMs
+                if ($secFailDurationMs -lt 0) { $secFailDurationMs = 0 }
+
                 $failureResult = [ordered]@{
                     hook              = $Section
                     status            = 'failed'
@@ -1867,6 +1937,7 @@ function Invoke-StrideSection {
                     stderr            = $secCmdStderr
                     commands_completed = $secCompletedCmds
                     commands_remaining = $secRemainingCmds
+                    duration_ms        = $secFailDurationMs
                 }
                 # (D228) after_goal only: carry the PostToolUse context field so
                 # a failed goal push is not silent. The field is added at
@@ -1886,7 +1957,9 @@ function Invoke-StrideSection {
                 # $primaryRc = Invoke-StrideSection ... assignment captures
                 # the JSON alongside the int `return`, producing an array
                 # and breaking the `-ne 0` check on every success path.
-                [Console]::Out.WriteLine(($failureResult | ConvertTo-Json -Depth 5 -Compress))
+                $failureJson = ($failureResult | ConvertTo-Json -Depth 5 -Compress)
+                Write-HookResult -Hook $Section -Json $failureJson
+                [Console]::Out.WriteLine($failureJson)
 
                 if ($secTimedOut) {
                     [Console]::Error.WriteLine("Stride $Section hook command $($secCmdIndex + 1)/$($secCmdTotal) timed out after ${secBudget}s budget: $execTrimmed")
@@ -1930,7 +2003,12 @@ function Invoke-StrideSection {
     # See the failure-path note above: route JSON to the host stdout so it
     # is not captured by `$primaryRc = Invoke-StrideSection ...`.
     # Depth 6 so the commands_output array of objects serializes fully.
-    [Console]::Out.WriteLine(($successResult | ConvertTo-Json -Depth 6 -Compress))
+    # (D234) Persist BEFORE printing: stdout on the exit-0 path reaches the
+    # transcript, not the model, so the file is the only channel the agent can
+    # actually read this figure back from.
+    $successJson = ($successResult | ConvertTo-Json -Depth 6 -Compress)
+    Write-HookResult -Hook $Section -Json $successJson
+    [Console]::Out.WriteLine($successJson)
 
     return 0
 }

@@ -3395,6 +3395,192 @@ if (Test-Path (Join-Path $d230FailProj 'should_not_exist.txt')) {
 }
 
 # ============================================================
+# Test Group 19: D234 — durable hook result file
+# ============================================================
+# Mirror of test-stride-hook.sh Test Group 27. Invoke-StrideSection writes its
+# JSON straight to the host stdout stream, but Claude Code's PreToolUse contract
+# sends exit-0 stdout to the transcript rather than to the model — so on the
+# success path there is nothing the agent can read a duration back from. These
+# pin the file that makes a real figure obtainable.
+#
+# This group exists because the two behaviours it covers were originally
+# verified BY HAND on the bash side only, and the hand-verification caught a
+# real StrictMode defect in this script's Write-HookResult that no automated
+# test would have caught. Manual verification does not survive into CI; this
+# does.
+Write-Host ""
+Write-Host "=== Test Group 19: durable hook result (D234) ==="
+
+$d234Claim = '{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}'
+$d234Complete = '{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete"}}'
+
+# 19a: a successful section writes the file, with the measured duration.
+$d234Proj = Join-Path $TmpDir 'g19-success'
+New-Item -ItemType Directory -Path $d234Proj -Force | Out-Null
+Set-Content -Path (Join-Path $d234Proj '.stride.md') -Value @'
+## before_doing
+```bash
+sleep 1
+```
+'@ -Encoding UTF8
+$r19a = Invoke-HookScript -InputJson $d234Claim -Phase 'post' -ProjectDir $d234Proj
+$d234File = Join-Path $d234Proj '.stride/.hook-result-before_doing.json'
+if (Test-Path -LiteralPath $d234File) {
+    Write-Host "  PASS: 19a: a successful section writes the durable result" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 19a: a successful section must write the durable result" -ForegroundColor Red
+    $script:FAIL++
+}
+$d234Json = if (Test-Path -LiteralPath $d234File) { Get-Content -Raw -LiteralPath $d234File | ConvertFrom-Json } else { $null }
+Assert-Eq "19a: the file names the hook it belongs to" "before_doing" `
+    "$(if ($d234Json) { $d234Json.hook } else { '' })"
+Assert-Eq "19a: the persisted status is success" "success" `
+    "$(if ($d234Json) { $d234Json.status } else { '' })"
+# Asserting > 0 rather than a range keeps this off the wall clock.
+$d234Ms = if ($d234Json) { [int]$d234Json.duration_ms } else { 0 }
+if ($d234Ms -gt 0) {
+    Write-Host "  PASS: 19a: the persisted duration_ms is a real measurement (${d234Ms}ms)" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 19a: persisted duration_ms must be > 0, got '$d234Ms'" -ForegroundColor Red
+    $script:FAIL++
+}
+Assert-Contains "19a: stdout still carries the duration (contract unchanged)" `
+    '"duration_ms":' $r19a.Stdout
+
+# 19b: an EMPTY section writes nothing. This is plugin mode, it does no work,
+# and 0 is the truthful answer — a missing file must mean "keep 0", never an
+# error and never a licence to invent a figure.
+$d234Empty = Join-Path $TmpDir 'g19-empty'
+New-Item -ItemType Directory -Path $d234Empty -Force | Out-Null
+Set-Content -Path (Join-Path $d234Empty '.stride.md') -Value @'
+## before_doing
+```bash
+```
+'@ -Encoding UTF8
+$null = Invoke-HookScript -InputJson $d234Claim -Phase 'post' -ProjectDir $d234Empty
+if (Test-Path -LiteralPath (Join-Path $d234Empty '.stride/.hook-result-before_doing.json')) {
+    Write-Host "  FAIL: 19b: an empty section must not write a result file" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 19b: an empty section writes no result file (0 stays truthful)" -ForegroundColor Green
+    $script:PASS++
+}
+
+# 19c: one hook's result never overwrites another's.
+$d234Two = Join-Path $TmpDir 'g19-two-hooks'
+New-Item -ItemType Directory -Path $d234Two -Force | Out-Null
+Set-Content -Path (Join-Path $d234Two '.stride.md') -Value @'
+## after_doing
+```bash
+echo after_doing_ran
+```
+
+## before_review
+```bash
+echo before_review_ran
+```
+'@ -Encoding UTF8
+$null = Invoke-HookScript -InputJson $d234Complete -Phase 'pre' -ProjectDir $d234Two
+$null = Invoke-HookScript -InputJson $d234Complete -Phase 'post' -ProjectDir $d234Two
+$d234Ad = Join-Path $d234Two '.stride/.hook-result-after_doing.json'
+$d234Br = Join-Path $d234Two '.stride/.hook-result-before_review.json'
+Assert-Eq "19c: after_doing keeps its own result" "after_doing" `
+    "$(if (Test-Path -LiteralPath $d234Ad) { (Get-Content -Raw -LiteralPath $d234Ad | ConvertFrom-Json).hook } else { '' })"
+Assert-Eq "19c: before_review keeps its own result" "before_review" `
+    "$(if (Test-Path -LiteralPath $d234Br) { (Get-Content -Raw -LiteralPath $d234Br | ConvertFrom-Json).hook } else { '' })"
+
+# 19d: the failure path persists a duration too. Before D234 the .ps1 failure
+# hashtable carried no duration at all, because $secDurationMs was not computed
+# until after that branch had already written its JSON and returned.
+$d234Fail = Join-Path $TmpDir 'g19-fail'
+New-Item -ItemType Directory -Path $d234Fail -Force | Out-Null
+Set-Content -Path (Join-Path $d234Fail '.stride.md') -Value @'
+## after_doing
+```bash
+sleep 1
+exit 7
+```
+'@ -Encoding UTF8
+$null = Invoke-HookScript -InputJson $d234Complete -Phase 'pre' -ProjectDir $d234Fail
+$d234Ff = Join-Path $d234Fail '.stride/.hook-result-after_doing.json'
+$d234FJson = if (Test-Path -LiteralPath $d234Ff) { Get-Content -Raw -LiteralPath $d234Ff | ConvertFrom-Json } else { $null }
+Assert-Eq "19d: the failure path persists its result too" "failed" `
+    "$(if ($d234FJson) { $d234FJson.status } else { '' })"
+$d234Fms = if ($d234FJson) { [int]$d234FJson.duration_ms } else { 0 }
+if ($d234Fms -gt 0) {
+    Write-Host "  PASS: 19d: a failed hook carries a real duration_ms (${d234Fms}ms)" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 19d: failed duration_ms must be > 0, got '$d234Fms'" -ForegroundColor Red
+    $script:FAIL++
+}
+
+# 19e: a re-run REPLACES the same hook's result, and the replacement is fresh.
+# Existence alone cannot tell "overwrote" from "silently left the previous file
+# alone", so the section body changes between runs and the assertion reads it
+# back out.
+Set-Content -Path (Join-Path $d234Two '.stride.md') -Value @'
+## after_doing
+```bash
+echo after_doing_RERUN
+```
+'@ -Encoding UTF8
+$null = Invoke-HookScript -InputJson $d234Complete -Phase 'pre' -ProjectDir $d234Two
+$d234Re = if (Test-Path -LiteralPath $d234Ad) { Get-Content -Raw -LiteralPath $d234Ad | ConvertFrom-Json } else { $null }
+Assert-Eq "19e: the replacement carries the SECOND run's data, not the first's" `
+    "echo after_doing_RERUN" `
+    "$(if ($d234Re) { @($d234Re.commands_completed)[0] } else { '' })"
+
+# 19f: a claim clears the previous task's result files. They carry no task id,
+# and the reader rule covers only ABSENCE, so a leftover would be read as this
+# task's figure — reachable by swapping .stride.md to plugin mode.
+$d234Clear = Join-Path $TmpDir 'g19-claim-clear'
+New-Item -ItemType Directory -Path (Join-Path $d234Clear '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $d234Clear '.stride/.hook-result-after_doing.json') `
+    -Value '{"hook":"after_doing","status":"success","duration_ms":999999}' -Encoding UTF8
+Set-Content -Path (Join-Path $d234Clear '.stride.md') -Value @'
+## before_doing
+```bash
+```
+'@ -Encoding UTF8
+$null = Invoke-HookScript -InputJson $d234Claim -Phase 'post' -ProjectDir $d234Clear
+if (Test-Path -LiteralPath (Join-Path $d234Clear '.stride/.hook-result-after_doing.json')) {
+    Write-Host "  FAIL: 19f: a claim must clear the previous task's hook results" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 19f: a claim clears the previous task's hook results (no stale figure)" -ForegroundColor Green
+    $script:PASS++
+}
+
+# 19g: Write-HookResult must stay NON-FATAL when it cannot create .stride/.
+# This is the regression test for the StrictMode defect found by hand: with
+# $_tmp unset, the catch block's own guard threw "The variable '$_tmp' cannot be
+# retrieved because it has not been set", propagating out of the function on
+# exactly the path the catch exists to absorb. The hook must still succeed.
+$d234RO = Join-Path $TmpDir 'g19-readonly'
+New-Item -ItemType Directory -Path $d234RO -Force | Out-Null
+Set-Content -Path (Join-Path $d234RO '.stride.md') -Value @'
+## before_doing
+```bash
+echo ran_anyway
+```
+'@ -Encoding UTF8
+# Block creation of .stride/ by making the project dir read-only to its owner.
+if ($IsLinux -or $IsMacOS) {
+    & chmod 500 $d234RO
+    $r19g = Invoke-HookScript -InputJson $d234Claim -Phase 'post' -ProjectDir $d234RO
+    & chmod 700 $d234RO
+    Assert-Eq "19g: an unwritable .stride/ does not fail the hook (never-fatal)" `
+        "0" "$($r19g.ExitCode)"
+    Assert-NotContains "19g: the StrictMode unset-variable defect has not returned" `
+        "cannot be retrieved because it has not been set" ($r19g.Stdout + $r19g.Stderr)
+} else {
+    Write-Host "  SKIP: 19g: unwritable-directory case needs POSIX permissions" -ForegroundColor Yellow
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

@@ -6050,10 +6050,16 @@ assert_contains "23i: a missing env cache still captures via the HEAD~1 fallback
   "work.txt" "$(jq -r '.[].path' "$D226_NC/.stride-changed-files.json" 2>/dev/null)"
 rm -rf "$D226_NC" "$D226_NCSTUB"
 
-# 23j: the W2066 replay, promoted from a manual run to an assertion. This pins
-# BOTH facts: the outer task now gets its own work (the D226 fix), AND it
-# still over-collects its children's commits (the D236 residual). Pinning the
-# residual is the point — without it, a later change could worsen silently.
+# 23j: the W2066 replay, promoted from a manual run to an assertion. It used to
+# pin BOTH the D226 fix (the outer task gets its own work) and the D236 residual
+# (it also over-collected its children's commits). D236 removed the residual, so
+# the second half of that assertion FLIPS here — the outer task now gets its own
+# work and nothing else.
+#
+# Note the shape this fixture happens to have: the outer task commits BEFORE the
+# nested claim, so its own commits are not a suffix of the range. That is the
+# interleaved case, and it is the harder one — a single diff anchor cannot
+# express it, which is why attribution is computed as commit RANGES.
 D226_W=$(mktemp -d)
 D226_WSTUB=$(mktemp -d)
 make_curl_stub "$D226_WSTUB" "$D226_W/curl-call.txt" 0
@@ -6082,9 +6088,234 @@ assert_eq "23j: a nested task captures exactly its own file" "fileB.txt" "$D226_
     | CLAUDE_PROJECT_DIR="$PWD" PATH="$D226_WSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
 )
 D226_W_A=$(jq -r '[.[].path] | sort | join(",")' "$D226_W/.stride-changed-files.json" 2>/dev/null)
-assert_eq "23j: the outer task gets its own work, plus the D236 range residual" \
-  "fileB.txt,outerA.txt" "$D226_W_A"
+assert_eq "23j (D236): the outer task gets its own work and NOT its child's" \
+  "outerA.txt" "$D226_W_A"
 rm -rf "$D226_W" "$D226_WSTUB"
+
+# 23n (D236): the three cases the fix has to get right beyond 23j's shape.
+# Built as one fixture because they share a repo and differ only in sequence.
+D236_F=$(mktemp -d)
+D236_FSTUB=$(mktemp -d)
+make_curl_stub "$D236_FSTUB" "$D236_F/curl-call.txt" 0
+d226_fixture "$D236_F"
+(
+  cd "$D236_F" || exit 1
+  echo "shared-v1" > shared.txt
+  git add shared.txt > /dev/null
+  git commit -q -m seed
+)
+d236_complete() {
+  (
+    cd "$1" || exit 1
+    echo "{\"tool_input\":{\"command\":\"curl -X PATCH https://stride.example.com/api/tasks/$2/complete\"}}" \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$D236_FSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+}
+d236_paths() { jq -r '[.[].path] | sort | join(",")' "$1/.stride-changed-files.json" 2>/dev/null; }
+
+# A claims; B claims, touches a file A will ALSO touch, completes; A commits and
+# completes. The nested task's work must not reach A, and the file both touched
+# must show A's hunk only.
+d226_claim "$D236_F" 100
+d226_claim "$D236_F" 200
+(
+  cd "$D236_F" || exit 1
+  echo nestedB > fileB.txt
+  echo "shared-B" >> shared.txt
+  git add -A > /dev/null
+  git commit -q -m fileB
+)
+d236_complete "$D236_F" 200
+assert_eq "23n (D236): the nested task still captures exactly its own work" \
+  "fileB.txt,shared.txt" "$(d236_paths "$D236_F")"
+(
+  cd "$D236_F" || exit 1
+  echo "shared-A" >> shared.txt
+  echo outerA > outerA.txt
+  git add -A > /dev/null
+  git commit -q -m outerA
+  echo wip > wip.txt
+)
+d236_complete "$D236_F" 100
+assert_eq "23n (D236): the outer task gets its own commits AND its uncommitted work" \
+  "outerA.txt,shared.txt,wip.txt" "$(d236_paths "$D236_F")"
+# The same-file case the task calls out: subtracting the child's RANGE would
+# have erased the parent's own change to shared.txt; attributing COMMITS keeps
+# it, and keeps the child's hunk out.
+D236_SHARED=$(jq -r '.[] | select(.path=="shared.txt") | .diff' "$D236_F/.stride-changed-files.json" 2>/dev/null)
+assert_contains "23n (D236): a file BOTH touched shows the outer task's change" \
+  "+shared-A" "$D236_SHARED"
+assert_eq "23n (D236): ...and not the nested task's change to that same file" \
+  "0" "$(printf '%s' "$D236_SHARED" | grep -c '^+shared-B' | tr -d ' ')"
+
+# An outer task whose own deliverable is in a gitignored subrepo has genuinely
+# no outer-repo commits. It must come back EMPTY rather than absorbing its
+# child's — the case where "no attributed ranges" must not be read as "no
+# attribution applies".
+(
+  cd "$D236_F" || exit 1
+  git add -A > /dev/null
+  git commit -q -m settle
+)
+d226_claim "$D236_F" 700
+d226_claim "$D236_F" 800
+(
+  cd "$D236_F" || exit 1
+  echo nestedE > fileE.txt
+  git add -A > /dev/null
+  git commit -q -m fileE
+)
+d236_complete "$D236_F" 800
+d236_complete "$D236_F" 700
+assert_eq "23n (D236): an outer task with no commits of its own captures nothing" \
+  "" "$(d236_paths "$D236_F")"
+
+# 23o (D236): the records must survive the NEXT claim. The claim rewrites the
+# env cache, and carrying TASK_BASE_REF_* across it but not TASK_HEAD_REF_*
+# silently reverts attribution to over-collecting — every claim erases the
+# record the previous completion just wrote. No other fixture in this group
+# claims a task AFTER a completion, so nothing else can catch it: deleting the
+# carry-across line left the suite fully green.
+D236_R=$(mktemp -d)
+D236_RSTUB=$(mktemp -d)
+make_curl_stub "$D236_RSTUB" "$D236_R/curl-call.txt" 0
+d226_fixture "$D236_R"
+d236_complete_in() {
+  (
+    cd "$1" || exit 1
+    echo "{\"tool_input\":{\"command\":\"curl -X PATCH https://stride.example.com/api/tasks/$2/complete\"}}" \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$D236_RSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+}
+d226_claim "$D236_R" 100
+d226_claim "$D236_R" 200
+( cd "$D236_R" && echo b > fileB.txt && git add -A > /dev/null && git commit -q -m fileB )
+d236_complete_in "$D236_R" 200
+# The claim that erased the head record in the first version of this fix.
+d226_claim "$D236_R" 300
+( cd "$D236_R" && echo c > fileC.txt && git add -A > /dev/null && git commit -q -m fileC )
+d236_complete_in "$D236_R" 300
+( cd "$D236_R" && echo a > outerA.txt && git add -A > /dev/null && git commit -q -m outerA )
+d236_complete_in "$D236_R" 100
+assert_eq "23o (D236): head records survive a later claim, so attribution holds" \
+  "outerA.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D236_R/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D236_R" "$D236_RSTUB"
+
+# 23p (D236): three levels. Pitfall 2 says nesting depth is unbounded, and every
+# other fixture here is exactly two levels deep.
+D236_D=$(mktemp -d)
+D236_DSTUB=$(mktemp -d)
+make_curl_stub "$D236_DSTUB" "$D236_D/curl-call.txt" 0
+d226_fixture "$D236_D"
+d236_complete_d() {
+  (
+    cd "$1" || exit 1
+    echo "{\"tool_input\":{\"command\":\"curl -X PATCH https://stride.example.com/api/tasks/$2/complete\"}}" \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$D236_DSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+}
+d226_claim "$D236_D" 10   # outermost
+d226_claim "$D236_D" 20   # middle
+d226_claim "$D236_D" 30   # innermost
+( cd "$D236_D" && echo c > deepC.txt && git add -A > /dev/null && git commit -q -m deepC )
+d236_complete_d "$D236_D" 30
+assert_eq "23p (D236): the innermost task captures only its own file" \
+  "deepC.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D236_D/.stride-changed-files.json" 2>/dev/null)"
+( cd "$D236_D" && echo b > midB.txt && git add -A > /dev/null && git commit -q -m midB )
+d236_complete_d "$D236_D" 20
+assert_eq "23p (D236): the middle task excludes the level below it" \
+  "midB.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D236_D/.stride-changed-files.json" 2>/dev/null)"
+( cd "$D236_D" && echo a > topA.txt && git add -A > /dev/null && git commit -q -m topA )
+d236_complete_d "$D236_D" 10
+assert_eq "23p (D236): the outermost task excludes BOTH levels below it" \
+  "topA.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D236_D/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D236_D" "$D236_DSTUB"
+
+# 23q (D236): the before_review self-heal must narrow too. Attribution was first
+# wired only into the base-SELECTION branch, missing the persisted-base branch —
+# which is the one actually taken when the primary PUT failed, i.e. exactly when
+# the self-heal runs. The retry then re-uploaded the over-collected snapshot
+# over the narrowed one, and last write wins on the server.
+#
+# This fixture is built locally rather than with d226_fixture because the
+# self-heal needs BOTH a resolvable API url/token (or the upload is skipped and
+# no state file is ever written) and a `## before_review` section. Without those
+# the retry path is never entered and the test passes vacuously — which it did,
+# until a negative control caught it.
+D236_H=$(mktemp -d)
+(
+  cd "$D236_H" || exit 1
+  git init -q
+  git config user.email "test@test.local"
+  git config user.name "Test"
+  printf '.stride*\nstub\n' > .gitignore
+  printf '## before_doing\n```bash\ntrue\n```\n\n## after_doing\n```bash\ntrue\n```\n\n## before_review\n```bash\ntrue\n```\n' > .stride.md
+  printf '**API URL:** `https://stride.example.com`\n**API Token:** `stride_dev_test`\n' > .stride_auth.md
+  echo seed > seed.txt
+  git add .gitignore seed.txt > /dev/null
+  git commit -q -m seed
+  mkdir -p stub
+  printf '#!/usr/bin/env bash\necho "500"\nexit 0\n' > stub/curl
+  chmod +x stub/curl
+)
+d236_h_run() { # $1 = task id, $2 = phase
+  (
+    cd "$D236_H" || exit 1
+    echo "{\"tool_input\":{\"command\":\"curl -X PATCH https://stride.example.com/api/tasks/$1/complete\"}}" \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$D236_H/stub:$PATH" bash "$HOOK_SCRIPT" "$2" > /dev/null 2>&1
+  )
+}
+d236_h_claim() { # $1 = task id
+  (
+    cd "$D236_H" || exit 1
+    echo "{\"tool_input\":{\"command\":\"curl -X POST https://stride.example.com/api/tasks/claim\"},\"tool_response\":{\"stdout\":\"{\\\"data\\\":{\\\"id\\\":$1,\\\"identifier\\\":\\\"T$1\\\"}}\"}}" \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$D236_H/stub:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+}
+d236_h_claim 100
+d236_h_claim 200
+( cd "$D236_H" && echo b > fileB.txt && git add -A > /dev/null && git commit -q -m fileB )
+d236_h_run 200 pre
+( cd "$D236_H" && echo a > outerA.txt && git add -A > /dev/null && git commit -q -m outerA )
+d236_h_run 100 pre    # after_doing: the PUT fails (stub returns 500) and state is persisted
+d236_h_run 100 post   # before_review: the self-heal retry
+assert_eq "23q (D236): the before_review self-heal stays narrowed after a failed PUT" \
+  "outerA.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D236_H/.stride-changed-files.json" 2>/dev/null)"
+# Guard against the fixture going vacuous again: the retry only means anything
+# if the primary PUT actually failed and recorded state for this task.
+assert_contains "23q (D236): ...and the fixture really did exercise the retry path" \
+  "http_code=500" "$(cat "$D236_H/.stride-diff-upload-state" 2>/dev/null)"
+rm -rf "$D236_H"
+
+
+# 23r (D236): the KNOWN LIMITATION, pinned rather than left to be rediscovered.
+# A commit the OUTER task makes while a nested task is in flight falls inside
+# that nested task's window and is attributed to the child. That is a trade
+# against pre-D236 behaviour in the LOSING-work direction, so it is pinned here:
+# if a later change alters it, this assertion is where the conversation starts.
+D236_L=$(mktemp -d)
+D236_LSTUB=$(mktemp -d)
+make_curl_stub "$D236_LSTUB" "$D236_L/curl-call.txt" 0
+d226_fixture "$D236_L"
+d236_complete_l() {
+  (
+    cd "$1" || exit 1
+    echo "{\"tool_input\":{\"command\":\"curl -X PATCH https://stride.example.com/api/tasks/$2/complete\"}}" \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$D236_LSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+}
+d226_claim "$D236_L" 100
+d226_claim "$D236_L" 200
+( cd "$D236_L" && echo during > outer_during.txt && git add -A > /dev/null && git commit -q -m outer_during )
+( cd "$D236_L" && echo b > nested_b.txt && git add -A > /dev/null && git commit -q -m nested_b )
+d236_complete_l "$D236_L" 200
+( cd "$D236_L" && echo after > outer_after.txt && git add -A > /dev/null && git commit -q -m outer_after )
+d236_complete_l "$D236_L" 100
+assert_eq "23r (D236): KNOWN LIMITATION — an outer commit made mid-window is attributed to the child" \
+  "outer_after.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D236_L/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D236_L" "$D236_LSTUB"
+
+rm -rf "$D236_F" "$D236_FSTUB"
 
 # ============================================================
 # Test Group 24: D228 — a failing after_goal must not be silent

@@ -61,6 +61,11 @@ write_hook_result() {
 # here because `set -u` is active and the emitter reads it unconditionally.
 AFTER_GOAL_JSON=""
 
+# (D236) Sentinel for "attribution applies and this task owns NO commits" — as
+# distinct from "no nested window applies", which is empty output. Cannot
+# collide with a git range.
+STRIDE_NO_OWN_COMMITS="__stride_no_own_commits__"
+
 # (D238) Set only on the doubly-degraded path where no stdout buffer could be
 # created anywhere and the primary section therefore ran unbuffered. Declared at
 # file scope because `set -u` is active.
@@ -114,8 +119,43 @@ fi
 # provided base is empty or unresolvable. Returns an empty array (and exit 0)
 # for any degraded path (jq missing, git missing, not in a repo, no commits to
 # diff) so callers can treat this strictly as "best-effort capture".
+# (D236) Run a git subcommand once per attributed range and concatenate the
+# output. Extracted because the same loop appeared at four call sites in
+# capture_changed_files, differing only in the git subcommand — and a
+# range-expansion bug fixed at three of four sites is exactly the class of
+# defect this file has already paid for.
+#   $1  newline-separated "<from> <to>" ranges (the sentinel is skipped)
+#   $2  pathspec to limit to, or "" for none
+#   $3+ git arguments
+# Invocation order matters and is why the pathspec is its own parameter rather
+# than part of "$@": git wants `diff <from> <to> -- <path>`, and everything
+# after `--` is a path — passing the pathspec inside the argument list put it
+# BEFORE the endpoints and silently produced an empty per-file patch.
+expand_own_ranges() {
+  local _ranges="$1" _path="$2"; shift 2
+  local _r _rf _rt
+  while IFS= read -r _r; do
+    [ -n "$_r" ] || continue
+    [ "$_r" = "$STRIDE_NO_OWN_COMMITS" ] && continue
+    _rf="${_r%% *}"; _rt="${_r##* }"
+    if [ -n "$_path" ]; then
+      git "$@" "$_rf" "$_rt" -- "$_path" 2>/dev/null || true
+    else
+      git "$@" "$_rf" "$_rt" 2>/dev/null || true
+    fi
+  done <<< "$_ranges"
+}
+
 capture_changed_files() {
   local base="${1:-}"
+  # (D236) Optional: newline-separated "<from> <to>" git ranges naming the
+  # commits that belong to THIS task, with any nested task's commits already
+  # removed. When empty the function behaves exactly as it always has —
+  # `git diff <base>` against the working tree — so every existing caller and
+  # test is untouched. When set, the committed half of the snapshot is built
+  # from these ranges instead, and the working-tree half is added on top,
+  # because uncommitted changes belong to whoever is completing now.
+  local own_ranges="${2:-}"
   local max_lines=500
   local trunc_marker="[diff truncated at 500 lines]"
   local bin_placeholder="[binary file — no diff captured]"
@@ -137,7 +177,15 @@ capture_changed_files() {
   # Tracked files that differ between base and the working tree (committed,
   # staged, and unstaged changes all surface in a single `git diff <base>`).
   local tracked_files
-  tracked_files=$(git diff --name-only "$base" 2>/dev/null || printf '')
+  if [ -n "$own_ranges" ]; then
+    # Union of every attributed range plus the uncommitted working tree.
+    tracked_files=$( {
+      expand_own_ranges "$own_ranges" "" diff --name-only
+      git diff --name-only HEAD 2>/dev/null || true
+    } | awk 'NF && !seen[$0]++' )
+  else
+    tracked_files=$(git diff --name-only "$base" 2>/dev/null || printf '')
+  fi
 
   # Untracked files not covered by .gitignore.
   local untracked_files
@@ -177,7 +225,14 @@ capture_changed_files() {
   # via the `- - <path>` marker. Untracked files are not in numstat; their
   # binary detection runs separately on file contents.
   local numstat
-  numstat=$(git diff --numstat "$base" 2>/dev/null || printf '')
+  if [ -n "$own_ranges" ]; then
+    numstat=$( {
+      expand_own_ranges "$own_ranges" "" diff --numstat
+      git diff --numstat HEAD 2>/dev/null || true
+    } )
+  else
+    numstat=$(git diff --numstat "$base" 2>/dev/null || printf '')
+  fi
 
   local jsonl_file
   jsonl_file=$(mktemp)
@@ -197,7 +252,13 @@ capture_changed_files() {
   # committed that same content, and the unchanged-since-claim blob hash then
   # excluded them from the snapshot.
   local committed_range
-  committed_range=$(git diff --name-only "$base" HEAD 2>/dev/null || printf '')
+  if [ -n "$own_ranges" ]; then
+    committed_range=$( {
+      expand_own_ranges "$own_ranges" "" diff --name-only
+    } | awk 'NF && !seen[$0]++' )
+  else
+    committed_range=$(git diff --name-only "$base" HEAD 2>/dev/null || printf '')
+  fi
 
   local file
   while IFS= read -r file; do
@@ -289,9 +350,24 @@ capture_changed_files() {
       diff_text="$bin_placeholder"
     else
       if [ "$is_untracked" -eq 0 ]; then
-        # Tracked: working-tree diff vs base (committed + staged + unstaged
-        # changes all in one diff).
-        diff_text=$(git diff "$base" -- "$file" 2>/dev/null || printf '')
+        if [ -n "$own_ranges" ]; then
+          # (D236) One patch per attributed range that touched this path, then
+          # the uncommitted change on top. A file touched in two runs — the
+          # interleaved shape, where the task committed both before and after a
+          # nested task's window — legitimately yields two patches; each is a
+          # complete unified diff with its own header, and together they are
+          # exactly this task's change to the file and nothing else. A file
+          # both this task and a nested task touched shows only THIS task's
+          # hunks, which is the whole point.
+          diff_text=$( {
+            expand_own_ranges "$own_ranges" "$file" diff
+            git diff HEAD -- "$file" 2>/dev/null || true
+          } )
+        else
+          # Tracked: working-tree diff vs base (committed + staged + unstaged
+          # changes all in one diff).
+          diff_text=$(git diff "$base" -- "$file" 2>/dev/null || printf '')
+        fi
       fi
       # diff_text for untracked was already captured above.
       local line_count=0
@@ -1187,6 +1263,172 @@ task_base_ref_for() {
   printf '%s' "$_v"
 }
 
+# (D236) Per-task completion HEAD. The base records D226 added say where each
+# task STARTED; attributing commits also needs to know where each nested task
+# ENDED, and nothing recorded that. Without an end marker a base alone cannot
+# separate a nested task's commits from the outer task's own later ones — every
+# commit after the nested claim is a descendant of that claim's base, including
+# the outer task's.
+task_head_ref_key() {
+  local _s
+  _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
+  case "$_s" in
+    "" | TRUSTED | OWNER | UNPROVEN) return 0 ;;
+  esac
+  printf 'TASK_HEAD_REF_%s' "$_s"
+}
+
+task_head_ref_for() {
+  local _k _v
+  [ -n "${1:-}" ] || return 0
+  _k=$(task_head_ref_key "$1")
+  _v="${!_k:-}"
+  printf '%s' "$_v"
+}
+
+# (D236) Stamp the completing task's HEAD so a later OUTER completion can tell
+# where this task's commits stop. Best-effort and never fatal: a missing record
+# only means the outer task falls back to its own base, which is exactly
+# today's behaviour.
+record_task_head_ref() {
+  local _tid="${1:-}" _key _head
+  [ -n "$_tid" ] || return 0
+  _key=$(task_head_ref_key "$_tid")
+  [ -n "$_key" ] || return 0
+  _head=$( (cd "$PROJECT_DIR" 2>/dev/null && git rev-parse HEAD 2>/dev/null) || printf '')
+  [ -n "$_head" ] || return 0
+  {
+    grep -v "^${_key}=" "$ENV_CACHE" 2>/dev/null || true
+    printf "%s='%s'\n" "$_key" "$_head"
+  } | write_env_cache || true
+  return 0
+}
+
+# (D236) capture_changed_files diffs base..working-tree, so every commit made
+# between an outer task's claim and its completion lands in that task's
+# snapshot — including commits from tasks that claimed, worked and completed
+# inside the outer task's window. Measured on W2066's sequence: claim A,
+# claim+complete B and C from inside A, complete A, and A's snapshot was
+# [fileB.txt, fileC.txt, outerA.txt] when only outerA.txt is A's. Dispatcher
+# mode makes that routine rather than exotic.
+#
+# KNOWN LIMITATION, in the under-reporting direction — read this before
+# "improving" the window test. A commit the OUTER task makes WHILE a nested task
+# is in flight falls inside that nested task's (base, head] window, so it is
+# attributed to the child and does not appear in the outer task's snapshot.
+# Measured: claim A, claim B, A commits, B commits, complete B, complete A gives
+# B=[nested_b, outer_during] and A=[outer_after] — A loses outer_during.
+#
+# This is a real trade against pre-D236 behaviour, where A over-collected but at
+# least included its own commit, and the trigger is not exotic: a nested
+# after_doing running `git add -A` sweeps the outer task's in-progress files
+# into the nested commit, and attribution then excludes that whole commit from
+# the outer. Over-reporting is the safer failure — showing extra beats losing
+# real task work — so this is NOT the direction to extend the window test in.
+#
+# Closing it properly needs per-COMMIT ownership rather than per-window: record
+# the SHAs a task's own auto-commit actually created, so a window subtracts only
+# commits the nested task authored. Filed rather than bolted on here. Test 23r
+# pins the current behaviour so it stays a known trade-off rather than a
+# surprise.
+#
+# (D236) The commit RANGES that belong to the completing task, one per line as
+# "<from> <to>" (a git range from..to). Empty output means "no nested work to
+# subtract" and the caller keeps its ordinary single-base path unchanged.
+#
+# Why ranges rather than one anchor: a nested task completes before the outer
+# one, so its commits are contiguous — but the OUTER task may have committed
+# both before and after that window. Its own commits are therefore one or more
+# contiguous RUNS separated by nested windows, and each run is expressible as a
+# git range. The common shape (dispatch, then the outer task's own auto-commit
+# at completion) is a single run; the interleaved shape W2066 actually produced
+# is two. A single anchor cannot express two runs, which is why this returns a
+# list.
+attributed_commit_ranges() {
+  local _own_base="${1:-}" _self="${2:-}"
+  [ -n "$_own_base" ] || return 0
+  command -v git > /dev/null 2>&1 || return 0
+  git rev-parse --verify "$_own_base" > /dev/null 2>&1 || return 0
+
+  local _self_key=""
+  [ -n "$_self" ] && _self_key=$(task_base_ref_key "$_self")
+
+  # Collect every OTHER task's window. A window needs BOTH ends: the base says
+  # where it started, the D236 head record says where it stopped. Without the
+  # end marker the window cannot be bounded, so it is skipped rather than
+  # guessed at — that degrades to today's behaviour, never to a wrong diff.
+  local _windows="" _line _bkey _id _b _h
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _bkey="${_line%%=*}"
+    [ "$_bkey" = "$_self_key" ] && continue
+    case "$_bkey" in
+      TASK_BASE_REF_TRUSTED | TASK_BASE_REF_OWNER | TASK_BASE_REF_UNPROVEN) continue ;;
+    esac
+    _id="${_bkey#TASK_BASE_REF_}"
+    _b="${_line#*=}"; _b="${_b#\'}"; _b="${_b%\'}"
+    _h=$(task_head_ref_for "$_id")
+    [ -n "$_b" ] && [ -n "$_h" ] || continue
+    git rev-parse --verify "$_b" > /dev/null 2>&1 || continue
+    git rev-parse --verify "$_h" > /dev/null 2>&1 || continue
+    git merge-base --is-ancestor "$_own_base" "$_b" 2>/dev/null || continue
+    git merge-base --is-ancestor "$_h" HEAD 2>/dev/null || continue
+    _windows="${_windows}${_b} ${_h}"$'\n'
+  done <<< "$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)"
+
+  [ -n "$_windows" ] || return 0
+
+  # Expand every window ONCE into the set of commits it covers, then test each
+  # candidate with a string lookup. The obvious implementation — two
+  # `git merge-base --is-ancestor` probes per (commit x window) pair — spawns a
+  # few thousand processes on a long-lived dispatcher task with the cache's
+  # 20-record cap, inside a hook budget this project has already blown before
+  # (and a blown after_doing budget loses the diff upload entirely).
+  local _w _wb _wh _covered_set="" _c
+  while IFS= read -r _w; do
+    [ -n "$_w" ] || continue
+    _wb="${_w%% *}"; _wh="${_w##* }"
+    # `rev-list <base>..<head>` is already base-EXCLUSIVE, which is the
+    # semantics this needs: a nested task's base is normally the outer task's
+    # own last commit, so including it attributed the outer's work to its child
+    # and silently dropped it from the outer snapshot. The interleaved fixture
+    # caught that; expressing the window as a rev-list range makes it
+    # structural rather than a condition someone has to keep right.
+    _covered_set="${_covered_set}$(git rev-list "${_wb}..${_wh}" 2>/dev/null || true)"$'\n'
+  done <<< "$_windows"
+
+  # Walk the task's range oldest-first, dropping covered commits and grouping
+  # the survivors into contiguous runs.
+  local _run_start="" _run_prev="" _out=""
+  while IFS= read -r _c; do
+    [ -n "$_c" ] || continue
+    if printf '%s' "$_covered_set" | grep -qxF "$_c"; then
+      # A nested commit closes any run that was open.
+      if [ -n "$_run_start" ]; then
+        _out="${_out}${_run_start}^ ${_run_prev}"$'\n'
+        _run_start=""; _run_prev=""
+      fi
+      continue
+    fi
+    [ -z "$_run_start" ] && _run_start="$_c"
+    _run_prev="$_c"
+  done <<< "$(git rev-list --reverse "${_own_base}..HEAD" 2>/dev/null || true)"
+  [ -n "$_run_start" ] && _out="${_out}${_run_start}^ ${_run_prev}"$'\n'
+
+  # EMPTY OUTPUT IS AMBIGUOUS, so it is never used to mean two things. No
+  # output at all means "no nested window applies here" and the caller keeps
+  # its ordinary single-base behaviour. But a task whose commits were ALL made
+  # by nested tasks — the outer task whose own deliverable lives in a gitignored
+  # subrepo, so it has no outer-repo commits of its own — also produces zero
+  # runs, and that must yield an EMPTY snapshot rather than falling back to the
+  # base and absorbing its children's work. The sentinel keeps the two apart.
+  if [ -z "$_out" ]; then
+    printf '%s' "$STRIDE_NO_OWN_COMMITS"
+    return 0
+  fi
+  printf '%s' "$_out"
+  return 0
+}
 # (D226) Choose the diff anchor for the task actually being completed, in
 # precedence order:
 #   1. the per-task record written by THAT task's own claim — survives any
@@ -1268,6 +1510,10 @@ finalize_after_doing() {
       if _base_candidate=$(select_task_snapshot_base "$_tid"); then
         SNAP_BASE_RESOLVED=$( (cd "$PROJECT_DIR" 2>/dev/null && resolve_snapshot_base "$_base_candidate") || printf '%s' "$_base_candidate")
         SNAP_BASE_REFUSED=false
+        # (D236) Commits made by tasks that claimed and completed INSIDE this
+        # task's window are not this task's work. Empty means nothing to
+        # subtract, and the ordinary single-base path runs unchanged.
+        SNAP_OWN_RANGES=$( (cd "$PROJECT_DIR" 2>/dev/null && attributed_commit_ranges "$SNAP_BASE_RESOLVED" "$_tid") || printf '')
       else
         SNAP_BASE_RESOLVED=""
         SNAP_BASE_REFUSED=true
@@ -1277,9 +1523,13 @@ finalize_after_doing() {
     if [ "${SNAP_BASE_REFUSED:-false}" = "true" ]; then
       snapshot='[]'
     else
-      snapshot=$(capture_changed_files "${SNAP_BASE_RESOLVED:-}" 2>/dev/null || printf '[]')
+      snapshot=$(capture_changed_files "${SNAP_BASE_RESOLVED:-}" "${SNAP_OWN_RANGES:-}" 2>/dev/null || printf '[]')
     fi
     printf '%s\n' "$snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
+    # (D236) Stamp where THIS task's commits stop, so an outer task completing
+    # later can subtract this window. Written after the capture so it records
+    # the HEAD the snapshot was actually taken against.
+    record_task_head_ref "$_tid"
 
     # No-op silently if any prerequisite is missing — preserves the on-disk
     # snapshot for legacy --argjson cf consumers.
@@ -1465,7 +1715,7 @@ self_heal_changed_files_upload() {
   # when no persisted judgment exists (process killed before any PUT) run
   # the trust guard fresh — the retry must never resurrect a stale base the
   # primary capture would have refused.
-  local _snapshot _http_code _snap_base _sel _refused=false
+  local _snapshot _http_code _snap_base _sel _own_ranges="" _refused=false
   if [ "$_state_task" = "$_tid" ] && [ -n "$_state_base" ]; then
     _snap_base="$_state_base"
   elif _sel=$(select_task_snapshot_base "$_tid"); then
@@ -1478,10 +1728,21 @@ self_heal_changed_files_upload() {
     _snap_base=""
     _refused=true
   fi
+  # (D236) Attribution belongs to EVERY non-refused path, not just the
+  # base-selection branch. Computing it inside the `elif` missed the
+  # persisted-base branch above — which is the branch actually taken whenever
+  # the primary PUT failed and left state on disk, i.e. exactly when this
+  # self-heal runs. The retry then re-captured base..working-tree and
+  # re-uploaded the over-collected snapshot OVER the narrowed one, silently
+  # undoing this whole fix; last write wins on the server. Review reproduced
+  # it with a curl stub returning 500.
+  if [ "$_refused" != "true" ]; then
+    _own_ranges=$( (cd "$PROJECT_DIR" 2>/dev/null && attributed_commit_ranges "$_snap_base" "$_tid") || printf '')
+  fi
   if [ "$_refused" = "true" ]; then
     _snapshot='[]'
   else
-    _snapshot=$( (cd "$PROJECT_DIR" && capture_changed_files "$_snap_base") 2>/dev/null || printf '[]')
+    _snapshot=$( (cd "$PROJECT_DIR" && capture_changed_files "$_snap_base" "${_own_ranges:-}") 2>/dev/null || printf '[]')
   fi
   printf '%s\n' "$_snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
   _http_code=$(upload_changed_files_snapshot "$_tid" "$_api_base" "$_token")
@@ -2684,11 +2945,23 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
       | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
         -e '^TASK_BASE_REF_UNPROVEN=' \
       | tail -n 20 || true)
+    # (D236) The per-task HEAD records have to survive this rewrite for exactly
+    # the same reason the base records do — and they are useless without their
+    # partner. A base says where a nested task started, the head says where it
+    # stopped, and attribution needs BOTH: with only the base the window is
+    # unbounded and the nested task's commits cannot be told apart from the
+    # outer task's own later ones. Dropping these here is precisely how the
+    # first version of this fix silently reverted to over-collecting — every
+    # subsequent claim erased the record the previous completion had just
+    # written.
+    _kept_head_records=$(grep -e '^TASK_HEAD_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
+      | tail -n 20 || true)
     # Values are single-quote escaped via sq_escape (W1453) so titles with
     # spaces, quotes, or dollar signs survive the `set -a` sourcing without
     # any shell interpretation.
     {
       [ -n "$_kept_base_records" ] && printf '%s\n' "$_kept_base_records"
+      [ -n "$_kept_head_records" ] && printf '%s\n' "$_kept_head_records"
       echo "TASK_ID=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.id // empty')")"
       echo "TASK_IDENTIFIER=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.identifier // empty')")"
       echo "TASK_TITLE=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.title // empty')")"

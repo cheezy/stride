@@ -191,17 +191,29 @@ trap 'rm -rf "$TMPDIR_TEST"' EXIT
 # codes, so the mechanism that broke them is not the one the calibration below
 # fixes, and widening a bound would not have touched them.
 #
-# What did break them, on the evidence: an inherited STRIDE_HOOK_TIMEOUT_OVERRIDE
-# forcing a 1s budget onto fixtures that never asked for one. Under load a 1s
-# budget kills even a trivial fixture, which is exactly how unrelated clusters
-# fail together and how the count swings 18/21/2/2 between identical runs. That
-# leak is D235's, it is already fixed, and its hermeticity gate at the top of
-# this file neutralises the variable — the gate still reports doing so on this
-# machine on every run, so the leak is live and the gate is what holds it back.
-# The verdict for those clusters is therefore "the harness was wrong, and D235
-# already fixed it" — not the test, and NOT stride-hook.sh, which this task
-# leaves untouched on purpose (D241's own `why` retracts the regression premise
-# its pitfalls[0] still carries).
+# The proposed mechanism is an inherited STRIDE_HOOK_TIMEOUT_OVERRIDE forcing a
+# 1s budget onto fixtures that never asked for one — D235's leak, already fixed,
+# and its gate still reports neutralising that exact variable on this machine on
+# every run, so the leak is live and the gate is what holds it back.
+#
+# THAT MECHANISM IS DEMONSTRATED, BUT ITS MAPPING ONTO THOSE 12 IS NOT. Running
+# `STRIDE_TEST_KEEP_ENV=1 STRIDE_HOOK_TIMEOUT_OVERRIDE=1 ./test-stride-hook.sh`
+# — the suite's own escape hatch, which lets the variable through — produces
+# 580/8 rather than 588/0, and the 8 are exactly the shape the mechanism
+# predicts: trivial fixtures and 1s-sleep fixtures killed by a budget they never
+# asked for (the passing-gate cases, 16a, 16b, 27a). So a single inherited
+# override provably does make unrelated cases fail together, which is the
+# behaviour that produced the 18/21/2/2 swing.
+#
+# But NONE of those 8 is one of the 12 clusters D241 named. On today's tree the
+# named clusters do not fail under the simulated leak, so the honest verdict is
+# in two parts: it is DEMONSTRATED that none of the 12 contains a wall-clock
+# assertion, and therefore that the calibration below could not have been their
+# fix; and it is INFERRED, not shown, that the override leak is what broke them
+# on the tree as it stood when D241 was filed. Do not read the second part as
+# established. What is certain either way is that the fault was in the harness,
+# NOT in stride-hook.sh, which this task leaves untouched on purpose (D241's own
+# `why` retracts the regression premise its pitfalls[0] still carries).
 # A handful of assertions below check that a hook was killed PROMPTLY — that a
 # `sleep 30` under a 1s budget did not run to completion. Those bounds used to be
 # fixed constants (`< 20s`, `< 15s`), and a fixed constant is the wrong shape for
@@ -226,8 +238,12 @@ trap 'rm -rf "$TMPDIR_TEST"' EXIT
 # the machine is meaningfully busier than idle, rather than only under extreme
 # load.
 SUITE_LOAD_BASELINE_MS=250   # idle measures 130-175ms; 250 leaves room for jitter
-SUITE_WALL_BASELINE_S=110    # measured post-D241: 109s idle (was 82-92s before the
-                             # budget floor rose and a second calibration pass was added)
+# Observed idle range post-D241: 82-109s across four runs (the budget floor rising
+# and the second calibration pass added time; the spread is real machine variance,
+# so quote the range rather than one run). Used only for the 2x warning threshold,
+# where a mid-range figure is the honest choice — 90 understated it and 110
+# overstated a genuinely quiet run.
+SUITE_WALL_BASELINE_S=100
 
 suite_now_ms() {
   if command -v perl > /dev/null 2>&1; then

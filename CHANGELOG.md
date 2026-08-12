@@ -23,6 +23,40 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.65.0] - 2026-08-12
+
+### Added
+
+- **D239 — the emitter now sends a `reason_code` alongside the skip prose, so the compliance breakdown aggregates.** `workflow_steps[].reason` is required when a step is skipped but only required to be a *string*, so agents wrote free prose. Measured across the production board: **73 skipped entries produced 58 distinct reason strings averaging 145 characters**, so grouping them verbatim is very nearly one row per entry — a breakdown with no aggregation in it.
+
+  The six codes were **derived by classifying all 73 real entries**, not invented: `decision_matrix_skip` (21), `ran_inline` (21), `hook_body_empty` (16), `subsumed_by_task_spec` (10), `folded_into_prior_step` (3), `matrix_deviation` (2). Coverage was 73/73.
+
+  `reason_code` is **optional and sits beside the prose**, which stays required and unconstrained — so a plugin that has not been updated, on any runtime, completes exactly as before. Only a code outside the list is rejected, which is what stops a typo opening its own silent bucket. `matrix_deviation` is called out explicitly in both skills because it is the one code that records **non-compliance**: the hazard of a closed vocabulary is that it makes `decision_matrix_skip` the path of least resistance for a step the matrix actually called for, which would launder a deviation into a sanctioned skip.
+
+  **Server-side counterpart required.** The validator and the dashboard aggregation ship in the Kanban app, not here. Emitting a code against a server that predates it is harmless — the field is simply carried and ignored.
+
+### Changed
+
+- **W2068 — `task-reviewer` persists its structured block and returns a bounded summary.** A review response ran to roughly **27 KB, ~17 KB of it the block alone**, and the caller re-sends whatever comes back on every later request whether it needs it or not. Review step 8 now writes the block to `.stride/.review-<IDENTIFIER>-r<N>.json` and the full human report to the `.md` beside it, returning a summary bounded at **24 lines / 2,000 characters**. Measured on a real 25-`project_checks` review: 8 lines / 475 characters against a 17,236 B block, and the summary is O(1) in review size because `project_checks` renders as a tally and the issue index is capped at ten rows.
+
+  **Two files, not one.** `review_report` is what a human reads on the task detail page, and it currently holds the reviewer's *full* response — writing only the block would have satisfied the letter of the change while silently reducing that field to a stub with no issue list and no tables.
+
+  **No path supplied means write nothing.** An older orchestrator supplies no `REVIEW_BLOCK_PATH` and never looks for a file, so deriving a default would leave it parsing a fence-less response into a legacy-only payload the completion API rejects — turning a working version pairing into a broken one. The reviewer falls back to emitting inline instead, which reproduces the previous behaviour exactly.
+
+  **Path trust.** The orchestrator reads only the paths **it supplied**; the `block:` / `report:` lines in the returned summary are for the human reader and are never used as a path. A reviewer steered by injected content could otherwise name any local file and have its bytes spliced into `review_report` and PATCHed to the server, where it is persisted and rendered. All three durable artifacts are deleted after a `2xx`.
+
+  **Scoped to this prompt.** The five other reviewer-variant prompts keep returning the block inline; the schema is unchanged and `schema_version` stays `"1.6"`, because the carrier moved and no field did.
+
+- **W2069 — the completion skill now describes the carrier it actually has.** `stride-completing-tasks` still told the reader to "extract the fenced ```json block", in three places that were outright false as literal instructions: they named the now-fallback path as the only mechanism while citing by name a section that no longer starts there. It now describes the **Source A** (block file) → **B** (inline fence) → **C** (prose) chain everywhere, including the quick-reference legend, and one sentence that contradicted its own file on where `review_report` comes from.
+
+- **W2070 — the same treatment for `task-explorer` and the `Plan` dispatch.** Measured, because no figures existed for either: explorer reports run **15.5–20.7 KB across 133–210 lines**, and a plan report was **34.8 KB / 256 lines** — larger than any reviewer report measured beside it. Both now write full findings to `.stride/.explorer-<IDENTIFIER>-r<N>.md` and `.stride/.plan-<IDENTIFIER>-r<N>.md`.
+
+  **Their bound is deliberately looser — 60 lines / 6,000 characters against the reviewer's 24 / 2,000** — because the summaries are read by different things. The reviewer's is parsed by machinery that then reads detail from disk; these are acted on directly by an agent that has to implement from them, so over-trimming forces the file open every time and saves nothing. Confirmed rather than asserted: a real 163-line explorer report condensed to 55 lines / 3,236 characters and was implemented from — and 3,236 is 62% above the reviewer's bound, so that tighter figure genuinely would not have fit.
+
+  **There is no planner agent file** — `Plan` is the generic subagent — so the Step 3 dispatch prompt is the only place its contract can live, which is exactly why it carries the whole contract including the write-failure fallback and the redaction rule rather than the convenient half.
+
+  Redaction reaches all three durable carriers with a byte-identical sentinel, so one search finds every redaction across them.
+
 ## [1.64.0] - 2026-08-12
 
 ### Fixed

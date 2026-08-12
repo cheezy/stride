@@ -357,9 +357,13 @@ TIMEOUT_TEST_BUDGET=$(( 2 * SUITE_LOAD_SCALE ))
 # own and the kill might never fire at all — the same class of self-defeating
 # scaling wall_budget is clamped against, in the opposite direction. 12s clears
 # command 1 (2s of sleep plus ~1.2s of fork at the 8x load measured here) with
-# room to spare, and leaves 20s of margin before the un-killed 32s.
+# room to spare, and leaves 24s of margin before the un-killed 32s. Tightened from
+# 12 to 8 in review round 3: at 12 the wall-at-kill (overhead + budget) reached the
+# 29s bound once overhead hit ~17s, which is the worst figure this defect's own
+# record contains. At 8 that breaking point moves to ~21s, and command 1 —
+# `sleep 2` plus fork and rounding, ~3-4s — still fits with 4s to spare.
 SPAN_TEST_BUDGET=$(( 4 * SUITE_LOAD_SCALE ))
-[ "$SPAN_TEST_BUDGET" -gt 12 ] && SPAN_TEST_BUDGET=12
+[ "$SPAN_TEST_BUDGET" -gt 8 ] && SPAN_TEST_BUDGET=8
 
 if [ "$SUITE_LOAD_SCALE" -gt 1 ]; then
   echo "NOTE: this machine is loaded — a trivial hook invocation took ${SUITE_OVERHEAD_MS}ms"

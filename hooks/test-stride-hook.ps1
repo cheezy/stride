@@ -312,7 +312,7 @@ $script:TimeoutTestBudget = [Math]::Min(2 * $script:SuiteLoadScale, 8)
 # 11d's section budget. CAPPED for the same reason as the bash twin: the section
 # is `sleep 2; sleep 30` = ~32s, so an unclamped 4x8=32s budget would expire only
 # as the section finished on its own and the kill might never fire.
-$script:SpanTestBudget = [Math]::Min(4 * $script:SuiteLoadScale, 12)
+$script:SpanTestBudget = [Math]::Min(4 * $script:SuiteLoadScale, 8)
 
 if ($script:SuiteLoadScale -gt 1) {
     Write-Host "NOTE: this machine is loaded — a trivial hook invocation took $($script:SuiteOverheadMs)ms"

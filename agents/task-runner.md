@@ -112,7 +112,8 @@ gate — that is a finding to report in your record, not a shortcut to take.**
 
 6. **Dispatch `stride:task-reviewer`; fix, re-review, and cap the rounds.** What
    to pass the reviewer — every field the task supplies, never a subset — how to
-   extract its fenced block, the whole-object copy rule and the criteria-
+   obtain its structured block (the block-file / inline-fence / prose source
+   chain), the whole-object copy rule and the criteria-
    preservation rule for a re-review are all `stride-workflow` Step 5, and the
    reviewer's own schema is owned by `stride/agents/task-reviewer.md`. Follow
    both by reference. What is yours is the loop and its end: fix every `critical`

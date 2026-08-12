@@ -513,6 +513,8 @@ saved separately as `review_report`.
 
 **Schema reference:** The `workflow_steps` array must match the schema documented in the `stride-workflow` skill — key-for-key. Always include one entry per step name (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`). Skipped steps use `{"name": "<step>", "dispatched": false, "reason": "<why>"}`.
 
+**`reason_code` (optional, D239).** On a skipped step, add a machine-readable category next to the prose — `{"dispatched": false, "reason_code": "decision_matrix_skip", "reason": "<why>"}`. The code is what the compliance dashboard aggregates; the prose is what a human reads on the task detail page. One of `decision_matrix_skip`, `ran_inline`, `hook_body_empty`, `subsumed_by_task_spec`, `folded_into_prior_step`, `matrix_deviation` — the picking table is in the `stride-workflow` skill. Never substitute the code for the prose, and never reach for `decision_matrix_skip` when the matrix actually called for the step: `matrix_deviation` is the honest code there. **Omitting `reason_code` entirely stays valid**, so an older plugin completes exactly as before; a code outside the list is rejected with a `422`.
+
 **Optional:** Include `review_report` when a task-reviewer agent produced a structured review. Omit it when the resolved matrix row's Review column said Skip, so no review was performed.
 
 ### Recording Manual & Exploratory Testing Findings (Optional — Existing Fields Only)

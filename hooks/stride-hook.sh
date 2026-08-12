@@ -56,6 +56,16 @@ write_hook_result() {
   return 0
 }
 
+# (D238) The after_goal section's structured result, stashed by
+# run_after_goal_section so that emit_hook_stdout can emit ONE document. Declared
+# here because `set -u` is active and the emitter reads it unconditionally.
+AFTER_GOAL_JSON=""
+
+# (D238) Set only on the doubly-degraded path where no stdout buffer could be
+# created anywhere and the primary section therefore ran unbuffered. Declared at
+# file scope because `set -u` is active.
+PRIMARY_UNREDIRECTED=false
+
 # (D220) Published by stride_route_command — the single source of truth for
 # "which Stride lifecycle endpoint, if any, is this Bash call actually issuing?".
 # Declared here because `set -u` is active and the after-goal gate reads
@@ -2443,7 +2453,15 @@ run_after_goal_section() {
     # Same semantics, different mechanism, structural rather than a preference.
     rm -f "$PROJECT_DIR/.stride/after-goal-unresolved" 2>/dev/null || true
   fi
-  [ -n "$_ag_out" ] && printf '%s\n' "$_ag_out"
+  # (D238) Stash rather than print. stdout must carry exactly ONE JSON document
+  # per invocation, and this object is the SECOND one whenever a primary section
+  # also ran — Claude Code parses stdout strictly, so two concatenated documents
+  # made the whole stream unparseable and every harness-facing field in it was
+  # silently dropped. emit_hook_stdout below is now the single writer.
+  # NOTE the D228 coupling this deliberately does not disturb: the marker clear
+  # above still keys on `_ag_out` being non-empty, captured from
+  # run_stride_section's own stdout, which still prints exactly as before.
+  AFTER_GOAL_JSON="$_ag_out"
   HOOK_NAME="$_routed_hook_name"
   export HOOK_NAME
 }
@@ -2739,14 +2757,131 @@ fi
 # HOOK_NAME=before_review; best-effort, never fails the hook.
 self_heal_changed_files_upload || true
 
+# (D238) THE SINGLE STDOUT WRITER. Claude Code parses a hook's stdout as ONE
+# JSON document. run_stride_section emits one object per section, so whenever a
+# primary section AND `## after_goal` both ran, stdout carried two concatenated
+# documents; a strict parse fails with "Extra data" and the harness falls back to
+# treating the whole stream as plain text. Every harness-facing field in it was
+# therefore dropped in that configuration — including the
+# hookSpecificOutput.additionalContext channel D228 added, which is why D228 had
+# to document that channel as best-effort rather than reliable.
+#
+# jq is NOT a strict parser here and must never be used to verify this: both
+# `jq .` and `jq -s` accept a concatenated stream, which is exactly how a D228
+# guard test asserted the broken value and passed. Verify with python json.loads.
+#
+# SHAPE, and why it is conditional. One section ran -> that section's object,
+# byte-identical to what shipped before this change; that covers every failure
+# path and every route where after_goal does not fire, so no existing consumer
+# moves. More than one ran -> a wrapper carrying them in order. The wrapper has
+# no "hook" key and the section objects always do, so `if .hook then <single>
+# else .sections[] end` discriminates without guessing. The multi-section case
+# has no back-compat obligation because what it emitted before parsed for
+# nobody.
+#
+# hookSpecificOutput is HOISTED to the top of the wrapper. It is addressed to the
+# harness, not to a section, and the harness only reads the document root — the
+# whole point of the fix.
+#
+# COLLISION RULE: after_goal wins. Only after_goal sets the key today, so this is
+# unreachable — but the ordering was originally the other way round, and review
+# pointed out it was backwards on the merits: a future primary-section field
+# would silently clobber D228's after_goal failure context, which is the one
+# payload this whole fix exists to deliver. The clauses below are applied
+# primary-first, after_goal-second, so the later one wins. The PowerShell twin
+# iterates the sections in order and takes the last, which is the same rule.
+emit_hook_stdout() {
+  local _primary="$1"
+  if [ -z "$_primary" ] && [ -z "$AFTER_GOAL_JSON" ]; then
+    return 0
+  fi
+  if [ -z "$AFTER_GOAL_JSON" ]; then
+    printf '%s\n' "$_primary"
+    return 0
+  fi
+  if [ -z "$_primary" ]; then
+    printf '%s\n' "$AFTER_GOAL_JSON"
+    return 0
+  fi
+  if [ "${HAS_JQ:-false}" != "true" ]; then
+    # DEFENSIVE, and unreachable as the code stands: run_after_goal_section
+    # self-gates on HAS_JQ and returns early without it, so AFTER_GOAL_JSON can
+    # only be non-empty when jq is present. Kept because the alternative to a
+    # merge we cannot perform is emitting a stream nothing can parse, which is
+    # the exact defect this function exists to remove — and because a future
+    # caller that stashes AFTER_GOAL_JSON without that gate would otherwise
+    # reintroduce it silently. Losing the after_goal detail beats losing BOTH
+    # objects; the durable per-hook result file (D234) still carries it.
+    printf '%s\n' "$_primary"
+    return 0
+  fi
+  jq -n --argjson primary "$_primary" --argjson after_goal "$AFTER_GOAL_JSON" \
+    '{sections: [$primary, $after_goal]}
+     + (if ($primary.hookSpecificOutput // null) != null
+        then {hookSpecificOutput: $primary.hookSpecificOutput} else {} end)
+     + (if ($after_goal.hookSpecificOutput // null) != null
+        then {hookSpecificOutput: $after_goal.hookSpecificOutput} else {} end)' \
+    2>/dev/null || printf '%s\n' "$_primary"
+}
+
 # --- Execute the primary hook ---
 # run_stride_section emits the structured JSON itself (success or failed shape)
 # and finalizes the per-file diff snapshot via the file-scope helper. Failure
 # exits 2 here to preserve the existing PreToolUse blocking semantic for
 # after_doing (other routes are PostToolUse where exit 2 has no gating effect
 # but matches the historical exit shape).
-run_stride_section "$HOOK_NAME"
-PRIMARY_RC=$?
+# (D238) Buffered, not printed. A REDIRECT rather than a command substitution:
+# `$( )` would run the section in a subshell and discard every global it sets,
+# which is the same trap the D228 marker comment warns about.
+#
+# THE UNREDIRECTED FALLBACK IS NOT OPTIONAL, and review caught its absence as a
+# critical regression. Bash does not execute a command at all when it cannot
+# open the command's redirect target — so buffering into a file makes running
+# the user's hook section conditional on that file being creatable. With
+# `.stride/` unwritable (permissions, a full disk, a read-only filesystem) the
+# section silently never ran: on the after_doing/PreToolUse route that is the
+# quality gate skipped entirely, and since exit 1 does not block in PreToolUse,
+# the completion proceeded with tests never having run. Measured against HEAD:
+# HEAD exits 0 and runs the section, the buffered version exited 1 and did not.
+# The PowerShell twin buffers in memory and its suite asserts this property
+# outright (19g, "an unwritable .stride/ does not fail the hook").
+#
+# So: prefer a private temp file, fall back to the system temp dir, and if no
+# buffer can be created anywhere, run the section UNREDIRECTED. Degrading to the
+# pre-D238 two-document stdout is strictly better than not running the hook —
+# the defect that costs is a parse failure, the one avoided here is a skipped
+# quality gate.
+PRIMARY_JSON_FILE=""
+if mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null; then
+  PRIMARY_JSON_FILE=$(mktemp "$PROJECT_DIR/.stride/.primary-section-out.XXXXXX" 2>/dev/null) || PRIMARY_JSON_FILE=""
+fi
+if [ -z "$PRIMARY_JSON_FILE" ]; then
+  PRIMARY_JSON_FILE=$(mktemp "${TMPDIR:-/tmp}/stride-primary-out.XXXXXX" 2>/dev/null) || PRIMARY_JSON_FILE=""
+fi
+if [ -n "$PRIMARY_JSON_FILE" ]; then
+  run_stride_section "$HOOK_NAME" > "$PRIMARY_JSON_FILE"
+  PRIMARY_RC=$?
+  PRIMARY_JSON=$(cat "$PRIMARY_JSON_FILE" 2>/dev/null || true)
+  rm -f "$PRIMARY_JSON_FILE" 2>/dev/null || true
+else
+  # No buffer anywhere — run it for real. PRIMARY_JSON stays empty, so
+  # emit_hook_stdout will not re-print what the section already wrote itself.
+  #
+  # ANNOUNCE IT. This path gives up the one-document guarantee: if after_goal
+  # also runs, stdout carries two concatenated documents again — the pre-D238
+  # behaviour, deliberately chosen over not running the user's hook, but a
+  # degradation either way. Silence here would leave the rarest state in the
+  # script also the least diagnosable, and this script's idiom is the opposite
+  # (see AFTER_GOAL UNRESOLVED). Note emit_hook_stdout cannot infer this state:
+  # an empty PRIMARY_JSON also means "the section had no commands", which is
+  # entirely legitimate, so the notice has to be emitted here where the two are
+  # still distinguishable.
+  PRIMARY_UNREDIRECTED=true
+  echo "stride-hook: could not create a stdout buffer in .stride/ or ${TMPDIR:-/tmp}; the ${HOOK_NAME} section ran unbuffered and stdout may carry two JSON documents" >&2
+  run_stride_section "$HOOK_NAME"
+  PRIMARY_RC=$?
+  PRIMARY_JSON=""
+fi
 
 # (D142) Capture TASK_BASE_REF only now — AFTER ## before_doing ran its
 # `git pull` / branch checkout — so the base is the post-pull branch point.
@@ -2756,6 +2891,11 @@ PRIMARY_RC=$?
 finalize_before_doing
 
 if [ "$PRIMARY_RC" -ne 0 ]; then
+  # (D238) Failure is always a single-section document — after_goal never runs
+  # after a failed primary — so this emits the exact shape that shipped before
+  # this change. That matters: exit 2 is the one path whose stdout reaches the
+  # model, so it is the shape agents and hook-diagnostician actually read.
+  emit_hook_stdout "$PRIMARY_JSON"
   exit "$PRIMARY_RC"
 fi
 
@@ -2794,5 +2934,9 @@ if [ "$HOOK_NAME" = "after_review" ]; then
   rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
   rm -f "$PROJECT_DIR/.stride-dirty-baseline" 2>/dev/null || true
 fi
+
+# (D238) The one and only stdout write on the success path, after after_goal
+# routing has had its chance to contribute a second section.
+emit_hook_stdout "$PRIMARY_JSON"
 
 exit 0

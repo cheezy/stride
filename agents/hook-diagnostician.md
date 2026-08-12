@@ -19,8 +19,13 @@ Use these to diagnose failures and recommend fixes.
 
 First, determine which format you received:
 
-- **Structured JSON:** Input contains a JSON object with `"hook"`, `"status": "failed"`, `"failed_command"`, `"stdout"`, `"stderr"`, `"commands_completed"`, and `"commands_remaining"` fields.
+- **Structured JSON, single section:** Input is a JSON object with `"hook"`, `"status": "failed"`, `"failed_command"`, `"stdout"`, `"stderr"`, `"commands_completed"`, and `"commands_remaining"` fields.
+- **Structured JSON, multi-section wrapper (D238):** Input is a JSON object with **no** top-level `"hook"` key and a `"sections"` array instead, each element being a section object of the shape above. This is what the executor emits when a primary section **and** `## after_goal` both ran in one invocation — which is exactly the case where a failing `## after_goal` needs diagnosing, so do not skip it. A top-level `"hookSpecificOutput"` may sit beside `"sections"`; it is addressed to the harness, not to you.
 - **Raw text:** Input is plain text containing mixed tool output (test results, credo warnings, etc.).
+
+**Discriminate on the `hook` key, not by guessing:** `if .hook then <single section> else .sections[] end`. Before D238 the multi-section case reached you as two concatenated JSON documents that no strict parser accepted, so it arrived as raw text; it now parses, and you should read the failing section out of `sections` rather than falling back. The same discriminator is documented in `skills/stride-workflow/parser.md` ("Executor stdout contract").
+
+When the wrapper carries more than one failed section, diagnose each one, and say which section each finding belongs to — a failing `## after_goal` and a failing primary section have different consequences: the primary blocks the lifecycle step, while `after_goal` failing means the goal's work is committed locally but was not pushed.
 
 ### Parsing Structured JSON Input
 

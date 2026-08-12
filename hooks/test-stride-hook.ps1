@@ -3487,6 +3487,60 @@ if (Test-Path (Join-Path $d230FailProj 'should_not_exist.txt')) {
 }
 
 # ============================================================
+# Test Group 20: D238 — stdout is exactly ONE JSON document
+# ============================================================
+# Mirror of the bash suite's flipped 24e. Claude Code parses hook stdout as one
+# document; when a primary section AND after_goal both emit, the old code wrote
+# two concatenated objects, a strict parse failed with "Extra data", and every
+# harness-facing field was dropped. AC5 of D238 requires both executors to emit
+# the SAME shape, and nothing on this side guarded that — the bash assertions
+# cannot see a ps1 regression.
+#
+# STRICT parser only. jq accepts a concatenated stream and cannot detect this.
+Write-Host ""
+Write-Host "=== Test Group 20: single stdout document (D238) ==="
+
+$d238Proj = Join-Path $TmpDir 'g20-one-doc'
+New-Item -ItemType Directory -Path $d238Proj -Force | Out-Null
+Set-Content -Path (Join-Path $d238Proj '.stride.md') -Value @'
+## before_review
+```bash
+echo primary_ran
+```
+
+## after_goal
+```bash
+exit 9
+```
+'@ -Encoding UTF8
+$d238Inner = '{"data":{"id":99,"parent_id":42},"hooks":[{"name":"before_review"},{"name":"after_goal","env":{"GOAL_ID":"42","GOAL_IDENTIFIER":"G1","GOAL_TITLE":"t","GOAL_DESCRIPTION":"d"}}]}'
+$d238Json = @{
+    tool_input = @{ command = 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' }
+    tool_response = @{ stdout = $d238Inner; stderr = ''; interrupted = $false }
+} | ConvertTo-Json -Compress
+$r20 = Invoke-HookScript -InputJson $d238Json -Phase 'post' -ProjectDir $d238Proj
+
+$d238Probe = @'
+import json,sys
+s = sys.stdin.read()
+try:
+    d = json.loads(s)
+except Exception:
+    print("MULTIPLE"); raise SystemExit
+secs = ",".join(x.get("hook","") for x in d.get("sections",[]))
+hso = (d.get("hookSpecificOutput") or {}).get("hookEventName","")
+print("SINGLE|%s|%s" % (secs, hso))
+'@
+$d238Res = ($r20.Stdout | & python3 -c $d238Probe) 2>$null
+$d238Parts = ("$d238Res".Trim() -split '\|')
+
+Assert-Eq "20a: stdout parses as exactly one JSON document (strict)" "SINGLE" $d238Parts[0]
+Assert-Eq "20b: both section results survive the merge, in order" "before_review,after_goal" `
+    $(if ($d238Parts.Count -gt 1) { $d238Parts[1] } else { "" })
+Assert-Eq "20c: hookSpecificOutput is hoisted to the document root" "PostToolUse" `
+    $(if ($d238Parts.Count -gt 2) { $d238Parts[2] } else { "" })
+
+# ============================================================
 # Test Group 19: D234 — durable hook result file
 # ============================================================
 # Mirror of test-stride-hook.sh Test Group 27. Invoke-StrideSection writes its

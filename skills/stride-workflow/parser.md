@@ -48,6 +48,42 @@ This makes the canonical multi-line examples in the workflow skill and hook-exec
 
 These rules apply to all five sections, including `## after_goal`. The parser itself is section-name-agnostic — it matches whatever name the caller passed in `$HOOK_NAME` — so adding `after_goal` to the recognized list is documentation only; no code change is required in `stride-hook.sh`.
 
+## Executor stdout contract (D238)
+
+**The executor writes exactly ONE JSON document to stdout per invocation.** Claude Code parses a hook's stdout as a single document, so this is a hard requirement rather than a stylistic one: two concatenated documents fail a strict parse with `Extra data`, the harness falls back to treating the whole stream as plain text, and **every** harness-facing field in it is silently dropped — including `hookSpecificOutput.additionalContext`. That is what D238 fixed; before it, any invocation where a primary section *and* `## after_goal` both ran emitted two objects and neither was read.
+
+Two shapes, discriminated by the presence of a top-level `hook` key:
+
+**One section ran** — the section's own object, unchanged from every release before D238:
+
+```json
+{ "hook": "before_doing", "status": "success", "commands_completed": [...], "duration_ms": 42 }
+```
+
+This covers every failure path (a failed primary section aborts before `after_goal` can run) and every route where `after_goal` does not fire. Consumers that read `.hook` / `.status` / `.duration_ms` at the top level are unaffected.
+
+**More than one section ran** — a wrapper carrying them in execution order:
+
+```json
+{
+  "sections": [
+    { "hook": "before_review", "status": "success", ... },
+    { "hook": "after_goal",    "status": "failed",  ... }
+  ],
+  "hookSpecificOutput": { "hookEventName": "PostToolUse", "additionalContext": "..." }
+}
+```
+
+- The wrapper has **no** `hook` key and section objects always do, so `if .hook then <single section> else .sections[] end` discriminates without guessing.
+- **No section result is dropped** to make the parse succeed — each object carries a different section's outcome and both remain recoverable.
+- `hookSpecificOutput` is **hoisted to the document root**. It addresses the harness, not a section, and the harness reads only the root — leaving it nested is precisely what made the channel inert.
+- **Collision rule: `after_goal` wins.** If more than one section ever sets `hookSpecificOutput`, the `after_goal` section's value is the one hoisted. Only `after_goal` sets it today, so this is currently unreachable — it is stated because the alternative ordering would let a future primary-section field silently clobber D228's after-goal failure context, which is the payload the hoist exists to deliver.
+- The multi-section shape carries no back-compatibility obligation: what it replaced parsed for nobody.
+
+**Verify this with a strict parser, never with `jq`.** Both `jq .` and `jq -s` accept a concatenated stream, so neither can detect the failure this contract exists to prevent — a D238-era guard test asserted the broken value and passed for exactly that reason. Use `python3 -c 'import json,sys; json.loads(sys.stdin.read())'`, which rejects trailing data.
+
+Both executors emit the same shape. They still differ in whitespace — `stride-hook.sh` pretty-prints and `stride-hook.ps1` emits compact JSON — which predates D238 and is not part of this contract.
+
 ## Back-Compatibility
 
 Older `.stride.md` files that predate `## after_goal` continue to work without modification. When the server fires the `after_goal` lifecycle event against a project whose `.stride.md` does not declare that section, the parser returns an empty command list and the hook bridge reports a clean no-op result.

@@ -84,6 +84,48 @@ $ResponseFile = Join-Path $ProjectDir '.stride/.last-api-response.json'
 # section body is empty, the section returns before doing any work and emits
 # nothing, and 0 is the truthful answer. Readers must never treat absence as an
 # error, a retry, or a licence to invent a figure.
+# (D238) Sections buffered for stdout. Claude Code parses a hook's stdout as ONE
+# JSON document, and Invoke-StrideSection emits one object per section — so when
+# a primary section AND `## after_goal` both ran, stdout carried two concatenated
+# documents, a strict parse failed with "Extra data", and every harness-facing
+# field in the stream was dropped. That is what made D228's
+# hookSpecificOutput.additionalContext channel inert in the common configuration.
+#
+# Never verify this with jq: `jq .` and `jq -s` both accept a concatenated
+# stream, which is exactly how a D228 guard test asserted the broken value and
+# passed. Verify with a strict parser (python json.loads).
+$script:PendingSections = @()
+
+# One section -> that section's object, byte-identical to what shipped before.
+# More than one -> a wrapper carrying them in order, with hookSpecificOutput
+# hoisted to the root because the harness only reads the document root. The
+# wrapper has no "hook" key and section objects always do, so
+# `if .hook then <single> else .sections[] end` discriminates without guessing.
+# Matches the bash twin's shape exactly (whitespace aside — this side emits
+# compact JSON, that side pretty-prints, which predates D238).
+function Emit-HookStdout {
+    if ($script:PendingSections.Count -eq 0) { return }
+    if ($script:PendingSections.Count -eq 1) {
+        [Console]::Out.WriteLine($script:PendingSections[0])
+        return
+    }
+    try {
+        $objs = @($script:PendingSections | ForEach-Object { $_ | ConvertFrom-Json })
+        $wrapper = [ordered]@{ sections = $objs }
+        foreach ($o in $objs) {
+            if ($o.PSObject.Properties.Name -contains 'hookSpecificOutput' -and $o.hookSpecificOutput) {
+                $wrapper['hookSpecificOutput'] = $o.hookSpecificOutput
+            }
+        }
+        [Console]::Out.WriteLine(($wrapper | ConvertTo-Json -Depth 8 -Compress))
+    } catch {
+        # Never lose the primary result to a merge failure: emitting it alone is
+        # strictly better than emitting a stream nothing can parse. The durable
+        # per-hook result files (D234) still carry every section's detail.
+        [Console]::Out.WriteLine($script:PendingSections[0])
+    }
+}
+
 function Get-HookResultFile {
     param([string]$Hook)
     return (Join-Path $ProjectDir (".stride/.hook-result-{0}.json" -f $Hook))
@@ -1959,7 +2001,9 @@ function Invoke-StrideSection {
                 # and breaking the `-ne 0` check on every success path.
                 $failureJson = ($failureResult | ConvertTo-Json -Depth 5 -Compress)
                 Write-HookResult -Hook $Section -Json $failureJson
-                [Console]::Out.WriteLine($failureJson)
+                # (D238) Buffered, not written. stdout must carry exactly ONE
+                # JSON document; Emit-HookStdout below is the single writer.
+                $script:PendingSections += ,$failureJson
 
                 if ($secTimedOut) {
                     [Console]::Error.WriteLine("Stride $Section hook command $($secCmdIndex + 1)/$($secCmdTotal) timed out after ${secBudget}s budget: $execTrimmed")
@@ -2008,7 +2052,8 @@ function Invoke-StrideSection {
     # actually read this figure back from.
     $successJson = ($successResult | ConvertTo-Json -Depth 6 -Compress)
     Write-HookResult -Hook $Section -Json $successJson
-    [Console]::Out.WriteLine($successJson)
+    # (D238) Buffered, not written — see Emit-HookStdout.
+    $script:PendingSections += ,$successJson
 
     return 0
 }
@@ -2200,6 +2245,9 @@ $primaryRc = Invoke-StrideSection -Section $HookName
 try { Invoke-FinalizeBeforeDoing } catch { }
 
 if ($primaryRc -ne 0) {
+    # (D238) Failure is always a single-section document — after_goal never runs
+    # after a failed primary — so this is the exact shape that shipped before.
+    Emit-HookStdout
     exit $primaryRc
 }
 
@@ -2236,5 +2284,9 @@ if ($HookName -eq 'after_review') {
     Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
     Remove-Item -Force (Join-Path $ProjectDir '.stride-dirty-baseline') -ErrorAction SilentlyContinue
 }
+
+# (D238) The one and only stdout write on the success path, after after_goal
+# routing has had its chance to contribute a second section.
+Emit-HookStdout
 
 exit 0

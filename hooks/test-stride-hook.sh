@@ -6137,29 +6137,84 @@ else
     "pushed=no" "$D228_MARKER"
   assert_contains "24c: the failure is announced loudly on stderr" \
     "AFTER_GOAL UNRESOLVED" "$D228_FAIL_ERR"
-  # 24e: the KNOWN limitation, pinned rather than papered over. Claude Code
-  # parses hook stdout as ONE document; when a primary section also emitted
-  # JSON, stdout is two concatenated documents and a strict parse fails, so
-  # the context field is not read. An earlier version of this group asserted
-  # `jq -s length == 2` and called it "stdout stays a single document" — but
-  # `jq -s` slurps a STREAM, so it cannot detect concatenation at all, and 2
-  # was the value both before and after the change. It pinned the broken
-  # state. These two assertions state the truth in both directions.
-  # A STRICT parser is required here. `jq .` and `jq -s` both accept a
-  # concatenated stream, which is exactly how the previous version of this
-  # guard fooled itself — python's json.loads rejects trailing data.
+  # 24e: FLIPPED BY D238. This assertion used to pin the limitation — with a
+  # primary section present, stdout was two concatenated documents, a strict
+  # parse failed, and the context field was never read. D238 made the executor
+  # emit exactly one document, so the same probe now asserts the opposite.
+  #
+  # Note what this test has been through, because it is the reason to keep it
+  # strict: an earlier version asserted `jq -s length == 2` and called it
+  # "stdout stays a single document". `jq -s` slurps a STREAM, so it cannot
+  # detect concatenation at all, and 2 was the value both before and after the
+  # change — it pinned the broken state while reporting success. A STRICT parser
+  # is mandatory here. `jq .` and `jq -s` both accept a concatenated stream;
+  # python's json.loads rejects trailing data, which is the whole point.
   if printf '%s' "$D228_FAIL_OUT" | python3 -c 'import json,sys; json.loads(sys.stdin.read())' > /dev/null 2>&1; then
     D228_STRICT="single"
   else
     D228_STRICT="multiple"
   fi
-  assert_eq "24e: with a primary section present, stdout is NOT a single document" \
-    "multiple" "$D228_STRICT"
-  # ...and after_goal's own object is still well-formed and carries the field,
-  # so the channel works whenever it IS the only document.
-  D228_AG_CTX=$(printf '%s' "$D228_FAIL_OUT" | jq -rs '.[] | select(.hook=="after_goal") | .hookSpecificOutput.hookEventName' 2>/dev/null)
-  assert_eq "24e: after_goal's own object is well-formed and carries the field" \
+  assert_eq "24e (D238): with a primary section present, stdout IS a single document" \
+    "single" "$D228_STRICT"
+  # The harness reads the document ROOT, so the context field has to be there —
+  # not nested inside a section object, where it was unreachable before.
+  D228_AG_CTX=$(printf '%s' "$D228_FAIL_OUT" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("hookSpecificOutput",{}).get("hookEventName",""))' 2>/dev/null)
+  assert_eq "24e (D238): hookSpecificOutput is hoisted to the document root" \
     "PostToolUse" "$D228_AG_CTX"
+  # Both sections survive the merge — the fix must not drop a result to make the
+  # parse succeed.
+  D228_SECS=$(printf '%s' "$D228_FAIL_OUT" | python3 -c 'import json,sys; print(",".join(x.get("hook","") for x in json.loads(sys.stdin.read()).get("sections",[])))' 2>/dev/null)
+  assert_eq "24e (D238): both section results are still recoverable, in order" \
+    "before_review,after_goal" "$D228_SECS"
+
+  # 24h (D238): only after_goal ran — no primary section. NOT a corner case:
+  # plugin mode ships an empty `## before_review`, so this is the common
+  # configuration there. The wrapper must not appear for a single section, and
+  # the after_goal object must sit at the document root where the harness reads
+  # hookSpecificOutput from.
+  D238_SOLO="$TMPDIR_TEST/d238-solo-after-goal"
+  mkdir -p "$D238_SOLO"
+  cat > "$D238_SOLO/.stride.md" << 'STRIDE'
+## before_review
+```bash
+```
+
+## after_goal
+```bash
+echo goal_only
+```
+STRIDE
+  D238_SOLO_OUT=$(echo "$D228_INPUT" | CLAUDE_PROJECT_DIR="$D238_SOLO" bash "$HOOK_SCRIPT" post 2>/dev/null)
+  D238_SOLO_HOOK=$(printf '%s' "$D238_SOLO_OUT" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d.get("hook",""))' 2>/dev/null)
+  assert_eq "24h (D238): only after_goal ran — single object at the root, no wrapper" \
+    "after_goal" "$D238_SOLO_HOOK"
+
+  # 24i (D238): THE REGRESSION GUARD. Buffering the primary section into a file
+  # made running the user's hook conditional on that file being creatable —
+  # bash does not execute a command whose redirect cannot be opened. With
+  # .stride/ unwritable the after_doing quality gate silently never ran, and
+  # because exit 1 does not block in PreToolUse the completion proceeded with
+  # tests never having run. The executor must fall back to running the section
+  # unredirected. Mirrors the ps1 suite's 19g.
+  D238_RO="$TMPDIR_TEST/d238-readonly-stride"
+  mkdir -p "$D238_RO/.stride"
+  cat > "$D238_RO/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+touch gate_actually_ran.txt
+```
+STRIDE
+  chmod 500 "$D238_RO/.stride"
+  echo '{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$D238_RO" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  chmod 700 "$D238_RO/.stride"
+  if [ -f "$D238_RO/gate_actually_ran.txt" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 24i (D238): an unwritable .stride/ does not stop the section running"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 24i (D238): the section must still run when .stride/ is unwritable"
+    FAIL=$((FAIL + 1))
+  fi
 
   # 24f: the durable marker is CLEARED by a later successful after_goal —
   # otherwise a one-off failure leaves a permanent unresolved=yes.

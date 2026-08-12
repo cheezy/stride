@@ -194,6 +194,12 @@ When the Stride plugin is enabled, `.stride.md` hooks execute **automatically wi
 3. Executes each uncommented command sequentially
 4. Caches task environment variables (`$TASK_IDENTIFIER`, `$TASK_TITLE`, etc.) from the claim response for use in all subsequent hooks
 5. Outputs structured JSON for diagnostics on both success and failure
+
+**Executor stdout contract (v1.64.0+).** The hook writes **exactly one JSON document** to stdout per invocation. Claude Code parses hook stdout as a single document, so when a primary section and `## after_goal` both ran, the previous two-object output failed a strict parse and every harness-facing field in it — including `hookSpecificOutput.additionalContext` — was silently dropped. One section still emits its own object unchanged; more than one emits `{sections: [...]}` with `hookSpecificOutput` hoisted to the root, discriminated by the absence of a top-level `hook` key. Verify with a strict parser, never `jq` — both `jq .` and `jq -s` accept a concatenated stream and cannot detect the failure. See `skills/stride-workflow/parser.md`.
+
+**Durable hook results (v1.64.0+).** Every section that does work also persists its structured result to `.stride/.hook-result-<hook>.json`, on both the success and failure paths, cleared at claim time. An absent file means the section body was empty and did no work, so `0` is the truthful duration. This makes `after_goal`'s real duration readable when building its follow-up PATCH; `after_doing` and `before_review` remain `0` because both fire on the very curl whose body already carries their result.
+
+**Task-attributed `changed_files` (v1.64.0+).** A completing task's diff snapshot now carries the commits **that task** made, rather than everything committed between its claim and its completion. Tasks that claim and complete inside another task's window — the normal shape under dispatcher mode — no longer have their commits absorbed by the outer task.
 6. Blocks tool calls (exit 2) on failure in PreToolUse context
 
 **Hook routing:**
@@ -280,6 +286,12 @@ To update to the latest version of Stride skills:
 
 The hook scripts ship with unit-style test suites that stub `curl` to verify
 argument shape:
+
+**(v1.64.0+)** Both suites calibrate machine load at the start and end of a run
+and scale their wall-clock backstops accordingly — clamped below each case's
+un-killed duration, so a timeout that never fires still fails. Each run reports
+its own wall clock and warns when the machine was busy, so a loaded run is
+distinguishable from a failing one without re-running it.
 
 ```
 bash hooks/test-stride-hook.sh

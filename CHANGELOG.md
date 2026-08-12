@@ -23,9 +23,37 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.64.0] - 2026-08-12
 
 ### Fixed
+
+- **D236 — an outer task's `changed_files` absorbed every commit its nested tasks made.** `capture_changed_files` diffs `base..working-tree`, so every commit between a task's claim and its completion was attributed to it. Replaying W2066's sequence — claim A, claim+complete B and C from inside A, complete A — gave A a snapshot of `[fileB.txt, fileC.txt, outerA.txt]` when only `outerA.txt` was its own. Dispatcher mode makes that the normal shape, since a task whose job is to dispatch runners always has its children's commits inside its window.
+
+  Fixed by attributing **commits** rather than subtracting ranges: subtracting a child's range would erase the parent's own change to a file both touched, which is now pinned in both directions. Each completion stamps `TASK_HEAD_REF_<id>` beside D226's base record — a base alone cannot bound a window, because every commit after it is a descendant, including the outer task's own later ones. A task's own commits are expressed as contiguous **ranges**, so the interleaved case (the outer committing both before and after a nested window) works where a single anchor cannot.
+
+  **Known limitation, pinned by test 23r rather than hidden:** a commit the outer task makes *while* a nested task is in flight still falls inside that window and is attributed to the child. That is a trade against the previous behaviour in the losing-work direction, so it is filed for a per-commit-ownership fix rather than accepted. Over-reporting is the safer failure.
+
+- **D238 — hook stdout carried two JSON documents, so Claude Code read none of them.** When a primary section and `## after_goal` both ran, `run_stride_section` emitted one object per section and stdout became two concatenated documents. A strict parse fails with `Extra data`, the harness falls back to treating the whole stream as plain text, and **every** harness-facing field in it is silently dropped — which is why D228's `hookSpecificOutput.additionalContext` channel had to ship as best-effort rather than reliable.
+
+  The executor now writes exactly one document. One section still emits its own object, byte-identical to before — that covers every failure path, which is the only path whose stdout reaches the model. More than one emits `{sections: [...], hookSpecificOutput: {...}}` with the harness-facing key hoisted to the root, discriminated by the absence of a top-level `hook` key. `docs/diff-contract.md` and `hook-diagnostician` moved in step.
+
+  Note for anyone verifying this: **`jq` cannot detect the defect.** Both `jq .` and `jq -s` accept a concatenated stream, which is exactly how a D228 guard test asserted the broken value and passed. Use a strict parser.
+
+- **D234 — the only hook duration the executor ever emitted was on the one path nobody can read.** `run_stride_section` measured a real `duration_ms`, wrote it to bare stdout and exited 0 — and exit-0 stdout reaches the transcript, not the model. The *failure* shape, which is readable, carried no duration field at all. Every section that does work now also persists its structured result to `.stride/.hook-result-<hook>.json`, one file per hook, on both paths, and the failure branch computes its duration before it emits.
+
+  An absent file means the section body was empty and did no work, so `0` is truthful — absence is never an error and never a licence to invent a figure. The files are cleared at claim time so a leftover cannot be read as the current task's.
+
+  **What this does not fix, stated rather than glossed:** `after_doing` and `before_review` remain `0`. Both fire on the very curl whose body already contains their result, so the figure does not exist at write time even in principle, and `workflow_steps` is on the `PATCH` forbidden list so no later correction is possible. `after_goal` is the one hook whose real duration is both obtainable and persistable, because its PATCH is a separate, later request; Step 8 now reads it.
+
+- **D241 — the hook suites' failure count depended on machine load, so they could not be used as a gate.** Filed originally as a bash-side regression on a five-run sample taken beside an 85-second Elixir suite; that premise was wrong and is retracted here. Every failure in it was load-induced, and the reviewer independently saw the count swing 18/21/2/2 from an identical command.
+
+  Two distinct causes. Wall-clock bounds were fixed constants absorbing process-startup overhead, which scales with load (measured: ~140ms idle, ~1200ms under 24 fork-heavy processes). And a real race: cases running `echo` then `sleep 30` under a **1s** budget assert the kill landed on command 2/3, but `run_stride_section` measures elapsed time at whole-second granularity and forks two `mktemp`s first, so a second boundary falling across them exhausts the budget before command 1 runs.
+
+  Both suites now calibrate load at the start **and end** of a run and scale their backstops — **clamped below each case's un-killed duration**, which is the load-bearing half: an unclamped 8x scale would grow one bound past its own `sleep 30`, so a timeout that never fired would pass. Both timeout budgets are capped for the same reason. A run also reports its own wall clock and warns when the machine was busy, so a loaded run is distinguishable from a failing one without re-running it.
+
+- **D231 — a `"failed"` section verdict could ship with a placeholder note.** The completion API now requires a substantive `note` on any failed section verdict — at least 20 non-whitespace characters, naming the specific violation, and rejected outright if it is a stub, a `TODO`, or a bare restatement of the status. The check is unconditional and does not consult the validation feature flag, because relying on the producing model to police the rule was the weakness it exists to remove.
+
+- **D235 — the hook suites asserted the developer's environment rather than the behaviour under test.** An inherited `STRIDE_HOOK_TIMEOUT_OVERRIDE` forced a 1s budget onto fixtures that never asked for one, so unrelated cases failed together. A hermeticity gate now neutralises inherited hook variables at the top of both suites, names each one it cleared without ever printing its value, and `STRIDE_TEST_KEEP_ENV=1` opts out while warning that the run is no longer hermetic.
 
 - **D230 — the `after_doing` gate breached its budget whenever the machine was busy.** Not a stress case: this repo's own workflow assumes two clones and a running Phoenix dev server, so contention is the ordinary condition. The cost was a recurring silent tax — a budget kill and a real test failure look the same to whoever reads the result, so every occurrence bought a diagnosis before anyone learned the tests were fine.
 
@@ -281,6 +309,10 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
   **`not_assessed` is deliberately untouched.** `note` stays optional on `"passed"` and `"not_assessed"`, so the ordinary empty-section case gains no friction — the fix targets the stub, not the rule it hid behind.
 
   **Prompt-text only — `schema_version` stays `"1.6"`.** No field is added, removed or re-typed; a previously-optional field becomes conditionally required, which no consumer needs to change to read. **Schema of record only:** the five variant reviewer prompts (Cursor, Windsurf, Continue, Codex, Gemini) are not touched here and will mirror `task-reviewer.md` on their next natural sync, per the meta-block's rule that variants reference this document by path rather than redefining the schema.
+
+### Verification (no plugin behaviour change)
+
+- **W2066 / W2067** shipped documentation and a measurement script only — `docs/runner-path-end-to-end-w2066.md`, `docs/token-measurement-g404-g405.md` and `docs/scripts/w2067-recursive.py`. They are recorded here because they are the source of several figures cited above, not because anything installed changed.
 
 ## [1.63.0] - 2026-08-09
 

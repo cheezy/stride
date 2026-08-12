@@ -179,6 +179,167 @@ assert_exit() {
 TMPDIR_TEST=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
 
+# ============================================================
+# Load calibration and wall-clock reporting (D241)
+# ============================================================
+# THE OTHER CLUSTERS, and the verdict on them, recorded here because D241 named
+# them and a reader who finds them unchanged deserves to know why. D241's
+# description listed 8a/8d/8g/13c (changed_files PUT), 10a/10d/10e (hook chaining
+# and after_goal JSON), 17c (command splitting), 23g/23l (D226 base-ref refusals)
+# and 9a/9b as the always-failing set. Every one of those 12 was re-read: NONE
+# contains a wall-clock assertion. They assert PUT counts, JSON content and exit
+# codes, so the mechanism that broke them is not the one the calibration below
+# fixes, and widening a bound would not have touched them.
+#
+# What did break them, on the evidence: an inherited STRIDE_HOOK_TIMEOUT_OVERRIDE
+# forcing a 1s budget onto fixtures that never asked for one. Under load a 1s
+# budget kills even a trivial fixture, which is exactly how unrelated clusters
+# fail together and how the count swings 18/21/2/2 between identical runs. That
+# leak is D235's, it is already fixed, and its hermeticity gate at the top of
+# this file neutralises the variable — the gate still reports doing so on this
+# machine on every run, so the leak is live and the gate is what holds it back.
+# The verdict for those clusters is therefore "the harness was wrong, and D235
+# already fixed it" — not the test, and NOT stride-hook.sh, which this task
+# leaves untouched on purpose (D241's own `why` retracts the regression premise
+# its pitfalls[0] still carries).
+# A handful of assertions below check that a hook was killed PROMPTLY — that a
+# `sleep 30` under a 1s budget did not run to completion. Those bounds used to be
+# fixed constants (`< 20s`, `< 15s`), and a fixed constant is the wrong shape for
+# them: what the bound has to absorb is not the budget, which is deterministic,
+# but the process-startup and scheduling OVERHEAD around it, which scales with
+# whatever else the machine is doing. On a quiet machine the suite reported
+# 588/0; run beside another test suite it reported failure counts swinging
+# 18/21/2/2 from the identical command, and one observed kill "near 4s" took 21s.
+# That cost a full task's worth of misdiagnosis (this defect was originally filed
+# as a bash-side regression on that evidence, which was wrong).
+#
+# So: measure the overhead on THIS machine, right now, and scale the bounds by
+# what we find. The deterministic evidence that the kill actually happened —
+# exit 2, `"timed_out": true`, `"exit_code": 124`, the budget named in stderr,
+# and the post-timeout command's file never appearing — is asserted separately in
+# every one of these cases and is NOT load-sensitive. The wall-clock bound is a
+# backstop against the kill silently not happening at all, so it needs to sit
+# comfortably below the un-killed duration while staying above real overhead.
+# Measured on this repo's dev machine: a trivial invocation costs ~130-155ms
+# idle, and ~1130ms with 24 fork-heavy background processes — roughly 8x. The
+# baseline is set at the idle figure so the scale starts responding as soon as
+# the machine is meaningfully busier than idle, rather than only under extreme
+# load.
+SUITE_LOAD_BASELINE_MS=250   # idle measures 130-175ms; 250 leaves room for jitter
+SUITE_WALL_BASELINE_S=90     # measured: 82-92s for the whole suite, idle
+
+suite_now_ms() {
+  if command -v perl > /dev/null 2>&1; then
+    perl -MTime::HiRes=time -e 'printf "%d", time()*1000'
+  else
+    printf '%s' $(( $(date +%s) * 1000 ))
+  fi
+}
+
+# Best of three trivial invocations. BEST, not mean: we want the machine's floor
+# for "start bash, parse .stride.md, run one no-op command, exit", so a single
+# scheduling hiccup during calibration does not inflate every bound in the suite.
+calibrate_suite_overhead_ms() {
+  local _p="$TMPDIR_TEST/.load-calibration" _s _e _best=999999 _i
+  mkdir -p "$_p"
+  printf '## before_doing\n\n```bash\ntrue\n```\n' > "$_p/.stride.md"
+  for _i in 1 2 3; do
+    _s=$(suite_now_ms)
+    echo '{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}' \
+      | CLAUDE_PROJECT_DIR="$_p" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+    _e=$(( $(suite_now_ms) - _s ))
+    [ "$_e" -lt "$_best" ] && _best=$_e
+  done
+  printf '%s' "$_best"
+}
+
+SUITE_START_MS=$(suite_now_ms)
+SUITE_OVERHEAD_MS=$(calibrate_suite_overhead_ms)
+# Integer scale, floor 1 — a machine faster than the baseline never TIGHTENS a
+# bound, because these are backstops rather than performance assertions.
+SUITE_LOAD_SCALE=$(( (SUITE_OVERHEAD_MS + SUITE_LOAD_BASELINE_MS - 1) / SUITE_LOAD_BASELINE_MS ))
+[ "$SUITE_LOAD_SCALE" -lt 1 ] && SUITE_LOAD_SCALE=1
+
+# A scaled wall-clock backstop, in whole seconds.
+#   $1 — the base bound that holds on an idle machine
+#   $2 — the UN-KILLED duration of the case: how long the hook body would take
+#        if the kill never happened (i.e. its `sleep`)
+#
+# The cap on $2 is the load-bearing half, and scaling without it would be worse
+# than the fixed constant it replaces. These bounds exist to catch one specific
+# regression: the timeout silently not firing, so the body runs to completion. A
+# bound that scales past the un-killed duration can no longer see that — an 8x
+# scale would take 15a's bound from 20s to 160s, and a `sleep 30` that ran in
+# full would sail through it. So the scaled value is clamped to stay below the
+# un-killed floor, and the guard keeps its meaning at every load level. The
+# margin is generous in practice: at the 8x load measured here a genuinely
+# killed 1s-budget hook finishes in about 2s against a 27s bound.
+wall_budget() {
+  local _scaled=$(( $1 * SUITE_LOAD_SCALE )) _cap=$(( $2 - 3 ))
+  # If the cap is already below the base bound the case is mis-specified — its
+  # un-killed duration does not leave room for the bound it asks for. Say so
+  # loudly rather than silently restoring the base, which would reinstate exactly
+  # the un-clamped value this function exists to prevent.
+  if [ "$_cap" -lt "$1" ]; then
+    # Deliberately NOT incrementing FAIL here: this runs inside a command
+    # substitution, so the increment would happen in a subshell and be lost —
+    # counting it would only look like a guard. Returning the (tighter) cap is
+    # what surfaces it, because the calling assertion then fails on its own.
+    echo -e "  ${RED}wall_budget: base $1s does not fit under un-killed $2s${RESET}" >&2
+    printf %s "$_cap"
+    return
+  fi
+  [ "$_scaled" -gt "$_cap" ] && _scaled=$_cap
+  printf %s "$_scaled"
+}
+
+# (D241) The timeout tests' own BUDGET scales too, and this is a different fix
+# from the wall-clock bounds above — it removes a race rather than widening a
+# backstop. Those cases run a section of `echo` / `sleep 30` under a 1s budget
+# and then assert that the kill landed on command **2/3**. That holds only while
+# command 1 finishes inside the budget, and command 1's cost is a fork, which is
+# exactly what load inflates: the calibration above measured a trivial
+# invocation at ~936ms under 24 background processes, against that 1s budget. So
+# under load the budget expires on command 1 and the assertion fails on the
+# index, having found nothing wrong with the code. Scaling the budget keeps
+# command 1 comfortably inside it at any load, and `sleep 30` still overruns it
+# by a wide margin, so the case tests what it always tested. At scale 1 — an
+# idle machine — this is 1s, exactly as before.
+# The floor is 2, not 1, and that matters on an IDLE machine rather than a busy
+# one. run_stride_section computes its elapsed time with whole-second `date +%s`
+# granularity (stride-hook.sh, `_elapsed=$(( $(date +%s) - _start_secs ))`) and
+# forks two mktemps between the section start and command 1. A 1s budget is
+# therefore exhausted before command 1 runs whenever a second boundary happens to
+# fall across those forks — which reports `command_index: 0` and "section budget
+# exhausted before this command started" instead of the "command 2/3 timed out"
+# these cases assert. Scaling alone never fixed that, because at scale 1 the
+# budget stayed 1s. A floor of 2 puts a whole second of slack between the forks
+# and the boundary, and `sleep 30` still overruns it by 28s.
+TIMEOUT_TEST_BUDGET=$(( 2 * SUITE_LOAD_SCALE ))
+
+# 15e's section budget, same treatment. Its command 1 is `sleep 2`, so the base
+# has to clear 2s of sleep PLUS the per-command fork and the same whole-second
+# rounding — a 4s base leaves 2s of absolute margin for costs that are not purely
+# wall-clock, which is thinner than it looks, and 11d (this case's mirror) is the
+# one that was actually observed failing at 21s. Scaling it keeps `"command_index": 1`
+# true at any load; `sleep 30` still overruns even a scaled budget comfortably.
+# CAPPED, and the cap is not optional: this budget scales UP toward the very
+# duration it must stay below. The section is `sleep 2; sleep 30` = ~32s, so an
+# unclamped 4x8=32s budget would expire exactly as the section finished on its
+# own and the kill might never fire at all — the same class of self-defeating
+# scaling wall_budget is clamped against, in the opposite direction. 12s clears
+# command 1 (2s of sleep plus ~1.2s of fork at the 8x load measured here) with
+# room to spare, and leaves 20s of margin before the un-killed 32s.
+SPAN_TEST_BUDGET=$(( 4 * SUITE_LOAD_SCALE ))
+[ "$SPAN_TEST_BUDGET" -gt 12 ] && SPAN_TEST_BUDGET=12
+
+if [ "$SUITE_LOAD_SCALE" -gt 1 ]; then
+  echo "NOTE: this machine is loaded — a trivial hook invocation took ${SUITE_OVERHEAD_MS}ms"
+  echo "      against a ${SUITE_LOAD_BASELINE_MS}ms idle baseline, so wall-clock backstops are"
+  echo "      scaled ${SUITE_LOAD_SCALE}x. Timing results here are not comparable to an idle run."
+  echo ""
+fi
+
 # --- Test .stride.md files ---
 
 cat > "$TMPDIR_TEST/basic.stride.md" << 'STRIDE'
@@ -4114,17 +4275,17 @@ STRIDE
 TO_CLAIM_JSON='{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}'
 TO_STDERR_FILE=$(mktemp)
 TO_START=$(date +%s)
-OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$TO_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=1 bash "$HOOK_SCRIPT" post 2>"$TO_STDERR_FILE")
+OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$TO_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=$TIMEOUT_TEST_BUDGET bash "$HOOK_SCRIPT" post 2>"$TO_STDERR_FILE")
 EXIT_CODE=$?
 TO_WALL=$(( $(date +%s) - TO_START ))
 TO_STDERR=$(cat "$TO_STDERR_FILE")
 rm -f "$TO_STDERR_FILE"
 assert_exit "15a: timed-out hook exits 2 (blocking failure)" 2 "$EXIT_CODE"
 assert_contains "15a: stderr names the hook and budget" \
-  "Stride before_doing hook command 2/3 timed out after 1s budget" "$TO_STDERR"
+  "Stride before_doing hook command 2/3 timed out after ${TIMEOUT_TEST_BUDGET}s budget" "$TO_STDERR"
 assert_contains "15a: failure JSON marks timed_out" '"timed_out": true' "$OUTPUT"
 assert_contains "15a: failure JSON carries exit 124" '"exit_code": 124' "$OUTPUT"
-assert_contains "15a: failure JSON carries the budget" '"budget_seconds": 1' "$OUTPUT"
+assert_contains "15a: failure JSON carries the budget" "\"budget_seconds\": $TIMEOUT_TEST_BUDGET" "$OUTPUT"
 if [ -f "$TO_PROJ/should_not_exist.txt" ]; then
   echo -e "  ${RED}FAIL${RESET}: 15a: commands after the timeout must not run"
   FAIL=$((FAIL + 1))
@@ -4132,7 +4293,7 @@ else
   echo -e "  ${GREEN}PASS${RESET}: 15a: commands after the timeout do not run"
   PASS=$((PASS + 1))
 fi
-if [ "$TO_WALL" -lt 20 ]; then
+if [ "$TO_WALL" -lt "$(wall_budget 20 30)" ]; then
   echo -e "  ${GREEN}PASS${RESET}: 15a: killed promptly (${TO_WALL}s wall clock)"
   PASS=$((PASS + 1))
 else
@@ -4159,16 +4320,16 @@ assert_contains "15b: both commands completed" "fast two" "$OUTPUT"
 # 15c: The watchdog fallback (no timeout utility) still enforces the budget.
 TO_STDERR_FILE=$(mktemp)
 TO_START=$(date +%s)
-OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$TO_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=1 STRIDE_HOOK_TIMEOUT_TOOL=none bash "$HOOK_SCRIPT" post 2>"$TO_STDERR_FILE")
+OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$TO_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=$TIMEOUT_TEST_BUDGET STRIDE_HOOK_TIMEOUT_TOOL=none bash "$HOOK_SCRIPT" post 2>"$TO_STDERR_FILE")
 EXIT_CODE=$?
 TO_WALL=$(( $(date +%s) - TO_START ))
 TO_STDERR=$(cat "$TO_STDERR_FILE")
 rm -f "$TO_STDERR_FILE"
 assert_exit "15c: watchdog fallback kills on budget (exit 2)" 2 "$EXIT_CODE"
 assert_contains "15c: watchdog reports timeout naming hook and budget" \
-  "timed out after 1s budget" "$TO_STDERR"
+  "timed out after ${TIMEOUT_TEST_BUDGET}s budget" "$TO_STDERR"
 assert_contains "15c: watchdog synthesizes exit 124" '"exit_code": 124' "$OUTPUT"
-if [ "$TO_WALL" -lt 20 ]; then
+if [ "$TO_WALL" -lt "$(wall_budget 20 30)" ]; then
   echo -e "  ${GREEN}PASS${RESET}: 15c: watchdog killed promptly (${TO_WALL}s wall clock)"
   PASS=$((PASS + 1))
 else
@@ -4288,7 +4449,7 @@ STRIDE
   assert_exit "15d2: server 1000ms timeout enforced end-to-end (exit 2)" 2 "$EXIT_CODE"
   assert_contains "15d2: stderr names the server-derived 1s budget" \
     "timed out after 1s budget" "$SRV_STDERR"
-  if [ "$SRV_WALL" -lt 20 ]; then
+  if [ "$SRV_WALL" -lt "$(wall_budget 20 30)" ]; then
     echo -e "  ${GREEN}PASS${RESET}: 15d2: killed on the server budget (${SRV_WALL}s wall clock)"
     PASS=$((PASS + 1))
   else
@@ -4310,7 +4471,7 @@ sleep 30
 STRIDE
 SPAN_STDERR_FILE=$(mktemp)
 SPAN_START=$(date +%s)
-OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$SPAN_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=4 bash "$HOOK_SCRIPT" post 2>"$SPAN_STDERR_FILE")
+OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$SPAN_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=$SPAN_TEST_BUDGET bash "$HOOK_SCRIPT" post 2>"$SPAN_STDERR_FILE")
 EXIT_CODE=$?
 SPAN_WALL=$(( $(date +%s) - SPAN_START ))
 SPAN_STDERR=$(cat "$SPAN_STDERR_FILE")
@@ -4318,8 +4479,8 @@ rm -f "$SPAN_STDERR_FILE"
 assert_exit "15e: section-budget overrun exits 2" 2 "$EXIT_CODE"
 assert_contains "15e: the SECOND command is the one killed" '"command_index": 1' "$OUTPUT"
 assert_contains "15e: failure JSON marks timed_out" '"timed_out": true' "$OUTPUT"
-assert_contains "15e: budget reported is the section budget" '"budget_seconds": 4' "$OUTPUT"
-if [ "$SPAN_WALL" -lt 15 ]; then
+assert_contains "15e: budget reported is the section budget" "\"budget_seconds\": $SPAN_TEST_BUDGET" "$OUTPUT"
+if [ "$SPAN_WALL" -lt "$(wall_budget 15 32)" ]; then
   echo -e "  ${GREEN}PASS${RESET}: 15e: section killed near its 4s budget (${SPAN_WALL}s wall clock)"
   PASS=$((PASS + 1))
 else
@@ -4350,9 +4511,9 @@ sleep 30 & echo $! > orphan.pid; wait
 ```
 STRIDE
   if [ -n "$TOOL_MODE" ]; then
-    OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$ORPHAN_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=1 STRIDE_HOOK_TIMEOUT_TOOL="$TOOL_MODE" bash "$HOOK_SCRIPT" post 2>&1)
+    OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$ORPHAN_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=$TIMEOUT_TEST_BUDGET STRIDE_HOOK_TIMEOUT_TOOL="$TOOL_MODE" bash "$HOOK_SCRIPT" post 2>&1)
   else
-    OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$ORPHAN_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=1 bash "$HOOK_SCRIPT" post 2>&1)
+    OUTPUT=$(echo "$TO_CLAIM_JSON" | CLAUDE_PROJECT_DIR="$ORPHAN_PROJ" STRIDE_HOOK_TIMEOUT_OVERRIDE=$TIMEOUT_TEST_BUDGET bash "$HOOK_SCRIPT" post 2>&1)
   fi
   EXIT_CODE=$?
   ORPHAN_LABEL="15g(${TOOL_MODE:-auto})"
@@ -4402,11 +4563,16 @@ EXIT_CODE=$?
 assert_exit "16a: sleeping hook exits 0" 0 "$EXIT_CODE"
 assert_contains "16a: success JSON still carries deprecated duration_seconds" '"duration_seconds"' "$OUTPUT"
 DUR_MS=$(echo "$OUTPUT" | grep -o '"duration_ms": [0-9]*' | head -1 | grep -o '[0-9]*$')
-if [ -n "$DUR_MS" ] && [ "$DUR_MS" -ge 900 ] && [ "$DUR_MS" -le 5000 ]; then
+# (D241) The LOWER bound is load-independent and stays fixed: a 1s sleep cannot
+# report less than ~1s however busy the machine is, so 900 catches a genuinely
+# wrong measurement. The UPPER bound is the load-sensitive half — it is absorbing
+# process-startup overhead, not measuring the sleep — so it scales.
+DUR_MAX=$(( 5000 + SUITE_OVERHEAD_MS * 4 ))
+if [ -n "$DUR_MS" ] && [ "$DUR_MS" -ge 900 ] && [ "$DUR_MS" -le "$DUR_MAX" ]; then
   echo -e "  ${GREEN}PASS${RESET}: 16a: duration_ms is a plausible integer (${DUR_MS}ms for a 1s sleep)"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${RESET}: 16a: expected duration_ms in 900..5000, got: '${DUR_MS}'"
+  echo -e "  ${RED}FAIL${RESET}: 16a: expected duration_ms in 900..${DUR_MAX}, got: '${DUR_MS}'"
   FAIL=$((FAIL + 1))
 fi
 
@@ -6074,13 +6240,13 @@ touch should_not_exist.txt
 STRIDE
 D230_TO_ERR=$(mktemp)
 D230_TO_OUT=$(echo "$D230_COMPLETE" | CLAUDE_PROJECT_DIR="$D230_TO_PROJ" \
-  STRIDE_HOOK_TIMEOUT_OVERRIDE=1 bash "$HOOK_SCRIPT" pre 2>"$D230_TO_ERR")
+  STRIDE_HOOK_TIMEOUT_OVERRIDE=$TIMEOUT_TEST_BUDGET bash "$HOOK_SCRIPT" pre 2>"$D230_TO_ERR")
 D230_TO_RC=$?
 D230_TO_STDERR=$(cat "$D230_TO_ERR"); rm -f "$D230_TO_ERR"
 
 assert_exit "25b: a budget kill also blocks the completion" 2 "$D230_TO_RC"
 assert_contains "25b: stderr says TIMED OUT and names the budget" \
-  "Stride after_doing hook command 2/3 timed out after 1s budget" "$D230_TO_STDERR"
+  "Stride after_doing hook command 2/3 timed out after ${TIMEOUT_TEST_BUDGET}s budget" "$D230_TO_STDERR"
 assert_contains "25b: the failure JSON marks timed_out TRUE" '"timed_out": true' "$D230_TO_OUT"
 assert_contains "25b: the failure JSON carries exit 124" '"exit_code": 124' "$D230_TO_OUT"
 
@@ -6390,6 +6556,32 @@ echo ""
 echo "========================================"
 TOTAL=$((PASS + FAIL))
 echo "Results: $PASS passed, $FAIL failed (out of $TOTAL)"
+
+# (D241) Report the run's own wall clock and the load it measured, so a loaded
+# run is distinguishable from a failing one WITHOUT re-running it. This is the
+# cheap step that would have prevented this defect's original misdiagnosis: a
+# 5-run sample taken beside an 85-second Elixir suite was read as a code
+# regression, when every failure in it was load-induced.
+SUITE_WALL_MS=$(( $(suite_now_ms) - SUITE_START_MS ))
+SUITE_WALL_S=$(( SUITE_WALL_MS / 1000 ))
+# Sample the load AGAIN at the end. Calibrating only at t=0 misses the exact
+# scenario that filed this defect: the 85-second Elixir suite that skewed the
+# original 5-run sample started while the hook suite was already running. A run
+# that begins quiet and turns busy would otherwise scale nothing, warn about
+# nothing, and fail with no indication in its own output that the machine was
+# the cause.
+SUITE_OVERHEAD_END_MS=$(calibrate_suite_overhead_ms)
+echo "Wall clock: ${SUITE_WALL_S}s (idle baseline ~${SUITE_WALL_BASELINE_S}s)  |  startup overhead: ${SUITE_OVERHEAD_MS}ms at start, ${SUITE_OVERHEAD_END_MS}ms at end (idle baseline ${SUITE_LOAD_BASELINE_MS}ms)"
+SUITE_END_SCALE=$(( (SUITE_OVERHEAD_END_MS + SUITE_LOAD_BASELINE_MS - 1) / SUITE_LOAD_BASELINE_MS ))
+if [ "$SUITE_LOAD_SCALE" -gt 1 ] || [ "$SUITE_END_SCALE" -gt 1 ] || [ "$SUITE_WALL_S" -gt $(( SUITE_WALL_BASELINE_S * 2 )) ]; then
+  echo ""
+  echo "WARNING: this machine was LOADED during the run (${SUITE_LOAD_SCALE}x at start,"
+  echo "         ${SUITE_END_SCALE}x at end, ${SUITE_WALL_S}s wall clock against a ~${SUITE_WALL_BASELINE_S}s idle"
+  echo "         baseline). Wall-clock backstops were scaled to the START sample, so a"
+  echo "         run that only became busy later got LESS headroom than it needed."
+  echo "         Reproduce any failure above on a quiet machine before diagnosing it as"
+  echo "         a code defect — that mistake is what filed D241."
+fi
 echo "========================================"
 
 [ "$FAIL" -eq 0 ] && exit 0 || exit 1

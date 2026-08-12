@@ -229,6 +229,98 @@ function Wait-ForListener {
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) "stride-ps-test-$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
 New-Item -ItemType Directory -Path $TmpDir -Force | Out-Null
 
+# ============================================================
+# Load calibration and wall-clock reporting (D241)
+# ============================================================
+# Mirror of the bash suite's calibration, and this side is where the defect was
+# actually OBSERVED: test 11d reported "expected kill near 4s, took 21s" while a
+# second test suite ran concurrently, then passed on a quiet re-run. The fixed
+# bounds below (`-lt 20`, `-lt 15`) have to absorb process-startup overhead,
+# which scales with machine load — and pwsh startup is heavier than bash's, so
+# this mirror is MORE exposed to it, not less.
+#
+# Two distinct fixes, as in the bash twin:
+#   - wall-clock bounds are scaled by measured load and then CLAMPED below the
+#     un-killed duration, so they keep catching a timeout that never fires;
+#   - the timeout tests' own budget is scaled, so command 1 of the section still
+#     finishes inside it under load and the kill lands where the case asserts.
+$script:SuiteLoadBaselineMs = 1000  # idle measures ~682ms; 1000 leaves room for jitter
+$script:SuiteWallBaselineS  = 300   # measured: ~298s for the whole suite, idle
+
+function Get-SuiteNowMs { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
+
+# Best of three: we want the machine's floor for one no-op invocation, so a
+# single scheduling hiccup during calibration cannot inflate every bound.
+function Measure-SuiteOverheadMs {
+    $p = Join-Path $TmpDir '.load-calibration'
+    New-Item -ItemType Directory -Path $p -Force | Out-Null
+    Set-Content -Path (Join-Path $p '.stride.md') -Value @'
+## before_doing
+```bash
+true
+```
+'@ -Encoding UTF8
+    $claim = '{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim -d {}"}}'
+    $best = [int]::MaxValue
+    foreach ($i in 1..3) {
+        $s = Get-SuiteNowMs
+        $null = Invoke-HookScript -InputJson $claim -Phase 'post' -ProjectDir $p
+        $e = [int]([long](Get-SuiteNowMs) - [long]$s)
+        if ($e -lt $best) { $best = $e }
+    }
+    return $best
+}
+
+$script:SuiteStartMs = Get-SuiteNowMs
+# Guarded because this runs BEFORE the try/finally that removes $TmpDir: a throw
+# in calibration would otherwise leak the temp directory and its fixtures. The
+# bash twin needs no equivalent — its `trap ... EXIT` is armed before calibration.
+try {
+    $script:SuiteOverheadMs = Measure-SuiteOverheadMs
+} catch {
+    Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
+    throw
+}
+$script:SuiteLoadScale = [Math]::Max(1, [Math]::Ceiling($script:SuiteOverheadMs / [double]$script:SuiteLoadBaselineMs))
+
+# $Base holds on an idle machine; $UnkilledSec is how long the hook body runs if
+# the kill never fires. The clamp is the load-bearing half — an 8x scale would
+# take 11a's bound from 20s to 160s, and a `sleep 30` that ran in full would sail
+# straight through it.
+function Get-WallBudget {
+    param([int]$Base, [int]$UnkilledSec)
+    $scaled = $Base * $script:SuiteLoadScale
+    $cap = $UnkilledSec - 3
+    # A cap already below the base means the case is mis-specified: its un-killed
+    # duration does not leave room for the bound it asks for. Say so, and return
+    # the tighter cap — silently restoring the base would reinstate exactly the
+    # un-clamped value this function exists to prevent.
+    if ($cap -lt $Base) {
+        Write-Host "  Get-WallBudget: base ${Base}s does not fit under un-killed ${UnkilledSec}s" -ForegroundColor Red
+        return $cap
+    }
+    if ($scaled -gt $cap) { $scaled = $cap }
+    return $scaled
+}
+
+# The timeout cases run `echo` / `sleep 30` under a 1s budget and assert the kill
+# landed on the SECOND command. That holds only while command 1 — a fork — fits
+# inside the budget, which is exactly what load inflates. At scale 1 this is 1s,
+# unchanged.
+$script:TimeoutTestBudget = 2 * $script:SuiteLoadScale
+
+# 11d's section budget. CAPPED for the same reason as the bash twin: the section
+# is `sleep 2; sleep 30` = ~32s, so an unclamped 4x8=32s budget would expire only
+# as the section finished on its own and the kill might never fire.
+$script:SpanTestBudget = [Math]::Min(4 * $script:SuiteLoadScale, 12)
+
+if ($script:SuiteLoadScale -gt 1) {
+    Write-Host "NOTE: this machine is loaded — a trivial hook invocation took $($script:SuiteOverheadMs)ms"
+    Write-Host "      against a $($script:SuiteLoadBaselineMs)ms idle baseline, so wall-clock backstops are"
+    Write-Host "      scaled $($script:SuiteLoadScale)x. Timing results are not comparable to an idle run."
+    Write-Host ""
+}
+
 try {
 
 # --- Test .stride.md files ---
@@ -2426,7 +2518,7 @@ sleep 30
 touch should_not_exist.txt
 ```
 '@ -Encoding UTF8
-$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = '1'
+$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = "$($script:TimeoutTestBudget)"
 try {
     $toStart = [DateTimeOffset]::UtcNow
     $r = Invoke-HookScript -InputJson $claimJson11 -Phase 'post' -ProjectDir $toProj
@@ -2435,10 +2527,10 @@ try {
     Remove-Item Env:STRIDE_HOOK_TIMEOUT_OVERRIDE -ErrorAction SilentlyContinue
 }
 Assert-Exit "11a: timed-out hook exits 2 (blocking failure)" 2 $r.ExitCode
-Assert-Contains "11a: stderr names the hook and budget" "Stride before_doing hook command 2/3 timed out after 1s budget" $r.Stderr
+Assert-Contains "11a: stderr names the hook and budget" "Stride before_doing hook command 2/3 timed out after $($script:TimeoutTestBudget)s budget" $r.Stderr
 Assert-Contains "11a: failure JSON marks timed_out" '"timed_out":true' $r.Stdout
 Assert-Contains "11a: failure JSON carries exit 124" '"exit_code":124' $r.Stdout
-Assert-Contains "11a: failure JSON carries the budget" '"budget_seconds":1' $r.Stdout
+Assert-Contains "11a: failure JSON carries the budget" "`"budget_seconds`":$($script:TimeoutTestBudget)" $r.Stdout
 if (Test-Path (Join-Path $toProj 'should_not_exist.txt')) {
     Write-Host "  FAIL: 11a: commands after the timeout must not run" -ForegroundColor Red
     $script:FAIL++
@@ -2446,7 +2538,7 @@ if (Test-Path (Join-Path $toProj 'should_not_exist.txt')) {
     Write-Host "  PASS: 11a: commands after the timeout do not run" -ForegroundColor Green
     $script:PASS++
 }
-if ($toWall -lt 20) {
+if ($toWall -lt (Get-WallBudget -Base 20 -UnkilledSec 30)) {
     Write-Host "  PASS: 11a: killed promptly ($([int]$toWall)s wall clock)" -ForegroundColor Green
     $script:PASS++
 } else {
@@ -2494,7 +2586,7 @@ $r = Invoke-HookScript -InputJson $srvJson -Phase 'post' -ProjectDir $srvProj
 $srvWall = ([DateTimeOffset]::UtcNow - $srvStart).TotalSeconds
 Assert-Exit "11c: server 1000ms timeout enforced end-to-end (exit 2)" 2 $r.ExitCode
 Assert-Contains "11c: stderr names the server-derived 1s budget" "timed out after 1s budget" $r.Stderr
-if ($srvWall -lt 20) {
+if ($srvWall -lt (Get-WallBudget -Base 20 -UnkilledSec 30)) {
     Write-Host "  PASS: 11c: killed on the server budget ($([int]$srvWall)s wall clock)" -ForegroundColor Green
     $script:PASS++
 } else {
@@ -2513,7 +2605,7 @@ sleep 2
 sleep 30
 ```
 '@ -Encoding UTF8
-$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = '4'
+$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = "$($script:SpanTestBudget)"
 try {
     $spanStart = [DateTimeOffset]::UtcNow
     $r = Invoke-HookScript -InputJson $claimJson11 -Phase 'post' -ProjectDir $spanProj
@@ -2524,8 +2616,8 @@ try {
 Assert-Exit "11d: section-budget overrun exits 2" 2 $r.ExitCode
 Assert-Contains "11d: the SECOND command is the one killed" '"command_index":1' $r.Stdout
 Assert-Contains "11d: failure JSON marks timed_out" '"timed_out":true' $r.Stdout
-Assert-Contains "11d: budget reported is the section budget" '"budget_seconds":4' $r.Stdout
-if ($spanWall -lt 15) {
+Assert-Contains "11d: budget reported is the section budget" "`"budget_seconds`":$($script:SpanTestBudget)" $r.Stdout
+if ($spanWall -lt (Get-WallBudget -Base 15 -UnkilledSec 32)) {
     Write-Host "  PASS: 11d: section killed near its 4s budget ($([int]$spanWall)s wall clock)" -ForegroundColor Green
     $script:PASS++
 } else {
@@ -2543,7 +2635,7 @@ Set-Content -Path (Join-Path $orphanProj '.stride.md') -Value @'
 sleep 30 & echo $! > orphan.pid; wait
 ```
 '@ -Encoding UTF8
-$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = '1'
+$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = "$($script:TimeoutTestBudget)"
 try {
     $r = Invoke-HookScript -InputJson $claimJson11 -Phase 'post' -ProjectDir $orphanProj
 } finally {
@@ -3339,7 +3431,7 @@ sleep 30
 touch should_not_exist.txt
 ```
 '@ -Encoding UTF8
-$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = '1'
+$env:STRIDE_HOOK_TIMEOUT_OVERRIDE = "$($script:TimeoutTestBudget)"
 try {
     $rTo = Invoke-HookScript -InputJson $d230Complete -Phase 'pre' -ProjectDir $d230ToProj
 } finally {
@@ -3347,7 +3439,7 @@ try {
 }
 Assert-Exit "18b: a budget kill also blocks the completion" 2 $rTo.ExitCode
 Assert-Contains "18b: stderr says TIMED OUT and names the budget" `
-    "Stride after_doing hook command 2/3 timed out after 1s budget" $rTo.Stderr
+    "Stride after_doing hook command 2/3 timed out after $($script:TimeoutTestBudget)s budget" $rTo.Stderr
 Assert-Contains "18b: the failure JSON marks timed_out TRUE" '"timed_out":true' $rTo.Stdout
 Assert-Contains "18b: the failure JSON carries exit 124" '"exit_code":124' $rTo.Stdout
 
@@ -3587,6 +3679,24 @@ Write-Host ""
 Write-Host "========================================"
 $Total = $script:PASS + $script:FAIL
 Write-Host "Results: $($script:PASS) passed, $($script:FAIL) failed (out of $Total)"
+
+# (D241) Report this run's own wall clock and the load it measured, so a loaded
+# run is distinguishable from a failing one WITHOUT re-running it.
+$suiteWallS = [int](([long](Get-SuiteNowMs) - [long]$script:SuiteStartMs) / 1000)
+# Sample the load AGAIN at the end — calibrating only at t=0 misses a run that
+# begins quiet and turns busy, which is exactly the scenario that filed D241.
+$suiteOverheadEndMs = Measure-SuiteOverheadMs
+$suiteEndScale = [Math]::Max(1, [Math]::Ceiling($suiteOverheadEndMs / [double]$script:SuiteLoadBaselineMs))
+Write-Host "Wall clock: ${suiteWallS}s (idle baseline ~$($script:SuiteWallBaselineS)s)  |  startup overhead: $($script:SuiteOverheadMs)ms at start, ${suiteOverheadEndMs}ms at end (idle baseline $($script:SuiteLoadBaselineMs)ms)"
+if ($script:SuiteLoadScale -gt 1 -or $suiteEndScale -gt 1 -or $suiteWallS -gt ($script:SuiteWallBaselineS * 2)) {
+    Write-Host ""
+    Write-Host "WARNING: this machine was LOADED during the run ($($script:SuiteLoadScale)x at start,"
+    Write-Host "         ${suiteEndScale}x at end, ${suiteWallS}s wall clock against a ~$($script:SuiteWallBaselineS)s idle"
+    Write-Host "         baseline). Wall-clock backstops were scaled to the START sample, so a"
+    Write-Host "         run that only became busy later got LESS headroom than it needed."
+    Write-Host "         Reproduce any failure above on a quiet machine before diagnosing it as"
+    Write-Host "         a code defect — that mistake is what filed D241."
+}
 Write-Host "========================================"
 
 } finally {

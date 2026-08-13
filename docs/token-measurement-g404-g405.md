@@ -337,6 +337,9 @@ wc -c $C/1.61.0/skills/stride-workflow/SKILL.md $C/1.62.0/skills/stride-workflow
 grep -rl --no-ignore "response_view" stride*/ ~/.claude/plugins/cache/ | wc -l
 
 # G405: confirm the slim views are serving in production
+# (the first curl is DELIBERATELY unslimmed — it is the baseline half of this
+#  before/after size comparison, and the one sanctioned bare-index call in the
+#  plugin; every real index call carries response_view=slim per W2086)
 curl -sS -H "Authorization: Bearer $TOKEN" "$URL/api/tasks"                    -o /dev/null -w '%{size_download}\n'
 curl -sS -H "Authorization: Bearer $TOKEN" "$URL/api/tasks?response_view=slim" -o /dev/null -w '%{size_download}\n'
 ```

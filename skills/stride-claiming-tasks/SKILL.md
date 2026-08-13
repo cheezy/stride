@@ -59,6 +59,8 @@ When the user initiates a Stride workflow (e.g., "claim a task", "work on tasks"
 - All hook executions (bash commands from `.stride.md`)
 - **Every API call in every skill in this plugin**
 
+**Never call `GET /api/tasks` (index) or `GET /api/tasks/:id/tree` without `response_view=slim`** — the bare index measured 2.2MB (~840,000 tokens) against production; the slim view serves the same rows at roughly 1% of the size. On tree, slim slims the **children** only — the root task always renders full (deliberately, so the caller keeps the detail it asked for), so a childless task's tree shrinks not at all. The claim and complete curls stay full — their responses feed discovery, the env-cache refresh, and after_goal detection.
+
 **NEVER ask the user:**
 - "Should I call the API?"
 - "Can I claim this task?"

@@ -169,6 +169,8 @@ STEP 8: Post-Completion
 
 ## Quick Reference Card
 
+**Never call `GET /api/tasks` (index) or `GET /api/tasks/:id/tree` without `response_view=slim`** — the bare index measured 2.2MB (~840,000 tokens) against production; slim serves the same rows at roughly 1% of the size. On tree, slim slims the **children** only — the root task always renders full, so a childless task's tree shrinks not at all. Claim and complete curls stay full.
+
 ```
 CLAUDE CODE WORKFLOW:
 ├─ 0. Prerequisites: .stride_auth.md + .stride.md exist

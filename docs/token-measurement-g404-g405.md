@@ -569,3 +569,91 @@ commit one itself:
 - the per-position and two-task views are **asserted to agree**, so a subagent
   reachable from two parents cannot be counted once in one view and twice in
   the other.
+
+---
+
+## G407 — measured 2026-08-12: the reports did not shrink, they moved
+
+**W2071.** Post-conversion re-measurement of the same quantity W2068–W2070
+changed: what a dispatched subagent puts into the main loop's context. Plugin
+**1.65.0**, no compaction, all dispatches inline (no dispatcher mode), attributed
+from the session transcript by the same per-source method used above.
+
+### The headline, and the trap in it
+
+| | Baseline (1.62.0) | This session (1.65.0) |
+|---|---:|---:|
+| Reports | 9 | 6 |
+| Bytes **into context** | 161,165 | **15,876** |
+| Average **into context** | 17,907 | **2,646** |
+
+**Per report, what reaches context fell 17,907 → 2,646 B — a 85.2% cut.** That
+is the number this goal actually bought.
+
+**But the reports themselves got BIGGER, and this is the part that is easy to
+report wrongly.** The same six dispatches wrote **185,457 B** to disk —
+**30,909 B per dispatch** against a baseline whose whole report averaged
+17,907 B. Freed from the cost of returning everything inline, the agents write
+*more*, not less. Anyone comparing totals (161,165 → 185,457) would conclude
+G407 made things worse; anyone comparing on-disk-to-in-context would claim a
+saving that includes bytes which never existed before.
+
+**Removed from context vs merely moved to disk — the distinction W2071 exists to
+draw:**
+
+- **Produced:** 185,457 B across 6 dispatches
+- **Entered context:** 15,876 B
+- **Kept out of context:** 169,581 B — **91.4% of what was produced**
+
+At this document's measured **2.86 B/token**, 169,581 B ≈ **59,294 tokens** kept
+out of the main loop across two tasks. Resident context is re-sent on every
+later main-loop request, so as with G404 the realised saving is that figure
+multiplied by the requests that follow it — not a one-off.
+
+### Where the cost centre moved
+
+Unique content added to context, this session, by source:
+
+| Source | Calls | Bytes | Share | Baseline share |
+|---|---:|---:|---:|---:|
+| Bash tool results | 72 | 164,665 | **72.1%** | 48.1% |
+| Read | 12 | 42,614 | 18.7% | 5.4% |
+| **Agent / subagent reports** | 6 | **15,876** | **7.0%** | **40.0%** |
+| AskUserQuestion | 2 | 2,189 | 1.0% | — |
+| Edit | 10 | 1,954 | 0.9% | 2.7% |
+| Write | 4 | 850 | 0.4% | 0.2% |
+| Skill | 4 | 155 | 0.1% | — |
+
+**Subagent reports fell from 40.0% of added context to 7.0%.** The 88% that
+"tool output and subagent reports" jointly accounted for is now overwhelmingly
+Bash. The next lever is Bash output, not agents.
+
+### Read this with its caveats — the mix is NOT the baseline's
+
+Stated because W2071's own pitfall requires it, and because two of these push
+the same way:
+
+1. **Two tasks, not three** (D243 small, D242 medium), plus a third explorer
+   from D244, which was explored and then released unstarted. Six dispatches
+   against the baseline's twelve.
+2. **All three were `defect` type.** The Step 3 matrix's Defect row outranks the
+   complexity rows and resolves `Plan = Skip` unless large, so **no planner ran
+   at all** — where the baseline dispatched one per task. A planner report was
+   the largest single artefact measured in this repo (34.8 KB), so its absence
+   flatters any total.
+3. **D221 landed after the baseline**, changing planner precedence, so part of
+   (2) is a rule change rather than a task-shape difference.
+4. Every dispatch ran **inline**; had they gone through a `task-runner`, reports
+   would never have reached the main loop at all and the measured figure would
+   be G406's doing, not G407's.
+
+**Therefore: the per-report into-context figure (17,907 → 2,646) is the
+comparable number. Session totals are not comparable and should not be quoted.**
+
+### The contract held
+
+All six dispatches honoured report-to-file: each wrote its report and returned a
+bounded summary, and **none regressed to returning full output**. The largest
+returned summary was 5,323 B (an explorer, whose bound is deliberately looser at
+60 lines / 6,000 chars); the smallest was 905 B (a re-review). Reviewer summaries
+ran 905–1,407 B against a 24-line / 2,000-char bound.

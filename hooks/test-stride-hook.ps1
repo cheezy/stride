@@ -3242,6 +3242,45 @@ $r = Invoke-HookScript -InputJson $w16dInput -Phase 'post' -ProjectDir $w16dProj
 Assert-Exit "16d: no-file + truncated + unreachable exits 0" 0 $r.ExitCode
 Assert-NotContains "16d: no file + no endpoint does not run ## after_goal" "after_goal_ran" $r.Stdout
 
+# 16e: W2087 — slim completion ack (?response_view=slim): the canonical file
+# holds ONLY the 9-field ack + hooks[] -> after_goal detection + GOAL_* export
+# still work (mirrors test-stride-hook.sh 20e).
+$w16eProj = Join-Path $TmpDir 'w2087-slimack'
+New-Item -ItemType Directory -Path (Join-Path $w16eProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $w16eProj '.stride.md') -Value @'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER] title=[$GOAL_TITLE]"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16eProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":99,"identifier":"W99","title":"Slim task","status":"done","parent_id":55,"needs_review":false,"review_status":null,"complexity":"medium","priority":"high"},"hooks":[{"name":"before_review"},{"name":"after_goal","env":{"GOAL_ID":"55","GOAL_IDENTIFIER":"G55","GOAL_TITLE":"Goal 55"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16eProj
+Assert-Exit "16e: slim ack with after_goal exits 0" 0 $r.ExitCode
+Assert-Contains "16e: ## after_goal ran off the slim ack" "ident=[G55]" $r.Stdout
+Assert-Contains "16e: GOAL_TITLE exported from the slim ack" "title=[Goal 55]" $r.Stdout
+$w16eCache = ''
+if (Test-Path (Join-Path $w16eProj '.stride-env-cache')) {
+    $w16eCache = Get-Content (Join-Path $w16eProj '.stride-env-cache') -Raw -Encoding UTF8
+}
+Assert-Contains "16e: env cache carries GOAL_ID off the slim ack" "GOAL_ID=55" $w16eCache
+
+# 16f: negative control — slim ack whose hooks[] has NO after_goal entry ->
+# the section must NOT run (mirrors test-stride-hook.sh 20f).
+$w16fProj = Join-Path $TmpDir 'w2087-slimneg'
+New-Item -ItemType Directory -Path (Join-Path $w16fProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $w16fProj '.stride.md') -Value @'
+## after_goal
+```bash
+echo "slim_after_goal_ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16fProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":99,"identifier":"W99","title":"Slim task","status":"done","parent_id":55,"needs_review":false,"review_status":null,"complexity":"medium","priority":"high"},"hooks":[{"name":"before_review"}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16fProj
+Assert-Exit "16f: slim ack without after_goal exits 0" 0 $r.ExitCode
+Assert-NotContains "16f: slim ack without after_goal does not run the section" "slim_after_goal_ran" $r.Stdout
+
 # ============================================================
 # Test Group 17: D142 — post-pull TASK_BASE_REF + committed-range override
 # (mirrors test-stride-hook.sh Test Group 21)

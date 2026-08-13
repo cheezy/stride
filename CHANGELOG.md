@@ -23,6 +23,12 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.66.0] - 2026-08-13
+
+### Changed
+
+- **W2087 — the complete curl adopts the slim completion acknowledgement (`?response_view=slim`).** Every runnable completion curl example — both stride-completing-tasks examples, the legacy ≤ v1.15.x inline pattern, and the stride-workflow Step 6 example — now appends `?response_view=slim`, so `PATCH /api/tasks/:id/complete` returns the 9-field ack plus `hooks[]` instead of the full task record. The hook reads only `.data.id`, `.data.parent_id`, and `hooks[]` off the complete response — all present in the ack — and the blessed `tee` capture is unchanged. The trade, stated honestly: on Claude Code this buys **correctness, not tokens** — the harness truncated the oversized full body anyway, and the slim ack costs roughly **872 tokens more** there in exchange for a response that arrives complete instead of truncated mid-JSON; the saving lands on non-truncating runtimes (Cursor/Windsurf/Continue), where the full body previously entered context whole — roughly **22,000 tokens per completion**. Servers predating the slim view ignore the parameter and return the full body, so the curls remain valid against every supported server. The claim curl is untouched — it stays full because its response feeds the env-cache identity refresh. New coverage: sh Group 20e/20f and ps1 Group 16e/16f prove after_goal detection and the no-false-positive control against the slim shape.
+
 ## [1.65.0] - 2026-08-12
 
 ### Added

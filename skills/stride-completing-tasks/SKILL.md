@@ -377,7 +377,7 @@ with **no error**. Three rules, always:
    truncation fallback:
 
    ```bash
-   curl -sS -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
+   curl -sS -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim" \
      -H "Authorization: Bearer $STRIDE_API_TOKEN" \
      -H 'Content-Type: application/json' \
      -d @payload.json \
@@ -394,7 +394,7 @@ child. The `.stride/` directory is created by the orchestrator; if you invoke th
 curl outside the orchestrator, `mkdir -p "$CLAUDE_PROJECT_DIR/.stride"` first.
 
 ```bash
-curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
+curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim" \
   -H "Authorization: Bearer $STRIDE_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d "$(jq -n \
@@ -873,7 +873,7 @@ OTHER ENVIRONMENTS (manual hooks):
 ├─ 7. needs_review=true? → STOP, wait for human ✓
 └─ 8. needs_review=false? → Execute after_review, claim next ✓
 
-API ENDPOINT: PATCH /api/tasks/:id/complete
+API ENDPOINT: PATCH /api/tasks/:id/complete?response_view=slim
 REQUIRED BODY: {
   "agent_name": "Claude Opus 4.6",
   "time_spent_minutes": 45,
@@ -1074,7 +1074,9 @@ still works (the server treats the PUT-uploaded value as authoritative). On
 older servers, the hook PUT 404s harmlessly (fire-and-forget) and the inline
 body remains the only path. If you are unsure of the deployed server version
 or you want a single curl that works against both, use the legacy inline
-pattern below — it remains valid against every supported server.
+pattern below — it remains valid against every supported server. That
+includes the `?response_view=slim` param below — servers predating the slim
+view ignore it and return the full body.
 
 **Legacy inline pattern (≤ v1.15.x deployments).** Inline the snapshot read
 inside the curl invocation using `jq -n --argjson cf`, with the absolute
@@ -1085,7 +1087,7 @@ curl call, so any earlier Bash tool call that reads the file runs BEFORE the
 hook has populated it.
 
 ```bash
-curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
+curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim" \
   -H "Authorization: Bearer $STRIDE_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d "$(jq -n \

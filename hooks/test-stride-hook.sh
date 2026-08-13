@@ -5064,6 +5064,8 @@ fi
 # fallback and missing-section edge cases, and a no-file no-false-positive
 # control, all under truncation. (The truncated-stdout + no-file fresh-call path
 # itself is covered by Group 19; Group 10m covers env-cache forwarding.)
+# 20e/20f lock in W2087: the same detection path against the slim completion
+# acknowledgement body (?response_view=slim), positive and negative control.
 echo ""
 echo "=== Test Group 20: after_goal reliability under truncation (W1612) ==="
 
@@ -5155,6 +5157,50 @@ STRIDE
     FAIL=$((FAIL + 1))
   else
     echo -e "  ${GREEN}PASS${RESET}: 20d: no file + no endpoint does not run ## after_goal (no false positive)"
+    PASS=$((PASS + 1))
+  fi
+
+  # 20e: W2087 — slim completion ack (?response_view=slim): the canonical file
+  # holds ONLY the 9-field ack + hooks[] (no workflow_steps/reviewer_result/
+  # completion_notes) -> after_goal detection and GOAL_* export still work.
+  W20E_PROJ="$TMPDIR_TEST/w2087-slimack"
+  mkdir -p "$W20E_PROJ/.stride"
+  cat > "$W20E_PROJ/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER] title=[$GOAL_TITLE]"
+```
+STRIDE
+  printf '%s' '{"data":{"id":99,"identifier":"W99","title":"Slim task","status":"done","parent_id":55,"needs_review":false,"review_status":null,"complexity":"medium","priority":"high"},"hooks":[{"name":"before_review"},{"name":"after_goal","env":{"GOAL_ID":"55","GOAL_IDENTIFIER":"G55","GOAL_TITLE":"Goal 55"}}]}' \
+    > "$W20E_PROJ/.stride/.last-api-response.json"
+  W20E_OUT=$(echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20E_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  W20E_RC=$?
+  assert_exit "20e: slim ack with after_goal exits 0" 0 "$W20E_RC"
+  assert_contains "20e: ## after_goal ran off the slim ack" "ident=[G55]" "$W20E_OUT"
+  assert_contains "20e: GOAL_TITLE exported from the slim ack" "title=[Goal 55]" "$W20E_OUT"
+  W20E_CACHE=$(cat "$W20E_PROJ/.stride-env-cache" 2>/dev/null)
+  assert_contains "20e: env cache carries GOAL_ID off the slim ack" "GOAL_ID='55'" "$W20E_CACHE"
+
+  # 20f: negative control — slim ack whose hooks[] has NO after_goal entry ->
+  # the section must NOT run (no false positive off the slimmer body).
+  W20F_PROJ="$TMPDIR_TEST/w2087-slimneg"
+  mkdir -p "$W20F_PROJ/.stride"
+  cat > "$W20F_PROJ/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "slim_after_goal_ran"
+```
+STRIDE
+  printf '%s' '{"data":{"id":99,"identifier":"W99","title":"Slim task","status":"done","parent_id":55,"needs_review":false,"review_status":null,"complexity":"medium","priority":"high"},"hooks":[{"name":"before_review"}]}' \
+    > "$W20F_PROJ/.stride/.last-api-response.json"
+  W20F_OUT=$(echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20F_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  W20F_RC=$?
+  assert_exit "20f: slim ack without after_goal exits 0" 0 "$W20F_RC"
+  if echo "$W20F_OUT" | grep -qF "slim_after_goal_ran"; then
+    echo -e "  ${RED}FAIL${RESET}: 20f: ran ## after_goal despite no after_goal entry in the slim ack"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 20f: slim ack without after_goal does not run the section"
     PASS=$((PASS + 1))
   fi
 fi

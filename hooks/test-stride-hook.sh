@@ -6334,11 +6334,16 @@ assert_contains "23q (D236): ...and the fixture really did exercise the retry pa
 rm -rf "$D236_H"
 
 
-# 23r (D236): the KNOWN LIMITATION, pinned rather than left to be rediscovered.
-# A commit the OUTER task makes while a nested task is in flight falls inside
-# that nested task's window and is attributed to the child. That is a trade
-# against pre-D236 behaviour in the LOSING-work direction, so it is pinned here:
-# if a later change alters it, this assertion is where the conversation starts.
+# 23r (D244, flipping the D236 pin): an outer commit made while a nested task
+# is in flight is KEPT by the outer task. The nested window {outer_during,
+# nested_b} has two residual commits no other window covers, so it is
+# AMBIGUOUS: attribution subtracts nothing from it and the whole span falls
+# through into the outer snapshot. Over-reporting — nested_b.txt appearing in
+# the outer snapshot too — is the accepted cost; the pre-D244 behaviour LOST
+# outer_during.txt from every snapshot, which is the losing-work direction
+# D244 exists to close. The nested task still absorbing outer_during into ITS
+# snapshot is the other half, re-filed as D255 (needs hook-mediated commit
+# ownership).
 D236_L=$(mktemp -d)
 D236_LSTUB=$(mktemp -d)
 make_curl_stub "$D236_LSTUB" "$D236_L/curl-call.txt" 0
@@ -6357,9 +6362,71 @@ d226_claim "$D236_L" 200
 d236_complete_l "$D236_L" 200
 ( cd "$D236_L" && echo after > outer_after.txt && git add -A > /dev/null && git commit -q -m outer_after )
 d236_complete_l "$D236_L" 100
-assert_eq "23r (D236): KNOWN LIMITATION — an outer commit made mid-window is attributed to the child" \
-  "outer_after.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D236_L/.stride-changed-files.json" 2>/dev/null)"
+assert_eq "23r (D244): an outer commit made mid-window stays in the outer task's snapshot" \
+  "nested_b.txt,outer_after.txt,outer_during.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D236_L/.stride-changed-files.json" 2>/dev/null)"
 rm -rf "$D236_L" "$D236_LSTUB"
+
+# 23s (D244): three levels where the MIDDLE task commits while the innermost is
+# open — the overlapping-window geometry the per-window other-union exists for.
+# At the middle task's completion the innermost window {mid_during, inner_c30}
+# has residual 2 (no other window covers either commit) → AMBIGUOUS → nothing
+# subtracted, so the middle keeps mid_during (plus inner_c30, the accepted
+# over-report). At the outer task's completion BOTH windows are collected: the
+# innermost is fully covered by the middle's window (residual 0 → PURE) and the
+# middle's own residual is exactly its auto-commit mid_after (residual 1 →
+# PURE), so both spans subtract and the outer reports only its own commit —
+# the purity test must not let ambiguity at one level leak up to the ancestor.
+D244_S=$(mktemp -d)
+D244_SSTUB=$(mktemp -d)
+make_curl_stub "$D244_SSTUB" "$D244_S/curl-call.txt" 0
+d226_fixture "$D244_S"
+d244_complete_s() {
+  (
+    cd "$1" || exit 1
+    echo "{\"tool_input\":{\"command\":\"curl -X PATCH https://stride.example.com/api/tasks/$2/complete\"}}" \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$D244_SSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+}
+d226_claim "$D244_S" 10
+d226_claim "$D244_S" 20
+d226_claim "$D244_S" 30
+( cd "$D244_S" && echo mid > mid_during.txt && git add -A > /dev/null && git commit -q -m mid_during )
+( cd "$D244_S" && echo inner > inner_c30.txt && git add -A > /dev/null && git commit -q -m inner_c30 )
+d244_complete_s "$D244_S" 30
+( cd "$D244_S" && echo after > mid_after.txt && git add -A > /dev/null && git commit -q -m mid_after )
+d244_complete_s "$D244_S" 20
+assert_eq "23s (D244): the middle task keeps a commit it made while the innermost was open" \
+  "inner_c30.txt,mid_after.txt,mid_during.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D244_S/.stride-changed-files.json" 2>/dev/null)"
+( cd "$D244_S" && echo outer > outer_own.txt && git add -A > /dev/null && git commit -q -m outer_own )
+d244_complete_s "$D244_S" 10
+assert_eq "23s (D244): ...and ambiguity at the middle level does not leak into the outer snapshot" \
+  "outer_own.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D244_S/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D244_S" "$D244_SSTUB"
+
+# 23t (D244): an outer task whose ONLY commit is made mid-window. Pre-D244 the
+# nested window swallowed it and the outer task hit the no-own-commits sentinel
+# — an EMPTY snapshot for a task that really committed work, the worst shape of
+# the losing-work direction. The ambiguous window now falls through whole.
+D244_T=$(mktemp -d)
+D244_TSTUB=$(mktemp -d)
+make_curl_stub "$D244_TSTUB" "$D244_T/curl-call.txt" 0
+d226_fixture "$D244_T"
+d244_complete_t() {
+  (
+    cd "$1" || exit 1
+    echo "{\"tool_input\":{\"command\":\"curl -X PATCH https://stride.example.com/api/tasks/$2/complete\"}}" \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$D244_TSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+}
+d226_claim "$D244_T" 100
+d226_claim "$D244_T" 200
+( cd "$D244_T" && echo during > only_during.txt && git add -A > /dev/null && git commit -q -m only_during )
+( cd "$D244_T" && echo b > nested_b.txt && git add -A > /dev/null && git commit -q -m nested_b )
+d244_complete_t "$D244_T" 200
+d244_complete_t "$D244_T" 100
+assert_eq "23t (D244): an outer task whose only commit is mid-window still reports it" \
+  "nested_b.txt,only_during.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D244_T/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D244_T" "$D244_TSTUB"
 
 rm -rf "$D236_F" "$D236_FSTUB"
 

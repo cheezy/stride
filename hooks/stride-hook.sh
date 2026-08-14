@@ -1312,25 +1312,33 @@ record_task_head_ref() {
 # [fileB.txt, fileC.txt, outerA.txt] when only outerA.txt is A's. Dispatcher
 # mode makes that routine rather than exotic.
 #
-# KNOWN LIMITATION, in the under-reporting direction — read this before
-# "improving" the window test. A commit the OUTER task makes WHILE a nested task
-# is in flight falls inside that nested task's (base, head] window, so it is
-# attributed to the child and does not appear in the outer task's snapshot.
-# Measured: claim A, claim B, A commits, B commits, complete B, complete A gives
-# B=[nested_b, outer_during] and A=[outer_after] — A loses outer_during.
+# (D244) The under-reporting direction of the window model is closed by the
+# per-window PURITY classification below. The original limitation: a commit the
+# OUTER task makes WHILE a nested task is in flight falls inside that nested
+# task's (base, head] window, so the flat window union attributed it to the
+# child and the outer task's snapshot lost it. Measured: claim A, claim B,
+# A commits, B commits, complete B, complete A gave B=[nested_b, outer_during]
+# and A=[outer_after] — A lost outer_during.
 #
-# This is a real trade against pre-D236 behaviour, where A over-collected but at
-# least included its own commit, and the trigger is not exotic: a nested
-# after_doing running `git add -A` sweeps the outer task's in-progress files
-# into the nested commit, and attribution then excludes that whole commit from
-# the outer. Over-reporting is the safer failure — showing extra beats losing
-# real task work — so this is NOT the direction to extend the window test in.
-#
-# Closing it properly needs per-COMMIT ownership rather than per-window: record
-# the SHAs a task's own auto-commit actually created, so a window subtracts only
-# commits the nested task authored. Filed rather than bolted on here. Test 23r
-# pins the current behaviour so it stays a known trade-off rather than a
-# surprise.
+# True per-COMMIT ownership is NOT recoverable here: hooks fire only on
+# claim/complete, so nothing observes the interior of a window, and two commits
+# that both exist before the next hook invocation are topologically
+# indistinguishable (D244's investigation verified this; the original sketch of
+# recording the after_doing pre/post delta fails because commits need not be
+# hook-mediated at all). What IS decidable per window: how many of its commits
+# no OTHER recorded window covers (its RESIDUAL). One residual commit is the
+# window task's own auto-commit — the window is PURE and its whole span is
+# subtracted, exactly the D236 behaviour. Two or more residual commits mean at
+# least one was authored outside any nested task (the outer task committing
+# mid-window) and topology cannot say which — the window is AMBIGUOUS, only the
+# commits other windows cover are subtracted, and the residual falls through
+# into the caller's own snapshot. That over-reports the ambiguous case (the
+# child's commit can appear in the outer snapshot too), which is the documented
+# safer failure: showing extra beats losing real task work. The nested task
+# STILL absorbing the outer's mid-window commit into its own snapshot is the
+# other half of the same defect, unachievable without hook-mediated commit
+# ownership — re-filed as D255 rather than bolted on here. Test 23r asserts
+# the outer task keeps its mid-window commit.
 #
 # (D236) The commit RANGES that belong to the completing task, one per line as
 # "<from> <to>" (a git range from..to). Empty output means "no nested work to
@@ -1378,23 +1386,56 @@ attributed_commit_ranges() {
 
   [ -n "$_windows" ] || return 0
 
-  # Expand every window ONCE into the set of commits it covers, then test each
-  # candidate with a string lookup. The obvious implementation — two
-  # `git merge-base --is-ancestor` probes per (commit x window) pair — spawns a
-  # few thousand processes on a long-lived dispatcher task with the cache's
-  # 20-record cap, inside a hook budget this project has already blown before
-  # (and a blown after_doing budget loses the diff upload entirely).
+  # (D244) Classify each window before subtracting it, instead of pouring every
+  # window into one flat union. Per window: expand it once with rev-list
+  # (`<base>..<head>` is base-EXCLUSIVE, which is load-bearing — a nested
+  # task's base is normally the outer task's own last commit, and including it
+  # attributed the outer's work to its child), then count its RESIDUAL — the
+  # commits no OTHER window covers. Residual <= 1: the window is PURE (the one
+  # residual commit is that task's own auto-commit) and its full span joins the
+  # covered set, exactly the D236 behaviour. Residual >= 2: the window is
+  # AMBIGUOUS — an outer commit landed mid-window and cannot be told apart from
+  # the task's own — so only its sub-covered commits join the set and the
+  # residual falls through to the caller (over-reporting, the safer failure).
+  # The other-union is computed per window because nested windows overlap
+  # (D236's three-level fixture) and a flat complement would miscount. The
+  # nested rev-list loop is O(n^2) in recorded windows, bounded at 20 by the
+  # cache cap — ~400 spawns worst case, well inside the hook budget the flat
+  # union was sized for.
   local _w _wb _wh _covered_set="" _c
+  local _w2 _wb2 _wh2 _set_i _other _residual_count
   while IFS= read -r _w; do
     [ -n "$_w" ] || continue
     _wb="${_w%% *}"; _wh="${_w##* }"
-    # `rev-list <base>..<head>` is already base-EXCLUSIVE, which is the
-    # semantics this needs: a nested task's base is normally the outer task's
-    # own last commit, so including it attributed the outer's work to its child
-    # and silently dropped it from the outer snapshot. The interleaved fixture
-    # caught that; expressing the window as a rev-list range makes it
-    # structural rather than a condition someone has to keep right.
-    _covered_set="${_covered_set}$(git rev-list "${_wb}..${_wh}" 2>/dev/null || true)"$'\n'
+    _set_i=$(git rev-list "${_wb}..${_wh}" 2>/dev/null || true)
+    [ -n "$_set_i" ] || continue
+    _other=""
+    while IFS= read -r _w2; do
+      [ -n "$_w2" ] || continue
+      # An identical base+head line is the same window (a duplicate record),
+      # not evidence the commits are shared — skip it, or every duplicated
+      # window would read as fully sub-covered and stay subtracted.
+      [ "$_w2" = "$_w" ] && continue
+      _wb2="${_w2%% *}"; _wh2="${_w2##* }"
+      _other="${_other}$(git rev-list "${_wb2}..${_wh2}" 2>/dev/null || true)"$'\n'
+    done <<< "$_windows"
+    _residual_count=0
+    while IFS= read -r _c; do
+      [ -n "$_c" ] || continue
+      if ! printf '%s' "$_other" | grep -qxF "$_c"; then
+        _residual_count=$((_residual_count + 1))
+      fi
+    done <<< "$_set_i"
+    if [ "$_residual_count" -le 1 ]; then
+      _covered_set="${_covered_set}${_set_i}"$'\n'
+    else
+      while IFS= read -r _c; do
+        [ -n "$_c" ] || continue
+        if printf '%s' "$_other" | grep -qxF "$_c"; then
+          _covered_set="${_covered_set}${_c}"$'\n'
+        fi
+      done <<< "$_set_i"
+    fi
   done <<< "$_windows"
 
   # Walk the task's range oldest-first, dropping covered commits and grouping

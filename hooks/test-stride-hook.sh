@@ -6914,6 +6914,26 @@ else
 fi
 
 # ============================================================
+# Test Group 28: W2079 — hot-path skill byte budgets
+# ============================================================
+# The budget check is a drift detector (D229 philosophy): it fails this gate
+# when a hot-path SKILL.md regrows past its budget, so regrowth is a visible
+# decision instead of an accident. Budgets and the failure guidance live in
+# scripts/check-skill-budgets.sh.
+echo ""
+echo "=== Test Group 28: W2079 hot-path skill byte budgets ==="
+W2079_OUT=$(bash "$SCRIPT_DIR/../scripts/check-skill-budgets.sh" 2>&1)
+W2079_RC=$?
+if [ "$W2079_RC" -eq 0 ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 28a: all hot-path skill files under budget"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 28a: a hot-path skill file is over budget (or the check errored)"
+  printf '%s\n' "$W2079_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

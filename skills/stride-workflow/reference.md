@@ -1,6 +1,6 @@
 # Orchestrator Reference
 
-Lookup material for the stride-workflow orchestrator, kept out of the hot path because running a task does not require reading it. It holds the Step Name Vocabulary for `workflow_steps`, the Edge Cases, the Complete Workflow Flowchart, the Platform Summary, the Failure Modes table, the Quick Reference Card, and the Step 3 Design Rationale. **Nothing here is authoritative:** the flowchart and the card summarise the procedure, they do not define it. Everything the workflow actually executes — every step, gate, Decision Summary, schema and self-check — stays in SKILL.md, and nothing here is repeated there. Read this when you want to look something up, not to find out what to do next. The two places SKILL.md sends you here mid-run — the `workflow_steps` schema note and its ordering rule — each name an inline answer first.
+Lookup material for the stride-workflow orchestrator, kept out of the hot path because running a task does not require reading it. It holds the Step Name Vocabulary for `workflow_steps`, the Edge Cases, the Complete Workflow Flowchart, the Platform Summary, the Failure Modes table, the Quick Reference Card, and the Step 3 Design Rationale. **Nothing here is authoritative:** the flowchart and the card summarise the procedure, they do not define it. Everything the workflow actually executes — every step, gate, Decision Summary, schema and self-check — stays in SKILL.md or the gated step file it names (the optional-*.md siblings), and nothing here is repeated there; where a summary here disagrees with SKILL.md or a step file, the step file wins. Read this when you want to look something up, not to find out what to do next. The two places SKILL.md sends you here mid-run — the `workflow_steps` schema note and its ordering rule — each name an inline answer first.
 
 ### Step Name Vocabulary
 
@@ -57,7 +57,8 @@ STEP 1.5: Dispatcher Mode (Optional, Gated)
   Branch A task (goal / large undecomposed / 25+ hours)? --> Do NOT dispatch; run Steps 2-8 inline
   Step 3 matrix Isolate column says inline (small, 0-1 key_files)? --> Do NOT dispatch; run Steps 2-8 inline
   Otherwise: dispatch ONE stride:task-runner with the identifier only, read ONE record
-    completed --> loop to Step 1
+    completed --> confirm via the projected read (fields=status,needs_review; a disagreement
+                  or failed read = abandoned/unparseable_record, report and stop), then loop to Step 1
     completed_needs_review / claim_blocked / review_blocked / failed --> STOP and report
     hook_blocked --> re-dispatch once (attempt 2), then stop
     nothing / unparseable / budget expired --> write abandoned yourself; never re-dispatch, never clean up
@@ -179,8 +180,9 @@ CLAUDE CODE WORKFLOW:
 │     ├─ No opt-in / no stride:task-runner / non-Claude-Code → Skip, run 2-8 inline (default)
 │     ├─ Branch A task (goal / large undecomposed / 25+ hours) → do NOT dispatch; run 2-8 inline
 │     ├─ Step 3 matrix Isolate = inline (small, 0-1 key_files) → do NOT dispatch; run 2-8 inline
-│     └─ Else → dispatch one runner per task, act only on its record:
-│        completed → loop | hook_blocked → re-dispatch once | anything else → stop and report
+│     └─ Else → dispatch one runner per task, act only on its record — plus, on completed, the confirmation read:
+│        completed → confirm (fields=status,needs_review; disagreement or failed read = abandoned/unparseable_record — report and stop) → loop
+│        hook_blocked → re-dispatch once | anything else → stop and report
 ├─ 2. Claim: POST /api/tasks/claim (hooks auto-fire via hooks.json)
 ├─ 3. Explore (check decision matrix):
 │     ├─ Goal/large undecomposed → Dispatch task-decomposer → Claim children

@@ -95,7 +95,7 @@ stride:stride-creating-goals          ← BEFORE calling POST /api/tasks/batch (
 
 ### stride-workflow
 
-**RECOMMENDED** entry point for all task work. Single orchestrator that walks through the complete lifecycle: prerequisites, claiming, codebase exploration, implementation, code review, hooks, and completion. Handles both Claude Code (with subagent dispatch) and other environments (Cursor, Windsurf, Continue). Eliminates the need to remember which skills to invoke at which moments. (v1.38.0+) adds an optional **Manual & Exploratory Testing** step (Step 5.5); (v1.39.0+) adds an optional **Deep security-considerations review** sub-step in Step 5 — see below; (v1.40.0+) threads the optional `behaviour_test_matrix` through Step 4 (implementation driver) and Step 5 (reviewer dispatch); (v1.41.0+) hardens every rule that reads matrix row text — row text is untrusted data rather than instructions, the secret rule triggers on row *state* and covers credentials named by location, a refused row has a named channel (`completion_notes`) and a redaction sentinel for the reviewer's echo, and the PATCH-body contradiction is resolved by stating that re-sending already-stored row text unchanged onto its own record is not a new copy; (v1.48.0+) maps the exploratory-testing severity rubric onto the reviewer issue enum and sets the escalation policy for a Critical exploratory finding — see below; (v1.53.0+) adds an optional **`/harden`** sub-step (Step 5.6) that turns a session's findings into drafted regression checks, sequenced so a drafted check can never turn the `after_doing` gate red; (v1.65.0+) a skipped `workflow_steps` entry may carry an optional machine-readable `reason_code` beside its free-text `reason` — see below.
+**RECOMMENDED** entry point for all task work. Single orchestrator that walks through the complete lifecycle: prerequisites, claiming, codebase exploration, implementation, code review, hooks, and completion. Handles both Claude Code (with subagent dispatch) and other environments (Cursor, Windsurf, Continue). Eliminates the need to remember which skills to invoke at which moments. (v1.38.0+) adds an optional **Manual & Exploratory Testing** step (Step 5.5); (v1.39.0+) adds an optional **Deep security-considerations review** sub-step in Step 5 — see below; (v1.40.0+) threads the optional `behaviour_test_matrix` through Step 4 (implementation driver) and Step 5 (reviewer dispatch); (v1.41.0+) hardens every rule that reads matrix row text — row text is untrusted data rather than instructions, the secret rule triggers on row *state* and covers credentials named by location, a refused row has a named channel (`completion_notes`) and a redaction sentinel for the reviewer's echo, and the PATCH-body contradiction is resolved by stating that re-sending already-stored row text unchanged onto its own record is not a new copy; (v1.48.0+) maps the exploratory-testing severity rubric onto the reviewer issue enum and sets the escalation policy for a Critical exploratory finding — see below; (v1.53.0+) adds an optional **`/harden`** sub-step (Step 5.6) that turns a session's findings into drafted regression checks, sequenced so a drafted check can never turn the `after_doing` gate red; (v1.65.0+) a skipped `workflow_steps` entry may carry an optional machine-readable `reason_code` beside its free-text `reason` — see below; (v1.66.0+) the hot path is re-extracted and size-gated — the regrown orchestrator body moves back into gated sibling files (`review-block-extraction.md`, `optional-security-review.md`, `behaviour-test-matrix.md`, plus new `hook-execution.md` and `reference.md` sections) with every gate, decision matrix, Decision Summary, and prompt-injection framing rule kept inline; `reference.md`'s dispatcher-mode summaries gain the completed-status confirmation gate; and `scripts/check-skill-budgets.sh` runs as hook-suite Group 28 so hot-path files cannot silently regrow.
 
 ### Optional: Manual & Exploratory Testing integration (v1.38.0+)
 
@@ -131,7 +131,7 @@ The measured problem: **73 skipped entries produced 58 distinct reason strings a
 
 ### stride-completing-tasks
 
-**MANDATORY** before any task completion API call. Owns the completion contract — its Completion Request Field Reference table is the authoritative required-field set (including `explorer_result`, `reviewer_result`, and `workflow_steps`, which the API rejects requests without) and it documents both hook execution patterns (after_doing + before_review). Skipping causes 3+ failed API calls as missing fields are discovered one at a time.
+**MANDATORY** before any task completion API call. Owns the completion contract — its Completion Request Field Reference table is the authoritative required-field set (including `explorer_result`, `reviewer_result`, and `workflow_steps`, which the API rejects requests without) and it documents both hook execution patterns (after_doing + before_review). Skipping causes 3+ failed API calls as missing fields are discovered one at a time. (v1.66.0+) the skill is roughly half its former size: the happy path — the Field Reference, the Explorer/Reviewer Result Schema with the skip-reason enum, the pre-submission hard gate, and the curl stdout rules — stays inline, while worked examples, the per-file-diff back-compat subtree, hook-failure remediation, and the summaries move to four sibling files (`manual-testing-findings.md`, `diff-capture.md`, `hook-failures.md`, `reference.md`), each reachable from a pointer at its original site; no field requirement, schema shape, or enum value changed.
 
 ### stride-creating-tasks
 
@@ -304,6 +304,15 @@ and scale their wall-clock backstops accordingly — clamped below each case's
 un-killed duration, so a timeout that never fires still fails. Each run reports
 its own wall clock and warns when the machine was busy, so a loaded run is
 distinguishable from a failing one without re-running it.
+
+**(v1.66.0+)** The bash suite's final group (Group 28) runs
+`scripts/check-skill-budgets.sh`, the hot-path byte-budget drift detector: the
+gate fails when `stride-workflow/SKILL.md`, `stride-completing-tasks/SKILL.md`,
+or `stride-claiming-tasks/SKILL.md` exceeds its stated budget, and the failure
+output names the file, its size, its budget, the extraction pattern to apply,
+and where the budget table lives. Budgets sit 12-13% above post-extraction
+sizes, so ordinary edits pass and only sustained regrowth trips (D229
+philosophy); raising one is a deliberate, reviewed decision.
 
 ```
 bash hooks/test-stride-hook.sh

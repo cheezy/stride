@@ -268,7 +268,9 @@ with **no error**. Three rules, always:
    `sed`, …). They alter or truncate what the hook reads.
 3. **Always pipe into `tee`** — the one blessed pipe, because it passes stdout
    through **unchanged** (the hook sees it) **and** writes a full copy for the
-   truncation fallback:
+   truncation fallback. The `?response_view=slim` on this curl degrades safely:
+   an older server ignores the parameter and echoes the full task, which the
+   hook reads identically — token cost only, never correctness:
 
    ```bash
    curl -sS -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim" \

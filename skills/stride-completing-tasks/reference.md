@@ -113,6 +113,7 @@ OTHER ENVIRONMENTS (manual hooks):
 └─ 8. needs_review=false? → Execute after_review, claim next ✓
 
 API ENDPOINT: PATCH /api/tasks/:id/complete?response_view=slim
+  (degrades safely: an older server ignores the param and echoes the full task)
 REQUIRED BODY: {
   "agent_name": "Claude Opus 4.6",
   "time_spent_minutes": 45,
@@ -184,6 +185,10 @@ VERSION: Send skills_version from your SKILL.md frontmatter with every complete 
 ---
 
 ## Worked completion payload example
+
+The `?response_view=slim` on this curl degrades safely: an older server ignores
+the parameter and echoes the full task, which the hook reads identically —
+token cost only, never correctness.
 
 ```bash
 curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim" \

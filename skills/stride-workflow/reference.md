@@ -78,7 +78,8 @@ STEP 1.5: Dispatcher Mode (Optional, Gated)
   Branch A task (goal / large undecomposed / 25+ hours)? --> Do NOT dispatch; run Steps 2-8 inline
   Step 3 matrix Isolate column says inline (small, 0-1 key_files)? --> Do NOT dispatch; run Steps 2-8 inline
   Otherwise: dispatch ONE stride:task-runner with the identifier only, read ONE record
-    completed --> confirm via the projected read (fields=status,needs_review; a disagreement
+    completed --> confirm via the projected read (fields=status,needs_review — degrade-safe:
+      an older server ignores the projection and the full body still answers; a disagreement
                   or failed read = abandoned/unparseable_record, report and stop), then loop to Step 1
     completed_needs_review / claim_blocked / review_blocked / failed --> STOP and report
     hook_blocked --> re-dispatch once (attempt 2), then stop
@@ -223,7 +224,7 @@ STEP 8: Post-Completion
 
 ## Quick Reference Card
 
-**Never call `GET /api/tasks` (index) or `GET /api/tasks/:id/tree` without `response_view=slim`** — the bare index measured 2.4 MB (~840,000 tokens) against production; slim serves the same rows at roughly 1% of the size. On tree, slim slims the **children** only — the root task always renders full (deliberately, so the caller keeps the detail it asked for), so a childless task's tree shrinks not at all. The claim curl stays full — its response feeds the env-cache identity refresh. The complete curl carries `?response_view=slim` (W2087); its ack plus `hooks[]` covers everything the hook reads.
+**Never call `GET /api/tasks` (index) or `GET /api/tasks/:id/tree` without `response_view=slim`** — the bare index measured 2.4 MB (~840,000 tokens) against production; slim serves the same rows at roughly 1% of the size. (Slim on index and tree is G408-era server behaviour: a server predating it **ignores the parameter and serves the 2.4 MB anyway**, so the param is a request, not a guarantee — on such a server avoid the index and tree endpoints outright.) On tree, slim slims the **children** only — the root task always renders full (deliberately, so the caller keeps the detail it asked for), so a childless task's tree shrinks not at all. The claim curl stays full — its response feeds the env-cache identity refresh. The complete curl carries `?response_view=slim` (W2087); its ack plus `hooks[]` covers everything the hook reads — and it degrades safely: an older server ignores the param and echoes the full task, which the hook reads identically, at token cost only.
 
 ```
 CLAUDE CODE WORKFLOW:
@@ -238,7 +239,7 @@ CLAUDE CODE WORKFLOW:
 │     ├─ Branch A task (goal / large undecomposed / 25+ hours) → do NOT dispatch; run 2-8 inline
 │     ├─ Step 3 matrix Isolate = inline (small, 0-1 key_files) → do NOT dispatch; run 2-8 inline
 │     └─ Else → dispatch one runner per task, act only on its record — plus, on completed, the confirmation read:
-│        completed → confirm (fields=status,needs_review; disagreement or failed read = abandoned/unparseable_record — report and stop) → loop
+│        completed → confirm (fields=status,needs_review, degrade-safe on older servers; disagreement or failed read = abandoned/unparseable_record — report and stop) → loop
 │        hook_blocked → re-dispatch once | anything else → stop and report
 │        every stop → clear the activation marker before ending the turn
 ├─ 2. Claim: POST /api/tasks/claim (hooks auto-fire via hooks.json)

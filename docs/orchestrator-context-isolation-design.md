@@ -498,6 +498,9 @@ fastest way to find out whether the ~54% is real before designing around it.
   re-discovery moved elsewhere. Nobody has measured the split.
 - **`GET /api/tasks` still returns 2.4 MB unslimmed** (~840K tokens). Unrelated
   to this design, and more urgent than any of it — an agent that calls it without
-  `response_view=slim` loses its context window immediately.
+  `response_view=slim` loses its context window immediately (and even with the
+  param on a server predating G408's slim-on-index, which ignores it).
 - **`response_view=slim` is still sent by nothing.** Deployed, working, unused.
-  Independent of this work and much smaller, but nearly free.
+  Independent of this work and much smaller, but nearly free. *(Historical, as
+  written: the plugin has since wired the param into its index/tree rule (W2086)
+  and the complete curl (W2087).)*

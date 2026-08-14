@@ -459,7 +459,7 @@ If either condition is false, **skip this sub-step entirely and use the task-rev
 | Non-Claude-Code environment (no `Agent` tool) | Skip deep dispatch → task-reviewer prose verdict is the sole source, no failure |
 | Plugin available + Claude Code + non-empty `security_considerations` | Dispatch security-reviewer, merge verdicts into `reviewer_result.security_considerations.considerations[]`, escalate on `partial`/`unmitigated` |
 | Plugin present but app/agent unavailable | Skip deep dispatch, **no failure** → task-reviewer prose verdict is the sole source |
-| Plugin present but verdicts malformed/absent | Fail-closed: keep prose verdict, note the anomaly, do NOT downgrade to `passed` |
+| Plugin present but verdicts malformed/absent | Fail-closed: keep prose verdict, note the anomaly, do NOT downgrade to `passed` — treat the inability to confirm mitigation like an un-addressed consideration |
 
 ### When the resolved row's Review column says Skip: omit `review_report` from completion.
 

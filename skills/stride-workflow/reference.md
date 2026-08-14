@@ -1,6 +1,6 @@
 # Orchestrator Reference
 
-Lookup material for the stride-workflow orchestrator, kept out of the hot path because running a task does not require reading it. It holds the Step Name Vocabulary for `workflow_steps`, the Edge Cases, the Complete Workflow Flowchart, the Platform Summary, the Failure Modes table, the Quick Reference Card, and the Step 3 Design Rationale. **Nothing here is authoritative:** the flowchart and the card summarise the procedure, they do not define it. Everything the workflow actually executes — every step, gate, Decision Summary, schema and self-check — stays in SKILL.md or the gated step file it names (the optional-*.md siblings), and nothing here is repeated there; where a summary here disagrees with SKILL.md or a step file, the step file wins. Read this when you want to look something up, not to find out what to do next. The two places SKILL.md sends you here mid-run — the `workflow_steps` schema note and its ordering rule — each name an inline answer first. **Granularity rule (D250):** the Quick Reference Card owes every gate, check, and stop condition the flowchart carries — compressed to one line each, never dropped. Dispositions that decide stop-versus-continue (the dispatcher statuses, the session endings, the hardening arms) count as stop conditions and are carried; purely recording dispositions, derivations, and telemetry mechanics sit below summary granularity in **both** renderings and live only in the step files, with one deliberate recording-level exception carried because it is safety-bearing: the deep-security fail-closed rule (malformed or absent verdicts never downgrade to passed).
+Lookup material for the stride-workflow orchestrator, kept out of the hot path because running a task does not require reading it. It holds the Step Name Vocabulary for `workflow_steps`, the Edge Cases, the Complete Workflow Flowchart, the Platform Summary, the Failure Modes table, the Quick Reference Card, and the Step 3 Design Rationale. **Nothing here is authoritative:** the flowchart and the card summarise the procedure, they do not define it. Everything the workflow actually executes — every step, gate, Decision Summary, schema and self-check — stays in SKILL.md or the gated step file it names (the optional-*.md siblings), and nothing here is repeated there; where a summary here disagrees with SKILL.md or a step file, the step file wins. Read this when you want to look something up, not to find out what to do next. The two places SKILL.md sends you here mid-run — the `workflow_steps` schema note and its ordering rule — each name an inline answer first. **Granularity rule (D250):** the Quick Reference Card owes every gate, check, and stop condition the flowchart carries — compressed to one line each, never dropped. Dispositions that decide stop-versus-continue (the dispatcher statuses, the session endings, the hardening arms) count as stop conditions and are carried; purely recording dispositions, derivations, and telemetry mechanics sit below summary granularity in **both** renderings and live only in the step files, with two deliberate exceptions carried because their failure modes are safety-bearing: the deep-security fail-closed rule (malformed or absent verdicts never downgrade to passed), and — decided and recorded here per D252 — the curl stdout-preservation rule (every claim and complete curl pipes only into `tee`; `-o`, an appended `> /dev/null`, or any transformer pipe silently empties `changed_files` and can mark the base ref unproven, with no error anywhere — a failure mode hit live twice in the week this was decided, which is why it is classified as a summary-owed check rather than invocation mechanics). The Step 3 mis-labelling check (a `small` task carrying 3+ key_files or 3+ acceptance-criteria lines is recorded in `completion_notes` AND `completion_summary`, never a planner trigger) is explicitly ruled **below** summary granularity per D252: it is a purely recording disposition with no stop-versus-continue arm, so it lives in SKILL.md Step 3 alone and neither rendering carries it.
 
 ### Step Name Vocabulary
 
@@ -18,10 +18,22 @@ The `name` field must be one of these six values. Do not invent new names — co
 ## Edge Cases
 
 ### Hook failure mid-workflow
-- Blocking hooks (`after_doing`, `before_review`) must pass before completion
+- All five hooks are blocking (`before_doing`, `after_doing`, `before_review`, `after_review`, `after_goal`) — a non-zero exit aborts the action each one gates
+- Timing per the SKILL.md hooks table: `after_doing` fires BEFORE the completion curl and blocks it; `before_review` fires AFTER `/complete` succeeds — its failure is fixed and the hook re-run, never a reason to re-send `/complete`
+- `before_doing` fires after the claim curl succeeds; when it fails, fix the issue and retry the claim curl (SKILL.md Step 2)
 - Fix the root cause, re-run the hook, then proceed
 - In Claude Code, dispatch `stride:hook-diagnostician` for complex failures
 - Never skip a blocking hook or call complete with a failed hook result
+
+### Claim failure (the Backlog claim-fail guard)
+- A failed claim is a terminal stop, never a fallback to building outside the lifecycle
+- Report why the task is not claimable (still in Backlog, already claimed, dependency-blocked) and end the turn
+- Never implement a task whose claim did not succeed; promoting Backlog → Ready is a human action in the board UI (SKILL.md, "Backlog Claim-Fail Guard")
+
+### Stale orchestrator marker
+- The activation marker (`.stride/.orchestrator_active`) is stale 4 hours after its `started_at`; the PreToolUse gate treats stale as missing and may delete it on read
+- If the gate blocks a sub-skill dispatch mid-task (a long task outliving its marker), re-write the marker per Step 0's Write Command and invoke again
+- Clear the marker explicitly at every stop (Step 8) — never rely on the 4-hour expiry, which would leave a window where direct sub-skill invocations slip the gate
 
 ### Task that needs_review=true
 - Stop after Step 7. Do not claim the next task.
@@ -79,6 +91,8 @@ STEP 1.5: Dispatcher Mode (Optional, Gated)
 STEP 2: Claim
   [Claude Code] POST /api/tasks/claim (hooks auto-fire)
   [Other]       Execute before_doing manually, then POST claim
+  Curl rule (every claim and complete curl): pipe only into tee -- -o, > /dev/null,
+    or any transformer pipe silently empties changed_files / marks the base unproven
   Claim failed (Backlog / already claimed / blocked)? --> terminal STOP: report it and
     end the turn; NEVER build a task whose claim did not succeed
   |
@@ -164,6 +178,7 @@ STEP 7: Complete
     a structured review block was parsed; Shape 2 skips and Source C carry no verdict
     and pass -- never hand-write a verdict to satisfy it
   PATCH /api/tasks/:id/complete with ALL required fields
+    (pipe only into tee -- the Step 2 curl rule applies here too)
   |
   v
 STEP 8: Post-Completion
@@ -227,6 +242,8 @@ CLAUDE CODE WORKFLOW:
 │        hook_blocked → re-dispatch once | anything else → stop and report
 │        every stop → clear the activation marker before ending the turn
 ├─ 2. Claim: POST /api/tasks/claim (hooks auto-fire via hooks.json)
+│     ├─ Curl rule (claim AND complete): pipe only into tee — -o, > /dev/null, or any
+│     │   transformer pipe silently empties changed_files / marks the base unproven
 │     └─ Claim failed (Backlog/claimed/blocked) → terminal STOP, report; NEVER build unclaimed work
 ├─ 3. Explore (check decision matrix):
 │     ├─ Goal/large undecomposed → Dispatch task-decomposer → Claim children

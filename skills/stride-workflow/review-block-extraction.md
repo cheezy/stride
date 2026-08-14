@@ -43,7 +43,7 @@ jq -n --slurpfile s "$BLOCK" --slurpfile r "$MERGED" --argjson n "$TASK_CRITERIO
 
 ## Source B pattern
 
-The historical path, unchanged. Extract the first ```json fence and parse it:
+The historical parse, plus the `$MERGED` write that makes Step 7 single-shape (D248). Extract the first ```json fence and parse it:
 
 ```python
 import re, json
@@ -77,6 +77,16 @@ assert len(reviewer_result.get("project_checks", [])) == len(structured.get("pro
 task_criterion_lines = [c for c in (task["acceptance_criteria"] or "").split("\n") if c.strip()]
 assert len(structured["acceptance_criteria"]) == len(task_criterion_lines), \
     "acceptance_criteria count must equal the task's criterion-line count — re-run the reviewer, do not truncate or pad"
+
+# D248: write the merged object to the SAME absolute $MERGED path Source A uses
+# (.stride/.reviewer-result-<IDENTIFIER>-r<N>.json under the resolved project
+# root), so Step 7's `jq --slurpfile r "$MERGED"` splice works identically on
+# both source paths — and reviewer_result never has to pass through your
+# context to reach the payload. The deep-security and Step 5.5 escalations
+# then mutate this file exactly as they do on Source A.
+merged_path = "<the $MERGED path resolved as in the Source A pattern above>"
+with open(merged_path, "w") as f:
+    json.dump(reviewer_result, f)
 ```
 
 ## Field mapping into `reviewer_result`
@@ -88,7 +98,7 @@ assert len(structured["acceptance_criteria"]) == len(task_criterion_lines), \
   - `dispatched: true`, `duration_ms: <wall-clock ms>` (as before)
 - Structured fields — **copy the reviewer's entire parsed JSON object verbatim** into `reviewer_result`, then overlay the legacy fields above on top. Do **not** maintain an allow-list of which structured keys to copy: whatever the agent emitted is persisted as-is, so any field the schema gains later flows through automatically (this is exactly how `project_checks` was being dropped — an enumerated copy-list silently omitted it). The structured key-set is owned by `stride/agents/task-reviewer.md`; passthrough it, never re-enumerate it here. Concretely, the reviewer currently emits `status`, `issue_counts`, `issues`, `acceptance_criteria`, `project_checks`, `testing_strategy`, `patterns`, `pitfalls`, `security_considerations`, and `schema_version` — but treat that as illustrative, not exhaustive. Because you copy the parsed JSON verbatim, keys the agent did not emit are simply absent (no empty placeholders to send). **Hand-typing, re-typing, or sub-selecting `reviewer_result` is FORBIDDEN — no exceptions, no small-task or brevity shortcut. The mechanical whole-object copy + mandatory self-check above is the only correct path; if the self-check fails, fix the copy, never the assertion.** On Source A the copy is a **byte-level splice from the block file**, which makes the passthrough literal rather than merely intended — and **re-typing a block you read out of that file is the same forbidden act** as hand-typing one out of a response.
 
-**What the copy must produce.** The result is **every key of the parsed block, unchanged, plus exactly the five overlaid keys above** (`dispatched`, `duration_ms`, `summary`, `issues_found`, `acceptance_criteria_checked`) — never fewer keys than the reviewer emitted, never one renamed, dropped, or re-typed on the way. That set relation *is* the mechanic; if you can state which keys you chose to copy, you did it wrong. On Source A the jq merge above *is* that relation, expressed so it cannot be got wrong by hand. Note that **`$MERGED` — not the block file — is what Step 7 submits**: the escalations the deep security-considerations review makes mutate the merged copy, leaving the block file as the reviewer's unmodified emission, which is what keeps the on-disk block byte-identical to what the reviewer wrote. A populated example of the resulting object lives in the `stride-completing-tasks` skill (`skills/stride-completing-tasks/SKILL.md`, "Explorer/Reviewer Result Schema" — Shape 1) — this file does not duplicate it. The reviewer's own emitted schema is owned by `stride/agents/task-reviewer.md`.
+**What the copy must produce.** The result is **every key of the parsed block, unchanged, plus exactly the five overlaid keys above** (`dispatched`, `duration_ms`, `summary`, `issues_found`, `acceptance_criteria_checked`) — never fewer keys than the reviewer emitted, never one renamed, dropped, or re-typed on the way. That set relation *is* the mechanic; if you can state which keys you chose to copy, you did it wrong. On Source A the jq merge above *is* that relation, expressed so it cannot be got wrong by hand; on Source B the dict-merge plus its closing `json.dump` produce the same file at the same path. Note that **`$MERGED` — not the block file — is what Step 7 submits, on both source paths**: the escalations the deep security-considerations review makes mutate the merged copy, leaving the block file as the reviewer's unmodified emission, which is what keeps the on-disk block byte-identical to what the reviewer wrote. A populated example of the resulting object lives in the `stride-completing-tasks` skill (`skills/stride-completing-tasks/SKILL.md`, "Explorer/Reviewer Result Schema" — Shape 1) — this file does not duplicate it. The reviewer's own emitted schema is owned by `stride/agents/task-reviewer.md`.
 
 Legacy + structured fields coexist in the same map; the server persists `reviewer_result` as `:jsonb` and tolerates the structured keys today (G143/W688 will validate them explicitly).
 

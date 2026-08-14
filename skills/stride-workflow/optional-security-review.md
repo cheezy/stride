@@ -25,7 +25,7 @@ When both gate conditions hold:
 
 (During the extraction step — see [review-block-extraction.md](review-block-extraction.md).) When you build `reviewer_result`:
 
-- **Merge** the captured `consideration_verdicts` into `reviewer_result.security_considerations.considerations[]` using the **same whole-object passthrough** the extraction step already mandates — set the nested array on the copied object; never hand-pick or re-type keys, so the nested breakdown survives intact into the persisted `reviewer_result`. On Source A the copied object is `$MERGED`, so this and every escalation write below is a jq update on **`$MERGED`, never on the block file** — the block file must stay byte-identical to what the reviewer emitted:
+- **Merge** the captured `consideration_verdicts` into `reviewer_result.security_considerations.considerations[]` using the **same whole-object passthrough** the extraction step already mandates — set the nested array on the copied object; never hand-pick or re-type keys, so the nested breakdown survives intact into the persisted `reviewer_result`. On Sources A and B alike the copied object lives at `$MERGED` (Source A's jq splice and Source B's closing `json.dump` both write that path — D248), so this and every escalation write below is a jq update on **`$MERGED`, never on the block file** — the block file, where one exists, must stay byte-identical to what the reviewer emitted:
 
   ```bash
   jq --argjson v "$CONSIDERATION_VERDICTS" \

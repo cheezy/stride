@@ -23,6 +23,12 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.67.0] - 2026-08-14
+
+### Fixed
+
+- **D248 — Source B now writes `$MERGED`, so Step 7's splice is single-shape on every source path.** The Source B pattern (older reviewer, inline ```json fence) built `reviewer_result` as an in-memory Python dict and wrote no file, while Step 7's `jq --slurpfile r "$MERGED"` splice — and the extraction pointer's "whichever source yields the block, `$MERGED` is what Step 7 submits" claim — assumed the file always exists; an agent on that path had to improvise with no instruction saying so (pre-existing gap, made less visible when W2077 moved the pattern out of SKILL.md; found by that task's exploratory session). The pattern now ends with a `json.dump` of the merged object to the same absolute `$MERGED` path Source A uses, the deep-security merge/escalation prose covers Sources A and B alike, and the Step 7 bullet states that Source C builds its legacy-only envelope directly into the payload since no block exists to splice. Source C is otherwise unchanged; no normative rule weakened — the whole-object copy and self-check contract hold on both sources.
+
 ## [1.66.0] - 2026-08-14
 
 ### Changed

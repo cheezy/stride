@@ -654,7 +654,7 @@ When a blocking hook fails, dispatch `stride:hook-diagnostician` agent with the 
 **Two fields this orchestrator owns, not that skill:**
 
 - **`workflow_steps`** — the six-entry telemetry array you have been building since Step 1. Its schema, the six-name vocabulary and the all-six rule are in [Workflow Telemetry: The `workflow_steps` Array](#workflow-telemetry-the-workflow_steps-array) immediately below.
-- **`reviewer_result`** — submit the object Step 5 built, exactly as it built it, in the source order that step defines. **Source A** (the block file): `$MERGED` — the whole-object splice from ["Extracting the structured review block"](#extracting-the-structured-review-block) with the five legacy keys overlaid, plus any bounded write the deep-security or Step 5.5 escalations made. **Source B** (an inline fence): the same whole-object copy, taken from the response. **Source C** (neither parsed): that step's legacy-only envelope with every structured key omitted. **Shape 2**: when the Step 3 decision matrix skipped review, the skip form with a `reason` from the enum. Do not re-derive, sub-select, or re-type it here.
+- **`reviewer_result`** — submit the object Step 5 built, exactly as it built it, in the source order that step defines. **Source A** (the block file): `$MERGED` — the whole-object splice from ["Extracting the structured review block"](#extracting-the-structured-review-block) with the five legacy keys overlaid, plus any bounded write the deep-security or Step 5.5 escalations made. **Source B** (an inline fence): the same whole-object copy, taken from the response and written to the same `$MERGED` path by the pattern's closing `json.dump` (D248), so the splice below reads one file on both source paths. **Source C** (neither parsed): that step's legacy-only envelope with every structured key omitted — built directly into the payload, since no block exists to splice. **Shape 2**: when the Step 3 decision matrix skipped review, the skip form with a `reason` from the enum. Do not re-derive, sub-select, or re-type it here.
 
   **Splice both large fields straight into the payload rather than reading them into your context:**
 
@@ -663,7 +663,7 @@ When a blocking hook fails, dispatch `stride:hook-diagnostician` agent with the 
      '.reviewer_result = $r[0] | .review_report = $report' payload-skeleton.json > payload.json
   ```
 
-  `--rawfile` needs jq ≥ 1.6; use `--arg report "$(cat "$REPORT")"` otherwise — command substitution also never prints to your context.
+  `--rawfile` needs jq ≥ 1.6; use `--arg report "$(cat "$REPORT")"` otherwise — command substitution also never prints to your context. And when no report file exists at `$REPORT` (an older reviewer, or the write-failure path), splice the reviewer's returned text into `review_report` instead, per Step 5 — the `$MERGED` leg is unaffected, since both source paths write that file.
 
   **Delete this task's `.stride/` working artifacts once the PATCH has succeeded**, so the durable window is one task rather than the life of the checkout — the reviewer's block, report and merged copy, plus the explorer and plan reports from Step 3:
 

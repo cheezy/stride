@@ -1,6 +1,6 @@
 # Orchestrator Reference
 
-Lookup material for the stride-workflow orchestrator, kept out of the hot path because running a task does not require reading it. It holds the Step Name Vocabulary for `workflow_steps`, the Edge Cases, the Complete Workflow Flowchart, the Platform Summary, the Failure Modes table, the Quick Reference Card, and the Step 3 Design Rationale. **Nothing here is authoritative:** the flowchart and the card summarise the procedure, they do not define it. Everything the workflow actually executes — every step, gate, Decision Summary, schema and self-check — stays in SKILL.md or the gated step file it names (the optional-*.md siblings), and nothing here is repeated there; where a summary here disagrees with SKILL.md or a step file, the step file wins. Read this when you want to look something up, not to find out what to do next. The two places SKILL.md sends you here mid-run — the `workflow_steps` schema note and its ordering rule — each name an inline answer first.
+Lookup material for the stride-workflow orchestrator, kept out of the hot path because running a task does not require reading it. It holds the Step Name Vocabulary for `workflow_steps`, the Edge Cases, the Complete Workflow Flowchart, the Platform Summary, the Failure Modes table, the Quick Reference Card, and the Step 3 Design Rationale. **Nothing here is authoritative:** the flowchart and the card summarise the procedure, they do not define it. Everything the workflow actually executes — every step, gate, Decision Summary, schema and self-check — stays in SKILL.md or the gated step file it names (the optional-*.md siblings), and nothing here is repeated there; where a summary here disagrees with SKILL.md or a step file, the step file wins. Read this when you want to look something up, not to find out what to do next. The two places SKILL.md sends you here mid-run — the `workflow_steps` schema note and its ordering rule — each name an inline answer first. **Granularity rule (D250):** the Quick Reference Card owes every gate, check, and stop condition the flowchart carries — compressed to one line each, never dropped. Dispositions that decide stop-versus-continue (the dispatcher statuses, the session endings, the hardening arms) count as stop conditions and are carried; purely recording dispositions, derivations, and telemetry mechanics sit below summary granularity in **both** renderings and live only in the step files, with one deliberate recording-level exception carried because it is safety-bearing: the deep-security fail-closed rule (malformed or absent verdicts never downgrade to passed).
 
 ### Step Name Vocabulary
 
@@ -44,6 +44,13 @@ The `name` field must be one of these six values. Do not invent new names — co
 STEP 0: Prerequisites
   .stride_auth.md exists? --> NO --> Ask user
   .stride.md exists?      --> NO --> Ask user
+  Write the activation marker (.stride/.orchestrator_active) -- mandatory; without it the
+    gate blocks the workflow's own sub-skill dispatches
+  Mention missing .gitignore entries -- UNCONDITIONAL for .stride/ and .stride_auth.md,
+    plus .exploratory/ only when the exploratory plugin is installed; never edit
+    their .gitignore yourself
+  Exploratory plugin installed? --> collect the authorized/non-production affirmative HERE
+    or never (asking between steps is illegal)
   |
   v
 STEP 1: Task Discovery
@@ -53,7 +60,9 @@ STEP 1: Task Discovery
   |
   v
 STEP 1.5: Dispatcher Mode (Optional, Gated)
-  No opt-in / no stride:task-runner agent / non-Claude-Code? --> Skip; run Steps 2-8 inline (default)
+  No opt-in / non-Claude-Code? --> Skip; run Steps 2-8 inline (default)
+  stride:task-runner agent unavailable? --> Skip inline AND record that isolation was
+    unavailable, so "could not" is distinguishable from "never considered"
   Branch A task (goal / large undecomposed / 25+ hours)? --> Do NOT dispatch; run Steps 2-8 inline
   Step 3 matrix Isolate column says inline (small, 0-1 key_files)? --> Do NOT dispatch; run Steps 2-8 inline
   Otherwise: dispatch ONE stride:task-runner with the identifier only, read ONE record
@@ -63,11 +72,15 @@ STEP 1.5: Dispatcher Mode (Optional, Gated)
     hook_blocked --> re-dispatch once (attempt 2), then stop
     nothing / unparseable / budget expired --> write abandoned yourself; never re-dispatch, never clean up
   Steps 2-8 are unchanged -- the runner executes them in its own context
+  Every stop (any non-completed disposition) --> clear the activation marker per Step 8
+    before ending the turn
   |
   v
 STEP 2: Claim
   [Claude Code] POST /api/tasks/claim (hooks auto-fire)
   [Other]       Execute before_doing manually, then POST claim
+  Claim failed (Backlog / already claimed / blocked)? --> terminal STOP: report it and
+    end the turn; NEVER build a task whose claim did not succeed
   |
   v
 STEP 3: Explore (Decision Matrix)
@@ -94,6 +107,10 @@ STEP 5: Code Review (Decision Matrix)
     [Claude Code] Dispatch task-reviewer, fix Critical/Important issues, then
                   evaluate the SAME deep security-considerations gate — it fires
                   on both branches; it is not a small-task-only step
+                  (verdicts malformed/absent? fail closed: keep the prose verdict,
+                  note the anomaly, never downgrade to passed — and treat the
+                  unconfirmed consideration like an un-addressed one: fix before
+                  completing)
     [Other]       Self-review against acceptance criteria
   |
   v
@@ -106,17 +123,30 @@ STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
     Pass charter + ONE environment-context block: app reach, the user's authorized/non-prod
                   affirmative (no affirmative --> do not dispatch), tools, seed-data pointers,
                   and an explicit session budget in the INSTALLED agent's unit
+    How the session ENDED bounds the coverage claim: charter quiet --> performed;
+      probe budget exhausted --> partial coverage, file leftover risk as a follow-up;
+      blocked or tool-call ceiling at ~zero probes --> NOT performed, hand the manual
+      test back as a human responsibility (the obstacle is recorded as an obstacle,
+      never as a severity-bearing finding); older-contract stopped_early --> resolve
+      from the sheet, conservatively; budget too small to fund one charter --> do
+      not dispatch at all; blocked or ceiling AFTER meaningful probes --> partial
+      coverage, record the findings and say the coverage claim is incomplete
     Critical whose responsible lines you wrote --> escalate fail-closed (testing_strategy failed
                   + category:testing Critical issue), fix, re-run the charter, re-review
     Critical in lines you did not write        --> report + file a follow-up defect, never block
     No structured review block in the payload  --> no escalation; never synthesize one
 
 STEP 5.6: Harden findings into checks (Optional, Gated)
-  No session / no convertible findings / no /harden / non-Claude-Code? --> Skip (no failure)
+  No session / no convertible findings / non-Claude-Code? --> Skip (no failure)
+  /harden unavailable? --> Skip AND record that hardening was unavailable, so "could
+    not" is distinguishable from "never considered"
   Otherwise: dispatch /harden (no --output) --> drafts land staged in .exploratory/checks/
     Staged is the default and always safe. A check enters the suite ONLY if the file
       loads clean AND the case is green or inert -- established by RUNNING the suite once,
       never by expecting. Otherwise revert the move and file a follow-up defect.
+    Never overwrite an existing test file -- that check is YOURS, /harden never writes
+      there; cannot make a check load clean or mark it inert --> leave it staged AND
+      file a follow-up defect carrying the check's substance, not just its path
     Anything written here is post-review: name it in completion_notes, completion_summary
       and actual_files_changed, and re-review whenever a check entered the tree
   |
@@ -128,12 +158,20 @@ STEP 6: Execute Hooks
   |
   v
 STEP 7: Complete
+  FIRST run the mandatory pre-submission self-check (every reviewer section present,
+    project_checks count equal, no not_assessed for a task-supplied section) -- it
+    must pass before you submit. The not_assessed check is SCOPED to payloads where
+    a structured review block was parsed; Shape 2 skips and Source C carry no verdict
+    and pass -- never hand-write a verdict to satisfy it
   PATCH /api/tasks/:id/complete with ALL required fields
   |
   v
 STEP 8: Post-Completion
-  needs_review=true?  --> STOP, wait for human
+  needs_review=true?  --> STOP, wait for human (changes requested --> re-enter at Step 4)
   needs_review=false? --> Execute after_review, loop to Step 1
+  Last child of a goal? --> verify the push landed (git log origin/main..main empty) --
+    the grace worker flips the goal to Done but does NOT push
+  Workflow stops (no tasks / halt / review wait / abort)? --> clear the activation marker
 ```
 
 ---
@@ -174,16 +212,22 @@ STEP 8: Post-Completion
 
 ```
 CLAUDE CODE WORKFLOW:
-├─ 0. Prerequisites: .stride_auth.md + .stride.md exist
+├─ 0. Prerequisites: .stride_auth.md + .stride.md exist; write the activation marker (mandatory);
+│     mention missing .gitignore entries (.stride/ + .stride_auth.md unconditionally,
+│     .exploratory/ only when the exploratory plugin is installed — never edit it yourself);
+│     plugin installed → collect the exploratory authorized/non-prod affirmative HERE or never
 ├─ 1. Discovery: GET /api/tasks/next, review task, enrich if needed
 ├─ 1.5 Dispatcher Mode (optional, gated):
-│     ├─ No opt-in / no stride:task-runner / non-Claude-Code → Skip, run 2-8 inline (default)
+│     ├─ No opt-in / non-Claude-Code → Skip, run 2-8 inline (default)
+│     ├─ No stride:task-runner agent → Skip inline AND record that isolation was unavailable
 │     ├─ Branch A task (goal / large undecomposed / 25+ hours) → do NOT dispatch; run 2-8 inline
 │     ├─ Step 3 matrix Isolate = inline (small, 0-1 key_files) → do NOT dispatch; run 2-8 inline
 │     └─ Else → dispatch one runner per task, act only on its record — plus, on completed, the confirmation read:
 │        completed → confirm (fields=status,needs_review; disagreement or failed read = abandoned/unparseable_record — report and stop) → loop
 │        hook_blocked → re-dispatch once | anything else → stop and report
+│        every stop → clear the activation marker before ending the turn
 ├─ 2. Claim: POST /api/tasks/claim (hooks auto-fire via hooks.json)
+│     └─ Claim failed (Backlog/claimed/blocked) → terminal STOP, report; NEVER build unclaimed work
 ├─ 3. Explore (check decision matrix):
 │     ├─ Goal/large undecomposed → Dispatch task-decomposer → Claim children
 │     ├─ Row says Skip for Explore/Plan/Review → Skip to Step 4
@@ -195,23 +239,37 @@ CLAUDE CODE WORKFLOW:
 │     │                         no reviewer precondition), then continue to 5.5
 │     │                         (NOT Step 6 — 5.5 likewise gates on manual_tests
 │     │                         + plugin, never on review)
-│     └─ Otherwise → Dispatch task-reviewer, fix issues
+│     └─ Otherwise → Dispatch task-reviewer, fix issues, then evaluate the SAME deep-security
+│                     gate — it fires on both branches (malformed/absent verdicts → fail
+│                     closed: keep the prose verdict, never downgrade to passed)
 ├─ 5.5 Manual & Exploratory Testing (optional, gated):
 │     ├─ manual_tests empty OR plugin unavailable → Skip to Step 6 (no failure)
 │     ├─ Plugin available → Dispatch the stride-exploratory-testing:explorer AGENT only,
 │     │                     manual_tests as charters (never a command, never the router skill)
 │     │                     Pass charter + one env-context block incl. an explicit budget;
 │     │                     no authorized/non-prod affirmative from the user → do not dispatch
+│     ├─ Session ending bounds the coverage claim: quiet → performed | probe budget → partial +
+│     │   file leftover risk | blocked/ceiling at ~zero probes → NOT performed, hand back
+│     │   (obstacle ≠ finding) | stopped_early → resolve from sheet | budget too small → no dispatch
+│     │   | blocked/ceiling AFTER meaningful probes → partial coverage, record + say so
 │     └─ Critical finding? Lines you wrote → escalate fail-closed | Anything else → report + file
 │        (no structured review block in the payload → no escalation; never synthesize one)
 ├─ 5.6 Harden findings into regression checks (optional, gated):
-│     ├─ No session / no convertible findings / no /harden / non-Claude-Code → Skip, no failure
+│     ├─ No session / no convertible findings / non-Claude-Code → Skip, no failure
+│     ├─ No /harden → Skip AND record that hardening was unavailable
 │     ├─ Dispatch /harden without --output; drafts stay staged in .exploratory/checks/ (safe default)
 │     └─ Into the suite only if the file loads clean AND the case is inert or run-green;
-│        verify by running once, else revert and file a follow-up. Surface post-review files
+│        verify by running once, else revert and file a follow-up carrying the check's
+│        substance. NEVER overwrite an existing test file (that check is yours, not
+│        /harden's). Surface post-review files (completion_notes, completion_summary,
+│        actual_files_changed) and re-review whenever a check entered the tree
 ├─ 6. Hooks: Automatic via hooks.json (fires on curl call)
-├─ 7. Complete: PATCH /api/tasks/:id/complete with ALL fields
-└─ 8. Loop: needs_review=false → Step 1 | needs_review=true → STOP
+├─ 7. Complete: run the mandatory pre-submission self-check FIRST (must pass; the not_assessed
+│     check is scoped to parsed-block payloads — never hand-write a verdict to satisfy it), then
+│     PATCH /api/tasks/:id/complete with ALL fields
+└─ 8. Loop: needs_review=false → after_review auto-fires, loop to Step 1 | needs_review=true →
+      STOP (changes requested → re-enter at Step 4). Last child of a goal → verify the push
+      landed (the grace worker does NOT push). Workflow stops → clear the activation marker
 
 OTHER ENVIRONMENTS (Cursor, Windsurf, Continue): see platform-other.md
 

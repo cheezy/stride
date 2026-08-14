@@ -687,9 +687,10 @@ The dispatcher's own reading of this step is narrower: it does not read `needs_r
 ### If `needs_review=true`:
 1. Task moves to Review column
 2. **STOP.** Wait for human reviewer to approve/reject.
-3. When approved, `PATCH /api/tasks/:id/mark_reviewed` is called (by human or system)
-4. Execute `after_review` hook
-5. Task moves to Done
+3. If the reviewer requests changes, re-enter this workflow at **Step 4** (implementation) with the task still claimed — then re-run the review and the hooks before re-completing.
+4. When approved, `PATCH /api/tasks/:id/mark_reviewed` is called (by human or system)
+5. Execute `after_review` hook
+6. Task moves to Done
 
 ### If `needs_review=false`:
 1. Task moves to Done immediately

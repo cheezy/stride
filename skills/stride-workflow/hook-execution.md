@@ -181,6 +181,66 @@ After the cap is exhausted, the executor surfaces the network failure to the use
 
 The 422 protocol-rejection case is **not** retried — repeating an invalid payload will not become valid. Only transient (5xx / network / timeout) errors are eligible for backoff.
 
+## Why Every Task-Lifecycle Duration Is Zero (D234, D242)
+
+The orchestrator's Step 6 keeps the operative rules inline — every task-lifecycle hook result carries `duration_ms: 0`, `after_goal` is the one hook whose real figure is read from its durable file, and none of these numbers may be invented. This section is the derivation behind those rules, kept out of the hot path because running a task never requires re-deriving it.
+
+The executor measures a real `duration_ms` and writes it as JSON to **stdout**, then exits 0 — and Claude Code's PreToolUse contract sends exit-0 stdout to the transcript, **not to the model**. Only exit 2 feeds output back. This repo established that independently: see "A hook that *passes* is invisible" in the Behavior When Invoked From a Subagent section below — *"Do not read silence as a pass."*
+
+**D234 made the figure durable.** Every section that actually runs now also writes its structured result to `.stride/.hook-result-<hook>.json` — one file per hook, so `after_doing` and `before_review` cannot overwrite each other — on both the success and the failure path. (The failure shape previously carried no duration at all; D234 computes it before that branch emits.) The file is cleared at claim time along with the other per-task artifacts, so a leftover from the previous task can never be read as this one's. **An absent file means the section body was empty, the executor did no work, and `0` is truthful. Absence is never an error, never a retry, and never a licence to invent a figure.**
+
+**What that does and does not fix. The deciding question is not visibility — it is whether the request that would carry the figure is written BEFORE or AFTER the hook runs.** For all four task-lifecycle hooks the answer is "before", and no durable file can change that:
+
+- **`before_doing_result.duration_ms` — `0`.** This hook fires as **PostToolUse of the claim curl** (`stride-hook.sh`, `post:claim → before_doing`) — the curl whose body already contains `before_doing_result`. Same structural impossibility as `after_doing` below. Its file *does* exist later in the task, but there is nowhere to put the number: the completion payload has no `before_doing_result` field, and `workflow_steps` has six fixed step names that do not include `before_doing`.
+- **`after_doing_result.duration_ms` — `0`.** This hook fires as PreToolUse *of the very curl whose body already contains `after_doing_result`*. The payload is fully constructed before the hook runs, so the figure does not exist at write time **even in principle** — and reading the file at that moment would hand you the *previous* task's figure, which is worse than `0` because it is wrong rather than merely absent.
+- **`before_review_result.duration_ms` — `0`.** It fires as PostToolUse of that same curl, so its duration does not exist at request time either.
+- **`after_goal` — the one that works.** The `## after_goal` section runs as PostToolUse of `/complete`, and the agent then issues a **separate, later** `PATCH /api/tasks/$GOAL_ID/after_goal`. That request is written *after* the hook has already run, so the file exists by then — and the server requires `duration_ms` as a non-negative integer and stores it on the goal.
+
+**There is no follow-up PATCH that fixes the first three, and as of D242 that is a settled decision rather than an open gap — stated plainly so nobody re-derives the chain or re-opens it as a defect.** `after_doing_result` and `before_review_result` are not task schema fields; they are transient completion-request fields whose content is persisted into `workflow_steps` — and `workflow_steps` is on the `PATCH /api/tasks/:id` forbidden list (D227), so a post-completion correction is refused. `before_doing_result` is validated for shape on the claim and never persisted at all.
+
+**D242 evaluated three ways to close it and declined all three.** The deciding fact is what consumes the figure: **nothing aggregates `duration_ms`.** `Kanban.Tasks.Compliance` reads dispatch counts, skip reasons and array length — never durations — and no `SUM`/`AVG` of `duration_ms` exists anywhere in `lib/`. The only consumer is the per-task Workflow Steps panel, so the entire harm was one panel's display accuracy.
+
+- **Rejected — a new `PATCH /api/tasks/:id/hook_result` mirroring `after_goal`.** It would work, and `after_goal` proves the shape. But it buys display accuracy on a figure nothing aggregates at the price of a **second round trip on every single completion, forever** — a permanent per-task cost paid by every task on every runtime, at a time when the active work (G404, G405, G407) is all aimed at cutting per-task cost. Wrong trade.
+- **Rejected — narrowly un-forbidding a duration-only `workflow_steps` merge.** D227 made that field forbidden *bluntly* and on purpose, and refuses it outright rather than silently dropping it. There is no precedent anywhere in `lib/` for a scoped partial update of a forbidden field, so this would introduce that pattern for a display fix — and a duration-only writer is exactly the kind of guard that widens by increment.
+- **Chosen — accept the `0`, and stop rendering it as a measurement.** The real defect was never the missing number; it was that `"0 ms"` is indistinguishable from a genuine near-instant run. The panel now renders an **em dash** for `after_doing` and `before_review` when their duration is `0`, so a figure that is structurally unknowable reads as unknown instead of as measured. A non-zero value on those steps still renders normally, so this stays correct if a later change ever gives them a real destination.
+
+**`before_doing` has no destination and permanently will not get one.** Its section fires as PostToolUse of the claim curl that already carries `before_doing_result`; the completion payload has no `before_doing_result` field; and `workflow_steps` has six fixed step names that do not include `before_doing`. There is nowhere to put the number even if it were free to obtain, so it is not a gap awaiting a fix. Its durable file exists and is still worth reading when diagnosing a slow claim — it is simply never submitted.
+
+**What did NOT change:** an absent `.stride/.hook-result-<hook>.json` still means the section body was empty, the executor did no work, and `0` is truthful — absence is never an error and never a licence to invent a figure. And `workflow_steps` remains unwritable after completion by any path: no endpoint was added, so entries still cannot be added, removed, reordered or renamed.
+
+## Submitting the after_goal Result PATCH (Step 8 companion)
+
+The orchestrator's Step 8 keeps the gate (last child of a parent goal), the read-it-from-the-durable-file rule, and the verify-the-push rule inline; this section is the submission mechanics it points to.
+
+```bash
+AFTER_GOAL_FILE="$CLAUDE_PROJECT_DIR/.stride/.hook-result-after_goal.json"
+if [ -f "$AFTER_GOAL_FILE" ]; then
+  AFTER_GOAL_RESULT_JSON=$(jq -c '{exit_code: (if .status == "success" then 0 else (.exit_code // 1) end),
+                                   output: (.commands_output // .stdout // "" | tostring),
+                                   duration_ms: (.duration_ms // 0)}' "$AFTER_GOAL_FILE")
+else
+  # Empty ## after_goal section (plugin mode): no work was done and no file was
+  # written. Without this branch jq exits 2, the substitution captures an empty
+  # string, and the curl below sends `-d ""`.
+  AFTER_GOAL_RESULT_JSON='{"exit_code": 0, "output": "", "duration_ms": 0}'
+fi
+
+curl -X PATCH "$STRIDE_API_URL/api/tasks/$GOAL_ID/after_goal" \
+  -H "Authorization: Bearer $STRIDE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$AFTER_GOAL_RESULT_JSON"
+```
+
+`$GOAL_ID` is supplied in the hook's `GOAL_ID` / `GOAL_IDENTIFIER` env vars (see the Variable Inventory above). A `2xx` with `exit_code == 0` transitions the goal to Done. A `2xx` with `exit_code != 0` records the failure on the goal's `after_goal_attempts` audit log and leaves the goal In Progress for the user to investigate and re-trigger.
+
+**How the hook detects `after_goal` reliably.** The `/complete` (and `/mark_reviewed`) response can be large — the echoed `reviewer_result` alone runs to tens of KB — and the harness truncates the `tool_response.stdout` the hook would otherwise parse. The completion/claim curls therefore capture the full response to the canonical file `$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json` (the `| tee` pattern documented in `stride-completing-tasks` / `stride-claiming-tasks`), which the hook reads in preference to the truncatable stdout (D118). When that file is absent or unreadable, the hook falls back to a fresh, hook-initiated `GET /api/tasks/:id/after_goal_status` (D119) — a subprocess the hook spawns, immune to harness truncation and needing no agent cooperation. Detection therefore does not depend on the agent's curl output being intact. The source-of-truth ordering is in the Response Payload Source section above.
+
+**Back-compat (matters for agent runtimes that predate this feature):**
+
+- If `.stride.md` has no `## after_goal` section, the hook script silently no-ops — no JSON is emitted, no PATCH is needed. The server's grace-window worker (configured per board, typically a few minutes) will promote the goal to Done automatically.
+- If the agent doesn't PATCH the result at all (older plugin versions, scripted environments), the same grace-window worker covers the gap. The goal transitions to Done after the wait expires, with `after_goal_status: :succeeded` and a synthetic attempt tagged `source: "after_goal_grace_worker"` in the audit log.
+- The `## after_goal` hook is general-purpose — Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses.
+
 ## Edge Cases
 
 - **Missing `GOAL_DESCRIPTION`.** Goals without a description return `""` from the server. The executor exports `GOAL_DESCRIPTION=""` (empty string, defined) — it does NOT raise an error or fall back to a placeholder. User commands that test `[ -n "$GOAL_DESCRIPTION" ]` will correctly see "empty."

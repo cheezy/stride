@@ -1,6 +1,6 @@
 # Orchestrator Reference
 
-Lookup material for the stride-workflow orchestrator, kept out of the hot path because running a task does not require reading it. It holds the Step Name Vocabulary for `workflow_steps`, the Edge Cases, the Complete Workflow Flowchart, the Platform Summary, the Failure Modes table, and the Quick Reference Card. **Nothing here is authoritative:** the flowchart and the card summarise the procedure, they do not define it. Everything the workflow actually executes — every step, gate, Decision Summary, schema and self-check — stays in SKILL.md, and nothing here is repeated there. Read this when you want to look something up, not to find out what to do next. The two places SKILL.md sends you here mid-run — the `workflow_steps` schema note and its ordering rule — each name an inline answer first.
+Lookup material for the stride-workflow orchestrator, kept out of the hot path because running a task does not require reading it. It holds the Step Name Vocabulary for `workflow_steps`, the Edge Cases, the Complete Workflow Flowchart, the Platform Summary, the Failure Modes table, the Quick Reference Card, and the Step 3 Design Rationale. **Nothing here is authoritative:** the flowchart and the card summarise the procedure, they do not define it. Everything the workflow actually executes — every step, gate, Decision Summary, schema and self-check — stays in SKILL.md, and nothing here is repeated there. Read this when you want to look something up, not to find out what to do next. The two places SKILL.md sends you here mid-run — the `workflow_steps` schema note and its ordering rule — each name an inline answer first.
 
 ### Step Name Vocabulary
 
@@ -222,3 +222,29 @@ DECISION MATRIX QUICK CHECK:
 
 ---
 
+
+## Step 3 Design Rationale
+
+The rules these derivations produced stay inline in SKILL.md's Step 3 — the mis-labelling check, the both-channels recording rule, and the small-0-1-key_files Isolate floor. Nothing here adds a condition or a trigger; this is the history and the arithmetic behind rules the matrix already carries.
+
+### Why the mis-labelling signal is not a planner trigger (D221)
+
+A task labelled `small` that carries 3+ `key_files` or 3+ acceptance-criteria lines is a task whose complexity label is probably wrong. Branch C used to treat that as an independent trigger to dispatch a planner, which is exactly what collided with the `small, 2+ key_files` row's `Plan = Skip` — two rules, one task, no stated precedence. Measured consequence: two runners on identically-shaped tasks (both `small`, 2 `key_files`, 4 criteria lines) resolved it differently and wrote **different reasons for the same skip** into their `workflow_steps` telemetry, making the `planner` entry non-comparable across runs. The trigger is gone; the signal is not — SKILL.md keeps it as a mis-labelling check.
+
+**Why both channels.** `completion_notes` is persisted only by Stride servers from D188 onward and you cannot tell which version you are talking to, so a mis-labelling noted there alone may reach nobody; `completion_summary` is required, persisted, and rendered on the Review queue. A signal routed to a channel that might not exist is not a preserved signal.
+
+### Why small 0-1 key_files tasks are not isolated — the measured derivation
+
+**A dispatch re-pays a fixed base of ~92,000 `cache_creation` tokens** — system prompt, tool definitions, skill bodies, task prompt — measured on W2058. That figure does not shrink with the task. What isolation *saves* does scale with the task, so there is a floor below which the base is not repaid, and the design sketch names it: "dispatching a subagent for a two-minute task will lose money."
+
+The floor lands where it does because of what the saving is actually made of. **The largest single component of what a task accumulates into the main loop is its subagent reports** — measured at 9 reports totalling 161,165 B ≈ 56,351 tokens, averaging **6,261 tokens each**. A medium task dispatches an explorer, a planner and a reviewer, so its reports alone run to roughly 19,000 tokens before any diff or hook output. **A small 0-1 key_files task dispatches none of them** — the matrix already excuses it from all three — so that component is exactly zero, and all that is left to save is its own diff and tool results.
+
+The arithmetic, so the threshold is checkable rather than asserted. A dispatcher makes about 4 main-loop requests per task, and context accumulated at task *k* is re-sent on every later main-loop request, so isolation repays its base when
+
+```
+accumulated_tokens × 4 × (N − k) > 92,000
+```
+
+which for a 20-task session with ten tasks still to run is about **2,300 tokens** of accumulation. A medium task clears that on its reports alone, several times over. A one-file task with no reports has to clear it on a single diff, and generally will not.
+
+**Two honest caveats.** The break-even is position-dependent — the same task is worth isolating early in a long session and not worth it as the last task — and the gate deliberately does not use position, because `complexity` and `key_files` are the signals already available at discovery and already driving the matrix. And the 2,300-token figure inherits the 4-requests-per-task and 20-task assumptions from the cap derivation in [`../../docs/task-runner-contract.md`](../../docs/task-runner-contract.md), neither of which is measured. The direction is robust even if the number moves: a fixed base against a saving that scales with reports a small task never produces.

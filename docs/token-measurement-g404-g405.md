@@ -363,6 +363,15 @@ Ordered by return, largest first.
    it and nothing requests it, so G405 is finished code delivering nothing. Apply
    it to `/tasks/next`, `/claim` and the GETs. For `/complete`, apply it for the
    truncation fix and the non-Claude ports — not for tokens on this runtime.
+
+   > **Superseded by the shipped adoption decision (W2086–W2088) — kept for the
+   > record, not as guidance.** The GETs (index and tree) carry
+   > `response_view=slim` per W2086, and `/complete` carries it per W2087 (the
+   > truncation fix, exactly as anticipated above). `/tasks/next` and `/claim`
+   > deliberately **stay full** — next's body is reviewed whole at discovery,
+   > and claim's response feeds the env-cache identity refresh — so the
+   > next/claim half of this recommendation was considered and declined, the
+   > same way the baseline curl above is the one sanctioned bare-index call.
 4. **Always report this class of number with its position in session.** The same
    change measured 15.2% and 5.6% in one sitting. A single headline percentage
    for a resident-context change is not a well-formed claim.

@@ -169,7 +169,7 @@ STEP 8: Post-Completion
 
 ## Quick Reference Card
 
-**Never call `GET /api/tasks` (index) or `GET /api/tasks/:id/tree` without `response_view=slim`** — the bare index measured 2.2MB (~840,000 tokens) against production; slim serves the same rows at roughly 1% of the size. On tree, slim slims the **children** only — the root task always renders full, so a childless task's tree shrinks not at all. The claim curl stays full — its response feeds the env-cache identity refresh. The complete curl carries `?response_view=slim` (W2087); its ack plus `hooks[]` covers everything the hook reads.
+**Never call `GET /api/tasks` (index) or `GET /api/tasks/:id/tree` without `response_view=slim`** — the bare index measured 2.4 MB (~840,000 tokens) against production; slim serves the same rows at roughly 1% of the size. On tree, slim slims the **children** only — the root task always renders full (deliberately, so the caller keeps the detail it asked for), so a childless task's tree shrinks not at all. The claim curl stays full — its response feeds the env-cache identity refresh. The complete curl carries `?response_view=slim` (W2087); its ack plus `hooks[]` covers everything the hook reads.
 
 ```
 CLAUDE CODE WORKFLOW:

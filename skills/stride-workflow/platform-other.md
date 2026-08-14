@@ -59,6 +59,8 @@ Walk through your changes against:
 
 ## Quick Reference Card — the Other Environments half
 
+**Never call `GET /api/tasks` (index) or `GET /api/tasks/:id/tree` without `response_view=slim`** — the bare index measured 2.4 MB (~840,000 tokens) against production; the slim view serves the same rows at roughly 1% of the size. On tree, slim slims the **children** only — the root task always renders full (deliberately, so the caller keeps the detail it asked for), so a childless task's tree shrinks not at all. The claim curl stays full — its response feeds the env-cache identity refresh. The complete curl carries `?response_view=slim` (W2087); its ack plus `hooks[]` covers everything the hook reads. No step below instructs an index or tree call — this rule is defence in depth for the agent that reaches for one anyway.
+
 ```
 OTHER ENVIRONMENTS (Cursor, Windsurf, Continue):
 ├─ 0. Prerequisites: .stride_auth.md + .stride.md exist

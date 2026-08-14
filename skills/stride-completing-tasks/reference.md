@@ -117,6 +117,9 @@ REQUIRED BODY: {
   "agent_name": "Claude Opus 4.6",
   "time_spent_minutes": 45,
   "completion_notes": "...",
+  "completion_summary": "...",
+  "actual_complexity": "small",
+  "actual_files_changed": "lib/foo.ex, test/foo_test.exs",
   "review_report": "..." (optional — include when task-reviewer ran),
   "skills_version": "1.0",
   "after_doing_result": {
@@ -217,8 +220,17 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim" \
   | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"
 ```
 
-The resulting request body has this shape (illustrative — populated values
-match the `--arg` substitutions above):
+The resulting request body has this shape (illustrative). The `--arg`
+substitutions above populate only the fields they name — `agent_name`,
+`completion_notes`, `completion_summary`, `actual_complexity`,
+`actual_files_changed`, and `review_report` (note `--arg summary` feeds
+`completion_summary`, not either nested `summary` field). Everything else in
+the body — the populated `acceptance_criteria` entry and its derived
+`acceptance_criteria_checked` count, the section-verdict `note`s, the hook
+`output`s, and both nested `summary` fields — is an
+independent, fuller illustration than the jq invocation's placeholders,
+kept consistent with the schema sections above rather than byte-identical
+to the command's literal output:
 
 ```json
 {
@@ -247,9 +259,9 @@ match the `--arg` substitutions above):
   "reviewer_result": {
     "dispatched": true,
     "duration_ms": 15300,
-    "summary": "Reviewed the diff against all 5 acceptance criteria and the 3 pitfalls; no issues found",
+    "summary": "Reviewed the diff against the task's acceptance criterion and the 3 pitfalls; no issues found",
     "issues_found": 0,
-    "acceptance_criteria_checked": 5,
+    "acceptance_criteria_checked": 1,
     "schema_version": "1.6",
     "status": "approved",
     "issue_counts": {"critical": 0, "important": 0, "minor": 0},

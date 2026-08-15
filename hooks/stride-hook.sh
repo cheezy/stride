@@ -1578,6 +1578,61 @@ another_open_window_exists() {
 # sentinel semantics are unchanged. Test 23r pins the fallback keeping the
 # outer's mid-window commit; 23u/23w/23x pin hook-mediated ownership.
 #
+# (D272) That steal RATCHETS, and the amplification is pinned rather than
+# fixed — a decision, not an oversight. Each childless window subtracted here
+# joins the covered set, which re-grounds the NEXT childless window's residual
+# to 1, so k childless completions interleaved with k outer commits strip all k
+# from their author's snapshot; at k = the outer's commit count the walk below
+# yields no runs and emits STRIDE_NO_OWN_COMMITS — an EMPTY snapshot for a task
+# that really committed, colliding with the sentinel's legitimate meaning.
+# 23v2 pins k=2, the k=3 terminal shape, the two shapes that do NOT ratchet
+# (an empty window has nothing to steal; a real-commit child's owned record
+# supersedes its window and breaks the chain), and that the victim is whichever
+# ENCLOSING task committed inside the window at ANY depth — a childless
+# grandchild takes the middle task's commit and leaves the outermost intact.
+# Do not read the empty snapshot as this shape's signature: it appears only
+# when the victim's tree is clean at completion. With ANY uncommitted work the
+# same terminal loss uploads an ordinary-looking non-empty snapshot (just the
+# WIP), so there is no artifact-level tell at all — measured, and the reason
+# the pin exists rather than a detection rule.
+#
+# The obvious fix — a PRESENT-and-empty record on a NONEMPTY window becomes
+# subtract-nothing — was implemented behind a flag and MEASURED against the
+# suite before being declined: 665 → 652 passed, 13 failed. Nine of the 13 are
+# pre-existing pins — 23j, 23n ×3 (its outer's paths, its hunk of a file both
+# touched, and its no-commits-of-its-own case), 23o, 23p ×2, 23q, 23v — and the
+# other four are 23v2's own ratchet assertions flipping, which is the branch
+# working. It is not scoped to this geometry because it is
+# not scoped to this SIGNAL: every fixture whose after_doing does not commit
+# records a present-and-empty set on EVERY window, so the branch stops
+# subtracting nested windows at all for hand-committing agents — 23j's outer
+# came back [fileB.txt, outerA.txt] and 23p's outermost [deepC.txt, midB.txt,
+# topA.txt]. That is not "W2066 re-opened for 23n's geometry"; it is D236
+# reverted for the whole fallback world. 23n and 23v are the same shape to
+# every signal attribution has (one-commit window, present-and-empty record),
+# differing only in who authored the commit — which is exactly what topology
+# cannot see — so no branch keyed on that record can keep one and fix the
+# other. Narrowing instead which windows may GROUND another window's purity
+# (excluding weak-pure ones from the fixpoint pool) does break the chain, but
+# on the same measurement it degrades every nested fallback geometry toward
+# over-report as well, and each of those is its own decided trade (23p, 23s);
+# it is recorded here as the live candidate if the ratchet is ever re-decided.
+#
+# Two things the cap does NOT do for this, both measured rather than reasoned,
+# because the obvious reading of D268 is that it eventually bounds the cascade
+# and it does not. (1) The 20-window cap is UNREACHABLE while the victim is
+# open: select_kept_window_records keeps every CLOSED window newer than the
+# oldest kept OPEN one, so 22 childless windows inside one live outer evicted
+# nothing (23 base records live) and all 22 of its commits were stolen. k is
+# bounded by the session, not by the cache. (2) Nested-window eviction would
+# only ever RESTORE a stolen commit to its author — removing a window removes
+# coverage — but that is vacuous here for the same reason, and it is NOT the
+# eviction this fleet actually hits. The one that fires is the OPEN-window cap,
+# which evicts the OLDEST open window — structurally the live outer, not the
+# abandoned claims this comment's neighbours reason about — and its direction
+# is total loss, not restoration. Filed separately; it is D268's own selector,
+# reachable with no ratchet involved at all.
+#
 # (D236) The commit RANGES that belong to the completing task, one per line as
 # "<from> <to>" (a git range from..to). Empty output means "no nested work to
 # subtract" and the caller keeps its ordinary single-base path unchanged.

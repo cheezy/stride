@@ -6678,6 +6678,8 @@ rm -rf "$D255_U" "$D255_USTUB"
 # task authored nothing" (23n's exact geometry), so ''-as-subtract-nothing
 # would re-open W2066. The known zero-commit steal therefore deliberately
 # remains: purity reads the one-commit window as PURE and subtracts it.
+# (D272) This is the k=1 instance of a cascade — 23v2 pins what k of these
+# windows do, and carries the measurement that declined the fix for both.
 D255_V=$(mktemp -d)
 D255_VSTUB=$(mktemp -d)
 make_curl_stub "$D255_VSTUB" "$D255_V/curl-call.txt" 0
@@ -6943,6 +6945,185 @@ d255_complete "$D271_E" 100 "$D271_ESTUB"
 assert_eq "23z7 (D271): a stale open-window record never re-narrows an outermost task's snapshot" \
   "manual.txt,tracked.txt" "$(d255_paths "$D271_E")"
 rm -rf "$D271_E" "$D271_ESTUB"
+
+# 23v2 (D272): the zero-commit steal RATCHETS. 23v pins the k=1 instance; this
+# pins what k of them do, because the amplification is a different fact about
+# the same branch and nothing pinned it. Each childless completion's window
+# holds only the outer's mid-window commit, reads residual 1, classifies PURE
+# and is subtracted — and that covered span then re-grounds the NEXT childless
+# window's residual back to 1, so k childless children strip k outer commits,
+# one per window, with no k limit short of the window-cache cap. At k = the
+# outer's commit count the outer completes with an EMPTY snapshot while its
+# work sits in git history, indistinguishable from the STRIDE_NO_OWN_COMMITS
+# sentinel that legitimately means "authored nothing" — the shape 23t calls the
+# worst of the losing-work direction. The realistic trigger is routine here:
+# dispatched children whose deliverable lives in a gitignored subrepo author no
+# outer-repo commits at all, interleaved with the outer agent's own commits.
+#
+# DECIDED (D272), trade DECLINED — the D272 paragraph in
+# attributed_commit_ranges carries the full rationale. The candidate fix (a
+# present-and-empty owned record on a NONEMPTY window becomes subtract-nothing)
+# was implemented behind a flag and MEASURED here rather than argued: 665 → 652
+# passed, 13 failed. Four of the 13 are the ratchet assertions below flipping —
+# the branch doing its job — and the other NINE are pre-existing pins it breaks
+# on the way: 23j, 23n (the outer's paths, its hunk of a file both touched, and
+# its no-commits-of-its-own case), 23o, 23p at both levels, 23q, and 23v.
+# Every fixture whose after_doing does not commit records a
+# present-and-empty set on EVERY window, so the branch is not scoped to this
+# geometry: it stops subtracting nested windows at all for hand-committing
+# agents (23j's outer came back [fileB.txt, outerA.txt]; 23p's outermost
+# [deepC.txt, midB.txt, topA.txt]) — D236 reverted for the whole fallback
+# world, not merely W2066 re-opened. 23n and 23v are the same shape to every
+# signal attribution has, differing only in who authored the one commit in the
+# window, so no branch keyed on that record separates them. The cascade is
+# therefore pinned, so a change that widens or narrows it is noticed instead of
+# discovered.
+#
+# k=2: two childless children, two outer commits stripped. 23v's single steal
+# generalises rather than saturating.
+D272_R=$(mktemp -d)
+D272_RSTUB=$(mktemp -d)
+make_curl_stub "$D272_RSTUB" "$D272_R/curl-call.txt" 0
+d255_fixture "$D272_R"
+d226_claim "$D272_R" 100
+d226_claim "$D272_R" 200
+d226_claim "$D272_R" 300
+( cd "$D272_R" && echo mid1 > outer_mid1.txt && git add -A > /dev/null && git commit -q -m outer_mid1 )
+d255_complete "$D272_R" 300 "$D272_RSTUB"
+assert_contains "23v2 (D272): the first childless child records the EMPTY owned set" \
+  "TASK_OWNED_300=''" "$(cat "$D272_R/.stride-env-cache" 2>/dev/null)"
+assert_eq "23v2 (D272): ...and its window swallows the outer's first commit (23v's single steal)" \
+  "outer_mid1.txt" "$(d255_paths "$D272_R")"
+( cd "$D272_R" && echo mid2 > outer_mid2.txt && git add -A > /dev/null && git commit -q -m outer_mid2 )
+d255_complete "$D272_R" 200 "$D272_RSTUB"
+assert_eq "23v2 (D272): the SECOND childless window steals the second outer commit — the covered span re-grounded its residual to 1" \
+  "outer_mid2.txt" "$(d255_paths "$D272_R")"
+( cd "$D272_R" && echo after > outer_after.txt && git add -A > /dev/null && git commit -q -m outer_after )
+d255_complete "$D272_R" 100 "$D272_RSTUB"
+assert_eq "23v2 (D272): the outer authored three commits and keeps only the one made after the last window closed" \
+  "outer_after.txt" "$(d255_paths "$D272_R")"
+rm -rf "$D272_R" "$D272_RSTUB"
+
+# k=3, the terminal shape: every commit the outer authored is inside some
+# childless window, so the walk yields no runs and the snapshot is EMPTY —
+# a task that really committed three files completing with the same artifact
+# a task that committed nothing produces.
+D272_K3=$(mktemp -d)
+D272_K3STUB=$(mktemp -d)
+make_curl_stub "$D272_K3STUB" "$D272_K3/curl-call.txt" 0
+d255_fixture "$D272_K3"
+d226_claim "$D272_K3" 100
+d226_claim "$D272_K3" 200
+d226_claim "$D272_K3" 300
+d226_claim "$D272_K3" 400
+( cd "$D272_K3" && echo mid1 > outer_mid1.txt && git add -A > /dev/null && git commit -q -m outer_mid1 )
+d255_complete "$D272_K3" 400 "$D272_K3STUB"
+( cd "$D272_K3" && echo mid2 > outer_mid2.txt && git add -A > /dev/null && git commit -q -m outer_mid2 )
+d255_complete "$D272_K3" 300 "$D272_K3STUB"
+( cd "$D272_K3" && echo mid3 > outer_mid3.txt && git add -A > /dev/null && git commit -q -m outer_mid3 )
+d255_complete "$D272_K3" 200 "$D272_K3STUB"
+assert_eq "23v2 (D272): each of the three childless children uploaded one of the outer's commits" \
+  "outer_mid3.txt" "$(d255_paths "$D272_K3")"
+d255_complete "$D272_K3" 100 "$D272_K3STUB"
+assert_eq "23v2 (D272): at k=3 the outer completes with an EMPTY snapshot (the no-own-commits sentinel, terminally)" \
+  "" "$(d255_paths "$D272_K3")"
+assert_eq "23v2 (D272): ...while its three commits really are in history — the empty snapshot is not 'authored nothing'" \
+  "3" "$(git -C "$D272_K3" log --oneline --format=%s | grep -c '^outer_mid' | tr -d ' ')"
+rm -rf "$D272_K3" "$D272_K3STUB"
+
+# Edge: a childless child whose window is ALSO empty (no outer commit landed
+# inside it) has nothing to steal — the empty rev-list expansion is skipped
+# before classification, so the outer keeps everything. The ratchet needs an
+# outer commit per window, not merely a childless child per window.
+D272_Z=$(mktemp -d)
+D272_ZSTUB=$(mktemp -d)
+make_curl_stub "$D272_ZSTUB" "$D272_Z/curl-call.txt" 0
+d255_fixture "$D272_Z"
+d226_claim "$D272_Z" 100
+d226_claim "$D272_Z" 200
+d255_complete "$D272_Z" 200 "$D272_ZSTUB"
+assert_eq "23v2 (D272): a childless child with an EMPTY window uploads nothing" \
+  "" "$(d255_paths "$D272_Z")"
+( cd "$D272_Z" && echo own > outer_own.txt && git add -A > /dev/null && git commit -q -m outer_own )
+d255_complete "$D272_Z" 100 "$D272_ZSTUB"
+assert_eq "23v2 (D272): ...and the outer keeps its own commit" \
+  "outer_own.txt" "$(d255_paths "$D272_Z")"
+rm -rf "$D272_Z" "$D272_ZSTUB"
+
+# Edge: one REAL-commit child interrupts the chain. Its non-empty owned record
+# supersedes the purity heuristic for its own window, and the next childless
+# window then holds two commits nothing owned covers → AMBIGUOUS → subtracts
+# nothing, so the outer keeps BOTH mid-window commits. The ratchet needs an
+# unbroken run of childless windows; hook-mediated ownership already breaks it
+# wherever a child actually commits through after_doing.
+D272_M=$(mktemp -d)
+D272_MSTUB=$(mktemp -d)
+make_curl_stub "$D272_MSTUB" "$D272_M/curl-call.txt" 0
+d255_fixture "$D272_M"
+d226_claim "$D272_M" 100
+d226_claim "$D272_M" 200
+d226_claim "$D272_M" 300
+( cd "$D272_M" && echo mid1 > outer_mid1.txt && git add -A > /dev/null && git commit -q -m outer_mid1 )
+( cd "$D272_M" && echo c3 > child3.txt )
+d255_complete "$D272_M" 300 "$D272_MSTUB"
+assert_eq "23v2 (D272): a child that COMMITS through after_doing captures only its own delta" \
+  "child3.txt" "$(d255_paths "$D272_M")"
+( cd "$D272_M" && echo mid2 > outer_mid2.txt && git add -A > /dev/null && git commit -q -m outer_mid2 )
+d255_complete "$D272_M" 200 "$D272_MSTUB"
+( cd "$D272_M" && echo after > outer_after.txt && git add -A > /dev/null && git commit -q -m outer_after )
+d255_complete "$D272_M" 100 "$D272_MSTUB"
+assert_eq "23v2 (D272): with a real-commit child in the chain the outer keeps every commit it authored" \
+  "outer_after.txt,outer_mid1.txt,outer_mid2.txt" "$(d255_paths "$D272_M")"
+rm -rf "$D272_M" "$D272_MSTUB"
+
+# Depth: the victim is whichever ENCLOSING task committed inside the childless
+# window, at any depth — not the outermost task the write-up describes. A
+# childless GRANDCHILD takes the MIDDLE task's mid-window commit while the top
+# is untouched, and the middle's loss is silently partial: a non-empty snapshot,
+# no sentinel, nothing for a reviewer to notice. 23p/23s pin depth 3 only with
+# committing children, so this victim class was pinned nowhere.
+D272_D3=$(mktemp -d)
+D272_D3STUB=$(mktemp -d)
+make_curl_stub "$D272_D3STUB" "$D272_D3/curl-call.txt" 0
+d255_fixture "$D272_D3"
+d226_claim "$D272_D3" 100
+( cd "$D272_D3" && echo t1 > top_own1.txt && git add -A > /dev/null && git commit -q -m top_own1 )
+d226_claim "$D272_D3" 200
+( cd "$D272_D3" && echo m1 > mid_own1.txt && git add -A > /dev/null && git commit -q -m mid_own1 )
+d226_claim "$D272_D3" 300
+( cd "$D272_D3" && echo m2 > mid_own2.txt && git add -A > /dev/null && git commit -q -m mid_own2 )
+d255_complete "$D272_D3" 300 "$D272_D3STUB"
+assert_eq "23v2 (D272): a childless GRANDCHILD uploads the middle task's commit" \
+  "mid_own2.txt" "$(d255_paths "$D272_D3")"
+d255_complete "$D272_D3" 200 "$D272_D3STUB"
+assert_eq "23v2 (D272): ...so the MIDDLE task authored two commits and reports one — a silently partial snapshot, no sentinel" \
+  "mid_own1.txt" "$(d255_paths "$D272_D3")"
+( cd "$D272_D3" && echo t2 > top_own2.txt && git add -A > /dev/null && git commit -q -m top_own2 )
+d255_complete "$D272_D3" 100 "$D272_D3STUB"
+assert_eq "23v2 (D272): ...while the outermost task is untouched — depth decides the victim, not being outermost" \
+  "top_own1.txt,top_own2.txt" "$(d255_paths "$D272_D3")"
+rm -rf "$D272_D3" "$D272_D3STUB"
+
+# Observability: the EMPTY snapshot is not this shape's signature. It appears
+# only when the victim's tree is clean at completion; with ANY uncommitted work
+# the same terminal loss uploads an ordinary-looking snapshot carrying just the
+# WIP, so nothing distinguishes it from a correct capture. Pinned in the
+# hand-committing family, where uncommitted work at completion is the norm.
+D272_W=$(mktemp -d)
+D272_WSTUB=$(mktemp -d)
+make_curl_stub "$D272_WSTUB" "$D272_W/curl-call.txt" 0
+d226_fixture "$D272_W"
+d226_claim "$D272_W" 100
+d226_claim "$D272_W" 200
+( cd "$D272_W" && echo mid1 > outer_mid1.txt && git add -A > /dev/null && git commit -q -m outer_mid1 )
+d255_complete "$D272_W" 200 "$D272_WSTUB"
+assert_eq "23v2 (D272): the childless child steals the outer's only commit in the fallback family too" \
+  "outer_mid1.txt" "$(d255_paths "$D272_W")"
+( cd "$D272_W" && echo wip > outer_wip.txt )
+d255_complete "$D272_W" 100 "$D272_WSTUB"
+assert_eq "23v2 (D272): with uncommitted work the terminal shape reports the WIP and hides the stolen commit — no empty snapshot to notice" \
+  "outer_wip.txt" "$(d255_paths "$D272_W")"
+rm -rf "$D272_W" "$D272_WSTUB"
 
 # ============================================================
 # Test Group 24: D228 — a failing after_goal must not be silent

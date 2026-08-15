@@ -6477,6 +6477,227 @@ rm -rf "$D244_T" "$D244_TSTUB"
 
 rm -rf "$D236_F" "$D236_FSTUB"
 
+# --- D255: hook-mediated commit ownership ---------------------------------
+# The fixtures ABOVE commit in bare subshells with `true` after_doing bodies —
+# they exercise (and keep pinning) the window/purity FALLBACK. The cases below
+# commit THROUGH after_doing, which is the only place ownership is observable
+# (the pre/post loop delta), so their fixture .stride.md really commits, and
+# `.stride/` is gitignored — without that, `git add -A` sweeps the hook's own
+# artifacts and the "authored nothing" scenarios would fake a non-empty delta.
+d255_fixture() { # $1 = dir — after_doing COMMITS (hook-mediated ownership)
+  (
+    cd "$1" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+.stride-diff-upload-state
+.stride-dirty-baseline
+.stride/
+curl-call.txt
+GITIGNORE
+    printf '## before_doing\n```bash\ntrue\n```\n\n## after_doing\n```bash\ngit add -A > /dev/null && git commit -q -m stride-auto || true\n```\n' > .stride.md
+    echo "v1" > tracked.txt
+    git add .gitignore tracked.txt > /dev/null
+    git commit -q -m "v1"
+  )
+}
+d255_complete() { # $1 = dir, $2 = task id, $3 = stub dir
+  (
+    cd "$1" || exit 1
+    echo "{\"tool_input\":{\"command\":\"curl -X PATCH https://stride.example.com/api/tasks/$2/complete\"}}" \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$3:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+}
+d255_paths() { jq -r '[.[].path] | sort | join(",")' "$1/.stride-changed-files.json" 2>/dev/null; }
+
+# 23u: the D255 headline. Outer claims, nested claims, the outer commits
+# mid-window (manually), the nested's OWN after_doing commits nested_b. The
+# nested snapshot must contain ONLY nested_b (before D255: nested_b + the
+# outer's mid-window commit), and the outer must keep its commits WITHOUT
+# double-reporting nested_b (before D255: the AMBIGUOUS window leaked it in).
+D255_U=$(mktemp -d)
+D255_USTUB=$(mktemp -d)
+make_curl_stub "$D255_USTUB" "$D255_U/curl-call.txt" 0
+d255_fixture "$D255_U"
+d226_claim "$D255_U" 100
+d226_claim "$D255_U" 200
+( cd "$D255_U" && echo during > outer_during.txt && git add -A > /dev/null && git commit -q -m outer_during )
+( cd "$D255_U" && echo b > nested_b.txt )
+d255_complete "$D255_U" 200 "$D255_USTUB"
+assert_eq "23u (D255): a nested task committing through after_doing captures ONLY its own commit" \
+  "nested_b.txt" "$(d255_paths "$D255_U")"
+assert_contains "23u (D255): the completion records its owned set" \
+  "TASK_OWNED_200=" "$(cat "$D255_U/.stride-env-cache" 2>/dev/null)"
+( cd "$D255_U" && echo after > outer_after.txt && git add -A > /dev/null && git commit -q -m outer_after )
+d255_complete "$D255_U" 100 "$D255_USTUB"
+assert_eq "23u (D255): the outer keeps its mid-window commit and does NOT double-report the nested commit" \
+  "outer_after.txt,outer_during.txt" "$(d255_paths "$D255_U")"
+rm -rf "$D255_U" "$D255_USTUB"
+
+# 23v: the zero-commit window (D244's P2 probe). The nested after_doing RUNS
+# and authors nothing → TASK_OWNED_200='' is recorded as a FACT — but it is
+# deliberately consumed as fallback (see attributed_commit_ranges): with
+# manual commits possible, "the loop authored nothing" does not mean "the
+# task authored nothing" (23n's exact geometry), so ''-as-subtract-nothing
+# would re-open W2066. The known zero-commit steal therefore deliberately
+# remains: purity reads the one-commit window as PURE and subtracts it.
+D255_V=$(mktemp -d)
+D255_VSTUB=$(mktemp -d)
+make_curl_stub "$D255_VSTUB" "$D255_V/curl-call.txt" 0
+d255_fixture "$D255_V"
+d226_claim "$D255_V" 100
+d226_claim "$D255_V" 200
+( cd "$D255_V" && echo during > outer_during.txt && git add -A > /dev/null && git commit -q -m outer_during )
+d255_complete "$D255_V" 200 "$D255_VSTUB"
+assert_contains "23v (D255): a loop that authors nothing records the EMPTY owned set (distinct from absence)" \
+  "TASK_OWNED_200=''" "$(cat "$D255_V/.stride-env-cache" 2>/dev/null)"
+assert_eq "23v (D255): the fallback nested snapshot still absorbs the outer's commit (the documented open steal)" \
+  "outer_during.txt" "$(d255_paths "$D255_V")"
+d255_complete "$D255_V" 100 "$D255_VSTUB"
+assert_eq "23v (D255): the outer's only commit stays stolen under '' fallback (flips only if '' becomes subtract-nothing, which 23n forbids)" \
+  "" "$(d255_paths "$D255_V")"
+rm -rf "$D255_V" "$D255_VSTUB"
+
+# 23w: manual-mid-work + hook-commit mix. The nested task commits nested_a
+# MANUALLY, then its after_doing commits nested_b. Ownership is authoritative
+# when non-empty: the nested snapshot is exactly the hook-authored delta (the
+# pre-hook manual commit falls out — the accepted trade), and the manual
+# commit falls back INTO the outer snapshot (over-report, the safer failure)
+# while the hook-authored one stays out. Strictly better than D244, where the
+# outer also carried nested_b.
+D255_W=$(mktemp -d)
+D255_WSTUB=$(mktemp -d)
+make_curl_stub "$D255_WSTUB" "$D255_W/curl-call.txt" 0
+d255_fixture "$D255_W"
+d226_claim "$D255_W" 100
+d226_claim "$D255_W" 200
+( cd "$D255_W" && echo a > nested_a.txt && git add -A > /dev/null && git commit -q -m nested_a )
+( cd "$D255_W" && echo b > nested_b.txt )
+d255_complete "$D255_W" 200 "$D255_WSTUB"
+assert_eq "23w (D255): with a hook-mediated commit the nested snapshot is the owned delta only" \
+  "nested_b.txt" "$(d255_paths "$D255_W")"
+( cd "$D255_W" && echo own > outer_own.txt && git add -A > /dev/null && git commit -q -m outer_own )
+d255_complete "$D255_W" 100 "$D255_WSTUB"
+assert_eq "23w (D255): the manual nested commit falls back into the outer (over-report) while the owned one stays out" \
+  "nested_a.txt,outer_own.txt" "$(d255_paths "$D255_W")"
+rm -rf "$D255_W" "$D255_WSTUB"
+
+# 23x: depth 3 — the middle task commits on BOTH sides of the innermost
+# window. The innermost owns its hook-authored commit; the middle keeps both
+# its manual commits (window 30's owned set supersedes purity so inner_c is
+# subtracted exactly); the outer stays clean of all of it.
+D255_X=$(mktemp -d)
+D255_XSTUB=$(mktemp -d)
+make_curl_stub "$D255_XSTUB" "$D255_X/curl-call.txt" 0
+d255_fixture "$D255_X"
+d226_claim "$D255_X" 10
+d226_claim "$D255_X" 20
+d226_claim "$D255_X" 30
+( cd "$D255_X" && echo ma > mid_a.txt && git add -A > /dev/null && git commit -q -m mid_a )
+( cd "$D255_X" && echo i > inner_c.txt )
+d255_complete "$D255_X" 30 "$D255_XSTUB"
+assert_eq "23x (D255): the innermost snapshot is its owned commit only" \
+  "inner_c.txt" "$(d255_paths "$D255_X")"
+( cd "$D255_X" && echo mb > mid_b.txt && git add -A > /dev/null && git commit -q -m mid_b )
+d255_complete "$D255_X" 20 "$D255_XSTUB"
+assert_eq "23x (D255): the middle keeps both manual commits; the owned innermost commit is subtracted exactly" \
+  "mid_a.txt,mid_b.txt" "$(d255_paths "$D255_X")"
+( cd "$D255_X" && echo x > outer_x.txt && git add -A > /dev/null && git commit -q -m outer_x )
+d255_complete "$D255_X" 10 "$D255_XSTUB"
+assert_eq "23x (D255): ambiguity does not leak upward — the outer reports only its own commit" \
+  "outer_x.txt" "$(d255_paths "$D255_X")"
+rm -rf "$D255_X" "$D255_XSTUB"
+
+# 23y: the owned records must survive the claim-time cache rewrite (the D236
+# bug class — a truncating rewrite that drops the family silently reverts the
+# signal on the very next claim). Geometry chosen so fallback CANNOT mask a
+# dropped record: without the carry-forward, window 200 reads AMBIGUOUS and
+# nested_b leaks into the outer snapshot.
+D255_Y=$(mktemp -d)
+D255_YSTUB=$(mktemp -d)
+make_curl_stub "$D255_YSTUB" "$D255_Y/curl-call.txt" 0
+d255_fixture "$D255_Y"
+d226_claim "$D255_Y" 100
+d226_claim "$D255_Y" 200
+( cd "$D255_Y" && echo during > outer_during.txt && git add -A > /dev/null && git commit -q -m outer_during )
+( cd "$D255_Y" && echo b > nested_b.txt )
+d255_complete "$D255_Y" 200 "$D255_YSTUB"
+d226_claim "$D255_Y" 300
+assert_contains "23y (D255): the owned record survives a later claim's truncating rewrite" \
+  "TASK_OWNED_200=" "$(cat "$D255_Y/.stride-env-cache" 2>/dev/null)"
+( cd "$D255_Y" && echo c > fileC.txt )
+d255_complete "$D255_Y" 300 "$D255_YSTUB"
+d255_complete "$D255_Y" 100 "$D255_YSTUB"
+assert_eq "23y (D255): with surviving owned records the outer neither double-reports nor loses" \
+  "outer_during.txt" "$(d255_paths "$D255_Y")"
+rm -rf "$D255_Y" "$D255_YSTUB"
+
+# 23z: the 20-SHA value cap. An after_doing that authors 21 commits records
+# the OVERFLOW sentinel, which every consumer treats exactly like no-record —
+# the nested capture falls back to base..working-tree (all 21 files present
+# proves OVERFLOW was never consumed as a truncated owned list), and the
+# outer's fallback classification reads the 21-commit window as AMBIGUOUS and
+# over-reports (sane, never loss).
+D255_Z=$(mktemp -d)
+D255_ZSTUB=$(mktemp -d)
+make_curl_stub "$D255_ZSTUB" "$D255_Z/curl-call.txt" 0
+(
+  cd "$D255_Z" || exit 1
+  git init -q
+  git config user.email "test@test.local"
+  git config user.name "Test"
+  cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+.stride-diff-upload-state
+.stride-dirty-baseline
+.stride/
+curl-call.txt
+GITIGNORE
+  printf '## before_doing\n```bash\ntrue\n```\n\n## after_doing\n```bash\nfor i in $(seq 1 21); do echo $i > f$i.txt && git add -A > /dev/null && git commit -q -m c$i; done || true\n```\n' > .stride.md
+  echo "v1" > tracked.txt
+  git add .gitignore tracked.txt > /dev/null
+  git commit -q -m "v1"
+)
+d226_claim "$D255_Z" 100
+d226_claim "$D255_Z" 200
+d255_complete "$D255_Z" 200 "$D255_ZSTUB"
+assert_contains "23z (D255): a 21-commit delta records the OVERFLOW sentinel, never a truncated list" \
+  "TASK_OWNED_200='OVERFLOW'" "$(cat "$D255_Z/.stride-env-cache" 2>/dev/null)"
+assert_eq "23z (D255): OVERFLOW is consumed as fallback — the nested snapshot carries all 21 files" \
+  "21" "$(jq 'length' "$D255_Z/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D255_Z" "$D255_ZSTUB"
+
+# 23z2: a rebase orphans the recorded SHAs. The window head stops being an
+# ancestor of HEAD, the window drops, everything falls back — the outer's own
+# work is never lost (over-report is acceptable, loss is not).
+D255_R=$(mktemp -d)
+D255_RSTUB=$(mktemp -d)
+make_curl_stub "$D255_RSTUB" "$D255_R/curl-call.txt" 0
+d255_fixture "$D255_R"
+d226_claim "$D255_R" 100
+d226_claim "$D255_R" 200
+( cd "$D255_R" && echo during > outer_during.txt && git add -A > /dev/null && git commit -q -m outer_during )
+( cd "$D255_R" && echo b > nested_b.txt )
+d255_complete "$D255_R" 200 "$D255_RSTUB"
+(
+  cd "$D255_R" || exit 1
+  git reset -q --hard HEAD~1
+  echo b2 > nested_b.txt && git add -A > /dev/null && git commit -q -m rewritten
+  echo after > outer_after.txt && git add -A > /dev/null && git commit -q -m outer_after
+)
+d255_complete "$D255_R" 100 "$D255_RSTUB"
+assert_contains "23z2 (D255): orphaned owned SHAs never lose the outer's own work (over-report ok)" \
+  "outer_after.txt" "$(d255_paths "$D255_R")"
+assert_contains "23z2 (D255): the outer's mid-window commit also survives the rewrite" \
+  "outer_during.txt" "$(d255_paths "$D255_R")"
+rm -rf "$D255_R" "$D255_RSTUB"
+
 # ============================================================
 # Test Group 24: D228 — a failing after_goal must not be silent
 # ============================================================

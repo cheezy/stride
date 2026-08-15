@@ -66,6 +66,19 @@ AFTER_GOAL_JSON=""
 # collide with a git range.
 STRIDE_NO_OWN_COMMITS="__stride_no_own_commits__"
 
+# (D255) Sentinel value for a TASK_OWNED_<id> record whose after_doing delta
+# exceeded the 20-SHA cap. Consumers treat it EXACTLY like no-record (purity
+# fallback) — never as a truncated list, which would mis-subtract.
+STRIDE_OWNED_OVERFLOW="OVERFLOW"
+# (D255) Owned-commit delta state for the CURRENT completion, set by
+# run_stride_section around the after_doing command loop and consumed once by
+# finalize_after_doing's post-loop call. Declared for `set -u`.
+SNAP_OWNED_H0=""
+SNAP_OWNED_H1=""
+SNAP_OWNED_LOOP_RAN=false
+SNAP_OWNED_SET=""
+SNAP_OWNED_RECORDED=false
+
 # (D238) Set only on the doubly-degraded path where no stdout buffer could be
 # created anywhere and the primary section therefore ran unbuffered. Declared at
 # file scope because `set -u` is active.
@@ -1304,6 +1317,86 @@ record_task_head_ref() {
   return 0
 }
 
+# (D255) Per-task owned-commit record: the commits this task's OWN after_doing
+# command loop authored (H0..H1 around the loop). ADDITIVE signal — absence,
+# emptiness, or OVERFLOW all degrade to the D244 window/purity fallback.
+task_owned_key() {
+  local _s
+  _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
+  case "$_s" in
+    "" | TRUSTED | OWNER | UNPROVEN) return 0 ;;
+  esac
+  printf 'TASK_OWNED_%s' "$_s"
+}
+
+# Prints the recorded owned set for the given task id. Return status is the
+# presence signal: 0 = a record EXISTS (value may legitimately be empty),
+# 1 = no record. Reads the CACHE FILE, not the environment, so absent-vs-empty
+# is decidable and an exported variable cannot forge a record.
+task_owned_for() {
+  local _key _line
+  _key=$(task_owned_key "${1:-}")
+  [ -n "$_key" ] || return 1
+  _line=$(grep -e "^${_key}=" "$ENV_CACHE" 2>/dev/null | tail -n 1 || true)
+  [ -n "$_line" ] || return 1
+  _line="${_line#*=}"
+  _line="${_line#\'}"
+  _line="${_line%\'}"
+  printf '%s' "$_line"
+  return 0
+}
+
+# (D255) Best-effort, never fatal — a missing record only means fallback.
+record_task_owned() {
+  local _tid="${1:-}" _val="${2:-}" _key
+  [ -n "$_tid" ] || return 0
+  _key=$(task_owned_key "$_tid")
+  [ -n "$_key" ] || return 0
+  {
+    grep -v -e "^${_key}=" "$ENV_CACHE" 2>/dev/null || true
+    printf "%s=%s\n" "$_key" "$(sq_escape "$_val")"
+  } | write_env_cache || true
+  return 0
+}
+
+# (D255) Compute the owned set for the loop delta H0..H1: space-separated full
+# SHAs in rev-list order (newest first), capped at 20; over the cap prints the
+# OVERFLOW sentinel; identical endpoints print nothing (the empty record).
+compute_owned_set() {
+  local _h0="${1:-}" _h1="${2:-}" _sha _out="" _count=0
+  [ -n "$_h0" ] && [ -n "$_h1" ] || return 0
+  [ "$_h0" = "$_h1" ] && return 0
+  while IFS= read -r _sha; do
+    [ -n "$_sha" ] || continue
+    _count=$((_count + 1))
+    if [ "$_count" -gt 20 ]; then
+      printf '%s' "$STRIDE_OWNED_OVERFLOW"
+      return 0
+    fi
+    if [ -n "$_out" ]; then _out="${_out} ${_sha}"; else _out="$_sha"; fi
+  done <<< "$( (cd "$PROJECT_DIR" 2>/dev/null && git rev-list "${_h0}..${_h1}" 2>/dev/null) || true)"
+  printf '%s' "$_out"
+}
+
+# (D255) Convert a non-empty owned set into one "<from> <to>" range line for
+# expand_own_ranges. The set is contiguous by construction (a single H0..H1
+# delta), so the range is <oldest>^ <newest>. Prints nothing — callers fall
+# back — when the set is empty/OVERFLOW or the oldest commit's parent does not
+# resolve (root commit, or a rebase already rewrote the SHAs away; matching
+# nothing over-reports, the documented safer failure).
+owned_set_to_range() {
+  local _set="${1:-}" _s _first="" _last=""
+  [ -n "$_set" ] || return 0
+  [ "$_set" = "$STRIDE_OWNED_OVERFLOW" ] && return 0
+  for _s in $_set; do
+    [ -n "$_first" ] || _first="$_s"
+    _last="$_s"
+  done
+  [ -n "$_last" ] || return 0
+  (cd "$PROJECT_DIR" 2>/dev/null && git rev-parse --verify "${_last}^" > /dev/null 2>&1) || return 0
+  printf '%s^ %s' "$_last" "$_first"
+}
+
 # (D236) capture_changed_files diffs base..working-tree, so every commit made
 # between an outer task's claim and its completion lands in that task's
 # snapshot — including commits from tasks that claimed, worked and completed
@@ -1320,25 +1413,34 @@ record_task_head_ref() {
 # A commits, B commits, complete B, complete A gave B=[nested_b, outer_during]
 # and A=[outer_after] — A lost outer_during.
 #
-# True per-COMMIT ownership is NOT recoverable here: hooks fire only on
-# claim/complete, so nothing observes the interior of a window, and two commits
-# that both exist before the next hook invocation are topologically
-# indistinguishable (D244's investigation verified this; the original sketch of
-# recording the after_doing pre/post delta fails because commits need not be
-# hook-mediated at all). What IS decidable per window: how many of its commits
-# no OTHER recorded window covers (its RESIDUAL). One residual commit is the
-# window task's own auto-commit — the window is PURE and its whole span is
-# subtracted, exactly the D236 behaviour. Two or more residual commits mean at
-# least one was authored outside any nested task (the outer task committing
-# mid-window) and topology cannot say which — the window is AMBIGUOUS, only the
-# commits other windows cover are subtracted, and the residual falls through
-# into the caller's own snapshot. That over-reports the ambiguous case (the
-# child's commit can appear in the outer snapshot too), which is the documented
-# safer failure: showing extra beats losing real task work. The nested task
-# STILL absorbing the outer's mid-window commit into its own snapshot is the
-# other half of the same defect, unachievable without hook-mediated commit
-# ownership — re-filed as D255 rather than bolted on here. Test 23r asserts
-# the outer task keeps its mid-window commit.
+# True per-COMMIT ownership is NOT recoverable from topology: hooks fire only
+# on claim/complete, so nothing observes the interior of a window, and two
+# commits that both exist before the next hook invocation are topologically
+# indistinguishable (D244's investigation verified this twice). What topology
+# DOES decide per window: how many of its commits no OTHER recorded window
+# covers (its RESIDUAL). One residual commit is the window task's own
+# auto-commit — the window is PURE and its whole span is subtracted, exactly
+# the D236 behaviour. Two or more residual commits mean at least one was
+# authored outside any nested task (the outer task committing mid-window) and
+# topology cannot say which — the window is AMBIGUOUS, only the commits other
+# windows cover are subtracted, and the residual falls through into the
+# caller's own snapshot (over-report, the documented safer failure).
+#
+# (D255) On top of that fallback sits an ADDITIVE per-window ownership signal:
+# run_stride_section records the HEAD delta around the after_doing command
+# loop as TASK_OWNED_<id> (see task_owned_key and friends). A NON-EMPTY,
+# non-OVERFLOW record names that window's commits exactly — the purity
+# classification is superseded for that window, the completing task's own
+# capture narrows to exactly its delta, and a later outer completion subtracts
+# exactly those SHAs. Absent, EMPTY, or OVERFLOW records keep the purity
+# fallback above: OVERFLOW because a truncated list would mis-subtract, and
+# EMPTY because with manual (non-hook-mediated) commits "the loop authored
+# nothing" does not mean "the task authored nothing" — a zero-commit hook run
+# beside a manual commit is exactly the ambiguity topology cannot resolve, so
+# the zero-commit-steal geometry (D244's P2 probe) deliberately remains the
+# open, documented behaviour (test 23v pins it). STRIDE_NO_OWN_COMMITS
+# sentinel semantics are unchanged. Test 23r pins the fallback keeping the
+# outer's mid-window commit; 23u/23w/23x pin hook-mediated ownership.
 #
 # (D236) The commit RANGES that belong to the completing task, one per line as
 # "<from> <to>" (a git range from..to). Empty output means "no nested work to
@@ -1366,6 +1468,7 @@ attributed_commit_ranges() {
   # end marker the window cannot be bounded, so it is skipped rather than
   # guessed at — that degrades to today's behaviour, never to a wrong diff.
   local _windows="" _line _bkey _id _b _h
+  local _owned_rec _oc _superseded="" _owned_covered=""
   while IFS= read -r _line; do
     [ -n "$_line" ] || continue
     _bkey="${_line%%=*}"
@@ -1381,6 +1484,23 @@ attributed_commit_ranges() {
     git rev-parse --verify "$_h" > /dev/null 2>&1 || continue
     git merge-base --is-ancestor "$_own_base" "$_b" 2>/dev/null || continue
     git merge-base --is-ancestor "$_h" HEAD 2>/dev/null || continue
+    # (D255) A window whose task recorded a NON-EMPTY owned set names its
+    # commits exactly — the purity heuristic is superseded for that window.
+    # Empty, OVERFLOW, and absent all fall back to the D244 classification:
+    # OVERFLOW because a truncated list would mis-subtract, and empty because
+    # with manual (non-hook-mediated) commits "the loop authored nothing" does
+    # not mean "the task authored nothing" — treating '' as subtract-nothing
+    # re-opens W2066 for every task whose agent commits by hand (23n's exact
+    # fixture geometry). SHAs a later rebase orphaned simply match nothing in
+    # the walk below → over-report, the documented safer failure.
+    _owned_rec=""
+    if _owned_rec=$(task_owned_for "$_id") \
+      && [ -n "$_owned_rec" ] && [ "$_owned_rec" != "$STRIDE_OWNED_OVERFLOW" ]; then
+      _superseded="${_superseded}${_b} ${_h}"$'\n'
+      for _oc in $_owned_rec; do
+        _owned_covered="${_owned_covered}${_oc}"$'\n'
+      done
+    fi
     _windows="${_windows}${_b} ${_h}"$'\n'
   done <<< "$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)"
 
@@ -1406,6 +1526,12 @@ attributed_commit_ranges() {
   local _w2 _wb2 _wh2 _set_i _other _residual_count
   while IFS= read -r _w; do
     [ -n "$_w" ] || continue
+    # (D255) Owned windows contribute their exact SHAs (already collected) and
+    # skip classification — but they REMAIN in _windows so every fallback
+    # window's other-union is unchanged and D244 math stays byte-identical.
+    if [ -n "$_superseded" ] && printf '%s' "$_superseded" | grep -qxF -- "$_w"; then
+      continue
+    fi
     _wb="${_w%% *}"; _wh="${_w##* }"
     _set_i=$(git rev-list "${_wb}..${_wh}" 2>/dev/null || true)
     [ -n "$_set_i" ] || continue
@@ -1437,6 +1563,10 @@ attributed_commit_ranges() {
       done <<< "$_set_i"
     fi
   done <<< "$_windows"
+
+  # (D255) Owned windows' exact SHAs join the covered set alongside the
+  # classified windows' contributions.
+  _covered_set="${_covered_set}${_owned_covered}"
 
   # Walk the task's range oldest-first, dropping covered commits and grouping
   # the survivors into contiguous runs.
@@ -1561,10 +1691,37 @@ finalize_after_doing() {
       fi
       SNAP_BASE_RESOLVED_DONE=true
     fi
+    # (D255) Record what this task's OWN after_doing loop authored — once per
+    # completion, and only when run_stride_section actually ran the loop (the
+    # empty-section/plugin-mode path never sets the flag, so it records nothing
+    # and stays byte-identical). '' is recorded deliberately: "ran and authored
+    # nothing" is a fact, distinct from no-record — though consumers currently
+    # treat both as fallback (see attributed_commit_ranges). Written BEFORE the
+    # capture so the before_review self-heal on this same completion reads the
+    # fresh record, and gated on SNAP_OWNED_RECORDED so the pre-loop early call
+    # can never consume a stale record from a previous completion of this id.
+    if [ "${SNAP_OWNED_LOOP_RAN:-false}" = "true" ] && [ "${SNAP_OWNED_RECORDED:-false}" != "true" ]; then
+      SNAP_OWNED_SET=$(compute_owned_set "${SNAP_OWNED_H0:-}" "${SNAP_OWNED_H1:-}")
+      record_task_owned "$_tid" "$SNAP_OWNED_SET"
+      SNAP_OWNED_RECORDED=true
+    fi
     if [ "${SNAP_BASE_REFUSED:-false}" = "true" ]; then
       snapshot='[]'
     else
-      snapshot=$(capture_changed_files "${SNAP_BASE_RESOLVED:-}" "${SNAP_OWN_RANGES:-}" 2>/dev/null || printf '[]')
+      # (D255) When this completion's own loop authored commits, its committed
+      # contribution is exactly that delta plus the uncommitted working tree —
+      # commits in base..H0 (an outer task's mid-window work, or this task's
+      # own pre-hook manual commits, the accepted consequence) fall out.
+      local _cap_ranges
+      _cap_ranges="${SNAP_OWN_RANGES:-}"
+      if [ "${SNAP_OWNED_RECORDED:-false}" = "true" ] \
+        && [ -n "${SNAP_OWNED_SET:-}" ] \
+        && [ "${SNAP_OWNED_SET:-}" != "$STRIDE_OWNED_OVERFLOW" ]; then
+        local _owned_range
+        _owned_range=$(owned_set_to_range "${SNAP_OWNED_SET:-}")
+        [ -n "$_owned_range" ] && _cap_ranges="$_owned_range"
+      fi
+      snapshot=$(capture_changed_files "${SNAP_BASE_RESOLVED:-}" "$_cap_ranges" 2>/dev/null || printf '[]')
     fi
     printf '%s\n' "$snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
     # (D236) Stamp where THIS task's commits stop, so an outer task completing
@@ -1663,6 +1820,16 @@ finalize_before_doing() {
       | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
         -e '^TASK_BASE_REF_UNPROVEN=' \
       | tail -n 20 || true)
+  fi
+  # (D255) A claim opens a fresh window for this task: its own owned record
+  # from a PREVIOUS completion must not survive into it. Other tasks' records
+  # pass through _preserved untouched (they are the whole point). Unproven
+  # claims (no validated owner) cannot name their record and leave it — the
+  # completion's own re-record overwrites it before capture on the normal path.
+  local _owned_self_key=""
+  [ -n "$_owner" ] && _owned_self_key=$(task_owned_key "$_owner")
+  if [ -n "$_owned_self_key" ]; then
+    _preserved=$(printf '%s\n' "$_preserved" | grep -v -e "^${_owned_self_key}=" || true)
   fi
   # (D226) Atomic, via the shared writer. A true race still loses one task's
   # record (last writer wins) — which degrades to a REFUSAL rather than a
@@ -1779,6 +1946,19 @@ self_heal_changed_files_upload() {
   # it with a curl stub returning 500.
   if [ "$_refused" != "true" ]; then
     _own_ranges=$( (cd "$PROJECT_DIR" 2>/dev/null && attributed_commit_ranges "$_snap_base" "$_tid") || printf '')
+  fi
+  # (D255) Same owned-set override as the primary capture: without it a failed
+  # PUT would let the retry re-upload the base-wide snapshot OVER the narrowed
+  # one (the exact D236 last-write-wins geometry this self-heal already guards
+  # for attribution). The record was written by finalize_after_doing before any
+  # PUT was attempted, so it is on disk whenever this retry runs after a
+  # recorded loop; a completion killed before the record falls back cleanly.
+  local _owned_rec _owned_range
+  if [ "$_refused" != "true" ] && _owned_rec=$(task_owned_for "$_tid"); then
+    if [ -n "$_owned_rec" ] && [ "$_owned_rec" != "$STRIDE_OWNED_OVERFLOW" ]; then
+      _owned_range=$(owned_set_to_range "$_owned_rec")
+      [ -n "$_owned_range" ] && _own_ranges="$_owned_range"
+    fi
   fi
   if [ "$_refused" = "true" ]; then
     _snapshot='[]'
@@ -2117,6 +2297,12 @@ run_stride_section() {
 
   cd "$PROJECT_DIR"
 
+  # (D255) Anchor the owned-commit delta: HEAD before the first section command
+  # runs. after_doing only — after_goal reuses this function and must stay inert.
+  if [ "${HOOK_NAME:-}" = "after_doing" ]; then
+    SNAP_OWNED_H0=$(git rev-parse HEAD 2>/dev/null || printf '')
+  fi
+
   # Early per-file diff snapshot (W1093) — the after_doing section runs the
   # full quality gate, and the 600s hook timeout can kill this process
   # mid-loop, silently losing the diff upload (how W1092 lost its diffs).
@@ -2264,6 +2450,16 @@ run_stride_section() {
     rm -f "$_cmd_stdout_file" "$_cmd_stderr_file"
     _cmd_index=$((_cmd_index + 1))
   done
+
+  # (D255) The loop ran to completion: close the delta. The failure path above
+  # returns 2 before reaching here, so a vetoed completion records nothing and
+  # the retry starts a fresh window (its pre-retry commits then fall back to
+  # the window model — over-report, never loss). An unresolvable HEAD (no
+  # commits yet) also records nothing.
+  if [ "${HOOK_NAME:-}" = "after_doing" ] && [ -n "${SNAP_OWNED_H0:-}" ]; then
+    SNAP_OWNED_H1=$(git rev-parse HEAD 2>/dev/null || printf '')
+    [ -n "${SNAP_OWNED_H1:-}" ] && SNAP_OWNED_LOOP_RAN=true
+  fi
 
   # Per-file diff snapshot (G148/W719) — no-op outside after_doing (gates on
   # the GLOBAL $HOOK_NAME). Calling run_stride_section for "after_goal" does
@@ -2545,7 +2741,7 @@ extract_hook_env() {
     | if type == "object" then . else {} end
     | to_entries[]
     | select(.key | test("^[A-Za-z_][A-Za-z0-9_]*$"))
-    | select(.key != "HOOK_NAME" and (.key | startswith("TASK_BASE_REF") | not))
+    | select(.key != "HOOK_NAME" and (.key | startswith("TASK_BASE_REF") | not) and (.key | startswith("TASK_OWNED") | not))
     | .key + "=" + (.value | tostring | @sh)
   ' 2>/dev/null || true
 }
@@ -3007,12 +3203,20 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # written.
     _kept_head_records=$(grep -e '^TASK_HEAD_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
       | tail -n 20 || true)
+    # (D255) The owned-commit records ride with the head records — same D236
+    # bug class: this rewrite TRUNCATES the cache, and dropping the family here
+    # silently reverts the ownership signal on the very next claim (every claim
+    # would erase the record the previous completion just wrote). Same 20-record
+    # cap as the base/head families.
+    _kept_owned_records=$(grep -e '^TASK_OWNED_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
+      | tail -n 20 || true)
     # Values are single-quote escaped via sq_escape (W1453) so titles with
     # spaces, quotes, or dollar signs survive the `set -a` sourcing without
     # any shell interpretation.
     {
       [ -n "$_kept_base_records" ] && printf '%s\n' "$_kept_base_records"
       [ -n "$_kept_head_records" ] && printf '%s\n' "$_kept_head_records"
+      [ -n "$_kept_owned_records" ] && printf '%s\n' "$_kept_owned_records"
       echo "TASK_ID=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.id // empty')")"
       echo "TASK_IDENTIFIER=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.identifier // empty')")"
       echo "TASK_TITLE=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.title // empty')")"

@@ -5915,7 +5915,19 @@ assert_contains "23d: an ownerless legacy base is still used, not refused" \
 rm -rf "$D226_BC" "$D226_BCSTUB"
 
 # 23e: the records are per-task, so they must not accumulate forever in a
-# long-lived checkout. Seed more than the cap and confirm it holds.
+# long-lived checkout. Seed more than the threshold and confirm the bound
+# holds.
+#
+# (D274) This case used to assert the old COUNT cap (20 carried), which D274
+# removed: no count cap can tell a live enclosing outer from an abandoned
+# claim, so capping open windows by count evicted the outer. The replacement
+# bound is LIVENESS — above the sweep threshold an open window is dropped only
+# when it is provably dead, meaning its base does not resolve to a commit at
+# all. Every base seeded here is a garbage SHA, so every one of them is
+# provably dead and the bound is now 0 rather than 20. That is
+# strictly tighter than the cap it replaces, and the companion case below is
+# the counterweight that keeps it from being satisfiable by "drop everything":
+# the same 25 records with REAL bases must all survive.
 D226_CAP=$(mktemp -d)
 (
   cd "$D226_CAP" || exit 1
@@ -5939,9 +5951,84 @@ D226_CAP=$(mktemp -d)
   finalize_before_doing
 )
 D226_CAP_N=$(grep -c '^TASK_BASE_REF_[0-9]' "$D226_CAP/.stride-env-cache" 2>/dev/null)
-assert_eq "23e: per-task base records stay bounded (19 carried + this task)" \
-  "20" "$D226_CAP_N"
+assert_eq "23e (D274): per-task base records stay bounded — 25 unresolvable bases are all swept" \
+  "0" "$D226_CAP_N"
 rm -rf "$D226_CAP"
+
+# 23e1 (D274): the counterweight. The same shape with REAL bases — every one a
+# resolvable ancestor of HEAD — must keep ALL 25 open windows even though that
+# is above the sweep threshold. This is the bound D274 chose, stated as a test:
+# growth is bounded by concurrent LIVENESS, never by a count that would have to
+# guess which live window to erase.
+D274_LIVE=$(mktemp -d)
+(
+  cd "$D274_LIVE" || exit 1
+  git init -q
+  git config user.email "test@test.local"
+  git config user.name "Test"
+  echo "v1" > a.txt
+  git add a.txt > /dev/null
+  git commit -q -m "v1"
+  echo "TASK_ID='9001'" > .stride-env-cache
+  for i in $(seq 1 25); do
+    echo "r$i" > "r$i.txt"
+    git add "r$i.txt" > /dev/null 2>&1
+    git commit -q -m "r$i" > /dev/null 2>&1
+    echo "TASK_BASE_REF_$i='$(git rev-parse HEAD)'" >> .stride-env-cache
+  done
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2> /dev/null
+  PROJECT_DIR="$PWD"
+  ENV_CACHE="$PWD/.stride-env-cache"
+  HAS_JQ=false
+  HOOK_NAME=before_doing
+  TASK_ID=9001
+  finalize_before_doing
+)
+D274_LIVE_N=$(grep -c '^TASK_BASE_REF_[0-9]' "$D274_LIVE/.stride-env-cache" 2>/dev/null)
+assert_eq "23e1 (D274): 25 LIVE open windows above the threshold are all kept" \
+  "25" "$D274_LIVE_N"
+rm -rf "$D274_LIVE"
+
+# 23e1b (D274): ancestry must NOT be a deletion signal. another_open_window_exists
+# treats a base that is not an ancestor of HEAD as unusable and SKIPS it, which
+# is recoverable the moment HEAD comes back. Deleting the record is not. A
+# detached HEAD — a bisect, or a checkout of an older commit — makes every
+# later base a non-ancestor at once, so a sweep that acted on ancestry would,
+# on the next claim past the threshold, permanently erase the anchors of tasks
+# that are perfectly live: D274's own outcome through a different door. Every
+# base here resolves and none is an ancestor of the detached HEAD.
+D274_DETACH=$(mktemp -d)
+(
+  cd "$D274_DETACH" || exit 1
+  git init -q
+  git config user.email "test@test.local"
+  git config user.name "Test"
+  echo "v1" > a.txt
+  git add a.txt > /dev/null 2>&1
+  git commit -q -m "v1" > /dev/null 2>&1
+  D274_DETACH_ROOT=$(git rev-parse HEAD)
+  echo "TASK_ID='9001'" > .stride-env-cache
+  for i in $(seq 1 25); do
+    echo "r$i" > "r$i.txt"
+    git add "r$i.txt" > /dev/null 2>&1
+    git commit -q -m "r$i" > /dev/null 2>&1
+    echo "TASK_BASE_REF_$i='$(git rev-parse HEAD)'" >> .stride-env-cache
+  done
+  git checkout -q "$D274_DETACH_ROOT" > /dev/null 2>&1
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2> /dev/null
+  PROJECT_DIR="$PWD"
+  ENV_CACHE="$PWD/.stride-env-cache"
+  HAS_JQ=false
+  HOOK_NAME=before_doing
+  TASK_ID=9001
+  finalize_before_doing
+)
+D274_DETACH_N=$(grep -c '^TASK_BASE_REF_[0-9]' "$D274_DETACH/.stride-env-cache" 2>/dev/null)
+assert_eq "23e1b (D274): a detached HEAD makes live bases non-ancestors — none may be swept" \
+  "25" "$D274_DETACH_N"
+rm -rf "$D274_DETACH"
 
 # 23f: the path review found, where the first version of this fix was DEFEATED.
 # A nested claim whose response does not parse leaves the PREVIOUS task's
@@ -6646,6 +6733,110 @@ esac
 assert_eq "23e3 (D268): a refused completion writes no orphan head/owned pair" \
   "" "$D268_O_ORPHAN"
 rm -rf "$D268_O" "$D268_OSTUB"
+
+# 23e4 (D274): the OPEN-window cap must not evict a live outer's anchor either.
+# 23e2 drives SEQUENTIAL closed cycles (claim, commit, complete), so never more
+# than two windows are open at once and the open cap is never reached. D268
+# pinned open windows but still capped them BY COUNT and kept the NEWEST 20, so
+# the open window actually dropped is the OLDEST — structurally the long-lived
+# enclosing OUTER, while the twenty just-claimed children that caused the
+# eviction are the ones kept. Measured before D274: 19 concurrently open
+# children kept TASK_BASE_REF_100 and the outer's deliverable; 20 lost both,
+# silently at claim time (empty stderr), and the outer then completed with an
+# EMPTY snapshot while outer_deliverable.txt sat in git history. The cap is 20,
+# dropping to 19 when finalize_before_doing reserves a slot, which is why the
+# boundary falls at 20 open children rather than 21. Drive both sides of it;
+# the 20-child case is the direction that failed.
+d274_open_children() { # $1 = dir, $2 = how many children claim and stay OPEN
+  local _i
+  d255_fixture "$1"
+  d226_claim "$1" 100
+  (
+    cd "$1" || exit 1
+    echo "deliverable" > outer_deliverable.txt
+    git add outer_deliverable.txt > /dev/null
+    git commit -q -m "outer deliverable"
+  )
+  for _i in $(seq 1 "$2"); do
+    d226_claim "$1" $((900 + _i))
+  done
+}
+
+D274_A=$(mktemp -d)
+D274_ASTUB=$(mktemp -d)
+make_curl_stub "$D274_ASTUB" "$D274_A/curl-call.txt" 0
+d274_open_children "$D274_A" 19
+assert_contains "23e4 (D274): control — the outer anchor survives 19 concurrently open children" \
+  "TASK_BASE_REF_100=" "$(cat "$D274_A/.stride-env-cache" 2>/dev/null)"
+d255_complete "$D274_A" 100 "$D274_ASTUB"
+assert_eq "23e4 (D274): control — the outer uploads its deliverable with 19 children open" \
+  "outer_deliverable.txt" "$(d255_paths "$D274_A")"
+rm -rf "$D274_A" "$D274_ASTUB"
+
+D274_B=$(mktemp -d)
+D274_BSTUB=$(mktemp -d)
+make_curl_stub "$D274_BSTUB" "$D274_B/curl-call.txt" 0
+d274_open_children "$D274_B" 20
+assert_contains "23e4 (D274): the outer anchor survives 20 concurrently open children" \
+  "TASK_BASE_REF_100=" "$(cat "$D274_B/.stride-env-cache" 2>/dev/null)"
+d255_complete "$D274_B" 100 "$D274_BSTUB"
+assert_eq "23e4 (D274): the outer uploads its deliverable with 20 children open" \
+  "outer_deliverable.txt" "$(d255_paths "$D274_B")"
+D274_B_ORPHANS=$(awk -F= '
+  NR == FNR { if ($1 ~ /^TASK_BASE_REF_[0-9]+$/) { id = $1; sub(/^TASK_BASE_REF_/, "", id); base[id] = 1 }; next }
+  $1 ~ /^TASK_HEAD_REF_[0-9]+$/ { id = $1; sub(/^TASK_HEAD_REF_/, "", id); if (!(id in base)) printf "head:%s ", id }
+  $1 ~ /^TASK_OWNED_[0-9]+$/   { id = $1; sub(/^TASK_OWNED_/, "", id); if (!(id in base)) printf "owned:%s ", id }
+' "$D274_B/.stride-env-cache" "$D274_B/.stride-env-cache" 2>/dev/null)
+assert_eq "23e4 (D274): the no-orphan invariant holds with the open cap exceeded" \
+  "" "$D274_B_ORPHANS"
+rm -rf "$D274_B" "$D274_BSTUB"
+
+# Two enclosing levels open at once. Worst case observed on the defect: a top
+# task and a middle task both open and both holding their own commits, and
+# twenty open children evicted BOTH anchors, so both completed with empty
+# snapshots. Then, on the same cache, pin the STATED BOUND that replaced the
+# count cap: above the sweep threshold a provably dead open window — a base
+# that no longer resolves — is dropped, and every live one is kept.
+D274_C=$(mktemp -d)
+D274_CSTUB=$(mktemp -d)
+make_curl_stub "$D274_CSTUB" "$D274_C/curl-call.txt" 0
+d255_fixture "$D274_C"
+d226_claim "$D274_C" 100
+(
+  cd "$D274_C" || exit 1
+  echo "top" > top_deliverable.txt
+  git add top_deliverable.txt > /dev/null
+  git commit -q -m "top deliverable"
+)
+d226_claim "$D274_C" 110
+(
+  cd "$D274_C" || exit 1
+  echo "mid" > mid_deliverable.txt
+  git add mid_deliverable.txt > /dev/null
+  git commit -q -m "mid deliverable"
+)
+for i in $(seq 1 20); do
+  d226_claim "$D274_C" $((900 + i))
+done
+D274_C_CACHE=$(cat "$D274_C/.stride-env-cache" 2>/dev/null)
+assert_contains "23e4 (D274): two enclosing levels — the TOP anchor is not evicted" \
+  "TASK_BASE_REF_100=" "$D274_C_CACHE"
+assert_contains "23e4 (D274): two enclosing levels — the MIDDLE anchor is not evicted" \
+  "TASK_BASE_REF_110=" "$D274_C_CACHE"
+printf "TASK_BASE_REF_777='%s'\n" "0000000000000000000000000000000000000000" >> "$D274_C/.stride-env-cache"
+d226_claim "$D274_C" 998
+D274_C_SWEPT=$(cat "$D274_C/.stride-env-cache" 2>/dev/null)
+case "$D274_C_SWEPT" in
+  *TASK_BASE_REF_777=*) D274_C_DEAD="kept" ;;
+  *) D274_C_DEAD="" ;;
+esac
+assert_eq "23e4 (D274): above the threshold a dead open window (unresolvable base) is swept" \
+  "" "$D274_C_DEAD"
+assert_contains "23e4 (D274): the sweep keeps the live TOP anchor it cannot prove dead" \
+  "TASK_BASE_REF_100=" "$D274_C_SWEPT"
+assert_contains "23e4 (D274): the sweep keeps the live MIDDLE anchor it cannot prove dead" \
+  "TASK_BASE_REF_110=" "$D274_C_SWEPT"
+rm -rf "$D274_C" "$D274_CSTUB"
 
 # 23u: the D255 headline. Outer claims, nested claims, the outer commits
 # mid-window (manually), the nested's OWN after_doing commits nested_b. The

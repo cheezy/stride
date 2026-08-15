@@ -70,6 +70,14 @@ STRIDE_NO_OWN_COMMITS="__stride_no_own_commits__"
 # exceeded the 20-SHA cap. Consumers treat it EXACTLY like no-record (purity
 # fallback) — never as a truncated list, which would mis-subtract.
 STRIDE_OWNED_OVERFLOW="OVERFLOW"
+
+# (D274) Open-window count at which the liveness sweep engages in
+# select_kept_window_records. This is NOT an eviction cap: above it the
+# selector drops only open windows it can PROVE dead, and keeps every open
+# window it cannot. It inherits the pre-D274 cap's arithmetic (one less when
+# the caller reserves a slot) so the point at which housekeeping engages is
+# unchanged — only what happens there.
+STRIDE_OPEN_WINDOW_SWEEP_AT=20
 # (D255) Owned-commit delta state for the CURRENT completion, set by
 # run_stride_section around the after_doing command loop and consumed once by
 # finalize_after_doing's post-loop call. Declared for `set -u`.
@@ -1372,28 +1380,138 @@ record_task_owned() {
   return 0
 }
 
+# (D274) Liveness sweep for OPEN windows — the replacement for D268's
+# open-window count cap, which could not tell a live enclosing outer from an
+# abandoned claim and so evicted the outer. $1 = the sweep threshold, $2 =
+# an optional reserved base-ref KEY to ignore. Prints a space-separated list
+# of task ids whose OPEN window is provably dead, or nothing.
+#
+# Fail-safe by construction, because a false positive here is the very data
+# loss this whole subsystem exists to prevent:
+#   * below the threshold it runs no git at all and proves nothing dead, so
+#     the ordinary cache (a handful of open windows) is untouched and pays
+#     nothing;
+#   * with an unreadable repository it returns empty, keeping every window;
+#   * a record is called dead ONLY when its base does not resolve to a commit
+#     at all. That is deliberately HALF of what another_open_window_exists
+#     treats as unusable: that predicate also skips a base that is not an
+#     ancestor of HEAD, and this sweep must NOT, because the two act on
+#     different state. Ancestry is a property of where HEAD points right
+#     NOW — a detached HEAD, a bisect, or a checkout of an older commit makes
+#     a perfectly live outer's base a non-ancestor for as long as that lasts.
+#     Skipping such a base is recoverable the moment HEAD comes back;
+#     DELETING its record is not, and one claim during a bisect with more
+#     than the threshold open would erase live anchors permanently — D274's
+#     own outcome through a different door. Non-resolution is the only
+#     irreversible signal, so it is the only one this sweep acts on.
+#   * a base whose value is not even SHA-shaped is KEPT rather than swept:
+#     unusable is not the same as provably dead, and keeping is the safe
+#     direction.
+# Openness is read from the cache FILE (base ids minus head ids) rather than
+# from the sourced environment, matching the selector this feeds.
+dead_open_window_ids() {
+  local _sweep_at="${1:-0}" _reserve="${2:-}" _open _id _b _dead=""
+  [ -f "$ENV_CACHE" ] || return 0
+  _open=$(awk -v reserve="$_reserve" '
+    /^TASK_BASE_REF_[A-Za-z0-9_]*=/ {
+      key = $0; sub(/=.*/, "", key)
+      if (key == "TASK_BASE_REF_TRUSTED" || key == "TASK_BASE_REF_OWNER" \
+          || key == "TASK_BASE_REF_UNPROVEN") next
+      if (reserve != "" && key == reserve) next
+      id = key; sub(/^TASK_BASE_REF_/, "", id)
+      nb++; bid[nb] = id; bval[id] = substr($0, index($0, "=") + 1)
+      next
+    }
+    /^TASK_HEAD_REF_[A-Za-z0-9_]*=/ {
+      id = $0; sub(/^TASK_HEAD_REF_/, "", id); sub(/=.*/, "", id); head[id] = 1
+    }
+    END { for (i = 1; i <= nb; i++) if (!(bid[i] in head)) print bid[i] "\t" bval[bid[i]] }
+  ' "$ENV_CACHE" 2>/dev/null || true)
+  [ -n "$_open" ] || return 0
+  [ "$(printf '%s\n' "$_open" | wc -l | tr -d ' ')" -gt "$_sweep_at" ] || return 0
+  (cd "$PROJECT_DIR" 2>/dev/null && git rev-parse --verify --quiet HEAD > /dev/null 2>&1) || return 0
+  while IFS=$'\t' read -r _id _b; do
+    [ -n "$_id" ] || continue
+    _b="${_b#\'}"
+    _b="${_b%\'}"
+    # Only a SHA-shaped value can be PROVED absent; anything else is merely
+    # unusable, which is not a licence to delete it.
+    case "$_b" in
+      "" | *[!0-9a-fA-F]*) continue ;;
+    esac
+    (cd "$PROJECT_DIR" 2>/dev/null \
+      && git rev-parse --verify --quiet "${_b}^{commit}" > /dev/null 2>&1) \
+      || _dead="${_dead} ${_id}"
+  done <<< "$_open"
+  printf '%s' "${_dead# }"
+}
+
 # (D268) Per-window eviction for the three per-task record families. The old
 # per-family `tail -n 20` pipelines evicted the OLDEST record — structurally
 # the longest-lived OUTER task's own anchor — so at 20 nested completions the
-# outer task uploaded an empty snapshot for its real work. The decided policy:
-#   1. OPEN windows are pinned. A window is open when its TASK_BASE_REF_<id>
-#      has no TASK_HEAD_REF_<id> partner (the head is written at completion),
-#      so a still-in-flight task's anchor never falls to the cap. Newest 20
-#      open windows are kept — the aging bound for abandoned claims: an
-#      abandoned window evicts only once 20 newer open windows exist, and if
-#      that task ever completes afterwards it degrades to the loud REFUSAL
-#      (no-diff, never wrong-diff), exactly as the pre-D268 comment argued
-#      for other tasks' records.
-#   2. CLOSED windows newer than the oldest kept open window are ALL kept:
+# outer task uploaded an empty snapshot for its real work.
+#
+# (D274) D268 pinned open windows but still capped them BY COUNT, and that cap
+# reached the same defect from the other side. The cap kept the newest opens
+# and dropped the oldest, and the oldest open window is structurally the live
+# enclosing OUTER — while the twenty newer opens that triggered the eviction
+# are exactly the ones kept. Measured on the hook itself: 19 concurrently open
+# children left the outer's anchor and its deliverable intact; 20 lost both,
+# and with two enclosing levels open, BOTH anchors went and both tasks
+# completed with empty snapshots over real commits. No count cap can be made
+# safe here. An open window is by definition a claim that has not completed,
+# so any open window may still be live, and the order records happen to sit in
+# the cache says nothing about which one is not; raising the cap only moves
+# the boundary. The decided policy:
+#   1. OPEN windows are NEVER evicted by a count cap. A window is open when
+#      its TASK_BASE_REF_<id> has no TASK_HEAD_REF_<id> partner (the head is
+#      written at completion), so a still-in-flight task's anchor never falls
+#      to a cap however many newer claims arrive. Housekeeping must not cost
+#      correctness, and evicting a live window costs a whole task's snapshot.
+#   2. The count becomes a SWEEP THRESHOLD, not an eviction threshold. Above
+#      STRIDE_OPEN_WINDOW_SWEEP_AT concurrently open windows, open windows are
+#      tested for liveness and only the PROVABLY DEAD are dropped — a base
+#      that does not resolve to a commit, and nothing else. Such a record is
+#      one another_open_window_exists and the attribution walk already skip,
+#      so dropping it removes nothing any reader would have used. When every
+#      open window is live they are ALL kept: the selector deliberately
+#      returns more than the threshold rather than erase live work.
+#
+#      STATED BOUND, and what it does NOT cover. The cache holds one
+#      open-window record per claim whose base still resolves — so growth is
+#      bounded by the number of claims whose base commit still exists, not by
+#      history and not by a count. Be honest about the gap this leaves: on a
+#      fast-forward-only trunk, which is what .stride.md's before_doing
+#      produces (checkout main, pull --rebase, checkout -B), an ABANDONED
+#      claim's base is a main commit that resolves forever, so the sweep will
+#      never reap it. That population is bounded by nothing but the number of
+#      claims that were abandoned, at one cache line each.
+#      That is a deliberate trade, not an oversight. Bounding it by a count is
+#      exactly what produced D274, because NOTHING IN THE CACHE distinguishes
+#      an abandoned claim from a live enclosing outer — both are simply a base
+#      with no head — so any count-based reaper must guess, and its wrong
+#      guesses erase live work. Reaping abandoned claims properly needs a
+#      signal the cache does not carry (claim age, or an unclaim that removes
+#      the record), which is a separate change; until then this subsystem
+#      prefers unbounded-but-tiny growth over erasing a live task's anchor.
+#      Cost follows the same bound: above the threshold the sweep spends one
+#      git process per open window, and a claim runs the selector twice (the
+#      identity rewrite and finalize_before_doing), so it pays that twice.
+#      Both are well inside the hook budget at any plausible open count.
+#
+#      The sweep is fail-safe in both directions — it runs no git at all below
+#      the threshold, and when the repository cannot be read, or a base is not
+#      even SHA-shaped, it proves nothing dead and keeps everything.
+#   3. CLOSED windows newer than the oldest kept open window are ALL kept:
 #      they are nested windows inside a live outer's window, and evicting one
 #      would make the outer absorb that nested task's commits into its own
 #      snapshot (a wrong-diff, strictly worse than the no-diff this subsystem
 #      degrades to everywhere else). Cache growth from this clause is bounded
 #      by the outer window's lifetime, at ~one line per nested completion.
-#   3. CLOSED windows older than every open window cap at 20, oldest evicted
+#   4. CLOSED windows older than every open window cap at 20, oldest evicted
 #      first — a window that predates every live claim cannot intersect any
 #      live attribution.
-#   4. Eviction is PER WINDOW, not per family — the decided answer to the
+#   5. Eviction is PER WINDOW, not per family — the decided answer to the
 #      family-desync question: head/owned records are kept exactly when their
 #      base survives, and an orphan head/owned record (no base partner) is
 #      dropped, since attribution needs both ends and a half-bounded window
@@ -1401,11 +1519,12 @@ record_task_owned() {
 #      one; this selector cannot.
 # Emits the kept lines (base, then head, then owned, each family in cache
 # order) from $ENV_CACHE. $1 (optional) is a base-ref KEY to exclude because
-# the caller appends a fresh record for that task itself; the open-window cap
-# drops to 19 then, so the reserved slot keeps the pre-D268 total bound.
+# the caller appends a fresh record for that task itself; the sweep threshold
+# drops by one then, matching the pre-D274 cap's reserved-slot arithmetic.
 select_kept_window_records() {
-  local _reserve="${1:-}" _opencap=20
-  [ -n "$_reserve" ] && _opencap=19
+  local _reserve="${1:-}" _sweep_at="$STRIDE_OPEN_WINDOW_SWEEP_AT" _dead
+  [ -n "$_reserve" ] && _sweep_at=$((_sweep_at - 1))
+  _dead=$(dead_open_window_ids "$_sweep_at" "$_reserve" || true)
   {
     grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
       | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
@@ -1414,11 +1533,15 @@ select_kept_window_records() {
     grep -e '^TASK_HEAD_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true
     printf '::FAMILY::\n'
     grep -e '^TASK_OWNED_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true
-  } | awk -v reserve="$_reserve" -v opencap="$_opencap" '
+  } | awk -v reserve="$_reserve" -v dead="$_dead" '
+    BEGIN { if (dead != "") { nd = split(dead, _d, " "); for (k = 1; k <= nd; k++) deadid[_d[k]] = 1 } }
     $0 == "::FAMILY::" { fam++; next }
     fam == 0 {
       if (reserve != "" && index($0, reserve "=") == 1) next
       id = $0; sub(/^TASK_BASE_REF_/, "", id); sub(/=.*/, "", id)
+      # (D274) A swept dead open window: its head/owned partners cannot
+      # survive it, and the kept[] gate below drops them with it.
+      if (id in deadid) next
       nb++; bline[nb] = $0; bid[nb] = id
       next
     }
@@ -1433,8 +1556,10 @@ select_kept_window_records() {
     }
     END {
       for (i = 1; i <= nb; i++) open[i] = (bid[i] in head) ? 0 : 1
-      c = 0
-      for (i = nb; i >= 1; i--) if (open[i]) { c++; if (c <= opencap) keep[i] = 1 }
+      # (D274) Every surviving open window is kept, however many there are.
+      # The only open windows already gone are the ones the liveness sweep
+      # proved dead before this awk ever saw them.
+      for (i = 1; i <= nb; i++) if (open[i]) keep[i] = 1
       # anchor = oldest KEPT open window (keep[] holds only opens so far)
       anchor = 0
       for (i = 1; i <= nb; i++) if (keep[i]) { anchor = i; break }
@@ -2063,8 +2188,10 @@ finalize_before_doing() {
   # and still holds as the degrade for the pathological cases; it was never an
   # argument for evicting a live window's anchor. Eviction is now per-window
   # and open-window-aware — see select_kept_window_records for the decided
-  # policy: open windows pinned (newest 20 — the abandoned-claim aging bound),
-  # closed windows inside a live outer's window all kept (evicting one would
+  # policy: open windows pinned outright (D274 — no count cap can tell a live
+  # enclosing outer from an abandoned claim, so a liveness sweep above the
+  # threshold is the aging bound instead), closed windows inside a live
+  # outer's window all kept (evicting one would
   # be a wrong-diff, the outer absorbing that nested task's commits), older
   # closed windows capped at 20, and head/owned records live and die with
   # their base so the cap can never leave a half-bounded window. The refusal
@@ -3464,7 +3591,10 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # anchor once 20 nested claims had rewritten the cache, which is exactly
     # the erasure the D226 comment above promises to prevent, just 20 claims
     # later. Eviction is now per-window and open-window-aware, shared with
-    # finalize_before_doing — see select_kept_window_records for the decided
+    # finalize_before_doing, and (D274) no longer caps open windows by count
+    # at all — this call site is the one that reserves nothing, so before D274
+    # it was the one whose cap fired at 20 rather than 19 — see
+    # select_kept_window_records for the decided
     # policy and the family-desync answer (head/owned live and die with their
     # base; a half-bounded window can no longer be produced by the cap).
     _kept_window_records=$(select_kept_window_records || true)

@@ -354,6 +354,9 @@ Ordered by return, largest first.
    position, against G404's 6.2%. Weigh it against the cross-task context that
    clearing discards — for a goal whose tasks build on each other, that context
    has real value. Worth a deliberate decision rather than a default.
+   *(The operator-facing policy this implies — which tasks share a session and
+   which get a fresh one, with these figures and their caveats — is written up
+   in `skills/stride-workflow/reference.md` § Session Position; W2091.)*
 2. **Cap the 88%.** Bash output and subagent reports dominate. Two concrete
    targets: subagent reports ran 100K+ tokens each with four dispatched per task,
    and `GET /api/tasks` returns 2.4 MB unslimmed (~840K tokens) — an agent that

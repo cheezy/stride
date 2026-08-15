@@ -1308,6 +1308,12 @@ record_task_head_ref() {
   [ -n "$_tid" ] || return 0
   _key=$(task_head_ref_key "$_tid")
   [ -n "$_key" ] || return 0
+  # (D268) A head without its base partner is a half-bounded window no reader
+  # can use — attribution requires BOTH ends, and the per-window selector
+  # drops orphans at the next claim anyway. Writing it (e.g. on the refused
+  # completion of an evicted task) only re-creates transiently the exact shape
+  # the D268 policy declares impossible, so skip it when no base record exists.
+  [ -n "$(task_base_ref_for "$_tid")" ] || return 0
   _head=$( (cd "$PROJECT_DIR" 2>/dev/null && git rev-parse HEAD 2>/dev/null) || printf '')
   [ -n "$_head" ] || return 0
   {
@@ -1352,11 +1358,94 @@ record_task_owned() {
   [ -n "$_tid" ] || return 0
   _key=$(task_owned_key "$_tid")
   [ -n "$_key" ] || return 0
+  # (D268) Same orphan guard as record_task_head_ref. Attribution consumes
+  # owned records only for a window with BOTH base and head; the one reader
+  # that does not require the pair is the before_review self-heal retry, which
+  # on a legacy pre-D226 cache (shared base, no per-task record) now falls
+  # back from owned-set narrowing to the purity heuristic — an accepted,
+  # transitional, safe-direction delta (over-collect, never under-report).
+  [ -n "$(task_base_ref_for "$_tid")" ] || return 0
   {
     grep -v -e "^${_key}=" "$ENV_CACHE" 2>/dev/null || true
     printf "%s=%s\n" "$_key" "$(sq_escape "$_val")"
   } | write_env_cache || true
   return 0
+}
+
+# (D268) Per-window eviction for the three per-task record families. The old
+# per-family `tail -n 20` pipelines evicted the OLDEST record — structurally
+# the longest-lived OUTER task's own anchor — so at 20 nested completions the
+# outer task uploaded an empty snapshot for its real work. The decided policy:
+#   1. OPEN windows are pinned. A window is open when its TASK_BASE_REF_<id>
+#      has no TASK_HEAD_REF_<id> partner (the head is written at completion),
+#      so a still-in-flight task's anchor never falls to the cap. Newest 20
+#      open windows are kept — the aging bound for abandoned claims: an
+#      abandoned window evicts only once 20 newer open windows exist, and if
+#      that task ever completes afterwards it degrades to the loud REFUSAL
+#      (no-diff, never wrong-diff), exactly as the pre-D268 comment argued
+#      for other tasks' records.
+#   2. CLOSED windows newer than the oldest kept open window are ALL kept:
+#      they are nested windows inside a live outer's window, and evicting one
+#      would make the outer absorb that nested task's commits into its own
+#      snapshot (a wrong-diff, strictly worse than the no-diff this subsystem
+#      degrades to everywhere else). Cache growth from this clause is bounded
+#      by the outer window's lifetime, at ~one line per nested completion.
+#   3. CLOSED windows older than every open window cap at 20, oldest evicted
+#      first — a window that predates every live claim cannot intersect any
+#      live attribution.
+#   4. Eviction is PER WINDOW, not per family — the decided answer to the
+#      family-desync question: head/owned records are kept exactly when their
+#      base survives, and an orphan head/owned record (no base partner) is
+#      dropped, since attribution needs both ends and a half-bounded window
+#      is unusable. The independent per-family caps could previously leave
+#      one; this selector cannot.
+# Emits the kept lines (base, then head, then owned, each family in cache
+# order) from $ENV_CACHE. $1 (optional) is a base-ref KEY to exclude because
+# the caller appends a fresh record for that task itself; the open-window cap
+# drops to 19 then, so the reserved slot keeps the pre-D268 total bound.
+select_kept_window_records() {
+  local _reserve="${1:-}" _opencap=20
+  [ -n "$_reserve" ] && _opencap=19
+  {
+    grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
+      | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
+          -e '^TASK_BASE_REF_UNPROVEN=' || true
+    printf '::FAMILY::\n'
+    grep -e '^TASK_HEAD_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true
+    printf '::FAMILY::\n'
+    grep -e '^TASK_OWNED_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true
+  } | awk -v reserve="$_reserve" -v opencap="$_opencap" '
+    $0 == "::FAMILY::" { fam++; next }
+    fam == 0 {
+      if (reserve != "" && index($0, reserve "=") == 1) next
+      id = $0; sub(/^TASK_BASE_REF_/, "", id); sub(/=.*/, "", id)
+      nb++; bline[nb] = $0; bid[nb] = id
+      next
+    }
+    fam == 1 {
+      id = $0; sub(/^TASK_HEAD_REF_/, "", id); sub(/=.*/, "", id)
+      nh++; hline[nh] = $0; hid[nh] = id; head[id] = 1
+      next
+    }
+    {
+      id = $0; sub(/^TASK_OWNED_/, "", id); sub(/=.*/, "", id)
+      no++; oline[no] = $0; oid[no] = id
+    }
+    END {
+      for (i = 1; i <= nb; i++) open[i] = (bid[i] in head) ? 0 : 1
+      c = 0
+      for (i = nb; i >= 1; i--) if (open[i]) { c++; if (c <= opencap) keep[i] = 1 }
+      # anchor = oldest KEPT open window (keep[] holds only opens so far)
+      anchor = 0
+      for (i = 1; i <= nb; i++) if (keep[i]) { anchor = i; break }
+      limit = (anchor > 0) ? anchor - 1 : nb
+      c = 0
+      for (i = limit; i >= 1; i--) if (!open[i]) { c++; if (c <= 20) keep[i] = 1 }
+      if (anchor > 0) for (i = anchor; i <= nb; i++) if (!open[i]) keep[i] = 1
+      for (i = 1; i <= nb; i++) if (keep[i]) { print bline[i]; kept[bid[i]] = 1 }
+      for (i = 1; i <= nh; i++) if (hid[i] in kept) print hline[i]
+      for (i = 1; i <= no; i++) if (oid[i] in kept) print oline[i]
+    }'
 }
 
 # (D255) Compute the owned set for the loop delta H0..H1: space-separated full
@@ -1803,33 +1892,38 @@ finalize_before_doing() {
   fi
   _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
     -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_UNPROVEN=' \
-    -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)
-  # The cap keeps a long-lived checkout from growing the cache without bound.
-  # `tail` drops the OLDEST record, which is the outer task's — and that
-  # eviction order is what makes the cap safe: an outer task that outlives the
-  # cap loses its record, falls through to the shared base, finds an owner
-  # stamp naming a different task, and REFUSES loudly. Degradation is to
-  # no-diff, never to wrong-diff. Do not reverse this order.
-  if [ -n "$_key" ]; then
-    _records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
-      | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
-        -e '^TASK_BASE_REF_UNPROVEN=' -e "^$_key=" \
-      | tail -n 19 || true)
-  else
-    _records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
-      | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
-        -e '^TASK_BASE_REF_UNPROVEN=' \
-      | tail -n 20 || true)
-  fi
+    -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' \
+    -e '^TASK_HEAD_REF_[A-Za-z0-9_]*=' -e '^TASK_OWNED_[A-Za-z0-9_]*=' \
+    "$ENV_CACHE" 2>/dev/null || true)
+  # (D268) The cap keeps a long-lived checkout from growing the cache without
+  # bound — but the old per-family `tail` dropped the OLDEST record, which is
+  # structurally the still-open OUTER task's own anchor, and at 20 nested
+  # completions the outer uploaded an empty snapshot for its real work. The
+  # pre-D268 comment's safety argument (evicted task falls through to the
+  # shared base, finds an owner stamp naming a different task, and REFUSES
+  # loudly — no-diff, never wrong-diff) was written for OTHER tasks' records
+  # and still holds as the degrade for the pathological cases; it was never an
+  # argument for evicting a live window's anchor. Eviction is now per-window
+  # and open-window-aware — see select_kept_window_records for the decided
+  # policy: open windows pinned (newest 20 — the abandoned-claim aging bound),
+  # closed windows inside a live outer's window all kept (evicting one would
+  # be a wrong-diff, the outer absorbing that nested task's commits), older
+  # closed windows capped at 20, and head/owned records live and die with
+  # their base so the cap can never leave a half-bounded window. The refusal
+  # path in select_task_snapshot_base is untouched.
+  _records=$(select_kept_window_records "$_key" || true)
   # (D255) A claim opens a fresh window for this task: its own owned record
   # from a PREVIOUS completion must not survive into it. Other tasks' records
-  # pass through _preserved untouched (they are the whole point). Unproven
-  # claims (no validated owner) cannot name their record and leave it — the
-  # completion's own re-record overwrites it before capture on the normal path.
+  # pass through untouched (they are the whole point). Unproven claims (no
+  # validated owner) cannot name their record and leave it — the completion's
+  # own re-record overwrites it before capture on the normal path. With $_key
+  # reserved above the selector already drops this task's whole previous
+  # window (base, head, owned together); this filter remains for the unproven
+  # path where no key could be reserved.
   local _owned_self_key=""
   [ -n "$_owner" ] && _owned_self_key=$(task_owned_key "$_owner")
   if [ -n "$_owned_self_key" ]; then
-    _preserved=$(printf '%s\n' "$_preserved" | grep -v -e "^${_owned_self_key}=" || true)
+    _records=$(printf '%s\n' "$_records" | grep -v -e "^${_owned_self_key}=" || true)
   fi
   # (D226) Atomic, via the shared writer. A true race still loses one task's
   # record (last writer wins) — which degrades to a REFUSAL rather than a
@@ -3188,35 +3282,27 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # anchor here — before finalize_before_doing ever runs — and the isolation
     # fix would protect nothing. The shared TASK_BASE_REF / _TRUSTED / _OWNER
     # keys are still dropped, exactly as D142 requires.
-    _kept_base_records=$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
-      | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
-        -e '^TASK_BASE_REF_UNPROVEN=' \
-      | tail -n 20 || true)
-    # (D236) The per-task HEAD records have to survive this rewrite for exactly
-    # the same reason the base records do — and they are useless without their
-    # partner. A base says where a nested task started, the head says where it
-    # stopped, and attribution needs BOTH: with only the base the window is
-    # unbounded and the nested task's commits cannot be told apart from the
-    # outer task's own later ones. Dropping these here is precisely how the
-    # first version of this fix silently reverted to over-collecting — every
-    # subsequent claim erased the record the previous completion had just
-    # written.
-    _kept_head_records=$(grep -e '^TASK_HEAD_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
-      | tail -n 20 || true)
-    # (D255) The owned-commit records ride with the head records — same D236
-    # bug class: this rewrite TRUNCATES the cache, and dropping the family here
-    # silently reverts the ownership signal on the very next claim (every claim
-    # would erase the record the previous completion just wrote). Same 20-record
-    # cap as the base/head families.
-    _kept_owned_records=$(grep -e '^TASK_OWNED_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
-      | tail -n 20 || true)
+    # (D236) The per-task HEAD records have to survive for exactly the same
+    # reason — and they are useless without their partner: a base says where a
+    # nested task started, the head says where it stopped, and attribution
+    # needs BOTH. Dropping them here is precisely how the first version of the
+    # D226 fix silently reverted to over-collecting.
+    # (D255) The owned-commit records ride with the head records — same bug
+    # class.
+    # (D268) The old three independent `tail -n 20` pipelines here evicted the
+    # oldest record per family — structurally the still-open outer task's own
+    # anchor once 20 nested claims had rewritten the cache, which is exactly
+    # the erasure the D226 comment above promises to prevent, just 20 claims
+    # later. Eviction is now per-window and open-window-aware, shared with
+    # finalize_before_doing — see select_kept_window_records for the decided
+    # policy and the family-desync answer (head/owned live and die with their
+    # base; a half-bounded window can no longer be produced by the cap).
+    _kept_window_records=$(select_kept_window_records || true)
     # Values are single-quote escaped via sq_escape (W1453) so titles with
     # spaces, quotes, or dollar signs survive the `set -a` sourcing without
     # any shell interpretation.
     {
-      [ -n "$_kept_base_records" ] && printf '%s\n' "$_kept_base_records"
-      [ -n "$_kept_head_records" ] && printf '%s\n' "$_kept_head_records"
-      [ -n "$_kept_owned_records" ] && printf '%s\n' "$_kept_owned_records"
+      [ -n "$_kept_window_records" ] && printf '%s\n' "$_kept_window_records"
       echo "TASK_ID=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.id // empty')")"
       echo "TASK_IDENTIFIER=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.identifier // empty')")"
       echo "TASK_TITLE=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.title // empty')")"

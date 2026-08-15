@@ -6514,6 +6514,93 @@ d255_complete() { # $1 = dir, $2 = task id, $3 = stub dir
 }
 d255_paths() { jq -r '[.[].path] | sort | join(",")' "$1/.stride-changed-files.json" 2>/dev/null; }
 
+# 23e2 (D268): the cap must never evict a still-open OUTER task's own anchor.
+# 20 nested claim+commit+complete cycles inside the outer's window used to push
+# the outer's TASK_BASE_REF_100 off the per-family tail cap (the oldest record
+# is structurally the longest-lived task's), so the outer completed with an
+# EMPTY snapshot while its deliverable sat in git history — at 19 nested tasks
+# the same run passed. Eviction is now per-window and open-window-aware
+# (select_kept_window_records): the open outer is pinned, and the closed nested
+# windows inside its window are all kept so its attribution stays complete.
+# Drive 21 real cycles, checking the anchor at 19/20/21, then complete the
+# outer and demand exactly its own deliverable — a missing nested window would
+# leak that nested commit into the outer's snapshot, so the exact-match assert
+# also guards the wrong-diff direction. Finally pin the family-desync answer:
+# eviction is per-window, so no head/owned record survives without its base.
+D268_DIR=$(mktemp -d)
+D268_STUB=$(mktemp -d)
+make_curl_stub "$D268_STUB" "$D268_DIR/curl-call.txt" 0
+d255_fixture "$D268_DIR"
+d226_claim "$D268_DIR" 100
+(
+  cd "$D268_DIR" || exit 1
+  echo "deliverable" > outer_deliverable.txt
+  git add outer_deliverable.txt > /dev/null
+  git commit -q -m "outer deliverable"
+)
+for i in $(seq 1 21); do
+  D268_ID=$((200 + i))
+  d226_claim "$D268_DIR" "$D268_ID"
+  ( cd "$D268_DIR" && echo "n$i" > "nested_$i.txt" )
+  d255_complete "$D268_DIR" "$D268_ID" "$D268_STUB"
+  case "$i" in
+    19)
+      assert_contains "23e2 (D268): control — the outer anchor survives 19 nested cycles" \
+        "TASK_BASE_REF_100=" "$(cat "$D268_DIR/.stride-env-cache" 2>/dev/null)"
+      ;;
+    20)
+      assert_contains "23e2 (D268): the outer anchor survives the 20th nested cycle (the old eviction threshold)" \
+        "TASK_BASE_REF_100=" "$(cat "$D268_DIR/.stride-env-cache" 2>/dev/null)"
+      ;;
+    21)
+      assert_contains "23e2 (D268): the outer anchor survives past the threshold" \
+        "TASK_BASE_REF_100=" "$(cat "$D268_DIR/.stride-env-cache" 2>/dev/null)"
+      ;;
+  esac
+done
+d255_complete "$D268_DIR" 100 "$D268_STUB"
+assert_eq "23e2 (D268): the outer uploads exactly its own deliverable after 21 nested completions" \
+  "outer_deliverable.txt" "$(d255_paths "$D268_DIR")"
+D268_ORPHANS=$(awk -F= '
+  NR == FNR { if ($1 ~ /^TASK_BASE_REF_[0-9]+$/) { id = $1; sub(/^TASK_BASE_REF_/, "", id); base[id] = 1 }; next }
+  $1 ~ /^TASK_HEAD_REF_[0-9]+$/ { id = $1; sub(/^TASK_HEAD_REF_/, "", id); if (!(id in base)) printf "head:%s ", id }
+  $1 ~ /^TASK_OWNED_[0-9]+$/   { id = $1; sub(/^TASK_OWNED_/, "", id); if (!(id in base)) printf "owned:%s ", id }
+' "$D268_DIR/.stride-env-cache" "$D268_DIR/.stride-env-cache" 2>/dev/null)
+assert_eq "23e2 (D268): per-window eviction leaves no head/owned record without its base partner" \
+  "" "$D268_ORPHANS"
+rm -rf "$D268_DIR" "$D268_STUB"
+
+# 23e3 (D268): the no-orphan invariant must hold BETWEEN claims too. A refused
+# completion of a task whose base record is gone (evicted, or a foreign-owned
+# cache, as here — the cheap way to stage the same shape 23c uses) used to
+# still write TASK_HEAD_REF_<id> and TASK_OWNED_<id>, re-creating exactly the
+# half-bounded orphan window the per-window selector exists to make
+# impossible — transiently, until the next claim dropped it. The record
+# writers now skip when no base partner exists, so the shape never appears.
+D268_O=$(mktemp -d)
+D268_OSTUB=$(mktemp -d)
+make_curl_stub "$D268_OSTUB" "$D268_O/curl-call.txt" 0
+d255_fixture "$D268_O"
+D268_O_BASE=$(git -C "$D268_O" rev-parse HEAD)
+D268_O_OUT=$(
+  cd "$D268_O" || exit 1
+  echo "swept" > swept.txt
+  printf "TASK_ID='300'\nTASK_BASE_REF='%s'\nTASK_BASE_REF_TRUSTED='1'\nTASK_BASE_REF_OWNER='999'\n" \
+    "$D268_O_BASE" > .stride-env-cache
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/300/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D268_OSTUB:$PATH" bash "$HOOK_SCRIPT" pre 2>&1
+)
+assert_contains "23e3 (D268): the staged foreign-owner cache still refuses loudly" \
+  "REFUSING" "$D268_O_OUT"
+D268_O_CACHE=$(cat "$D268_O/.stride-env-cache" 2>/dev/null)
+case "$D268_O_CACHE" in
+  *TASK_HEAD_REF_300=*|*TASK_OWNED_300=*) D268_O_ORPHAN="orphan-written" ;;
+  *) D268_O_ORPHAN="" ;;
+esac
+assert_eq "23e3 (D268): a refused completion writes no orphan head/owned pair" \
+  "" "$D268_O_ORPHAN"
+rm -rf "$D268_O" "$D268_OSTUB"
+
 # 23u: the D255 headline. Outer claims, nested claims, the outer commits
 # mid-window (manually), the nested's OWN after_doing commits nested_b. The
 # nested snapshot must contain ONLY nested_b (before D255: nested_b + the

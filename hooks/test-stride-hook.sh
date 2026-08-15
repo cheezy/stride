@@ -6840,6 +6840,110 @@ assert_contains "23z2 (D255): the outer's mid-window commit also survives the re
   "outer_during.txt" "$(d255_paths "$D255_R")"
 rm -rf "$D255_R" "$D255_RSTUB"
 
+# 23z3 (D271): an OUTERMOST task must not narrow to its owned set. A single
+# claim (no other window ever exists), a manual mid-task commit, and a dirty
+# tracked edit the after_doing sweep commits (making the owned set genuinely
+# non-empty — the shape that trips the bug). Nested tasks may narrow because
+# the dropped base..H0 commits fall back into the enclosing OPEN window
+# (23u/23w pin that over-report); with no other open window there is no
+# absorber, and pre-D271 the snapshot was tracked.txt alone — the manual
+# commit silently vanished from an outermost task's own report.
+D271_A=$(mktemp -d)
+D271_ASTUB=$(mktemp -d)
+make_curl_stub "$D271_ASTUB" "$D271_A/curl-call.txt" 0
+d255_fixture "$D271_A"
+d226_claim "$D271_A" 100
+( cd "$D271_A" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D271_A" && echo dirty >> tracked.txt )
+d255_complete "$D271_A" 100 "$D271_ASTUB"
+assert_contains "23z3 (D271): the sweep still records a non-empty owned set (the narrowing trigger is real)" \
+  "TASK_OWNED_100=" "$(cat "$D271_A/.stride-env-cache" 2>/dev/null)"
+assert_eq "23z3 (D271): an outermost task's manual commit survives alongside its own after_doing commit" \
+  "manual.txt,tracked.txt" "$(d255_paths "$D271_A")"
+rm -rf "$D271_A" "$D271_ASTUB"
+
+# 23z4 (D271): same geometry with a stray UNTRACKED file as the sweep fodder —
+# the common accidental shape (a junk file left in the tree) that made the
+# swept residue masquerade as the task's whole deliverable.
+D271_B=$(mktemp -d)
+D271_BSTUB=$(mktemp -d)
+make_curl_stub "$D271_BSTUB" "$D271_B/curl-call.txt" 0
+d255_fixture "$D271_B"
+d226_claim "$D271_B" 100
+( cd "$D271_B" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D271_B" && echo stray > stray.txt )
+d255_complete "$D271_B" 100 "$D271_BSTUB"
+assert_eq "23z4 (D271): an outermost task's manual commit survives alongside a swept stray file" \
+  "manual.txt,stray.txt" "$(d255_paths "$D271_B")"
+rm -rf "$D271_B" "$D271_BSTUB"
+
+# 23z5 (D271 edge): after_doing authors NOTHING at top level (clean tree at
+# completion). The owned set is the recorded-empty fact, narrowing never had a
+# trigger, and the wide path reports the manual commit — pinned so the D271
+# gate can never regress the already-correct empty-owned outermost shape.
+D271_C=$(mktemp -d)
+D271_CSTUB=$(mktemp -d)
+make_curl_stub "$D271_CSTUB" "$D271_C/curl-call.txt" 0
+d255_fixture "$D271_C"
+d226_claim "$D271_C" 100
+( cd "$D271_C" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+d255_complete "$D271_C" 100 "$D271_CSTUB"
+assert_contains "23z5 (D271): a sweep that authors nothing records the empty owned set at top level" \
+  "TASK_OWNED_100=''" "$(cat "$D271_C/.stride-env-cache" 2>/dev/null)"
+assert_eq "23z5 (D271): the outermost snapshot still reports the manual commit when the sweep authored nothing" \
+  "manual.txt" "$(d255_paths "$D271_C")"
+rm -rf "$D271_C" "$D271_CSTUB"
+
+# 23z6 (D271): the observed worst case — an outer task with 22 nested
+# completions and a junk sweep at its own completion. Pre-D271 the outer's
+# snapshot was ONLY the junk its after_doing swept (the entire real
+# deliverable missing); the outermost gate keeps the deliverable, and the
+# exact match also guards the wrong-diff direction (no nested file may leak
+# into the outer's snapshot through the 22 closed windows).
+D271_D=$(mktemp -d)
+D271_DSTUB=$(mktemp -d)
+make_curl_stub "$D271_DSTUB" "$D271_D/curl-call.txt" 0
+d255_fixture "$D271_D"
+d226_claim "$D271_D" 100
+(
+  cd "$D271_D" || exit 1
+  echo "deliverable" > outer_deliverable.txt
+  git add outer_deliverable.txt > /dev/null
+  git commit -q -m "outer deliverable"
+)
+for i in $(seq 1 22); do
+  D271_ID=$((200 + i))
+  d226_claim "$D271_D" "$D271_ID"
+  ( cd "$D271_D" && echo "n$i" > "nested_$i.txt" )
+  d255_complete "$D271_D" "$D271_ID" "$D271_DSTUB"
+done
+( cd "$D271_D" && echo junk > junk.txt )
+d255_complete "$D271_D" 100 "$D271_DSTUB"
+assert_eq "23z6 (D271): after 22 nested completions the outer reports its deliverable plus the sweep, never only the swept residue" \
+  "junk.txt,outer_deliverable.txt" "$(d255_paths "$D271_D")"
+rm -rf "$D271_D" "$D271_DSTUB"
+
+# 23z7 (D271): a stale base-without-head cache line must not flip the
+# outermost gate. A dead open-window record (abandoned claim's leftover, a
+# rebase-orphaned or corrupt SHA — here one that resolves to nothing) has no
+# completion coming to absorb anything, so treating it as a live absorber
+# would resurrect the exact D271 under-report through one junk cache line.
+# The predicate validates candidates like attributed_commit_ranges does
+# (resolvable + ancestor of HEAD), so the 23z3 geometry still reports both
+# changes with the stale line present.
+D271_E=$(mktemp -d)
+D271_ESTUB=$(mktemp -d)
+make_curl_stub "$D271_ESTUB" "$D271_E/curl-call.txt" 0
+d255_fixture "$D271_E"
+d226_claim "$D271_E" 100
+printf "TASK_BASE_REF_999='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'\n" >> "$D271_E/.stride-env-cache"
+( cd "$D271_E" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D271_E" && echo dirty >> tracked.txt )
+d255_complete "$D271_E" 100 "$D271_ESTUB"
+assert_eq "23z7 (D271): a stale open-window record never re-narrows an outermost task's snapshot" \
+  "manual.txt,tracked.txt" "$(d255_paths "$D271_E")"
+rm -rf "$D271_E" "$D271_ESTUB"
+
 # ============================================================
 # Test Group 24: D228 — a failing after_goal must not be silent
 # ============================================================

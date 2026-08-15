@@ -1486,6 +1486,53 @@ owned_set_to_range() {
   printf '%s^ %s' "$_last" "$_first"
 }
 
+# (D271) TRUE (status 0) when some task OTHER than $1 has an OPEN window on
+# record — a TASK_BASE_REF_<id> line with no TASK_HEAD_REF_<id> partner (the
+# head is written only at completion; the same open-window definition D268's
+# select_kept_window_records uses). Decides whether the D255 owned-set
+# narrowing is safe for the completing task's own capture: the commits the
+# narrowing drops (base..H0 — manual mid-task commits) can only be absorbed
+# by a window that is still open, so with no other open window the completing
+# task is OUTERMOST and must keep the wide D244 purity/window path instead.
+# Closed windows deliberately do not count: a sibling that already completed
+# can never absorb anything. Bases are read from the cache FILE and heads via
+# the sourced env, matching attributed_commit_ranges, so this predicate stays
+# consistent with the attribution walk it gates — including its validation:
+# a candidate base must resolve AND be an ancestor of HEAD, or the line is a
+# stale record (a garbage or rebase-orphaned SHA), not a live window. Without
+# that check a single dead base-without-head cache line would flip this
+# predicate forever — no unclaim path ever removes one, and D268 eviction
+# deliberately pins open windows — narrowing every later outermost task in
+# the checkout and silently resurrecting the exact D271 under-report. The
+# skip direction is the safe one: treating a dubious line as no-window means
+# the wide path, which over-reports but never loses this task's own work. A
+# genuinely abandoned claim whose base still resolves does keep the narrowing
+# alive until its window ages out — that lifecycle gap is recorded, not
+# solved here.
+another_open_window_exists() {
+  local _self="${1:-}" _self_key="" _line _bkey _id _b
+  [ -n "$_self" ] && _self_key=$(task_base_ref_key "$_self")
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _bkey="${_line%%=*}"
+    [ -n "$_self_key" ] && [ "$_bkey" = "$_self_key" ] && continue
+    case "$_bkey" in
+      TASK_BASE_REF_TRUSTED | TASK_BASE_REF_OWNER | TASK_BASE_REF_UNPROVEN) continue ;;
+    esac
+    _id="${_bkey#TASK_BASE_REF_}"
+    [ -n "$(task_head_ref_for "$_id")" ] && continue
+    _b="${_line#*=}"
+    _b="${_b#\'}"
+    _b="${_b%\'}"
+    [ -n "$_b" ] || continue
+    (cd "$PROJECT_DIR" 2>/dev/null \
+      && git rev-parse --verify --quiet "${_b}^{commit}" > /dev/null 2>&1 \
+      && git merge-base --is-ancestor "$_b" HEAD 2>/dev/null) || continue
+    return 0
+  done <<< "$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)"
+  return 1
+}
+
 # (D236) capture_changed_files diffs base..working-tree, so every commit made
 # between an outer task's claim and its completion lands in that task's
 # snapshot — including commits from tasks that claimed, worked and completed
@@ -1836,7 +1883,21 @@ finalize_after_doing() {
       # (D255) When this completion's own loop authored commits, its committed
       # contribution is exactly that delta plus the uncommitted working tree —
       # commits in base..H0 (an outer task's mid-window work, or this task's
-      # own pre-hook manual commits, the accepted consequence) fall out.
+      # own pre-hook manual commits) fall out. (D271) That trade is safe ONLY
+      # while some OTHER task's window is still open: a nested task's dropped
+      # commits fall back into the enclosing task's later snapshot — the
+      # documented over-report, pinned by 23u/23w. An OUTERMOST task has no
+      # absorber, so the same narrowing silently under-reported its own manual
+      # mid-task commits (worst observed: a 22-child outer whose snapshot was
+      # only the junk its after_doing swept, its real deliverable missing).
+      # With no other open window the owned range is instead UNIONED with the
+      # task's attributed ranges: SNAP_OWN_RANGES was computed BEFORE the loop
+      # ran, so the loop's own commits are in no attributed range and are no
+      # longer uncommitted by capture time — replacing the narrowing with the
+      # attributed ranges alone would trade losing the manual commits for
+      # losing the sweep's. When there are no attributed ranges at all (no
+      # other windows recorded), _cap_ranges stays empty and the plain
+      # base..working-tree diff already covers both.
       local _cap_ranges
       _cap_ranges="${SNAP_OWN_RANGES:-}"
       if [ "${SNAP_OWNED_RECORDED:-false}" = "true" ] \
@@ -1844,7 +1905,13 @@ finalize_after_doing() {
         && [ "${SNAP_OWNED_SET:-}" != "$STRIDE_OWNED_OVERFLOW" ]; then
         local _owned_range
         _owned_range=$(owned_set_to_range "${SNAP_OWNED_SET:-}")
-        [ -n "$_owned_range" ] && _cap_ranges="$_owned_range"
+        if [ -n "$_owned_range" ]; then
+          if another_open_window_exists "$_tid"; then
+            _cap_ranges="$_owned_range"
+          elif [ -n "$_cap_ranges" ]; then
+            _cap_ranges="${_cap_ranges}"$'\n'"${_owned_range}"
+          fi
+        fi
       fi
       snapshot=$(capture_changed_files "${SNAP_BASE_RESOLVED:-}" "$_cap_ranges" 2>/dev/null || printf '[]')
     fi
@@ -2083,9 +2150,21 @@ self_heal_changed_files_upload() {
   # for attribution). The record was written by finalize_after_doing before any
   # PUT was attempted, so it is on disk whenever this retry runs after a
   # recorded loop; a completion killed before the record falls back cleanly.
+  # (D271) And the same outermost gate as the primary capture: without it the
+  # retry would re-narrow and upload the under-reporting snapshot OVER the
+  # wide one the primary capture just took — the same last-write-wins shape,
+  # in the opposite direction. Self's own window is closed by now (the head
+  # was recorded before the primary PUT); the predicate excludes self, so for
+  # a single sequential agent it answers as it did at capture time. When
+  # ANOTHER completion lands in the gap between the failed PUT and this retry
+  # (multi-agent on one checkout), the answer can shift and the retry's
+  # judgment diverges from the primary's — over-report direction on the
+  # demonstrated open-to-closed flip, an accepted consequence of re-deriving
+  # rather than persisting the capture-time decision.
   local _owned_rec _owned_range
   if [ "$_refused" != "true" ] && _owned_rec=$(task_owned_for "$_tid"); then
-    if [ -n "$_owned_rec" ] && [ "$_owned_rec" != "$STRIDE_OWNED_OVERFLOW" ]; then
+    if [ -n "$_owned_rec" ] && [ "$_owned_rec" != "$STRIDE_OWNED_OVERFLOW" ] \
+      && another_open_window_exists "$_tid"; then
       _owned_range=$(owned_set_to_range "$_owned_rec")
       [ -n "$_owned_range" ] && _own_ranges="$_owned_range"
     fi

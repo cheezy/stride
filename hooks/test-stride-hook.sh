@@ -6413,16 +6413,24 @@ assert_eq "23r (D244): an outer commit made mid-window stays in the outer task's
   "nested_b.txt,outer_after.txt,outer_during.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D236_L/.stride-changed-files.json" 2>/dev/null)"
 rm -rf "$D236_L" "$D236_LSTUB"
 
-# 23s (D244): three levels where the MIDDLE task commits while the innermost is
-# open — the overlapping-window geometry the per-window other-union exists for.
-# At the middle task's completion the innermost window {mid_during, inner_c30}
-# has residual 2 (no other window covers either commit) → AMBIGUOUS → nothing
-# subtracted, so the middle keeps mid_during (plus inner_c30, the accepted
-# over-report). At the outer task's completion BOTH windows are collected: the
-# innermost is fully covered by the middle's window (residual 0 → PURE) and the
-# middle's own residual is exactly its auto-commit mid_after (residual 1 →
-# PURE), so both spans subtract and the outer reports only its own commit —
-# the purity test must not let ambiguity at one level leak up to the ancestor.
+# 23s (D244/D256): three levels where the MIDDLE task commits while the
+# innermost is open. At the middle task's completion the innermost window
+# {mid_during, inner_c30} has residual 2 → AMBIGUOUS → nothing subtracted, so
+# the middle keeps mid_during (plus inner_c30, the accepted over-report). At
+# the outer task's completion, D244's other-union used to let the two windows
+# explain each other — innermost covered by the middle (PURE), middle's
+# residual just its auto-commit (PURE) — keeping the outer snapshot clean.
+# (D256) That same mutual-coverage arithmetic is what let two CONCURRENTLY
+# open sibling windows both read PURE and subtract the outer's own mid-window
+# commit — this fixture's commit graph is topologically IDENTICAL to the
+# sibling repro (shared-base claim chain, nested spans), so no topology-only
+# rule can keep the outer clean here while keeping the outer's commit there.
+# The purity fixpoint decides that loss-vs-noise trade for never losing an
+# author's commit: an AMBIGUOUS window grounds no other window's purity, so
+# both windows fall through and the outer OVER-REPORTS all four files — noise,
+# where the sibling geometry previously LOST outer_mid from its author's
+# snapshot. The middle-level assertion is unchanged; the outer one pins the
+# accepted over-report.
 D244_S=$(mktemp -d)
 D244_SSTUB=$(mktemp -d)
 make_curl_stub "$D244_SSTUB" "$D244_S/curl-call.txt" 0
@@ -6446,9 +6454,47 @@ assert_eq "23s (D244): the middle task keeps a commit it made while the innermos
   "inner_c30.txt,mid_after.txt,mid_during.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D244_S/.stride-changed-files.json" 2>/dev/null)"
 ( cd "$D244_S" && echo outer > outer_own.txt && git add -A > /dev/null && git commit -q -m outer_own )
 d244_complete_s "$D244_S" 10
-assert_eq "23s (D244): ...and ambiguity at the middle level does not leak into the outer snapshot" \
-  "outer_own.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D244_S/.stride-changed-files.json" 2>/dev/null)"
+assert_eq "23s (D244/D256): ...and the outer over-reports the ambiguous descendants rather than trusting mutual coverage (the accepted loss-vs-noise trade)" \
+  "inner_c30.txt,mid_after.txt,mid_during.txt,outer_own.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D244_S/.stride-changed-files.json" 2>/dev/null)"
 rm -rf "$D244_S" "$D244_SSTUB"
+
+# 23s2 (D256): TWO nested tasks open concurrently — the sibling geometry. Both
+# windows share the outer's base, so each sibling's commits sit inside the
+# other's span too; the old other-union let them mutually "cover" each other,
+# both classified PURE, and the union subtracted the outer's own mid-window
+# commit: outer(100) reported [outer_after.txt] only, its real work lost from
+# its author's snapshot (it appeared only in the siblings' records). Under the
+# purity fixpoint neither sibling finds a pure sub-window (mutual intersection
+# grounds nothing), both read AMBIGUOUS, and the outer keeps outer_mid while
+# absorbing the siblings' commits — over-reporting, the documented safer
+# failure. Parallel dispatch of subagents while the outer session commits is
+# the routine shape that hits this.
+D256_S=$(mktemp -d)
+D256_SSTUB=$(mktemp -d)
+make_curl_stub "$D256_SSTUB" "$D256_S/curl-call.txt" 0
+d226_fixture "$D256_S"
+d256_complete_s() {
+  (
+    cd "$1" || exit 1
+    echo "{\"tool_input\":{\"command\":\"curl -X PATCH https://stride.example.com/api/tasks/$2/complete\"}}" \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$D256_SSTUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+}
+d226_claim "$D256_S" 100
+d226_claim "$D256_S" 200
+d226_claim "$D256_S" 300
+( cd "$D256_S" && echo mid > outer_mid.txt && git add -A > /dev/null && git commit -q -m outer_mid )
+( cd "$D256_S" && echo w300 > w300.txt && git add -A > /dev/null && git commit -q -m w300 )
+d256_complete_s "$D256_S" 300
+( cd "$D256_S" && echo w200 > w200.txt && git add -A > /dev/null && git commit -q -m w200 )
+d256_complete_s "$D256_S" 200
+( cd "$D256_S" && echo after > outer_after.txt && git add -A > /dev/null && git commit -q -m outer_after )
+d256_complete_s "$D256_S" 100
+assert_contains "23s2 (D256): the outer task keeps the commit it made while two siblings were open" \
+  "outer_mid.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D256_S/.stride-changed-files.json" 2>/dev/null)"
+assert_eq "23s2 (D256): the siblings' spans fall through as over-report, never as a silent subtraction" \
+  "outer_after.txt,outer_mid.txt,w200.txt,w300.txt" "$(jq -r '[.[].path] | sort | join(",")' "$D256_S/.stride-changed-files.json" 2>/dev/null)"
+rm -rf "$D256_S" "$D256_SSTUB"
 
 # 23t (D244): an outer task whose ONLY commit is made mid-window. Pre-D244 the
 # nested window swallowed it and the outer task hit the no-own-commits sentinel
@@ -6673,10 +6719,19 @@ assert_eq "23w (D255): the manual nested commit falls back into the outer (over-
   "nested_a.txt,outer_own.txt" "$(d255_paths "$D255_W")"
 rm -rf "$D255_W" "$D255_WSTUB"
 
-# 23x: depth 3 — the middle task commits on BOTH sides of the innermost
-# window. The innermost owns its hook-authored commit; the middle keeps both
-# its manual commits (window 30's owned set supersedes purity so inner_c is
-# subtracted exactly); the outer stays clean of all of it.
+# 23x (D255/D256): depth 3 — the middle task commits on BOTH sides of the
+# innermost window. The innermost owns its hook-authored commit; the middle
+# keeps both its manual commits (window 30's owned set supersedes purity so
+# inner_c is subtracted exactly). At the OUTER's completion, the middle's
+# window is a fallback window (its own after_doing authored nothing, so its
+# owned record is empty), and pre-D256 it read PURE because window 30's SPAN
+# covered mid_a — but mid_a is not 30's commit; span coverage there is the
+# same shared-base overlap arithmetic that let concurrent siblings steal the
+# outer's commit (23s2), and a rule keeping this outer clean would re-open
+# that steal whenever one sibling committed through hooks and the other by
+# hand. Only 30's exact OWNED commit grounds coverage now, so the middle's
+# window reads AMBIGUOUS and the outer over-reports the middle's manual
+# commits — noise in place of lost work, the same decided trade 23s pins.
 D255_X=$(mktemp -d)
 D255_XSTUB=$(mktemp -d)
 make_curl_stub "$D255_XSTUB" "$D255_X/curl-call.txt" 0
@@ -6695,8 +6750,8 @@ assert_eq "23x (D255): the middle keeps both manual commits; the owned innermost
   "mid_a.txt,mid_b.txt" "$(d255_paths "$D255_X")"
 ( cd "$D255_X" && echo x > outer_x.txt && git add -A > /dev/null && git commit -q -m outer_x )
 d255_complete "$D255_X" 10 "$D255_XSTUB"
-assert_eq "23x (D255): ambiguity does not leak upward — the outer reports only its own commit" \
-  "outer_x.txt" "$(d255_paths "$D255_X")"
+assert_eq "23x (D255/D256): the outer over-reports the middle's manual commits rather than trusting span overlap; the owned inner commit stays subtracted exactly" \
+  "mid_a.txt,mid_b.txt,outer_x.txt" "$(d255_paths "$D255_X")"
 rm -rf "$D255_X" "$D255_XSTUB"
 
 # 23y: the owned records must survive the claim-time cache rewrite (the D236

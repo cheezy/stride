@@ -1595,63 +1595,99 @@ attributed_commit_ranges() {
 
   [ -n "$_windows" ] || return 0
 
-  # (D244) Classify each window before subtracting it, instead of pouring every
-  # window into one flat union. Per window: expand it once with rev-list
+  # (D244/D256) Classify each window before subtracting it, instead of pouring
+  # every window into one flat union. Per window: expand it once with rev-list
   # (`<base>..<head>` is base-EXCLUSIVE, which is load-bearing — a nested
   # task's base is normally the outer task's own last commit, and including it
   # attributed the outer's work to its child), then count its RESIDUAL — the
-  # commits no OTHER window covers. Residual <= 1: the window is PURE (the one
+  # commits nothing KNOWN covers. Residual <= 1: the window is PURE (the one
   # residual commit is that task's own auto-commit) and its full span joins the
   # covered set, exactly the D236 behaviour. Residual >= 2: the window is
   # AMBIGUOUS — an outer commit landed mid-window and cannot be told apart from
-  # the task's own — so only its sub-covered commits join the set and the
-  # residual falls through to the caller (over-reporting, the safer failure).
-  # The other-union is computed per window because nested windows overlap
-  # (D236's three-level fixture) and a flat complement would miscount. The
-  # nested rev-list loop is O(n^2) in recorded windows, bounded at 20 by the
-  # cache cap — ~400 spawns worst case, well inside the hook budget the flat
-  # union was sized for.
-  local _w _wb _wh _covered_set="" _c
-  local _w2 _wb2 _wh2 _set_i _other _residual_count
-  while IFS= read -r _w; do
-    [ -n "$_w" ] || continue
-    # (D255) Owned windows contribute their exact SHAs (already collected) and
-    # skip classification — but they REMAIN in _windows so every fallback
-    # window's other-union is unchanged and D244 math stays byte-identical.
-    if [ -n "$_superseded" ] && printf '%s' "$_superseded" | grep -qxF -- "$_w"; then
-      continue
-    fi
-    _wb="${_w%% *}"; _wh="${_w##* }"
-    _set_i=$(git rev-list "${_wb}..${_wh}" 2>/dev/null || true)
-    [ -n "$_set_i" ] || continue
-    _other=""
-    while IFS= read -r _w2; do
-      [ -n "$_w2" ] || continue
-      # An identical base+head line is the same window (a duplicate record),
-      # not evidence the commits are shared — skip it, or every duplicated
-      # window would read as fully sub-covered and stay subtracted.
-      [ "$_w2" = "$_w" ] && continue
-      _wb2="${_w2%% *}"; _wh2="${_w2##* }"
-      _other="${_other}$(git rev-list "${_wb2}..${_wh2}" 2>/dev/null || true)"$'\n'
-    done <<< "$_windows"
-    _residual_count=0
-    while IFS= read -r _c; do
-      [ -n "$_c" ] || continue
-      if ! printf '%s' "$_other" | grep -qxF "$_c"; then
-        _residual_count=$((_residual_count + 1))
+  # the task's own — so it contributes NOTHING and its commits fall through to
+  # the caller (over-reporting, the safer failure).
+  #
+  # (D256) What counts as "known" is a PURITY FIXPOINT, not the union of all
+  # other windows. D244 computed each residual against every other window's
+  # full span, and that let two windows open CONCURRENTLY (both bases predating
+  # the outer's mid-window commit) mutually "cover" the commits they merely
+  # share: each residual dropped to <= 1, both misclassified PURE, and the
+  # union subtracted the outer's own commit — losing work from its author's
+  # snapshot, the exact direction D244 exists to close. Mutual coverage is
+  # evidence of AMBIGUITY, not purity: a commit has one owner. So windows are
+  # classified smallest-set-first, and a window's residual is reduced only by
+  # (a) commits in a D255 owned record — exact per-commit ownership, no
+  # nesting needed — and (b) the sets of windows ALREADY classified PURE that
+  # NEST inside this window (subset, never mere intersection, never an
+  # ambiguous window). In the sibling geometry neither sibling finds a pure
+  # sub-window, both read AMBIGUOUS, and the outer keeps its commit while
+  # absorbing the siblings' — over-reporting, the documented safer failure.
+  # Cost: proper nesting with clean windows (23p) classifies identically; the
+  # 23s depth-3 geometry, which is topologically IDENTICAL to the sibling
+  # repro (per-commit ownership is not recoverable from topology — see the
+  # header comment), now resolves the same way the sibling case must: the
+  # outer over-reports instead of a window whose residual was explained by an
+  # ambiguous neighbour subtracting. That loss-vs-noise trade is decided in
+  # favour of never losing an author's commit; 23s pins it. Sets live in a
+  # scratch dir (newline SHA files; wc/grep do the set algebra) — if mktemp
+  # fails, every fallback window is treated as AMBIGUOUS, which degrades to
+  # pure over-report, never to a lost commit. The rev-list expansion stays
+  # O(n) and the subset tests O(n^2) in recorded windows, bounded by the
+  # cache cap — well inside the hook budget the flat union was sized for.
+  local _w _wb _wh _covered_set="" _set_i
+  local _fixdir _fx_n=0 _fx_order="" _fx_pool="" _fx_f _fx_p _fx_size _fx_idx _residual_count
+  _fixdir=$(mktemp -d 2>/dev/null) || _fixdir=""
+  if [ -n "$_fixdir" ]; then
+    printf '%s' "$_owned_covered" > "$_fixdir/owned"
+    while IFS= read -r _w; do
+      [ -n "$_w" ] || continue
+      # (D255) Owned windows contribute their exact SHAs (already collected in
+      # _owned_covered, which also seeds the fixpoint's known set) and skip
+      # classification.
+      if [ -n "$_superseded" ] && printf '%s' "$_superseded" | grep -qxF -- "$_w"; then
+        continue
       fi
-    done <<< "$_set_i"
-    if [ "$_residual_count" -le 1 ]; then
-      _covered_set="${_covered_set}${_set_i}"$'\n'
-    else
-      while IFS= read -r _c; do
-        [ -n "$_c" ] || continue
-        if printf '%s' "$_other" | grep -qxF "$_c"; then
-          _covered_set="${_covered_set}${_c}"$'\n'
+      _wb="${_w%% *}"; _wh="${_w##* }"
+      _set_i=$(git rev-list "${_wb}..${_wh}" 2>/dev/null || true)
+      [ -n "$_set_i" ] || continue
+      _fx_n=$((_fx_n + 1))
+      printf '%s\n' "$_set_i" > "$_fixdir/set_$_fx_n"
+      _fx_size=$(wc -l < "$_fixdir/set_$_fx_n" | tr -d ' ')
+      _fx_order="${_fx_order}${_fx_size} ${_fx_n}"$'\n'
+    done <<< "$_windows"
+    # Duplicate base+head lines collapse to identical set files; the first
+    # classifies on its own merits and the duplicate then nests inside it —
+    # same disposition as the old identical-line skip, stated so the removal
+    # of that skip is deliberate rather than lost.
+    while IFS= read -r _fx_idx; do
+      [ -n "$_fx_idx" ] || continue
+      _fx_idx="${_fx_idx#* }"
+      _fx_f="$_fixdir/set_$_fx_idx"
+      : > "$_fixdir/cov"
+      [ -s "$_fixdir/owned" ] && grep -xFf "$_fixdir/owned" "$_fx_f" >> "$_fixdir/cov" 2>/dev/null
+      for _fx_p in $_fx_pool; do
+        # Pool set ⊆ this set? (non-empty, and no line of it falls outside)
+        if [ -s "$_fx_p" ] && ! grep -vxFf "$_fx_f" "$_fx_p" 2>/dev/null | grep -q .; then
+          cat "$_fx_p" >> "$_fixdir/cov"
         fi
-      done <<< "$_set_i"
-    fi
-  done <<< "$_windows"
+      done
+      if [ -s "$_fixdir/cov" ]; then
+        _residual_count=$(grep -cvxFf "$_fixdir/cov" "$_fx_f" 2>/dev/null || true)
+      else
+        _residual_count=$(wc -l < "$_fx_f" | tr -d ' ')
+      fi
+      # An errored count (empty) defaults to the full set size, never to 0 —
+      # every failure in this fixpoint must degrade toward AMBIGUOUS
+      # (over-report), and a zero default is the one branch that would fail
+      # toward subtracting a span, i.e. toward lost work.
+      [ -n "$_residual_count" ] || _residual_count=$(wc -l < "$_fx_f" | tr -d ' ')
+      if [ "${_residual_count:-1}" -le 1 ]; then
+        _covered_set="${_covered_set}$(cat "$_fx_f")"$'\n'
+        _fx_pool="$_fx_pool $_fx_f"
+      fi
+    done <<< "$(printf '%s' "$_fx_order" | sort -n -k1,1 -k2,2)"
+    rm -rf "$_fixdir"
+  fi
 
   # (D255) Owned windows' exact SHAs join the covered set alongside the
   # classified windows' contributions.

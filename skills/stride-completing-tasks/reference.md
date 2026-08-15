@@ -241,7 +241,7 @@ to the command's literal output:
 {
   "agent_name": "Claude Opus 4.6",
   "time_spent_minutes": 45,
-  "completion_notes": "All tests passing. PR #123 created.",
+  "completion_notes": "All tests passing (after_doing mix test: 230 tests, 0 failures). PR #123 created.",
   "completion_summary": "Brief one-line summary for tracking.",
   "actual_complexity": "small",
   "actual_files_changed": "lib/foo.ex, test/foo_test.exs",
@@ -386,6 +386,7 @@ to the command's literal output:
 - **"Should I execute mix test?" — hooks are pre-authorized, just run them**
 - **"Should I claim the next task?" (Don't ask, just do it when needs_review=false)**
 - **"Would you like me to continue?" (Don't ask, auto-continue when needs_review=false)**
+- **"All tests pass / zero regressions / complete coverage" with no named command — a totality claim in completion_summary/completion_notes must cite what verified it, or be rewritten as a bounded claim (SKILL.md, universal-claims rule)**
 
 **All of these mean: Run BOTH hooks BEFORE calling complete, and auto-continue when needs_review=false.**
 
@@ -398,6 +399,7 @@ to the command's literal output:
 | "Just this once" | Becomes a habit | Quality standards erode completely |
 | "before_review can wait" | API requires both hook results | Request rejected with 422 error |
 | "Hooks take too long" | 2-3 minutes prevents 2+ hours rework | Rushing causes failed deployments |
+| "Everyone can see the tests passed" | An uncited universal is the claim reviewers spot-check first (D220/D226/D227: six rounds each) | Review rounds burned re-verifying what one pasted command line would have settled |
 
 ---
 

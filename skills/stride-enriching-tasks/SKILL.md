@@ -384,4 +384,4 @@ Note the `"Error / exception"` row: on a defect it pairs the bug-no-longer-repro
 **All of these mean: Run the full enrichment process. Every field saves 15-30 minutes for the implementing agent.** The last five also mean: **an empty pill on the review_queue dashboard at completion** — and enrichment is the last chance to prevent it.
 
 ---
-**References:** For the full enrichment procedure with decision logic, edge cases, and common mistakes, see `stride/agents/task-enricher.md`. For the field reference, see `stride-creating-tasks` SKILL.md. For endpoint details, see the [API Reference](https://raw.githubusercontent.com/cheezy/kanban/refs/heads/main/docs/api/README.md).
+**References:** For the full enrichment procedure with decision logic, see `stride/agents/task-enricher.md`; its edge cases, common mistakes and worked example live beside it in `stride/docs/task-enricher-reference.md`. For the field reference, see `stride-creating-tasks` SKILL.md. For endpoint details, see the [API Reference](https://raw.githubusercontent.com/cheezy/kanban/refs/heads/main/docs/api/README.md).

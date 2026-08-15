@@ -92,8 +92,9 @@ older servers, the hook PUT 404s harmlessly (fire-and-forget) and the inline
 body remains the only path. If you are unsure of the deployed server version
 or you want a single curl that works against both, use the legacy inline
 pattern below — it remains valid against every supported server. That
-includes the `?response_view=slim` param below — servers predating the slim
-view ignore it and return the full body.
+includes the `?response_view=slim` param below — it degrades safely: a
+server predating the slim view ignores the parameter and returns the full
+body, which is read identically, at token cost only.
 
 **Legacy inline pattern (≤ v1.15.x deployments).** Inline the snapshot read
 inside the curl invocation using `jq -n --argjson cf`, with the absolute

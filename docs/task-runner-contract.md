@@ -119,7 +119,9 @@ this corpus's ratio. Index and tree calls take `?response_view=slim`, which
 measured 16,615 B (−99.3%) and 5,810 B (−98.2%) respectively (against a
 G408-era server; an older server ignores the parameter and serves the full
 body, inflating this base accordingly — on such a server the runner avoids
-the index and tree endpoints outright).
+the index and tree endpoints outright, and when the era cannot be established
+— a `fields=column_id` 422 proves a current server, but a 200 proves nothing —
+the runner takes the branch safe on both eras and avoids them likewise).
 
 ---
 

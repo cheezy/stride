@@ -4,7 +4,7 @@
 Why this exists rather than `baseline.py`: the dispatcher path nests two levels
 of subagent (main loop -> task-runner -> explorer/reviewer), and `baseline.py`
 walks one. Omitting the second level understates the new path by ~1.07M tokens
-and is pitfall 3 of W2067 verbatim.
+and is the omit-the-runners'-own-subagents error of W2067 verbatim.
 
 Attribution follows token-baseline.md: subagents are resolved by `toolUseId`
 from `subagents/agent-*.meta.json`, not by scraping ids out of transcript text.
@@ -238,21 +238,38 @@ def discover_inline_runs(sess):
                     claims.append((i, ids[0]))
             elif "/api/tasks/" in cmd and "/complete" in cmd:
                 completes.append(i)
+    # Bound windows at the next TASK START, not the next claim. A dispatch is a
+    # task start too, so bounding at claims[n+1] leaves a claim-then-dispatch
+    # session (exactly the shape this script was generalised to measure) with
+    # nxt = None, and the window runs to the end of the transcript and swallows
+    # the dispatched subtree.
+    # Repeat claims of the SAME identifier are boundaries too, even though
+    # discover_task_starts() dedupes them away: without them a re-claimed task's
+    # first window runs past its own re-claim, the two overlap, and the overlap
+    # guard in main() exits 1 on a session that is merely unusual, not broken.
+    start_lines = sorted({line for line, _ident in discover_task_starts(sess)}
+                         | {line for line, _ident in claims})
     runs = []
     for n, (line, ident) in enumerate(claims):
         if ident in dispatched:
             continue
-        nxt = claims[n + 1][0] if n + 1 < len(claims) else None
+        later = [s for s in start_lines if s > line]
+        nxt = later[0] if later else None
         end = None
         for cl in completes:
             if cl > line and (nxt is None or cl < nxt):
                 end = cl
         if end is None:
-            # An unfinished run is real data (this is how a session in progress
-            # looks) but it is not comparable with a completed one. Say so.
-            print("   (%s: claimed at %d, no /complete found — measured to end of "
-                  "transcript, INCOMPLETE)" % (ident, line), file=sys.stderr)
-            end = last_line(sess)
+            # An unfinished run is real data — a session still in progress, or a
+            # task re-claimed after its claim lapsed — but it is not comparable
+            # with a completed one. Bound it at the NEXT task start rather than
+            # the end of the transcript: an unbounded window overlaps every
+            # later run and silently multiplies their cost into this one, which
+            # is a far larger error than the missing tail it was papering over.
+            end = (nxt - 1) if nxt is not None else last_line(sess)
+            print("   (%s: claimed at %d, no /complete before the next task start "
+                  "— measured to line %d, INCOMPLETE)" % (ident, line, end),
+                  file=sys.stderr)
         runs.append((ident, line, end))
     return runs
 
@@ -522,6 +539,46 @@ def print_per_position(sess, dispatches, pos_by_label, positions):
     return pos_tot, pos_req
 
 
+def print_normalisation(sess, dispatches, pos_by_label, positions):
+    """Absolute per-request figures, new path against the inline baseline.
+
+    Totals measure task size, not architecture — the do-not-compare-totals rule
+    verbatim. A dispatched task five times the size of its baseline row shows a
+    ruinous
+    cache_creation total and a per-request improvement at the same time, and
+    only one of those two facts is about the dispatcher path. Both are printed
+    so neither can be quoted alone.
+    """
+    print()
+    print("Per-request normalisation (totals measure task size; these do not):")
+    print("  {:<26}{:>6}{:>11}{:>13}{:>12}".format(
+        "context", "req", "cc/req", "tokens/req", "cost/req"))
+    for p in positions:
+        ds = [d for d in dispatches if pos_by_label[d[0]] == p]
+        c2, r2 = collections.Counter(), 0
+        for _label, line, agent, _t, _a in ds:
+            cc, nn = sum_usage(sess.path, lines=line)
+            c2 += cc
+            r2 += nn
+            c3, n3 = walk(sess, agent, _label, [], set())
+            c2 += c3
+            r2 += n3
+        tin = sum(c2[k] for k in IN_KEYS)
+        b = BASELINE[p]
+        bc = counter_from(b)
+        print("  {:<26}{:>6}{:>11,}{:>13,}{:>12,}".format(
+            "dispatcher pos %d" % p, r2,
+            c2["cache_creation_input_tokens"] // r2, tin // r2, int(cost(c2) / r2)))
+        print("  {:<26}{:>6}{:>11,}{:>13,}{:>12,}".format(
+            "inline baseline pos %d" % p, b["req"],
+            b["cc"] // b["req"], b["in"] // b["req"], int(cost(bc) / b["req"])))
+        print("  {:<26}{:>6}{:>10.1f}%{:>12.1f}%{:>11.1f}%".format(
+            "  delta (+ = new cheaper)", 0,
+            pct(b["cc"] / b["req"], c2["cache_creation_input_tokens"] / r2),
+            pct(b["in"] / b["req"], tin / r2),
+            pct(cost(bc) / b["req"], cost(c2) / r2)))
+
+
 def print_pricing(agg, reqs, base):
     bc = counter_from(base)
     print()
@@ -546,25 +603,47 @@ def print_positions_detail(sess, dispatches, dispatch_pos, claim_pos):
 
 
 def print_inline(sess, runs, label):
-    """Inline comparator: each main-loop run plus every subagent it dispatched."""
+    """Inline comparator: each main-loop run plus every subagent it dispatched.
+
+    Positions come from discover_task_starts() — the union of claims and
+    dispatches — NOT from enumerating the inline runs. discover_inline_runs()
+    has already removed every dispatched identifier, so enumerating its result
+    would let a dispatched task fail to consume its ordinal: on a session that
+    mixes the two (exactly the shape W2090 measured — an inline task at line 60,
+    a dispatched one at 216) every inline run after a dispatched one would be
+    numbered too low and silently compared against the wrong BASELINE row.
+    """
     print()
     print("Inline runs in %s (%s):" % (sess.id[:8], label))
     hdr = "{:<44}{:>5}{:>15}{:>14}{:>8}{:>13}".format(
         "context", "req", "cache_create", "cache_read", "output", "TOTAL_IN")
     print(hdr)
     print("-" * len(hdr))
-    out = []
-    for n, (ident, lo, hi) in enumerate(runs, 1):
+    ordinal = {ident: n for n, (_line, ident) in enumerate(discover_task_starts(sess), 1)}
+    out, claim_count = [], collections.Counter()
+    for (ident, lo, hi) in runs:
+        n = ordinal.get(ident)
+        if n is None:
+            print("!! inline run %s has no task start — cannot assign a position"
+                  % ident, file=sys.stderr)
+            sys.exit(1)
+        # A task can be claimed more than once (a lapsed claim, re-claimed).
+        # Each window is real and is reported separately, but they are the same
+        # task and share one ordinal — the position is a property of the task,
+        # not of the window.
+        claim_count[ident] += 1
+        ident_label = (ident if claim_count[ident] == 1
+                       else "%s re-claim %d" % (ident, claim_count[ident]))
         rows = []
         c, r = sum_usage(sess.path, lines=range(lo, hi + 1))
-        rows.append(("%s main loop" % ident, r, c))
+        rows.append(("%s main loop" % ident_label, r, c))
         agg, reqs = collections.Counter(c), r
         # Only dispatches issued INSIDE this run's window belong to it.
         issued = agent_dispatch_ids_in_range(sess, lo, hi)
         seen = set()
         for child, m in sorted(sess.meta.items()):
             if m.get("toolUseId") in issued and child not in seen:
-                cc, cn = walk(sess, child, "%s -> %s" % (ident, m.get("agentType", child)),
+                cc, cn = walk(sess, child, "%s -> %s" % (ident_label, m.get("agentType", child)),
                               rows, seen)
                 agg += cc
                 reqs += cn
@@ -573,7 +652,7 @@ def print_inline(sess, runs, label):
                              cc["cache_read_input_tokens"], cc["output_tokens"],
                              sum(cc[k] for k in IN_KEYS)))
         tin = sum(agg[k] for k in IN_KEYS)
-        print(FMT.format("  %s TOTAL (position %d)" % (ident, n), reqs,
+        print(FMT.format("  %s TOTAL (position %d)" % (ident_label, n), reqs,
                          agg["cache_creation_input_tokens"], agg["cache_read_input_tokens"],
                          agg["output_tokens"], tin))
         out.append((ident, n, agg, reqs, tin))
@@ -581,11 +660,20 @@ def print_inline(sess, runs, label):
 
 
 def agent_dispatch_ids_in_range(sess, lo, hi):
+    """Agent dispatches issued inside [lo, hi], EXCLUDING task-runner dispatches.
+
+    A dispatched task's whole subtree is measured by the dispatcher path. If a
+    runner dispatch falls inside an inline window it must not also be charged to
+    the enclosing inline run, or the same subtree is counted twice — once as the
+    dispatcher path and once as inline cost.
+    """
     ids = set()
     for i, r in sess.records():
         if i < lo or i > hi:
             continue
         for c in tool_uses(r, "Agent"):
+            if (c.get("input") or {}).get("subagent_type") == RUNNER_AGENT_TYPE:
+                continue
             ids.add(c.get("id"))
     return ids
 
@@ -639,6 +727,7 @@ def main():
     if detail is None:
         detail = session_id != LEGACY_SESSION
     if detail:
+        print_normalisation(sess, dispatches, pos_by_label, positions)
         print_positions_detail(
             sess, dispatches,
             resolve_positions(sess, dispatches, "dispatch"),
@@ -651,6 +740,28 @@ def main():
             print("!! no inline runs found in %s" % args.inline_session, file=sys.stderr)
             sys.exit(1)
         guard_compaction(isess, [(lo, hi) for _i, lo, hi in iruns], "inline")
+
+        # Inline-view agreement, mirroring the dispatcher-view guards below:
+        # windows must not overlap, and the per-run main-loop request counts must
+        # equal one pass over their union. Overlapping windows are how an
+        # unbounded run silently multiplies a later run's cost into itself.
+        spans = sorted((lo, hi) for _i, lo, hi in iruns)
+        for (alo, ahi), (blo, bhi) in zip(spans, spans[1:]):
+            if blo <= ahi:
+                print("!! inline windows overlap: %d-%d and %d-%d — a run would be "
+                      "counted twice" % (alo, ahi, blo, bhi), file=sys.stderr)
+                sys.exit(1)
+        union = set()
+        per_run = 0
+        for _i, lo, hi in iruns:
+            union |= set(range(lo, hi + 1))
+            _c, rn = sum_usage(isess.path, lines=range(lo, hi + 1))
+            per_run += rn
+        _c, union_reqs = sum_usage(isess.path, lines=union)
+        if per_run != union_reqs:
+            print("!! inline per-run requests %d != union %d" % (per_run, union_reqs),
+                  file=sys.stderr)
+            sys.exit(1)
         inline = print_inline(isess, iruns, "comparator")
         print()
         print("Dispatcher vs this inline comparator, per position:")

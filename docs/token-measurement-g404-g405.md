@@ -445,8 +445,8 @@ case, and excluding it would be picking the flattering number.
 
 **The runners' own subagents are the tier most easily missed** — six contexts,
 17 requests, 1,074,907 tokens. An earlier version of this section omitted them,
-which is pitfall 3 verbatim, and the omission was asymmetric because the
-baseline rows include their four subagents each. It also ran *against* the
+which is the omit-the-runners'-own-subagents error verbatim, and the omission was
+asymmetric because the baseline rows include their four subagents each. It also ran *against* the
 result: correcting it moved the per-request figure from −0.3% to +8.6%.
 
 ## Why the raw 51.7% is not an architecture result
@@ -488,7 +488,7 @@ The correct statement is stronger and needs no n>2: **the new path is flat with
 position while the baseline rises.** Where the two lines cross, though, depends
 on which metric you ask:
 
-| Per position | tokens/req | cache_creation | modelled cost/req |
+| Per position *(dispatch convention — see W2090 caveat 6)* | tokens/req | cache_creation *(total, not per request)* | modelled cost/req |
 |---|---:|---:|---:|
 | Position 1 | −24.6% | −7.2% | −26.1% |
 | Position 2 | **+24.3%** | **−42.5%** | **−14.6%** |
@@ -528,8 +528,9 @@ write 1.25×, cache read 0.1×, output 5× base input — as a stated assumption
 - **Per request: 18.3% more expensive.** Isolation trades cheap cache reads
   (0.1×) for expensive cache writes (1.25×), and the +8.6% token saving inverts.
 
-That inversion is pitfall 4's real point, and it is the single most important
-line here for anyone deciding whether to turn this on.
+That inversion — cheap cache reads traded for expensive cache writes — is the
+real point, and it is the single most important line here for anyone deciding
+whether to turn this on.
 
 ## What this does and does not license
 
@@ -542,6 +543,16 @@ line here for anyone deciding whether to turn this on.
   On modelled cost the new path is still 14.6% more expensive at position 2, so
   the crossover is somewhere beyond the measured range. The lines are flat and
   rising, so it should arrive — but no session has run a third dispatched task.
+  **Superseded by W2090 (2026-08-15), below — read that section before quoting
+  any figure in this bullet.** W2090 found the question ill-posed: the answer is
+  set by which inline baseline row you score against, not by position. The same
+  measurement scored against rows 1/2/3 gives −30.6% / −9.8% / +11.1%, so the
+  lines have crossed under some defensible scorings of existing data and not
+  under others. Two specific corrections to the sentences above: the
+  `−18.3%` and the `14.6%` are **convention-dependent** (W2090 caveat 6 — under
+  the claim convention the aggregate is `+1.8%`), and **"no session has run a
+  third dispatched task" is withdrawn** — under the claim convention W2073 *is* a
+  dispatched task at position 3, and it prints `cost/req +7.2%`.
 
 ## Caveats
 
@@ -672,3 +683,287 @@ bounded summary, and **none regressed to returning full output**. The largest
 returned summary was 5,323 B (an explorer, whose bound is deliberately looser at
 60 lines / 6,000 chars); the smallest was 905 B (a re-review). Reviewer summaries
 ran 905–1,407 B against a 24-line / 2,000-char bound.
+
+---
+
+## W2090 — measured 2026-08-15: the crossover is comparator-determined
+
+**W2090.** The first dispatcher-mode run since the reductions landed, and the
+first new data on the path since W2067. Plugin **1.67.0**, release commit
+**`61c87e8`** (tag `v1.67.0`, 2026-08-15) — that is the commit to pin to
+reproduce the plugin under test. The harness additionally reports a
+`gitCommitSha` of `dbe48e8d05636500e6f6283f4e0f563003ca9468` for the install; it
+is recorded only because it is what the install metadata says, and it **does not
+identify the 1.67.0 content** — it resolves to a 2026-02-28 commit, and
+`61c87e8` is not an ancestor of it. The plugin was loaded 2026-08-15 20:32 UTC,
+carrying W2086/W2087's slim views (1.66.0) and W2080's reviewer-body split
+(1.67.0). Session `14967905-1967-4326-9dd6-8dc4598be91e`, **no compaction
+records**. **D274** — a medium defect in the `stride/` subrepo — was dispatched
+to `stride:task-runner` and returned `completed`, review approved, with three
+nested subagents. It is the session's **2nd** task under the claim convention:
+W2090 itself was claimed inline first, at transcript line 60; D274 was dispatched
+at line 216.
+
+### The finding that governs everything else
+
+**The crossover question, as W2067 posed it, is not well defined — the answer is
+set by which inline baseline you score against, not by session position.** This
+supersedes the framing rather than answering it, so it comes first.
+
+One measurement, D274 at **24,122 modelled cost per request**, scored against the
+three inline baseline rows this document already publishes:
+
+| D274 scored against | inline cost/req | D274 vs it |
+|---|---:|---:|
+| baseline row 1 (W2055) | 18,466 | **−30.6%** (dispatcher worse) |
+| baseline row 2 (W2057) | 21,971 | **−9.8%** (dispatcher worse) |
+| baseline row 3 (W2058) | 27,134 | **+11.1%** (dispatcher *cheaper*) |
+
+Nothing about the dispatcher path changed between those three rows. What changed
+is the comparator: the inline baseline spans **2.01× in tokens/request and 1.47×
+in modelled cost/request** across positions 1–3, because an inline run's cost is
+dominated by how much context it has accumulated and how big the task is. The
+dispatcher path is roughly position-independent — that is W2067's own finding,
+and it held. So the two "lines" cross wherever the inline line happens to be, and
+the inline line is set by task and position together.
+
+**Three independent comparator choices, each defensible, each giving a different
+answer, on the same data:**
+
+1. **Which baseline row** — as above: −30.6% / −9.8% / +11.1%.
+2. **Which comparator session** — comparator A (published baseline) says −9.8%;
+   comparator B (contemporaneous inline) says +15.7%. See the table below.
+3. **Which 1.6x run to compare the reduced base against** — both W2072 and W2073
+   can be "scored against baseline row 2". W2073 (its dispatch-position 2) is
+   25,189 cost/req, 14.6% above row 2; W2072 (its *claim*-position 2, the same
+   convention D274 is scored under) is 23,294, only 6.0% above. Pairing D274's
+   9.8% with the first says the reduced base **closed 4.8 points**; pairing it
+   with the second says it **lost 3.8 points**. Both pairings satisfy the same
+   stated criterion.
+
+**Answering the crossover question directly, in the terms it was asked:** the
+modelled-cost lines **have crossed under some defensible scorings of the existing
+data and not under others.** Against baseline row 2 they have not (−9.8%);
+against row 3 they have (+11.1%).
+
+**A correction to the W2067 section, and to an earlier draft of this one.** The
+claim that *no session has ever run a dispatched task past position 2* is
+**convention-dependent and is withdrawn.** Under the claim convention — the one
+this section uses for its own figures, and `token-baseline.md`'s own — the
+legacy 1.6x session's W2073 is a dispatched task at **position 3**, and it
+prints `cost/req +7.2%`: already crossed, in data committed since W2067.
+Reproduce with `--position-mode claim`. It was only ever "past position 2" that
+had not been reached under the *dispatch* convention.
+
+### The headline, worst metric first
+
+All D274 figures are **position 2 (claim convention — see caveat 6)** against
+**comparator A, baseline row 2**, which is the comparator that **flatters** the
+dispatcher path (see caveat 2). Per recommendation 4, no figure below appears
+without its metric, its position and its comparator.
+
+1. **`cache_creation` per request** — **86.4% worse** than comparator A at
+   position 2: 6,967/req against 3,737/req. Still the worst metric, as in W2067.
+2. **Modelled cost per request** — **9.8% more expensive** than comparator A at
+   position 2: 24,122 against 21,971. Because this comparator flatters the path,
+   **9.8% is a lower bound on the position-2 cost penalty against it**, not a
+   point estimate.
+3. **Tokens per request** — **4.3% cheaper** than comparator A at position 2:
+   148,639 against 155,276. The only metric on which the path is ahead.
+
+**Two totals in this section must not be quoted as architecture results.** The
+`−171.4%` cache_creation total, and the `38.0%` per-request improvement in the
+tier table below. D274 is **3.1× the size** of the 1.6x dispatcher run it is
+compared against — 166 requests against 54. That 54 **includes W2073's resume**,
+as every 1.6x figure in this section does: the task's own edge case says to
+include it, and excluding it would give both a smaller comparator (32 requests)
+and a flatteringly larger 5.2× ratio. Totals measure task size, not architecture
+— the counting rule this document states as *"do not compare totals; the task
+mixes differ"* — and, as the next section shows, **per-request normalisation does
+not fix it either** when requests-per-context changes.
+
+### The runs
+
+| Context | Req | cache_creation | cache_read | Output | TOTAL_IN |
+|---|---:|---:|---:|---:|---:|
+| D274 main window | 1 | 2,121 | 170,004 | 3,179 | 172,127 |
+| D274 runner | 101 | 786,791 | 17,115,795 | 22,153 | 17,902,788 |
+| D274 runner → `stride:task-reviewer` | 21 | 130,209 | 2,272,593 | 7,289 | 2,402,844 |
+| D274 runner → `stride:task-explorer` | 27 | 117,853 | 2,375,635 | 3,263 | 2,493,542 |
+| D274 runner → `stride:task-reviewer` | 16 | 119,621 | 1,583,122 | 5,425 | 1,702,775 |
+| **D274 total** | **166** | **1,156,595** | **23,517,149** | **41,309** | **24,674,076** |
+| Comparator A, baseline row 2 (W2057, inline) | 114 | 426,082 | 17,275,226 | 48,876 | 17,701,524 |
+
+Both reviewer rows are real: D274 took two review rounds. The runner's own
+subagents are counted — omitting them is the error W2067 made in its first round,
+and it ran against the result.
+
+### What the reduced base did and did not buy
+
+**It is tempting to read the per-request table below as the reduced base working.
+It is mostly amortisation, and the decomposition says so.**
+
+| Scored against baseline row 2, per request | W2073 (1.6x) | D274 (1.67.0) | Change |
+|---|---:|---:|---|
+| `cache_creation`/req **vs the other dispatcher run** | 11,240 | 6,967 | 38.0% lower |
+| tokens/req **vs the other dispatcher run** | 117,589 | 148,639 | 26.4% higher |
+| modelled cost/req **vs the other dispatcher run** | 25,189 | 24,122 | 4.2% lower |
+| modelled cost **vs baseline row 2** | −14.6% | −9.8% | 4.8 points closer |
+
+Every "Change" cell above compares **two dispatcher runs**, not dispatcher against
+inline. Read alone, `38.0% lower` inverts the section's actual finding, which is
+that cache_creation per request is **86.4% worse than inline**.
+
+**And the 38.0% is not the plugin.** Decomposing both sides by tier — the same
+rows this document already prints:
+
+| Tier | W2073 (1.6x) | D274 (1.67.0) | |
+|---|---:|---:|---|
+| runner tier (**the tier that loads the reduced body**) | 8,361 cc/req | 7,790 cc/req | only **6.8% lower** |
+| subagent tier | 24,886 cc/req | 5,745 cc/req | 76.9% lower |
+| **cache_creation per context** | **75,874** | **231,319** | **3.05× HIGHER** |
+| requests per context | 6.8 | 33.2 | 4.9× more |
+
+A smaller resident base is a **per-context, per-cold-start** mechanism: if it were
+the cause, cost per context would fall. It rose 3.05×. What actually fell is a
+per-request average, because D274 spread fixed cold-start writes over 4.9× more
+requests per context — its subagents ran 16–27 requests each against W2073's 2–3.
+Hold subagent intensity constant in either direction and the result collapses:
+give W2073's subagents D274's cc/req and W2073 lands at 7,696 against D274's
+6,967, a **9.5%** improvement rather than 38.0%; give D274's subagents W2073's
+cc/req and D274 lands at 14,347, **27.6% worse** than W2073.
+
+**So: the effect of the reduced base is not identifiable from this run** — which
+is exactly what caveat 3 says, and the prose now agrees with it. The most that
+can be said is that the tier which actually carries the reduced plugin body
+improved **6.8%**.
+
+*(Reconciliation, because the numbers look incompatible: W2067 publishes
+`cache_creation −42.5%` at position 2 for this same 1.6x data, and this section
+says 200.7% worse. Both are right — **−42.5% is a total, 200.7% is per request.**
+The script's per-position line puts a total between two per-request metrics under
+a bare `cache_creation` label; W2067's table reproduced that line verbatim. Per
+request is the comparable figure.)*
+
+### Produced vs entered — the one asymmetry that survives every comparator
+
+This is what dispatcher mode is bought for, and unlike everything above it does
+**not** move when the comparator changes.
+
+| Run | Convention | Entered the main loop | Produced | Entered |
+|---|---|---:|---:|---:|
+| W2072 (1.6x) | dispatch pos 1 / claim pos 2 | 165,229 | 6,073,774 | 2.72% |
+| W2073 (1.6x) | dispatch pos 2 / claim pos 3 | 185,326 | 3,643,065 | 5.09% |
+| W2073 resume (1.6x) | dispatch pos 2 / claim pos 3 | 194,455 | 2,706,766 | 7.18% |
+| **D274 (1.67.0)** | **claim pos 2** | **172,127** | **24,674,076** | **0.70%** |
+| — *inline* D272 (comparator B) | claim pos 1 | 10,628,593 | 16,061,479 | **66.2%** |
+| — *inline* W2080 (comparator B) | claim pos 2 | 11,899,397 | 16,135,596 | **73.7%** |
+| — *inline* W2081 (comparator B) | claim pos 3 | 8,210,437 | 9,107,441 | **90.2%** |
+| — *inline* W2082 (comparator B) | claim pos 4 | 4,457,899 | 5,469,295 | **81.5%** |
+
+Position labels carry their convention because the two are not interchangeable
+(caveat 6); the dispatcher rows above position-match nothing — they are listed to
+show the *range* of entered-share, not a position series.
+
+**A dispatched task put 0.70% of what it produced into the main loop. Inline runs
+put 66–90% in, at every position measured.** That is roughly a hundredfold
+difference, it points the same way at all four inline positions, and it is the
+only finding here that no comparator choice reverses. The main-loop window stayed
+bounded at 165–195K regardless of task size — W2067's flat line, confirmed.
+
+Note the mechanism honestly: D274's 0.70% is the lowest entered-share ever
+measured on this path **because the task was large**, not because the plugin got
+smaller. The benefit scales with how much work the task generates.
+
+### So should dispatcher mode default on?
+
+The measurement supports an answer, and the earlier draft of this section ducked
+it. Stating it plainly:
+
+- **The cost difference is small and its sign is undetermined.** Across every
+  defensible scoring of the existing data it runs from −30.6% to +15.7%. The
+  single most like-for-like scoring (comparator A, baseline row 2 — the one that
+  flatters the dispatcher path) puts it at **≥9.8% more expensive per request**.
+  There is no honest way to call this a settled penalty, and no honest way to
+  call it a saving.
+- **The context benefit is large and robust: ~100×**, in the same direction at
+  every position and under every comparator.
+
+**Therefore: decide on context pressure, not on cost — and do not wait for the
+crossover number, because the data says it is not a well-defined quantity.**
+Dispatcher mode is worth defaulting on where main-loop context exhaustion is the
+binding constraint, which by the entered-share table means **large tasks**; it is
+not worth defaulting on to save tokens, and the Step 3 matrix's existing small-task
+carve-out remains right for the opposite reason it was written — such tasks
+generate too little work for a ~100× context saving to be worth anything.
+
+**What would actually settle the cost question** — and it is one run, not a
+programme: **one inline task on 1.67.0, matched to a dispatched one in both size
+and position.** Caveat 2 explains why none exists yet. Matching size matters as
+much as matching position; every comparison in this document is confounded by
+task size, and that is the confound the next measurement should remove first. A
+**small** task dispatched on 1.67.0 would additionally bound the penalty at its
+unfavourable end, which no run has ever done.
+
+### Caveats
+
+1. **n = 1 new run.** One task, one position, one session.
+2. **No same-version inline control exists.** 1.67.0 was loaded 14 minutes before
+   this session's first claim and this is the first session on it, so nothing
+   inline has been measured on the reduced base. Both comparators are
+   cross-version, and comparator A is five releases older — the reductions under
+   test would shrink an inline run too, so it flatters the dispatcher path.
+   Comparator B (session `20778a92…`) ran on 1.66.0 plus partly-landed
+   reductions, and its task mix is heavier per request (201,695 tokens/req at
+   position 2 against comparator A's 155,276), which is why it reverses the sign.
+   Against comparator B the 1.6x runs come out **+11.9% at position 2 but −4.5% at
+   position 1** — so B flatters the dispatcher path at both positions (by 26.5
+   points at position 2 and 21.6 at position 1) without reversing the sign at
+   both.
+3. **Three variables moved at once** — plugin version, task size (**3.1×**, the
+   ratio the body uses, resume included), and which task was run. The isolated
+   effect of the reduced base is **not identifiable**; the tier decomposition
+   above bounds the part attributable to the plugin body at about 6.8%.
+4. **Per-request normalisation does not neutralise task size** when
+   requests-per-context changes, as it does here (6.8 → 33.2). This is why the
+   tier decomposition exists and why the 38.0% figure is not what it appears.
+5. **Pricing multipliers are assumed**, not read from an invoice.
+6. **Session position is convention-dependent, and the convention is
+   load-bearing.** This section uses the *claim* convention (all task starts in
+   the window: W2090 = 1, D274 = 2), which is `token-baseline.md`'s own. The W2067
+   figures use the *dispatch* convention (ordinal among task-runner identifiers
+   only). They are not interchangeable: re-scoring the W2067 session under the
+   claim convention moves its published headline from **−18.3% to +1.8%**
+   cost/request on identical data, because W2072/W2073 then land on baseline rows
+   2/3 instead of 1/2. The legacy session is pinned to `dispatch` in the script so
+   the committed figures stay reproducible, and every non-legacy run prints both.
+7. **The figures are not independently auditable.** Both reproduction commands
+   read machine-local transcripts under `~/.claude/projects`; only the *plugin*
+   is pinned by commit. The measured window also sits in a session that was still
+   appending when the section was written, and the script's compaction guard exits
+   1 if a boundary later lands inside a measured window — so the command can begin
+   failing without the document changing.
+
+### Reproduction
+
+```bash
+# this section's figures
+python3 stride/docs/scripts/w2067-recursive.py \
+        --session 14967905-1967-4326-9dd6-8dc4598be91e \
+        --inline-session 20778a92-65e9-44aa-9a10-dbdd0867d3f1
+
+# the withdrawn "past position 2" claim, and the +7.2% crossing at position 3
+python3 stride/docs/scripts/w2067-recursive.py --position-mode claim
+
+# the W2067 figures above, still reproduced byte for byte
+python3 stride/docs/scripts/w2067-recursive.py
+```
+
+W2090 generalised the script: dispatches, session positions and the inline
+baseline are discovered or derived rather than hand-encoded, so measuring the next
+session needs no edit. It also added a compaction guard — a boundary inside a
+measured window now exits 1 instead of silently summing across it — and fixed two
+latent bookkeeping defects in inline-run measurement (positions were numbered
+without counting dispatched tasks, and a run with no `/complete` before the next
+task start was measured to the end of the transcript, overlapping every later
+run). Neither affected a published figure.

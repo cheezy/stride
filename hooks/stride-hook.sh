@@ -2610,7 +2610,17 @@ ${_key}=''"
   if [ -z "${GOAL_ID:-}" ] && [ "$HAS_JQ" = "true" ] && [ -n "$_payload" ]; then
     _parent=$(printf '%s' "$_payload" | jq -r '.data.parent_id // .parent_id // empty' 2>/dev/null || true)
     if [ -n "$_parent" ] && [ "$_parent" != "null" ]; then
-      apply_env_lines "GOAL_ID=$(sq_escape "$_parent")"
+      # (D245) Replace the empty GOAL_ID line already in the cache instead of
+      # appending a second, contradictory one: a first-match reader (grep -m1)
+      # would take the empty line while a sourcing reader takes this one. Same
+      # replace-in-place shape as record_task_head_ref. The export is done
+      # directly because apply_env_lines would append again.
+      GOAL_ID="$_parent"
+      export GOAL_ID
+      {
+        grep -v '^GOAL_ID=' "$ENV_CACHE" 2>/dev/null || true
+        printf 'GOAL_ID=%s\n' "$(sq_escape "$_parent")"
+      } | write_env_cache || true
     fi
   fi
 }

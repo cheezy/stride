@@ -5203,6 +5203,53 @@ STRIDE
     echo -e "  ${GREEN}PASS${RESET}: 20f: slim ack without after_goal does not run the section"
     PASS=$((PASS + 1))
   fi
+
+  # 20g: D245 — after_goal env OMITS GOAL_ID and data.parent_id is set (exactly
+  # the population the fallback exists for): the env cache must carry exactly
+  # ONE GOAL_ID line and it must hold the parent_id value. Before the fix the
+  # defined-but-empty export loop appended GOAL_ID='' and the fallback appended
+  # GOAL_ID='6' — a first-match reader (grep -m1) got '' while a sourcing
+  # reader got 6.
+  W20G_PROJ="$TMPDIR_TEST/d245-onegoalid"
+  mkdir -p "$W20G_PROJ/.stride"
+  cat > "$W20G_PROJ/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER]"
+```
+STRIDE
+  printf '%s' '{"data":{"id":99,"identifier":"W99","title":"Slim task","status":"done","parent_id":6,"needs_review":false,"review_status":null,"complexity":"medium","priority":"high"},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G6"}}]}' \
+    > "$W20G_PROJ/.stride/.last-api-response.json"
+  W20G_OUT=$(echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20G_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  W20G_RC=$?
+  assert_exit "20g: fallback-firing slim ack exits 0" 0 "$W20G_RC"
+  assert_contains "20g: ## after_goal still receives the fallback GOAL_ID" "goal=[6]" "$W20G_OUT"
+  W20G_COUNT=$(grep -c '^GOAL_ID=' "$W20G_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')
+  assert_eq "20g: env cache carries exactly one GOAL_ID line when the fallback fires" "1" "$W20G_COUNT"
+  W20G_FIRST=$(grep -m1 '^GOAL_ID=' "$W20G_PROJ/.stride-env-cache" 2>/dev/null)
+  assert_eq "20g: a first-match reader gets the parent_id value" "GOAL_ID='6'" "$W20G_FIRST"
+
+  # 20h: normal-path control for D245 — after_goal env WITH GOAL_ID: still
+  # exactly one GOAL_ID line, and it holds the server-supplied value (the
+  # replace-in-place fallback never fires, no regression on the normal path).
+  W20H_PROJ="$TMPDIR_TEST/d245-normalpath"
+  mkdir -p "$W20H_PROJ/.stride"
+  cat > "$W20H_PROJ/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER]"
+```
+STRIDE
+  printf '%s' '{"data":{"id":99,"parent_id":55},"hooks":[{"name":"after_goal","env":{"GOAL_ID":"55","GOAL_IDENTIFIER":"G55"}}]}' \
+    > "$W20H_PROJ/.stride/.last-api-response.json"
+  W20H_OUT=$(echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20H_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  W20H_RC=$?
+  assert_exit "20h: supplied-GOAL_ID slim path exits 0" 0 "$W20H_RC"
+  assert_contains "20h: ## after_goal receives the supplied GOAL_ID" "goal=[55]" "$W20H_OUT"
+  W20H_COUNT=$(grep -c '^GOAL_ID=' "$W20H_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')
+  assert_eq "20h: env cache still carries exactly one GOAL_ID line on the normal path" "1" "$W20H_COUNT"
+  W20H_FIRST=$(grep -m1 '^GOAL_ID=' "$W20H_PROJ/.stride-env-cache" 2>/dev/null)
+  assert_eq "20h: a first-match reader gets the supplied value" "GOAL_ID='55'" "$W20H_FIRST"
 fi
 
 # ============================================================

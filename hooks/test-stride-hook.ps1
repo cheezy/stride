@@ -3281,6 +3281,57 @@ $r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16fProj
 Assert-Exit "16f: slim ack without after_goal exits 0" 0 $r.ExitCode
 Assert-NotContains "16f: slim ack without after_goal does not run the section" "slim_after_goal_ran" $r.Stdout
 
+# 16g: D245 — after_goal env OMITS GOAL_ID and data.parent_id is set (the
+# fallback population): the env cache must carry exactly ONE GOAL_ID line and
+# it must hold the parent_id value. Regression lock mirroring
+# test-stride-hook.sh 20g — Set-AfterGoalEnv builds one env map and writes the
+# cache once, so it structurally cannot duplicate; this pins that geometry.
+# (ps1 cache lines are unquoted: GOAL_ID=6.)
+$w16gProj = Join-Path $TmpDir 'd245-onegoalid'
+New-Item -ItemType Directory -Path (Join-Path $w16gProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $w16gProj '.stride.md') -Value @'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER]"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16gProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":99,"identifier":"W99","title":"Slim task","status":"done","parent_id":6,"needs_review":false,"review_status":null,"complexity":"medium","priority":"high"},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G6"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16gProj
+Assert-Exit "16g: fallback-firing slim ack exits 0" 0 $r.ExitCode
+Assert-Contains "16g: ## after_goal still receives the fallback GOAL_ID" "goal=[6]" $r.Stdout
+$w16gCache = @()
+if (Test-Path (Join-Path $w16gProj '.stride-env-cache')) {
+    $w16gCache = @(Get-Content (Join-Path $w16gProj '.stride-env-cache') -Encoding UTF8)
+}
+$w16gGoalLines = @($w16gCache | Where-Object { $_ -match '^GOAL_ID=' })
+Assert-Eq "16g: env cache carries exactly one GOAL_ID line when the fallback fires" "1" "$($w16gGoalLines.Count)"
+Assert-Eq "16g: a first-match reader gets the parent_id value" "GOAL_ID=6" "$($w16gGoalLines | Select-Object -First 1)"
+
+# 16h: normal-path control for D245 — after_goal env WITH GOAL_ID: still
+# exactly one GOAL_ID line holding the server-supplied value (mirrors
+# test-stride-hook.sh 20h).
+$w16hProj = Join-Path $TmpDir 'd245-normalpath'
+New-Item -ItemType Directory -Path (Join-Path $w16hProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $w16hProj '.stride.md') -Value @'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER]"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16hProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":99,"parent_id":55},"hooks":[{"name":"after_goal","env":{"GOAL_ID":"55","GOAL_IDENTIFIER":"G55"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16hProj
+Assert-Exit "16h: supplied-GOAL_ID slim path exits 0" 0 $r.ExitCode
+Assert-Contains "16h: ## after_goal receives the supplied GOAL_ID" "goal=[55]" $r.Stdout
+$w16hCache = @()
+if (Test-Path (Join-Path $w16hProj '.stride-env-cache')) {
+    $w16hCache = @(Get-Content (Join-Path $w16hProj '.stride-env-cache') -Encoding UTF8)
+}
+$w16hGoalLines = @($w16hCache | Where-Object { $_ -match '^GOAL_ID=' })
+Assert-Eq "16h: env cache still carries exactly one GOAL_ID line on the normal path" "1" "$($w16hGoalLines.Count)"
+Assert-Eq "16h: a first-match reader gets the supplied value" "GOAL_ID=55" "$($w16hGoalLines | Select-Object -First 1)"
+
 # ============================================================
 # Test Group 17: D142 — post-pull TASK_BASE_REF + committed-range override
 # (mirrors test-stride-hook.sh Test Group 21)

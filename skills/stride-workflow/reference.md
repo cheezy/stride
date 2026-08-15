@@ -146,9 +146,16 @@ STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
       from the sheet, conservatively; budget too small to fund one charter --> do
       not dispatch at all; blocked or ceiling AFTER meaningful probes --> partial
       coverage, record the findings and say the coverage claim is incomplete
+    Relatedness gate FIRST, at ANY severity: responsible lines are lines this task
+      changed, OR same defect class as the change --> fix in-task + re-review, never
+      file; the severity/provenance policy below governs only out-of-scope findings
+      (moved/reformatted-only lines shown to predate the change are NOT related -->
+      out-of-scope below; a follow-up task is the exception for a real out-of-scope
+      bug, never the default)
     Critical whose responsible lines you wrote --> escalate fail-closed (testing_strategy failed
                   + category:testing Critical issue), fix, re-run the charter, re-review
-    Critical in lines you did not write        --> report + file a follow-up defect, never block
+    Out-of-scope or provenance-undetermined Critical --> report + file a
+                  follow-up defect, never block
     No structured review block in the payload  --> no escalation; never synthesize one
 
 STEP 5.6: Harden findings into checks (Optional, Gated)
@@ -270,7 +277,11 @@ CLAUDE CODE WORKFLOW:
 │     │   file leftover risk | blocked/ceiling at ~zero probes → NOT performed, hand back
 │     │   (obstacle ≠ finding) | stopped_early → resolve from sheet | budget too small → no dispatch
 │     │   | blocked/ceiling AFTER meaningful probes → partial coverage, record + say so
-│     └─ Critical finding? Lines you wrote → escalate fail-closed | Anything else → report + file
+│     ├─ Relatedness gate FIRST, any severity: lines you changed OR same defect class →
+│     │   fix in-task + re-review, never file (moved-only lines predating the change ≠
+│     │   related; a follow-up task = the exception for a real out-of-scope bug)
+│     └─ Critical: lines you wrote → escalate fail-closed | out-of-scope or provenance
+│        undetermined → report + file
 │        (no structured review block in the payload → no escalation; never synthesize one)
 ├─ 5.6 Harden findings into regression checks (optional, gated):
 │     ├─ No session / no convertible findings / non-Claude-Code → Skip, no failure

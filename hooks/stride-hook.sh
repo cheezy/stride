@@ -3490,12 +3490,16 @@ extract_response_payload() {
 #
 # (D273) That protection is per-FAMILY, not automatic — a new family needs its
 # own prefix here, and TASK_NARROWED was added without one. The consequence was
-# concrete rather than theoretical: apply_env_lines APPENDS these lines to the
+# concrete rather than theoretical: apply_env_lines wrote these lines to the
 # cache in the same before_review invocation that then runs the self-heal, and
 # task_narrowed_for reads the file with `tail -n 1`, so a server-supplied
 # TASK_NARROWED_<id> outranked the record the capture wrote and steered the
 # retry into narrowing — an outside party forcing the UNDER-report direction
-# this whole subsystem exists to prevent. TASK_BASE_AT is fenced on the same
+# this whole subsystem exists to prevent. (D260) It APPENDED when this was
+# found; it now replaces in place for the keys each call writes, so a future
+# unfenced family would fare WORSE than described here — the forwarded line
+# would DELETE the capture's record rather than outrank it. Same escalation
+# the D258 paragraph below records, for the same reason. TASK_BASE_AT is fenced on the same
 # terms: a supplied stamp would let an outside party keep a dead window alive
 # (or retire a live one) and reach the same narrowing decision one step
 # earlier. Every client-owned family belongs in this list.
@@ -3734,8 +3738,8 @@ ${_key}=''"
   # is what these two geometries were.) So within a single claim window, where
   # no claim intervenes to truncate the cache:
   #   1. Run 1 establishes GOAL_ID='7'. Run 2 omits both the GOAL_ID env key
-  #      and data.parent_id, so the defaults loop above appends GOAL_ID=''
-  #      AFTER the real value and the fallback never runs to clean it up.
+  #      and data.parent_id, so the defaults loop above appended GOAL_ID=''
+  #      AFTER the real value and the fallback never ran to clean it up.
   #      grep -m1 then reads the PREVIOUS goal's id while sourcing reads ''.
   #   2. GOAL_IDENTIFIER, GOAL_TITLE and GOAL_DESCRIPTION never had a
   #      replace-in-place at all, so two runs accumulate contradictory pairs
@@ -3762,13 +3766,20 @@ ${_key}=''"
   # same after_goal env and are deliberately untouched HERE.
   #
   # (D260) This block is NOT redundant with apply_env_lines' own collapse, and
-  # the reason is the parent-id fallback above. apply_env_lines collapses the
-  # keys IT was handed, but the fallback can set GOAL_ID afterwards — so
-  # without this block that later value would be appended beside the forwarded
-  # one. This block also emits all four keys from the exported values, which is
-  # what makes an omitted key resolve to the defaults loop's empty string
-  # rather than surviving from a previous run. Keys apply_env_lines never
-  # received are exactly the ones it cannot collapse.
+  # the reason is the parent-id fallback above — but state the mechanism
+  # exactly, because the obvious one is wrong. apply_env_lines has ALREADY
+  # written all four keys by this point (the defaults loop hands it every
+  # omitted one as ''), and the fallback then assigns only the SHELL variable.
+  # So nothing appends a second GOAL_ID; what would happen without this block
+  # is quieter and worse to debug: the cache would keep the empty default while
+  # the process env holds the parent id, so the section and the cache would
+  # disagree about the goal. Re-emitting all four from the exported values is
+  # what closes that gap.
+  #
+  # The ps1 twin's equivalent block IS fully redundant, because there the
+  # fallback writes into the env map BEFORE that port's collapse runs. Two
+  # structurally similar blocks, two different answers — check each against its
+  # own call order rather than against the other.
   #
   # THE FILTER IS QUOTE-AWARE, AND IT HAS TO BE. A plain `grep -v '^KEY='` is
   # what D245 used, and it was safe there only because GOAL_ID is always a
@@ -3777,8 +3788,8 @@ ${_key}=''"
   # a record — the corruption apply_env_lines' comment used to cite as its
   # reason for appending rather than rewriting (D260 answered that objection by
   # making its own collapse quote-aware rather than by ignoring it). Test 10l
-  # pins the adversarial
-  # shape deliberately: a GOAL_TITLE whose value contains a line reading
+  # pins the adversarial shape deliberately: a GOAL_TITLE whose value
+  # contains a line reading
   # `GOAL_IDENTIFIER=sneaky`. Extending D245's idiom to all four keys as
   # literally specified would have silently truncated that value.
   #
@@ -3803,8 +3814,12 @@ ${_key}=''"
   # cache. The `if` below then skips the collapse entirely.
   #
   # Skipping is always the safe degrade — for that case and for a missing awk
-  # alike. The cache keeps today's append behaviour, which is the duplicate
-  # this task fixes, never a corrupted or truncated one.
+  # alike. (D260) What the degraded path actually leaves is not duplicates:
+  # apply_env_lines has already collapsed the four keys, so the cache keeps one
+  # record each. What goes unrecorded is the fallback's GOAL_ID, leaving the
+  # empty default on file while the process env holds the parent id — the same
+  # cache/env divergence this block exists to close, never a corrupted or
+  # truncated cache.
   if _collapsed=$(awk -v q="'" '
     function scan(s,   i, c) {
       for (i = 1; i <= length(s); i++) {

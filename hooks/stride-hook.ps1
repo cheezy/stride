@@ -1379,8 +1379,9 @@ function Set-AfterGoalEnv {
     # Set-HookEnv called — so its collapse, keyed on $EnvMap.Keys, already
     # covers every GOAL_* key including the fallback's. The bash twin's
     # equivalent block is genuinely NOT redundant, because there
-    # apply_env_lines runs BEFORE the fallback, so a GOAL_ID the fallback sets
-    # afterwards would be appended beside the forwarded one.
+    # apply_env_lines runs BEFORE the fallback and the fallback assigns only a
+    # shell variable — so without it the bash cache would keep the empty
+    # default while its process env held the parent id.
     #
     # Retained anyway, as defence in depth and nothing more: it is the D257
     # guarantee's local guard, and deleting it would make D257 depend entirely

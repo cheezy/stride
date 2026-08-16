@@ -5251,6 +5251,173 @@ STRIDE
   assert_eq "20h: env cache still carries exactly one GOAL_ID line on the normal path" "1" "$W20H_COUNT"
   W20H_FIRST=$(grep -m1 '^GOAL_ID=' "$W20H_PROJ/.stride-env-cache" 2>/dev/null)
   assert_eq "20h: a first-match reader gets the supplied value" "GOAL_ID='55'" "$W20H_FIRST"
+
+  # 20i (D257): D245 fixed ONE geometry. Its replace-in-place lived inside the
+  # parent-id fallback, so it ran only when that fallback fired — and
+  # apply_env_lines APPENDS on every call. A second after_goal run in the same
+  # claim window (no claim between, so nothing truncates the cache) whose
+  # response omits BOTH the GOAL_ID env key and data.parent_id therefore had
+  # the defaults loop append GOAL_ID='' AFTER run 1's real value, with no
+  # fallback to clean it up: grep -m1 read the PREVIOUS goal's id while
+  # sourcing read ''. That is the exact D245 symptom, one response shape away
+  # from the population D245 fixed.
+  #
+  # The decided value resolves the drafted check's open product-intent
+  # question: a single GOAL_ID='' line, NOT the removal of the key. The
+  # contract (hook-execution.md) is that a key the server omits exports
+  # defined-but-empty, never absent, so a `set -u` section can reference it —
+  # dropping the line would reintroduce the absent state that contract forbids.
+  # Keeping run 1's '7' would be worse still: it is the stale-identity bug.
+  W20I_PROJ="$TMPDIR_TEST/d257-resurrect"
+  mkdir -p "$W20I_PROJ/.stride"
+  cat > "$W20I_PROJ/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER]"
+```
+STRIDE
+  # Run 1: fallback fires, GOAL_ID='7'
+  printf '%s' '{"data":{"id":99,"parent_id":7},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G7"}}]}' \
+    > "$W20I_PROJ/.stride/.last-api-response.json"
+  echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20I_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_eq "20i: run 1 leaves one GOAL_ID line" "1" \
+    "$(grep -c '^GOAL_ID=' "$W20I_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')"
+  # Run 2 (no claim between): GOAL_ID env omitted AND no parent_id
+  printf '%s' '{"data":{"id":100},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G8"}}]}' \
+    > "$W20I_PROJ/.stride/.last-api-response.json"
+  echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20I_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  W20I_COUNT=$(grep -c '^GOAL_ID=' "$W20I_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')
+  assert_eq "20i (D257): exactly one GOAL_ID line after a second in-window after_goal" "1" "$W20I_COUNT"
+  W20I_FIRST=$(grep -m1 '^GOAL_ID=' "$W20I_PROJ/.stride-env-cache" 2>/dev/null)
+  W20I_SOURCED=$(bash -c ". '$W20I_PROJ/.stride-env-cache' 2>/dev/null; printf 'GOAL_ID=%s' \"\$(printf \"'%s'\" \"\$GOAL_ID\")\"")
+  assert_eq "20i (D257): first-match and sourcing readers agree" "$W20I_SOURCED" "$W20I_FIRST"
+  assert_eq "20i (D257): the surviving line is the contract's defined-but-empty value, not the previous goal's id" \
+    "GOAL_ID=''" "$W20I_FIRST"
+
+  # 20j (D257): the three siblings never had a replace-in-place at all — only
+  # GOAL_ID did, and only via the fallback — so two in-window runs accumulated
+  # contradictory pairs. A first-match reader then stitched run 2's GOAL_ID to
+  # run 1's GOAL_IDENTIFIER: two different goals reconstructed as one identity.
+  # That is the harm that matters, because a commit message, PR body or
+  # notification built from those fields names the wrong goal. Run 1 supplies a
+  # full identity for goal 6; run 2 supplies only GOAL_IDENTIFIER=G7 and
+  # parent_id=7, so GOAL_TITLE must NOT keep goal 6's title.
+  W20J_PROJ="$TMPDIR_TEST/d257-siblings"
+  mkdir -p "$W20J_PROJ/.stride"
+  cat > "$W20J_PROJ/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER]"
+```
+STRIDE
+  printf '%s' '{"data":{"id":99,"parent_id":6},"hooks":[{"name":"after_goal","env":{"GOAL_ID":"6","GOAL_IDENTIFIER":"G6","GOAL_TITLE":"Alpha Goal"}}]}' \
+    > "$W20J_PROJ/.stride/.last-api-response.json"
+  echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20J_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  printf '%s' '{"data":{"id":100,"parent_id":7},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G7"}}]}' \
+    > "$W20J_PROJ/.stride/.last-api-response.json"
+  echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20J_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  for _k in GOAL_ID GOAL_IDENTIFIER GOAL_TITLE GOAL_DESCRIPTION; do
+    _c=$(grep -c "^${_k}=" "$W20J_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')
+    assert_eq "20j (D257): exactly one ${_k} line after two in-window after_goal runs" "1" "$_c"
+  done
+  # Identity consistency for first-match readers: id and identifier must belong
+  # to the SAME goal (the second run's: 7 / G7).
+  assert_eq "20j (D257): first-match GOAL_ID is the current goal's" "GOAL_ID='7'" \
+    "$(grep -m1 '^GOAL_ID=' "$W20J_PROJ/.stride-env-cache" 2>/dev/null)"
+  assert_eq "20j (D257): first-match GOAL_IDENTIFIER is the current goal's" "GOAL_IDENTIFIER='G7'" \
+    "$(grep -m1 '^GOAL_IDENTIFIER=' "$W20J_PROJ/.stride-env-cache" 2>/dev/null)"
+  # The sibling run 1 supplied and run 2 did not: it must NOT survive as goal
+  # 6's title beside goal 7's id, which is the stitched-identity failure.
+  assert_eq "20j (D257): a sibling the current run omitted does not keep the previous goal's value" \
+    "GOAL_TITLE=''" "$(grep -m1 '^GOAL_TITLE=' "$W20J_PROJ/.stride-env-cache" 2>/dev/null)"
+
+  # 20k (D257): the goal-switch edge the strategy names — run 2 supplies a
+  # DIFFERENT explicit GOAL_ID. The fallback never fires (GOAL_ID is non-empty),
+  # so this is the geometry the D245 guard structurally could not reach.
+  W20K_PROJ="$TMPDIR_TEST/d257-switch"
+  mkdir -p "$W20K_PROJ/.stride"
+  cat > "$W20K_PROJ/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID]"
+```
+STRIDE
+  printf '%s' '{"data":{"id":99},"hooks":[{"name":"after_goal","env":{"GOAL_ID":"6","GOAL_IDENTIFIER":"G6"}}]}' \
+    > "$W20K_PROJ/.stride/.last-api-response.json"
+  echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20K_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  printf '%s' '{"data":{"id":100},"hooks":[{"name":"after_goal","env":{"GOAL_ID":"7","GOAL_IDENTIFIER":"G7"}}]}' \
+    > "$W20K_PROJ/.stride/.last-api-response.json"
+  echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20K_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_eq "20k (D257): a mid-window goal switch leaves one GOAL_ID line" "1" \
+    "$(grep -c '^GOAL_ID=' "$W20K_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')"
+  assert_eq "20k (D257): and it holds the SECOND run's goal, preserving last-wins" "GOAL_ID='7'" \
+    "$(grep -m1 '^GOAL_ID=' "$W20K_PROJ/.stride-env-cache" 2>/dev/null)"
+
+  # 20l (D257): scope guard. The collapse is for the four GOAL_* keys only —
+  # every other key on the same after_goal env keeps apply_env_lines' documented
+  # append-only behaviour, here and for every other hook. A regression that
+  # widened the filter would silently change unrelated hooks' env handling.
+  W20L_PROJ="$TMPDIR_TEST/d257-scope"
+  mkdir -p "$W20L_PROJ/.stride"
+  printf '## after_goal\n```bash\ntrue\n```\n' > "$W20L_PROJ/.stride.md"
+  printf '%s' '{"data":{"id":99,"parent_id":9},"hooks":[{"name":"after_goal","env":{"BOARD_NAME":"Stride Development","GOAL_IDENTIFIER":"G9"}}]}' \
+    > "$W20L_PROJ/.stride/.last-api-response.json"
+  echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20L_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_contains "20l (D257): a non-GOAL key on the same after_goal env still reaches the cache" \
+    "BOARD_NAME=" "$(cat "$W20L_PROJ/.stride-env-cache" 2>/dev/null)"
+  assert_eq "20l (D257): and the GOAL_* collapse still applied on that same run" "1" \
+    "$(grep -c '^GOAL_IDENTIFIER=' "$W20L_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')"
+
+  # 20m (D257): the collapse must find record boundaries by QUOTING STATE, not
+  # by line shape. 10l pins the single-run case; this is the multi-run one the
+  # collapse actually operates on. Run 1 supplies a multi-line GOAL_TITLE whose
+  # value contains a line reading `GOAL_ID=999` — a decoy that a plain
+  # `grep -v '^GOAL_ID='` would delete from the MIDDLE of the value, corrupting
+  # it, which is precisely why apply_env_lines appends rather than rewrites and
+  # why D245's line-based idiom could not simply be extended to all four keys.
+  # Run 2 then re-supplies a single-line title, so the whole multi-line record
+  # must be removed as one unit — not partially, and not left behind.
+  W20M_PROJ="$TMPDIR_TEST/d257-multiline"
+  mkdir -p "$W20M_PROJ/.stride"
+  cat > "$W20M_PROJ/.stride.md" << 'STRIDE'
+## after_goal
+```bash
+echo "gt=[$GOAL_TITLE]"
+```
+STRIDE
+  W20M_TITLE="first
+GOAL_ID=999
+last"
+  jq -nc --arg t "$W20M_TITLE" '{data:{id:99,parent_id:6},hooks:[{name:"after_goal",env:{GOAL_ID:"6",GOAL_TITLE:$t}}]}' \
+    > "$W20M_PROJ/.stride/.last-api-response.json"
+  echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20M_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  W20M_T1=$(set -a; . "$W20M_PROJ/.stride-env-cache" 2>/dev/null; set +a; printf '%s' "${GOAL_TITLE:-}")
+  assert_contains "20m (D257): run 1's multi-line title round-trips through the collapse" "last" "$W20M_T1"
+  # NOTE the oracle here, deliberately: a raw `grep -c '^GOAL_ID='` returns 2 on
+  # this fixture and that is CORRECT — the second hit is the decoy line inside
+  # GOAL_TITLE's value, which is data, not a record. So the acceptance
+  # criterion's "exactly one line per GOAL_* key" cannot be measured by counting
+  # lines once any value may contain a decoy; the invariant that actually
+  # matters, and the one D245 stated, is that a first-match reader and a
+  # sourcing reader AGREE. 20i/20j count lines because their values contain no
+  # decoy; this case must not, and asserting a count here would pin the wrong
+  # property and fail for the right reason.
+  W20M_FIRST=$(grep -m1 '^GOAL_ID=' "$W20M_PROJ/.stride-env-cache" 2>/dev/null)
+  W20M_SRC=$(set -a; . "$W20M_PROJ/.stride-env-cache" 2>/dev/null; set +a; printf "GOAL_ID='%s'" "${GOAL_ID:-}")
+  assert_eq "20m (D257): first-match and sourcing readers agree despite the decoy line" \
+    "$W20M_SRC" "$W20M_FIRST"
+  assert_eq "20m (D257): and the record a first-match reader finds is the run's, not the decoy" "GOAL_ID='6'" \
+    "$W20M_FIRST"
+  # Run 2: single-line title — the whole multi-line record must go, as one unit.
+  printf '%s' '{"data":{"id":100,"parent_id":7},"hooks":[{"name":"after_goal","env":{"GOAL_ID":"7","GOAL_TITLE":"Beta"}}]}' \
+    > "$W20M_PROJ/.stride/.last-api-response.json"
+  echo "$W1612_TRUNC" | CLAUDE_PROJECT_DIR="$W20M_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  W20M_T2=$(set -a; . "$W20M_PROJ/.stride-env-cache" 2>/dev/null; set +a; printf '%s' "${GOAL_TITLE:-}")
+  assert_eq "20m (D257): run 2 replaces the multi-line record wholesale" "Beta" "$W20M_T2"
+  assert_eq "20m (D257): no orphan fragment of run 1's value survives" "0" \
+    "$(grep -c '^GOAL_ID=999' "$W20M_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')"
+  assert_eq "20m (D257): still exactly one GOAL_TITLE line" "1" \
+    "$(grep -c '^GOAL_TITLE=' "$W20M_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')"
 fi
 
 # ============================================================

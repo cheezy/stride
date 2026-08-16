@@ -3565,7 +3565,7 @@ apply_env_lines() {
 # response-local — the executor still never queries the API for goal state.
 export_after_goal_env() {
   local _payload="$1"
-  local _lines _supplied _key _parent
+  local _lines _supplied _key _parent _collapsed
   _lines=$(extract_hook_env "$_payload" "after_goal")
 
   # Which keys did the server actually supply? Asked of jq directly (one key
@@ -3601,18 +3601,108 @@ ${_key}=''"
   if [ -z "${GOAL_ID:-}" ] && [ "$HAS_JQ" = "true" ] && [ -n "$_payload" ]; then
     _parent=$(printf '%s' "$_payload" | jq -r '.data.parent_id // .parent_id // empty' 2>/dev/null || true)
     if [ -n "$_parent" ] && [ "$_parent" != "null" ]; then
-      # (D245) Replace the empty GOAL_ID line already in the cache instead of
-      # appending a second, contradictory one: a first-match reader (grep -m1)
-      # would take the empty line while a sourcing reader takes this one. Same
-      # replace-in-place shape as record_task_head_ref. The export is done
-      # directly because apply_env_lines would append again.
       GOAL_ID="$_parent"
       export GOAL_ID
-      {
-        grep -v '^GOAL_ID=' "$ENV_CACHE" 2>/dev/null || true
-        printf 'GOAL_ID=%s\n' "$(sq_escape "$_parent")"
-      } | write_env_cache || true
     fi
+  fi
+
+  # (D245/D257) Collapse the four GOAL_* keys to exactly one cache line each.
+  #
+  # (D245) established the invariant: a first-match reader (grep -m1) and a
+  # sourcing reader of this file must agree. It fixed the one geometry it had
+  # in hand by replacing GOAL_ID in place -- but only inside the parent-id
+  # fallback above, so the guard ran only when that fallback fired.
+  #
+  # (D257) Two geometries stayed one response-shape away from that fix, and
+  # apply_env_lines is why: it APPENDS every line, supplied or defaulted, on
+  # every call. So within a single claim window, where no claim intervenes to
+  # truncate the cache:
+  #   1. Run 1 establishes GOAL_ID='7'. Run 2 omits both the GOAL_ID env key
+  #      and data.parent_id, so the defaults loop above appends GOAL_ID=''
+  #      AFTER the real value and the fallback never runs to clean it up.
+  #      grep -m1 then reads the PREVIOUS goal's id while sourcing reads ''.
+  #   2. GOAL_IDENTIFIER, GOAL_TITLE and GOAL_DESCRIPTION never had a
+  #      replace-in-place at all, so two runs accumulate contradictory pairs
+  #      and a first-match reader reconstructs GOAL_ID='7' beside
+  #      GOAL_IDENTIFIER='G6' -- two different goals stitched into one
+  #      identity. A commit message, PR body or notification built from those
+  #      fields then names the wrong goal, which is the harm that matters.
+  #
+  # Doing it here, unconditionally and for all four keys, is what makes the
+  # invariant hold by construction rather than per-geometry: this runs on
+  # EVERY after_goal export, whether or not the fallback fired, and it is
+  # placed after the fallback so it captures GOAL_ID's final value.
+  #
+  # The values come from the exported environment, which apply_env_lines has
+  # already eval'd -- so the line written is exactly what a sourcing reader
+  # would have resolved to, and LAST-WINS SOURCING SEMANTICS ARE PRESERVED
+  # rather than changed. An omitted key resolves to the defaults loop's empty
+  # string, which is deliberate and contract-mandated (hook-execution.md: a
+  # key the server omits is exported defined-but-empty, never absent, so a
+  # `set -u` section can reference it) -- and it is also what stops a previous
+  # run's value from surviving into a run for a different goal.
+  #
+  # Scope is exactly these four keys. apply_env_lines stays append-only for
+  # everything else and for every other hook: BOARD_*, COLUMN_* and AGENT_NAME
+  # ride the same after_goal env and are deliberately untouched here.
+  #
+  # THE FILTER IS QUOTE-AWARE, AND IT HAS TO BE. A plain `grep -v '^KEY='` is
+  # what D245 used, and it was safe there only because GOAL_ID is always a
+  # numeric id. GOAL_TITLE and GOAL_DESCRIPTION are free-form and routinely
+  # span lines, so a line-based filter deletes the middle of a value instead of
+  # a record — which is exactly the corruption apply_env_lines' own comment
+  # says is why it appends rather than rewrites. Test 10l pins the adversarial
+  # shape deliberately: a GOAL_TITLE whose value contains a line reading
+  # `GOAL_IDENTIFIER=sneaky`. Extending D245's idiom to all four keys as
+  # literally specified would have silently truncated that value.
+  #
+  # So records are found by shell-quoting state, not by line shape. Every value
+  # is sq_escape output — wrapped in single quotes, with embedded quotes as the
+  # 4-char sequence '\'' — so scanning for quote state identifies where a
+  # record really ends. A line is the START of a record only when the scanner
+  # is outside quotes; a continuation line inherits its record's keep/drop
+  # decision, whatever it happens to look like. That protects non-GOAL
+  # multi-line records (TASK_DESCRIPTION) from a continuation that looks like a
+  # GOAL_ key, in the same motion.
+  #
+  # The scanner's correctness rests on an invariant that is now LOAD-BEARING:
+  # every line in the cache is sq_escape (or jq @sh) output, so quoting is
+  # balanced. That holds across every current writer, but a future writer
+  # emitting an unbalanced line would desynchronise the scanner — and the
+  # consequence is not merely a bad diff, because this cache is later sourced
+  # with `set -a`, so an orphaned fragment left as a standalone line becomes
+  # executable text. So the scanner FAILS CLOSED: if it reaches EOF still
+  # inside a quoted value, the input was not what this function is allowed to
+  # assume, and it exits non-zero rather than emitting a partially-parsed
+  # cache. The `if` below then skips the collapse entirely.
+  #
+  # Skipping is always the safe degrade — for that case and for a missing awk
+  # alike. The cache keeps today's append behaviour, which is the duplicate
+  # this task fixes, never a corrupted or truncated one.
+  if _collapsed=$(awk -v q="'" '
+    function scan(s,   i, c) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) { if (c == q) inq = 0 }
+        else if (esc) { esc = 0 }
+        else if (c == "\\") { esc = 1 }
+        else if (c == q) { inq = 1 }
+      }
+    }
+    BEGIN { inq = 0; esc = 0; drop = 0 }
+    {
+      if (!inq) { drop = ($0 ~ /^GOAL_(ID|IDENTIFIER|TITLE|DESCRIPTION)=/) }
+      scan($0)
+      if (!drop) print
+    }
+    END { if (inq) exit 1 }
+  ' "$ENV_CACHE" 2>/dev/null); then
+    {
+      [ -n "$_collapsed" ] && printf '%s\n' "$_collapsed"
+      for _key in GOAL_ID GOAL_IDENTIFIER GOAL_TITLE GOAL_DESCRIPTION; do
+        printf '%s=%s\n' "$_key" "$(sq_escape "${!_key:-}")"
+      done
+    } | write_env_cache || true
   fi
 }
 

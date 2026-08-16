@@ -1291,6 +1291,47 @@ function Set-AfterGoalEnv {
         if ($null -ne $parentId -and "$parentId") { $envMap['GOAL_ID'] = "$parentId" }
     }
 
+    # (D257) Drop any GOAL_* lines a PREVIOUS after_goal run in this same claim
+    # window left behind, so the append below leaves exactly one record per key.
+    # Set-HookEnv appends unconditionally, and nothing truncates the cache
+    # between two after_goal runs, so without this a first-match reader and a
+    # sourcing reader disagree — and worse, a first-match reader stitches this
+    # run's GOAL_ID to the previous run's GOAL_IDENTIFIER, naming the wrong
+    # goal in whatever the section builds.
+    #
+    # This port's exposure is only ACROSS runs: Get-HookEnvFromPayload builds
+    # one map per run and a hashtable cannot hold a duplicate key, so no single
+    # run can emit two lines for the same key. That is why the guard belongs
+    # here and not in Set-HookEnv.
+    #
+    # A plain line filter is correct HERE, unlike in the bash twin, because
+    # Set-HookEnv already flattens newlines to spaces before writing — so a
+    # cache line is always a whole record on this side, and a multi-line value
+    # cannot be split across lines for the filter to corrupt. Do not copy this
+    # simpler shape back into stride-hook.sh, which needs quote-state parsing.
+    #
+    # Scoped to the four GOAL_* keys: every other key Set-HookEnv writes, on
+    # this hook and every other, keeps its append-only behaviour. Never move
+    # this into Set-HookEnv, which is shared by all five hooks.
+    # Routed through Write-EnvCache, not a direct Set-Content, for the same
+    # reason every other rewrite on this side is: it stages to a temp file and
+    # moves it into place, so a failure or a kill inside the write window
+    # leaves the PREVIOUS cache intact rather than a truncated one. A direct
+    # truncate-then-write here could lose TASK_BASE_REF and the per-task
+    # records to a kill, which is a far worse outcome than the duplicate this
+    # is cleaning up. The bash twin routes through write_env_cache for the
+    # same reason.
+    if (Test-Path $EnvCache) {
+        try {
+            $kept = @(Get-Content -Path $EnvCache -Encoding UTF8 |
+                Where-Object { $_ -notmatch '^(GOAL_ID|GOAL_IDENTIFIER|GOAL_TITLE|GOAL_DESCRIPTION)=' })
+            Write-EnvCache -Lines $kept | Out-Null
+        } catch {
+            # Best-effort: a failed filter leaves today's append behaviour,
+            # which over-reports duplicates but never corrupts a value.
+        }
+    }
+
     Set-HookEnv -EnvMap $envMap
 }
 

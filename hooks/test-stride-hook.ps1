@@ -3332,6 +3332,105 @@ $w16hGoalLines = @($w16hCache | Where-Object { $_ -match '^GOAL_ID=' })
 Assert-Eq "16h: env cache still carries exactly one GOAL_ID line on the normal path" "1" "$($w16hGoalLines.Count)"
 Assert-Eq "16h: a first-match reader gets the supplied value" "GOAL_ID=55" "$($w16hGoalLines | Select-Object -First 1)"
 
+# 16i (D257): mirrors test-stride-hook.sh 20i. 16g/16h pin that a SINGLE run
+# cannot duplicate a key — Set-AfterGoalEnv builds one env map and a hashtable
+# holds no duplicate key. This port's real exposure is ACROSS runs: Set-HookEnv
+# appends, and nothing truncates the cache between two after_goal runs in one
+# claim window. Run 1 establishes GOAL_ID=7 via the fallback; run 2 omits both
+# the GOAL_ID env key and parent_id, so its defined-but-empty default appended
+# a second, contradictory line. A first-match reader then read the PREVIOUS
+# goal's id. The surviving line must be the empty one — the contract is
+# defined-but-empty, never absent, and never a stale id.
+$w16iProj = Join-Path $TmpDir 'd257-resurrect'
+New-Item -ItemType Directory -Path (Join-Path $w16iProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $w16iProj '.stride.md') -Value @'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER]"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16iProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":99,"parent_id":7},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G7"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16iProj
+Set-Content -Path (Join-Path $w16iProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":100},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G8"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16iProj
+$w16iCache = @()
+if (Test-Path (Join-Path $w16iProj '.stride-env-cache')) {
+    $w16iCache = @(Get-Content (Join-Path $w16iProj '.stride-env-cache') -Encoding UTF8)
+}
+$w16iGoalLines = @($w16iCache | Where-Object { $_ -match '^GOAL_ID=' })
+Assert-Eq "16i (D257): exactly one GOAL_ID line after a second in-window after_goal" "1" "$($w16iGoalLines.Count)"
+Assert-Eq "16i (D257): the surviving line is defined-but-empty, not the previous goal's id" "GOAL_ID=" "$($w16iGoalLines | Select-Object -First 1)"
+
+# 16j (D257): mirrors test-stride-hook.sh 20j. The three siblings never had any
+# de-duplication on this side either, so two in-window runs left a first-match
+# reader stitching run 2's GOAL_ID to run 1's GOAL_IDENTIFIER — two goals
+# reconstructed as one identity, which is what puts the wrong goal in whatever
+# the ## after_goal section builds. GOAL_TITLE, supplied only by run 1, must
+# not survive beside run 2's id.
+$w16jProj = Join-Path $TmpDir 'd257-siblings'
+New-Item -ItemType Directory -Path (Join-Path $w16jProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $w16jProj '.stride.md') -Value @'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID] ident=[$GOAL_IDENTIFIER]"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16jProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":99,"parent_id":6},"hooks":[{"name":"after_goal","env":{"GOAL_ID":"6","GOAL_IDENTIFIER":"G6","GOAL_TITLE":"Alpha Goal"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16jProj
+Set-Content -Path (Join-Path $w16jProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":100,"parent_id":7},"hooks":[{"name":"after_goal","env":{"GOAL_IDENTIFIER":"G7"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16jProj
+$w16jCache = @()
+if (Test-Path (Join-Path $w16jProj '.stride-env-cache')) {
+    $w16jCache = @(Get-Content (Join-Path $w16jProj '.stride-env-cache') -Encoding UTF8)
+}
+foreach ($k in @('GOAL_ID', 'GOAL_IDENTIFIER', 'GOAL_TITLE', 'GOAL_DESCRIPTION')) {
+    $w16jLines = @($w16jCache | Where-Object { $_ -match "^$k=" })
+    Assert-Eq "16j (D257): exactly one $k line after two in-window after_goal runs" "1" "$($w16jLines.Count)"
+}
+Assert-Eq "16j (D257): first-match GOAL_ID is the current goal's" "GOAL_ID=7" `
+    "$(@($w16jCache | Where-Object { $_ -match '^GOAL_ID=' }) | Select-Object -First 1)"
+Assert-Eq "16j (D257): first-match GOAL_IDENTIFIER is the current goal's" "GOAL_IDENTIFIER=G7" `
+    "$(@($w16jCache | Where-Object { $_ -match '^GOAL_IDENTIFIER=' }) | Select-Object -First 1)"
+Assert-Eq "16j (D257): a sibling the current run omitted does not keep the previous goal's value" "GOAL_TITLE=" `
+    "$(@($w16jCache | Where-Object { $_ -match '^GOAL_TITLE=' }) | Select-Object -First 1)"
+
+# 16k (D257): the scope guard, and it has to be built differently from 20l to
+# mean anything on this side. The .ps1 filter runs BEFORE Set-HookEnv appends,
+# so a non-GOAL key written by the SAME run can never be dropped by it — an
+# assertion about the current run would pass no matter how wide the regex got.
+# The key that can actually be lost is one a PREVIOUS run wrote, which the
+# filter passes over. Run 1 supplies BOARD_NAME; run 2 does not. If the regex
+# were widened beyond the four GOAL_* keys, run 1's BOARD_NAME would vanish
+# here and every other hook's cached keys would be silently at risk too.
+$w16kProj = Join-Path $TmpDir 'd257-scope'
+New-Item -ItemType Directory -Path (Join-Path $w16kProj '.stride') -Force | Out-Null
+Set-Content -Path (Join-Path $w16kProj '.stride.md') -Value @'
+## after_goal
+```bash
+echo "goal=[$GOAL_ID]"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $w16kProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":99,"parent_id":6},"hooks":[{"name":"after_goal","env":{"GOAL_ID":"6","BOARD_NAME":"Stride Development"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16kProj
+Set-Content -Path (Join-Path $w16kProj '.stride/.last-api-response.json') `
+    -Value '{"data":{"id":100,"parent_id":7},"hooks":[{"name":"after_goal","env":{"GOAL_ID":"7"}}]}' -Encoding UTF8 -NoNewline
+$r = Invoke-HookScript -InputJson $w16Trunc -Phase 'post' -ProjectDir $w16kProj
+$w16kCache = @()
+if (Test-Path (Join-Path $w16kProj '.stride-env-cache')) {
+    $w16kCache = @(Get-Content (Join-Path $w16kProj '.stride-env-cache') -Encoding UTF8)
+}
+Assert-Contains "16k (D257): a non-GOAL key from an EARLIER run survives the collapse" `
+    "BOARD_NAME=Stride Development" "$($w16kCache -join "`n")"
+Assert-Eq "16k (D257): and the GOAL_* collapse still applied on that run" "1" `
+    "$(@($w16kCache | Where-Object { $_ -match '^GOAL_ID=' }).Count)"
+Assert-Eq "16k (D257): holding the second run's goal" "GOAL_ID=7" `
+    "$(@($w16kCache | Where-Object { $_ -match '^GOAL_ID=' }) | Select-Object -First 1)"
+
 # ============================================================
 # Test Group 17: D142 — post-pull TASK_BASE_REF + committed-range override
 # (mirrors test-stride-hook.sh Test Group 21)

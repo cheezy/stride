@@ -57,6 +57,7 @@ SNAP_BASE_RESOLVED_DONE
 STRIDE_HOOK_TIME_SOURCE
 STRIDE_HOOK_TIMEOUT_OVERRIDE
 STRIDE_HOOK_TIMEOUT_TOOL
+STRIDE_OPEN_WINDOW_MAX_AGE_SECS
 TASK_BASE_REF
 TASK_BASE_REF_OWNER
 TASK_BASE_REF_TRUSTED
@@ -7136,6 +7137,516 @@ d255_complete "$D271_E" 100 "$D271_ESTUB"
 assert_eq "23z7 (D271): a stale open-window record never re-narrows an outermost task's snapshot" \
   "manual.txt,tracked.txt" "$(d255_paths "$D271_E")"
 rm -rf "$D271_E" "$D271_ESTUB"
+
+# --- D273: window-state drift ---------------------------------------------
+# 23z7 pins the CORRUPT record (a SHA that resolves to nothing). It does not
+# reach the case D271 explicitly left open: a GENUINELY ABANDONED claim, whose
+# base is a real commit and a real ancestor, so every check 23z7 exercises
+# passes. Nothing ages such a line out — there is no unclaim path in this
+# script, claim expiry is server-side only, and D268 eviction pins open windows
+# — so one abandoned claim re-enabled the D255 narrowing for every later
+# outermost task in the checkout, permanently. That is the D271 under-report
+# restored by a record with no owner, and the 60-minute claim expiry makes it
+# routine rather than exotic.
+#
+# 23z8 and 23z9 are a PAIR and must be read together: identical geometry,
+# differing only in the age of the phantom window's base. The pair is what
+# makes either case meaningful — 23z9 alone would pass before this change, and
+# 23z8 alone could pass by disabling narrowing outright.
+#
+# A phantom window is a base line plus the claim-time stamp its own claim
+# would have written. The stamp — not the base commit's date — is what the
+# predicate ages, so these helpers take the stamp as an argument: `now` for a
+# live window, an epoch far in the past for an abandoned one. Writing the base
+# WITHOUT a stamp is a third, meaningful state (a record from a hook version
+# that predates D273), exercised by 23z17.
+d273_phantom() { # $1 = dir, $2 = id, $3 = base sha, $4 = epoch stamp ('' for none)
+  printf "TASK_BASE_REF_%s='%s'\n" "$2" "$3" >> "$1/.stride-env-cache"
+  [ -n "${4:-}" ] && printf "TASK_BASE_AT_%s='%s'\n" "$2" "$4" >> "$1/.stride-env-cache"
+  return 0
+}
+d273_now() { date +%s; }
+
+# 23z8 (D273): the abandoned claim. TASK_BASE_REF_999 resolves, is an ancestor
+# of HEAD, and has no head partner — it passes every 23z7 check — but its own
+# claim stamp is years old, so no live session is behind it and nothing is
+# coming to absorb this task's manual commit. Aged out, the completing task is
+# outermost and keeps the wide path.
+D273_A=$(mktemp -d)
+D273_ASTUB=$(mktemp -d)
+make_curl_stub "$D273_ASTUB" "$D273_A/curl-call.txt" 0
+d255_fixture "$D273_A"
+d226_claim "$D273_A" 100
+D273_A_SHA=$( cd "$D273_A" && git rev-parse HEAD )
+d273_phantom "$D273_A" 999 "$D273_A_SHA" 1577836800
+( cd "$D273_A" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D273_A" && echo dirty >> tracked.txt )
+d255_complete "$D273_A" 100 "$D273_ASTUB"
+assert_eq "23z8 (D273): an abandoned open window past the age horizon stops absorbing, so the outermost task keeps its manual commit" \
+  "manual.txt,tracked.txt" "$(d255_paths "$D273_A")"
+rm -rf "$D273_A" "$D273_ASTUB"
+
+# 23z9 (D273): the control for 23z8 — same geometry, same base commit, ONLY the
+# claim stamp differs. It must still narrow: the age check may retire dead
+# records and nothing else. The pair is what makes either case mean anything.
+D273_B=$(mktemp -d)
+D273_BSTUB=$(mktemp -d)
+make_curl_stub "$D273_BSTUB" "$D273_B/curl-call.txt" 0
+d255_fixture "$D273_B"
+d226_claim "$D273_B" 100
+D273_B_SHA=$( cd "$D273_B" && git rev-parse HEAD )
+d273_phantom "$D273_B" 999 "$D273_B_SHA" "$(d273_now)"
+( cd "$D273_B" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D273_B" && echo dirty >> tracked.txt )
+d255_complete "$D273_B" 100 "$D273_BSTUB"
+assert_eq "23z9 (D273): a FRESH open window still absorbs, so the narrowing D255 exists for is untouched" \
+  "tracked.txt" "$(d255_paths "$D273_B")"
+rm -rf "$D273_B" "$D273_BSTUB"
+
+# 23z10 (D273): the horizon is overridable, and raising it past the record's
+# age puts the SAME window back in service — so 23z8 turns on age alone and not
+# on some other property of that cache line. Digits-only path.
+D273_C=$(mktemp -d)
+D273_CSTUB=$(mktemp -d)
+make_curl_stub "$D273_CSTUB" "$D273_C/curl-call.txt" 0
+d255_fixture "$D273_C"
+d226_claim "$D273_C" 100
+D273_C_SHA=$( cd "$D273_C" && git rev-parse HEAD )
+d273_phantom "$D273_C" 999 "$D273_C_SHA" 1577836800
+( cd "$D273_C" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D273_C" && echo dirty >> tracked.txt )
+(
+  cd "$D273_C" || exit 1
+  echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/100/complete"}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D273_CSTUB:$PATH" \
+      STRIDE_OPEN_WINDOW_MAX_AGE_SECS=9999999999 bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+)
+assert_eq "23z10 (D273): raising STRIDE_OPEN_WINDOW_MAX_AGE_SECS past the record's age restores the narrowing" \
+  "tracked.txt" "$(d255_paths "$D273_C")"
+rm -rf "$D273_C" "$D273_CSTUB"
+
+# 23z11 (D273): the two override values that must NOT disable the check. A
+# non-numeric one falls back to the documented default (the direction 26f pins
+# for the budget override); an out-of-range one does too, which is the point —
+# `test -gt` parses with strtoimax, so past 2^63 the comparison becomes an
+# ERROR, and with no `set -e` the `&& continue` would short-circuit and leave
+# every dead record counted as live. Both must leave the dead window dead.
+for D273_OV in "not-a-number" "99999999999999999999"; do
+  D273_D=$(mktemp -d)
+  D273_DSTUB=$(mktemp -d)
+  make_curl_stub "$D273_DSTUB" "$D273_D/curl-call.txt" 0
+  d255_fixture "$D273_D"
+  d226_claim "$D273_D" 100
+  D273_D_SHA=$( cd "$D273_D" && git rev-parse HEAD )
+  d273_phantom "$D273_D" 999 "$D273_D_SHA" 1577836800
+  ( cd "$D273_D" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+  ( cd "$D273_D" && echo dirty >> tracked.txt )
+  (
+    cd "$D273_D" || exit 1
+    echo '{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/100/complete"}}' \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$D273_DSTUB:$PATH" \
+        STRIDE_OPEN_WINDOW_MAX_AGE_SECS="$D273_OV" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  assert_eq "23z11 (D273): an unusable horizon override ('$D273_OV') falls back to the default and the dead window stays dead" \
+    "manual.txt,tracked.txt" "$(d255_paths "$D273_D")"
+  rm -rf "$D273_D" "$D273_DSTUB"
+done
+
+# 23z17 (D273): the boundary, and the two states either side of it. The
+# implementation chose strict -gt — age exactly AT the horizon is still LIVE —
+# and nothing else in the suite lands on that line, so flipping -gt to -ge
+# would otherwise pass unnoticed. Asserted against the predicate directly with
+# the horizon pinned to 100s: at 100s old it must narrow, at 101s it must not.
+# The third row is the no-stamp case, which is how every window written by a
+# pre-D273 hook looks and is the whole abandoned population this retires.
+# Each row writes to its OWN result path, removed first: a shared path would
+# let a row whose subshell died before printing pass on the PREVIOUS row's
+# verdict — and rows 2-5 all expect DEAD, so the no-stamp row (the one that
+# pins the whole abandoned population) is exactly where that would hide. An
+# absent file now reads as empty and fails loudly.
+D273_IDX=0
+for D273_ROW in "100:LIVE:exactly at the horizon is still live (strict -gt)" \
+  "101:DEAD:one second past the horizon is dead" \
+  "RAW=08:DEAD:a leading-zero stamp is rejected, never read as octal" \
+  "RAW=99999999999999999999:DEAD:a stamp too wide for the arithmetic is rejected, never wrapped into LIVE" \
+  "-86400:DEAD:a stamp dated in the FUTURE is not a small age, it is an invalid one" \
+  ":DEAD:a record with no claim stamp at all is dead"; do
+  D273_IDX=$((D273_IDX + 1))
+  D273_AGE="${D273_ROW%%:*}"
+  D273_REST="${D273_ROW#*:}"
+  D273_WANT="${D273_REST%%:*}"
+  D273_WHAT="${D273_REST#*:}"
+  D273_EDGE="$TMPDIR_TEST/d273_edge_$D273_IDX"
+  rm -f "$D273_EDGE"
+  (
+    # shellcheck source=/dev/null
+    HAS_JQ=true RESPONSE_PAYLOAD='{}' source "$HOOK_SCRIPT" > /dev/null 2>&1 || true
+    D273_J=$(mktemp -d)
+    PROJECT_DIR="$D273_J"
+    ENV_CACHE="$D273_J/.stride-env-cache"
+    STRIDE_OPEN_WINDOW_MAX_AGE_SECS=100
+    (
+      cd "$D273_J" || exit 1
+      git init -q
+      git config user.email "test@test.local"
+      git config user.name "Test"
+      echo v1 > f.txt
+      git add f.txt > /dev/null
+      git commit -q -m v1
+    )
+    D273_J_SHA=$( cd "$D273_J" && git rev-parse HEAD )
+    printf "TASK_BASE_REF_999='%s'\n" "$D273_J_SHA" > "$ENV_CACHE"
+    case "$D273_AGE" in
+      '') : ;;
+      RAW=*) printf "TASK_BASE_AT_999='%s'\n" "${D273_AGE#RAW=}" >> "$ENV_CACHE" ;;
+      *) printf "TASK_BASE_AT_999='%s'\n" "$(( $(date +%s) - D273_AGE ))" >> "$ENV_CACHE" ;;
+    esac
+    if another_open_window_exists 100; then
+      printf 'LIVE' > "$D273_EDGE"
+    else
+      printf 'DEAD' > "$D273_EDGE"
+    fi
+    rm -rf "$D273_J"
+  ) > /dev/null 2>&1 || true
+  assert_eq "23z17 (D273): $D273_WHAT" "$D273_WANT" "$(cat "$D273_EDGE" 2>/dev/null)"
+done
+
+# 23z18 (D273): the claim-time stamp must SURVIVE a later claim. The cache is
+# rebuilt at claim from select_kept_window_records plus fixed identity keys,
+# which emit only the base/head/owned families — so without the carry-forward
+# every surviving stamp would vanish on the next claim, every open window would
+# read as unstamped, and the predicate would retire live windows wholesale.
+# This is the 23u nesting geometry with an extra claim in the middle: if the
+# outer's stamp were lost, the nested completion would take the wide path.
+D273_K=$(mktemp -d)
+D273_KSTUB=$(mktemp -d)
+make_curl_stub "$D273_KSTUB" "$D273_K/curl-call.txt" 0
+d255_fixture "$D273_K"
+d226_claim "$D273_K" 100
+assert_contains "23z18 (D273): a claim stamps when its own window opened" \
+  "TASK_BASE_AT_100=" "$(cat "$D273_K/.stride-env-cache" 2>/dev/null)"
+d226_claim "$D273_K" 200
+assert_contains "23z18 (D273): a later claim carries the earlier open window's stamp forward" \
+  "TASK_BASE_AT_100=" "$(cat "$D273_K/.stride-env-cache" 2>/dev/null)"
+( cd "$D273_K" && echo during > outer_during.txt && git add -A > /dev/null && git commit -q -m outer_during )
+( cd "$D273_K" && echo b > nested_b.txt )
+d255_complete "$D273_K" 200 "$D273_KSTUB"
+assert_eq "23z18 (D273): the surviving stamp keeps the outer window live, so nesting still narrows" \
+  "nested_b.txt" "$(d255_paths "$D273_K")"
+rm -rf "$D273_K" "$D273_KSTUB"
+
+# --- D273: self-heal replays the capture-time verdict ----------------------
+# The Group 23 drives above never PUT: resolve_stride_api_{url,token} read the
+# completion COMMAND, and d255_complete's command carries no Authorization
+# header, so finalize_after_doing stops before the upload block. These cases
+# need the upload to happen (a failed PUT is what arms the self-heal), so they
+# drive a command that carries one — the Group 13 idiom, in Group 23 geometry.
+d273_complete_auth() { # $1 = dir, $2 = task id, $3 = stub dir
+  (
+    cd "$1" || exit 1
+    jq -nc --arg cmd "curl -X PATCH https://stride.example.com/api/tasks/$2/complete -H \"Authorization: Bearer tok\"" \
+      '{tool_input:{command:$cmd}}' \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$3:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+}
+d273_before_review() { # $1 = dir, $2 = task id, $3 = stub dir
+  (
+    cd "$1" || exit 1
+    jq -nc --arg cmd "curl -X PATCH https://stride.example.com/api/tasks/$2/complete -H \"Authorization: Bearer tok\"" \
+      --arg out "{\"data\":{\"id\":$2},\"hooks\":[{\"name\":\"before_review\"}]}" \
+      '{tool_input:{command:$cmd},tool_response:{stdout:$out}}' \
+      | CLAUDE_PROJECT_DIR="$PWD" PATH="$3:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+}
+
+# 23z12 (D273): the headline. Nested 200 completes inside outer 100's window,
+# narrows correctly, and its PUT fails — so the snapshot it captured is not on
+# the server and before_review must re-upload it. Outer 100 then completes in
+# that gap, which does TWO things the retry used to lose to: it closes the only
+# other open window, so re-deriving the D255 gate now answers "outermost"; and
+# its own record_diff_upload_state TRUNCATES the shared state file, so 200's
+# persisted judgment is overwritten with 100's. The retry therefore re-captured
+# WIDE over its own narrowed primary and manual.txt was attributed to both
+# tasks. The verdict is now stamped per task at capture time, so the retry
+# re-uploads what it actually captured.
+D273_E=$(mktemp -d)
+D273_E500=$(mktemp -d)
+D273_E200=$(mktemp -d)
+make_curl_stub "$D273_E500" "$D273_E/curl-call.txt" 0 500
+make_curl_stub "$D273_E200" "$D273_E/curl-call.txt" 0 200
+d255_fixture "$D273_E"
+d226_claim "$D273_E" 100
+d226_claim "$D273_E" 200
+( cd "$D273_E" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D273_E" && echo dirty >> tracked.txt )
+d273_complete_auth "$D273_E" 200 "$D273_E500"
+D273_E_PRIMARY="$(d255_paths "$D273_E")"
+assert_eq "23z12 (D273): the nested primary capture narrows to its own commit" \
+  "tracked.txt" "$D273_E_PRIMARY"
+assert_contains "23z12 (D273): the capture stamps its verdict per task, where an interleaved completion cannot truncate it" \
+  "TASK_NARROWED_200='yes'" "$(cat "$D273_E/.stride-env-cache" 2>/dev/null)"
+d273_complete_auth "$D273_E" 100 "$D273_E200"
+assert_contains "23z12 (D273): the interleaved completion really does overwrite the shared state file" \
+  "task_id=100" "$(cat "$D273_E/.stride-diff-upload-state" 2>/dev/null)"
+d273_before_review "$D273_E" 200 "$D273_E200"
+assert_eq "23z12 (D273): the delayed self-heal re-uploads the judgment its OWN capture reached, not the one retry-time state implies" \
+  "$D273_E_PRIMARY" "$(d255_paths "$D273_E")"
+rm -rf "$D273_E" "$D273_E500" "$D273_E200"
+
+# 23z13 (D273): the fallback, and the control that makes 23z12 mean something.
+# Identical drive with BOTH carriers of the verdict removed — the state written
+# by a hook version that predates this change. With nothing on record the retry
+# re-derives exactly as it did before, which in this geometry is the wide path.
+# 23z12 and 23z13 differ only in whether a verdict was persisted, so the pair
+# pins that the replay is what changes the outcome.
+D273_F=$(mktemp -d)
+D273_F500=$(mktemp -d)
+D273_F200=$(mktemp -d)
+make_curl_stub "$D273_F500" "$D273_F/curl-call.txt" 0 500
+make_curl_stub "$D273_F200" "$D273_F/curl-call.txt" 0 200
+d255_fixture "$D273_F"
+d226_claim "$D273_F" 100
+d226_claim "$D273_F" 200
+( cd "$D273_F" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D273_F" && echo dirty >> tracked.txt )
+d273_complete_auth "$D273_F" 200 "$D273_F500"
+grep -v '^TASK_NARROWED_' "$D273_F/.stride-env-cache" > "$D273_F/.env-tmp" 2>/dev/null
+mv "$D273_F/.env-tmp" "$D273_F/.stride-env-cache"
+d273_complete_auth "$D273_F" 100 "$D273_F200"
+d273_before_review "$D273_F" 200 "$D273_F200"
+assert_eq "23z13 (D273): with no verdict on record the self-heal re-derives exactly as it did before this change" \
+  "manual.txt,tracked.txt" "$(d255_paths "$D273_F")"
+rm -rf "$D273_F" "$D273_F500" "$D273_F200"
+
+# 23z14 (D273): a tampered verdict degrades to the WIDE path, never to
+# narrowing and never to executing anything. The value is only ever compared,
+# so the risk is not injection but a hand-edited or corrupted line steering the
+# retry into under-reporting — the one direction D271 forbids. No interleaved
+# completion here: the outer window is still open, so BOTH a faithful replay
+# (`yes`) and a fresh re-derivation would narrow. Only the tamper path gives
+# the wide answer, which is what makes this assertion decisive rather than
+# incidental.
+D273_G=$(mktemp -d)
+D273_G500=$(mktemp -d)
+D273_G200=$(mktemp -d)
+make_curl_stub "$D273_G500" "$D273_G/curl-call.txt" 0 500
+make_curl_stub "$D273_G200" "$D273_G/curl-call.txt" 0 200
+d255_fixture "$D273_G"
+d226_claim "$D273_G" 100
+d226_claim "$D273_G" 200
+( cd "$D273_G" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D273_G" && echo dirty >> tracked.txt )
+d273_complete_auth "$D273_G" 200 "$D273_G500"
+sed "s/^TASK_NARROWED_200=.*/TASK_NARROWED_200='\$(touch pwned.txt)'/" \
+  "$D273_G/.stride-env-cache" > "$D273_G/.env-tmp" 2>/dev/null
+mv "$D273_G/.env-tmp" "$D273_G/.stride-env-cache"
+d273_before_review "$D273_G" 200 "$D273_G200"
+assert_eq "23z14 (D273): a tampered verdict degrades to the wide path, never to narrowing" \
+  "manual.txt,tracked.txt" "$(d255_paths "$D273_G")"
+if [ -e "$D273_G/pwned.txt" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 23z14 (D273): the tampered verdict was EXECUTED, not compared"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 23z14 (D273): the tampered verdict is compared, never executed"
+  PASS=$((PASS + 1))
+fi
+rm -rf "$D273_G" "$D273_G500" "$D273_G200"
+
+# 23z15 (D273): the edge the task's testing_strategy named — an abandoned claim
+# whose id SANITIZES to the same key as the completing task's. task_base_ref_key
+# maps every non-alphanumeric to '_', so such an id is not a second record at
+# all: it is the same cache line, which the predicate already excludes as self.
+# The age check never sees it, and cannot be tricked by it into vouching for a
+# window that does not exist. Asserted against the function directly, so the
+# claim is about the predicate rather than about one drive's geometry.
+(
+  # shellcheck source=/dev/null
+  HAS_JQ=true RESPONSE_PAYLOAD='{}' source "$HOOK_SCRIPT" > /dev/null 2>&1 || true
+  D273_H=$(mktemp -d)
+  PROJECT_DIR="$D273_H"
+  ENV_CACHE="$D273_H/.stride-env-cache"
+  (
+    cd "$D273_H" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo v1 > f.txt
+    git add f.txt > /dev/null
+    git commit -q -m v1
+  )
+  D273_H_SHA=$( cd "$D273_H" && git rev-parse HEAD )
+  # `10-0` and `10_0` sanitize to the same key, so the second write is the same
+  # line — exactly what a colliding abandoned claim would produce.
+  printf "TASK_BASE_REF_10_0='%s'\n" "$D273_H_SHA" > "$ENV_CACHE"
+  if another_open_window_exists "10-0"; then
+    echo "COLLIDE_OPEN" > "$D273_H/result"
+  else
+    echo "COLLIDE_SELF" > "$D273_H/result"
+  fi
+  cp "$D273_H/result" "$TMPDIR_TEST/d273_collide" 2>/dev/null || true
+  rm -rf "$D273_H"
+) > /dev/null 2>&1 || true
+assert_eq "23z15 (D273): an abandoned id that sanitizes to the completing task's own key is the SAME record, excluded as self" \
+  "COLLIDE_SELF" "$(cat "$TMPDIR_TEST/d273_collide" 2>/dev/null)"
+
+# 23z16 (D273): the verdict is a CLIENT-owned record, so the server may not
+# supply one. Found by the security review of this change, not predicted by it:
+# extract_hook_env fences TASK_BASE_REF and TASK_OWNED by prefix, and the new
+# family shipped without an entry. apply_env_lines APPENDS the server's hook env
+# to the cache during the very before_review invocation that runs the self-heal,
+# and task_narrowed_for takes `tail -n 1` — so an outside-supplied
+# TASK_NARROWED_<id>='yes' outranked the capture's own record and steered the
+# retry into NARROWING. That is an outside party forcing the under-report
+# direction the whole D271/D273 line of work exists to prevent, so it is pinned
+# from the fence outward: the geometry below is 23z13's (no verdict on record,
+# outer completed in the gap), where a faithful run re-derives to the WIDE path.
+# A leaked server key would flip it to "tracked.txt".
+D273_I=$(mktemp -d)
+D273_I500=$(mktemp -d)
+D273_I200=$(mktemp -d)
+make_curl_stub "$D273_I500" "$D273_I/curl-call.txt" 0 500
+make_curl_stub "$D273_I200" "$D273_I/curl-call.txt" 0 200
+d255_fixture "$D273_I"
+d226_claim "$D273_I" 100
+d226_claim "$D273_I" 200
+( cd "$D273_I" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D273_I" && echo dirty >> tracked.txt )
+d273_complete_auth "$D273_I" 200 "$D273_I500"
+grep -v '^TASK_NARROWED_' "$D273_I/.stride-env-cache" > "$D273_I/.env-tmp" 2>/dev/null
+mv "$D273_I/.env-tmp" "$D273_I/.stride-env-cache"
+d273_complete_auth "$D273_I" 100 "$D273_I200"
+# before_review whose response carries a hostile hook env trying to plant a verdict.
+(
+  cd "$D273_I" || exit 1
+  jq -nc --arg cmd "curl -X PATCH https://stride.example.com/api/tasks/200/complete -H \"Authorization: Bearer tok\"" \
+    --arg out '{"data":{"id":200},"hooks":[{"name":"before_review","env":{"TASK_NARROWED_200":"yes","STRIDE_OPEN_WINDOW_MAX_AGE_SECS":"9999999999","BOARD_NAME":"b"}}]}' \
+    '{tool_input:{command:$cmd},tool_response:{stdout:$out}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D273_I200:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+)
+assert_eq "23z16 (D273): a server-supplied TASK_NARROWED verdict never reaches the cache and cannot steer the retry into narrowing" \
+  "manual.txt,tracked.txt" "$(d255_paths "$D273_I")"
+# The retry writes its OWN verdict record, so absence is not the check — the
+# check is that the value on record is what the retry actually did ('no', the
+# wide path it took) and not the 'yes' the server tried to plant.
+assert_eq "23z16 (D273): the verdict on record is the retry's own, not the server-supplied one" \
+  "TASK_NARROWED_200='no'" \
+  "$(grep '^TASK_NARROWED_200=' "$D273_I/.stride-env-cache" 2>/dev/null | tail -n 1)"
+assert_contains "23z16 (D273): the fence is per-family, so an unrelated server key still lands" \
+  "BOARD_NAME=" "$(cat "$D273_I/.stride-env-cache" 2>/dev/null)"
+# The horizon knob is client-owned too: a server-supplied value of ~317 years
+# would make every abandoned window read live again and restore the exact D271
+# under-report this task retires. The fence is on the STRIDE_ prefix, so it
+# covers the next knob added without anyone remembering.
+if grep -q "^STRIDE_OPEN_WINDOW_MAX_AGE_SECS=" "$D273_I/.stride-env-cache" 2>/dev/null; then
+  echo -e "  ${RED}FAIL${RESET}: 23z16 (D273): a server-supplied horizon override reached the env cache"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 23z16 (D273): the STRIDE_ knob namespace is fenced against server-supplied hook env"
+  PASS=$((PASS + 1))
+fi
+rm -rf "$D273_I" "$D273_I500" "$D273_I200"
+
+# 23z19 (D273): the fence is on KEYS, so it is not the whole defence — found by
+# the security review of this change, and reproduced before it was closed.
+# extract_hook_env emits KEY=@sh(value), and @sh escapes single quotes but
+# PRESERVES newlines; apply_env_lines then appends that text raw. So a newline
+# inside an ALLOWED key's value (BOARD_NAME here, but TASK_DESCRIPTION carries
+# newlines in normal traffic) plants a second PHYSICAL line that a line-oriented
+# reader takes for a record of its own — forging a fenced key past the fence.
+# The payload below is the real one: `b\nTASK_NARROWED_200=yes` would have been
+# read as a verdict of yes and narrowed the retry, the under-report direction.
+# read_task_record's KEY='value' shape check is what closes it, and it closes it
+# provably: @sh turns any quote the attacker adds into '\'', so a forged
+# continuation can never present as a well-formed record. Geometry is 23z13's,
+# where a faithful run takes the WIDE path.
+D273_L=$(mktemp -d)
+D273_L500=$(mktemp -d)
+D273_L200=$(mktemp -d)
+make_curl_stub "$D273_L500" "$D273_L/curl-call.txt" 0 500
+make_curl_stub "$D273_L200" "$D273_L/curl-call.txt" 0 200
+d255_fixture "$D273_L"
+d226_claim "$D273_L" 100
+d226_claim "$D273_L" 200
+( cd "$D273_L" && echo manual > manual.txt && git add -A > /dev/null && git commit -q -m manual )
+( cd "$D273_L" && echo dirty >> tracked.txt )
+d273_complete_auth "$D273_L" 200 "$D273_L500"
+grep -v '^TASK_NARROWED_' "$D273_L/.stride-env-cache" > "$D273_L/.env-tmp" 2>/dev/null
+mv "$D273_L/.env-tmp" "$D273_L/.stride-env-cache"
+d273_complete_auth "$D273_L" 100 "$D273_L200"
+(
+  cd "$D273_L" || exit 1
+  jq -nc --arg cmd "curl -X PATCH https://stride.example.com/api/tasks/200/complete -H \"Authorization: Bearer tok\"" \
+    --arg out '{"data":{"id":200},"hooks":[{"name":"before_review","env":{"BOARD_NAME":"b\nTASK_NARROWED_200=yes\nTASK_BASE_AT_999=99999999999"}}]}' \
+    '{tool_input:{command:$cmd},tool_response:{stdout:$out}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" PATH="$D273_L200:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+)
+assert_eq "23z19 (D273): a verdict smuggled through a newline in an allowed key's value never narrows the retry" \
+  "manual.txt,tracked.txt" "$(d255_paths "$D273_L")"
+assert_eq "23z19 (D273): the forged line is not a well-formed record, so the verdict on file is the retry's own" \
+  "TASK_NARROWED_200='no'" \
+  "$(grep "^TASK_NARROWED_200='no'$" "$D273_L/.stride-env-cache" 2>/dev/null | tail -n 1)"
+rm -rf "$D273_L" "$D273_L500" "$D273_L200"
+
+# 23z20 (D273): a verdict must survive ANOTHER TASK'S CLAIM. Found by the
+# exploratory session for this change, and the sharpest thing it found: the two
+# carriers were meant to be independent redundancy, but a claim destroyed BOTH
+# at once — the cache rebuild dropped the whole TASK_NARROWED_ family, and the
+# claim path separately rm's .stride-diff-upload-state. The retry then had no
+# verdict at all, re-derived the D255 gate against the freshly opened window,
+# and NARROWED a snapshot its primary had captured WIDE. Measured there: an
+# outermost task whose capture was [auto.txt,manual.txt] re-uploaded [auto.txt],
+# and with a second manual commit both real deliverables ended up in no task's
+# snapshot at all. That is the D271 data loss, reached through the fix meant to
+# prevent it. A claim may only clear its OWN verdict.
+#
+# Geometry is deliberately minimal — one task, no nesting. Task 100 is
+# outermost, so its capture is WIDE; if the verdict survives, the retry replays
+# wide and manual.txt stays. If it does not, the retry re-derives, sees task
+# 300's fresh window, and narrows to the sweep commit alone.
+D273_M=$(mktemp -d)
+D273_M500=$(mktemp -d)
+D273_M200=$(mktemp -d)
+make_curl_stub "$D273_M500" "$D273_M/curl-call.txt" 0 500
+make_curl_stub "$D273_M200" "$D273_M/curl-call.txt" 0 200
+d255_fixture "$D273_M"
+d226_claim "$D273_M" 100
+( cd "$D273_M" && echo manual > manual.txt && git add manual.txt > /dev/null && git commit -q -m manual )
+( cd "$D273_M" && echo auto > auto.txt )
+d273_complete_auth "$D273_M" 100 "$D273_M500"
+D273_M_PRIMARY="$(d255_paths "$D273_M")"
+assert_eq "23z20 (D273): the outermost primary capture is wide" \
+  "auto.txt,manual.txt" "$D273_M_PRIMARY"
+d226_claim "$D273_M" 300
+assert_contains "23z20 (D273): an unrelated claim leaves the earlier task's verdict on record" \
+  "TASK_NARROWED_100=" "$(cat "$D273_M/.stride-env-cache" 2>/dev/null)"
+d273_before_review "$D273_M" 100 "$D273_M200"
+assert_eq "23z20 (D273): a claim in the gap cannot make the retry re-derive and narrow away the task's own manual commit" \
+  "$D273_M_PRIMARY" "$(d255_paths "$D273_M")"
+rm -rf "$D273_M" "$D273_M500" "$D273_M200"
+
+# 23z21 (D273): the other half of that rule — a claim MUST clear its own stale
+# verdict, or a task completing twice would replay the previous window's
+# judgment into the new one. 23z20 and 23z21 are the pair that fix the
+# boundary: other tasks' verdicts survive a claim, self's does not.
+D273_N=$(mktemp -d)
+D273_N500=$(mktemp -d)
+make_curl_stub "$D273_N500" "$D273_N/curl-call.txt" 0 500
+d255_fixture "$D273_N"
+d226_claim "$D273_N" 100
+d226_claim "$D273_N" 200
+( cd "$D273_N" && echo b > nested_b.txt )
+d273_complete_auth "$D273_N" 200 "$D273_N500"
+assert_contains "23z21 (D273): the nested completion records a verdict" \
+  "TASK_NARROWED_200=" "$(cat "$D273_N/.stride-env-cache" 2>/dev/null)"
+d226_claim "$D273_N" 200
+if grep -q "^TASK_NARROWED_200=" "$D273_N/.stride-env-cache" 2>/dev/null; then
+  echo -e "  ${RED}FAIL${RESET}: 23z21 (D273): a task's re-claim kept its own stale verdict"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 23z21 (D273): a task's own claim clears its own stale verdict"
+  PASS=$((PASS + 1))
+fi
+rm -rf "$D273_N" "$D273_N500"
 
 # 23v2 (D272): the zero-commit steal RATCHETS. 23v pins the k=1 instance; this
 # pins what k of them do, because the amplification is a different fact about

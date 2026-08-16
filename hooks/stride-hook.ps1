@@ -1143,7 +1143,21 @@ function Get-HookEnvFromPayload {
             # bash variables are case-sensitive, so the same key is inert
             # there. Do not harmonize these — making this one case-sensitive
             # re-opens the hole it closes.
-            if ($key -eq 'HOOK_NAME' -or $key -like 'TASK_BASE_REF*') { continue }
+            # (D273) TASK_NARROWED and TASK_BASE_AT are fenced here for parity
+            # with the bash twin, where an unfenced server-supplied verdict or
+            # claim stamp could steer the self-heal into under-reporting. This
+            # port implements none of the window-narrowing subsystem, so
+            # nothing here READS those families and the keys are inert either
+            # way — they are fenced so the two scripts declare the SAME
+            # client-owned namespace rather than leaving a gap for whenever the
+            # subsystem is ported. TASK_OWNED is added for the same reason and
+            # in the same breath: the bash twin has fenced it since D255, this
+            # side never did, and a parity claim that skipped it would be
+            # false the moment anyone relied on it.
+            # (D273) STRIDE_* is fenced alongside them: the executor's own
+            # tuning knobs are client-owned by definition and none is meant to
+            # arrive from the server.
+            if ($key -eq 'HOOK_NAME' -or $key -like 'TASK_BASE_REF*' -or $key -like 'TASK_OWNED*' -or $key -like 'TASK_NARROWED*' -or $key -like 'TASK_BASE_AT*' -or $key -like 'STRIDE_*') { continue }
             $envMap[$key] = [string]$prop.Value
         }
         break

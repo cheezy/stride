@@ -1347,17 +1347,49 @@ task_owned_key() {
 # presence signal: 0 = a record EXISTS (value may legitimately be empty),
 # 1 = no record. Reads the CACHE FILE, not the environment, so absent-vs-empty
 # is decidable and an exported variable cannot forge a record.
-task_owned_for() {
-  local _key _line
-  _key=$(task_owned_key "${1:-}")
+# (D273) Read a per-task record from the cache FILE, accepting ONLY a
+# well-formed KEY='value' line. Every file-reading per-task lookup goes through
+# here.
+#
+# The shape check is a security boundary, not tidiness. A server-supplied hook
+# env VALUE may legitimately contain newlines — TASK_DESCRIPTION routinely does
+# — and extract_hook_env's @sh quoting preserves them, so apply_env_lines
+# appends a value spanning several PHYSICAL lines. A line-oriented reader then
+# reads a continuation line as a record of its own, which turns a value on an
+# ALLOWED key into a forged record on a fenced one: `"b\nTASK_NARROWED_200=yes"`
+# plants a line that outranks the one this client wrote and steers a retry into
+# NARROWING — the under-report direction, reached past a fence that only
+# filters keys. Demanding the full quoted shape closes it at the reader, where
+# it is provable rather than probable: @sh escapes any single quote in the
+# injected text as '\'', so a forged continuation can never present as
+# KEY='value'.
+#
+# What the readers give up in exchange, stated exactly rather than generously:
+# sq_escape renders an embedded quote as '\'' too, so a LEGITIMATE record whose
+# value contained one would also fail this shape and read as absent. That is
+# survivable only because all three families this reader serves carry
+# constrained values — `yes`/`no`, epoch digits, and hex SHAs or the OVERFLOW
+# sentinel — none of which can contain a quote. It is not a property of
+# sq_escape, and a future family with free-form values must not be routed here
+# without revisiting it. The failure direction is safe either way: an
+# unreadable record degrades to the wide path.
+read_task_record() { # $1 = full key
+  local _key="${1:-}" _line
   [ -n "$_key" ] || return 1
-  _line=$(grep -e "^${_key}=" "$ENV_CACHE" 2>/dev/null | tail -n 1 || true)
+  _line=$(grep -e "^${_key}='[^']*'$" "$ENV_CACHE" 2>/dev/null | tail -n 1 || true)
   [ -n "$_line" ] || return 1
   _line="${_line#*=}"
   _line="${_line#\'}"
   _line="${_line%\'}"
   printf '%s' "$_line"
   return 0
+}
+
+task_owned_for() {
+  local _key
+  _key=$(task_owned_key "${1:-}")
+  [ -n "$_key" ] || return 1
+  read_task_record "$_key"
 }
 
 # (D255) Best-effort, never fatal — a missing record only means fallback.
@@ -1611,6 +1643,68 @@ owned_set_to_range() {
   printf '%s^ %s' "$_last" "$_first"
 }
 
+# (D273) The claim-time stamp for a per-task window, and the horizon that
+# decides when one is too old to keep vouching in another_open_window_exists.
+#
+# Nothing else ages an open window out. There is no unclaim path in this
+# script, claim expiry is server-side only, and D274 made the position
+# stronger, not weaker: it removed D268's open-window COUNT cap outright
+# because no count can distinguish a live enclosing outer from an abandoned
+# claim, so open windows are now pinned unconditionally and the only aging
+# left — dead_open_window_ids — retires a record solely when its base fails
+# to resolve. D274's own comment states the residue: on a fast-forward-only
+# trunk an abandoned claim's base is a main commit that resolves forever, so
+# that sweep can never reap it. One such record re-enabled the D255 narrowing
+# for every later outermost task in the checkout, permanently — the D271
+# under-report, resurrected by a record with no owner. This is that bound.
+task_base_at_key() {
+  local _s
+  _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
+  case "$_s" in
+    "" | TRUSTED | OWNER | UNPROVEN) return 0 ;;
+  esac
+  printf 'TASK_BASE_AT_%s' "$_s"
+}
+
+# Epoch seconds recorded when the given task's window opened, or empty.
+task_base_at_for() {
+  local _key
+  _key=$(task_base_at_key "${1:-}")
+  [ -n "$_key" ] || return 1
+  read_task_record "$_key"
+}
+
+#
+# 4 hours matches the orchestrator activation marker's own freshness window
+# (skills/stride-workflow/SKILL.md: markers older than started_at + 4h are
+# treated as stale). Past it the session that opened the window is presumed
+# dead, and this plugin already says so about its own marker.
+#
+# The trade is deliberate and one-sided: an outer window that legitimately
+# outlives the horizon stops absorbing, so tasks nesting inside it take the
+# wide path and OVER-report — the same safe direction D271 chose, and never
+# the under-report this exists to prevent.
+#
+# STRIDE_OPEN_WINDOW_MAX_AGE_SECS overrides the default. It is validated
+# digits-only and used solely as an arithmetic operand, never interpolated
+# into a command string; any other value falls back to the default rather
+# than disabling the check.
+open_window_max_age_secs() {
+  local _v="${STRIDE_OPEN_WINDOW_MAX_AGE_SECS:-}"
+  case "$_v" in
+    '' | *[!0-9]*) printf '14400'; return 0 ;;
+  esac
+  # Width matters as much as shape. `test -gt` parses with strtoimax, so a
+  # value past 2^63 makes the comparison an ERROR rather than a false — and
+  # with no `set -e` the `&& continue` just short-circuits, so the age check
+  # stops running and narrowing silently comes back. That is the one direction
+  # this function must never fail in, so an out-of-range value degrades to the
+  # documented default exactly as a non-numeric one does. Ten digits is ~317
+  # years, well past any horizon anyone means.
+  [ "${#_v}" -le 10 ] || { printf '14400'; return 0; }
+  printf '%s' "$_v"
+}
+
 # (D271) TRUE (status 0) when some task OTHER than $1 has an OPEN window on
 # record — a TASK_BASE_REF_<id> line with no TASK_HEAD_REF_<id> partner (the
 # head is written only at completion; the same open-window definition D268's
@@ -1630,13 +1724,23 @@ owned_set_to_range() {
 # deliberately pins open windows — narrowing every later outermost task in
 # the checkout and silently resurrecting the exact D271 under-report. The
 # skip direction is the safe one: treating a dubious line as no-window means
-# the wide path, which over-reports but never loses this task's own work. A
-# genuinely abandoned claim whose base still resolves does keep the narrowing
-# alive until its window ages out — that lifecycle gap is recorded, not
-# solved here.
+# the wide path, which over-reports but never loses this task's own work.
+# (D273) The lifecycle gap that note recorded is now closed by the age check
+# below: a genuinely abandoned claim leaves a resolvable, ancestor
+# base-without-head line that no unclaim path ever removes, so without an age
+# horizon one dead record vouches as a live absorber forever.
 another_open_window_exists() {
-  local _self="${1:-}" _self_key="" _line _bkey _id _b
+  local _self="${1:-}" _self_key="" _line _bkey _id _b _bt _age _now _max_age
   [ -n "$_self" ] && _self_key=$(task_base_ref_key "$_self")
+  # (D273) Resolve the clock and the horizon once, outside the loop. Without a
+  # usable clock the age check cannot run, and the D271 rule is that every
+  # validation failure takes the wide path — so answer "no open window" rather
+  # than vouching for records this predicate cannot age.
+  _now=$(date +%s 2>/dev/null || printf '')
+  case "$_now" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  _max_age=$(open_window_max_age_secs)
   while IFS= read -r _line; do
     [ -n "$_line" ] || continue
     _bkey="${_line%%=*}"
@@ -1653,9 +1757,145 @@ another_open_window_exists() {
     (cd "$PROJECT_DIR" 2>/dev/null \
       && git rev-parse --verify --quiet "${_b}^{commit}" > /dev/null 2>&1 \
       && git merge-base --is-ancestor "$_b" HEAD 2>/dev/null) || continue
+    # (D273) Resolvable and an ancestor is necessary but not sufficient: an
+    # abandoned claim leaves exactly that shape behind permanently. Age the
+    # record out by WHEN THE WINDOW WAS OPENED, read from the TASK_BASE_AT_<id>
+    # stamp its own claim wrote.
+    #
+    # The stamp exists because the obvious free signal is wrong. The base
+    # commit's committer time (`git show -s --format=%ct`) measures when the
+    # repo last moved, not when the claim happened: a task claiming on a HEAD
+    # that is already older than the horizon — the ordinary case at the start
+    # of a session, and for the whole life of a long outer window that never
+    # re-anchors — would read as abandoned from its first nested completion
+    # onward. That silently disables the D255 narrowing 23u/23w pin, in the
+    # common case rather than a corner, and no fixture that commits just
+    # before claiming can see it. The direction is safe, but a "safe" answer
+    # given almost always is not the behaviour this predicate is for.
+    #
+    # A MISSING stamp reads as dead, and that is deliberate rather than
+    # conservative-by-accident: every window opened by a hook carrying this
+    # change is stamped at claim, so an unstamped record was written by an
+    # older version — which makes it, by construction, from an earlier
+    # session. That is exactly the abandoned population this closes, and it
+    # needs no migration. A mixed-version checkout costs the older agent's
+    # live window the narrowing, which over-reports; the one direction D271
+    # forbids stays unreachable. Age exactly AT the horizon counts as live
+    # (strict -gt).
+    _bt=$(task_base_at_for "$_id") || _bt=""
+    # Digits-only is NOT enough on either count, and both failures were
+    # reproduced. A leading zero makes `$(( ))` read the stamp as OCTAL, and
+    # `08` is not a valid octal literal — under bash 3.2 (the macOS default
+    # this hook runs on) that is a FATAL expansion error, so it does not skip
+    # the record, it kills the hook mid-completion. A value past 2^63 wraps
+    # silently instead, making the difference hugely negative and the dead
+    # record read LIVE — the under-report direction, and the same trap the
+    # horizon override already guards on its side. Bound the width and force
+    # base 10; `date +%s` produces neither shape, so anything that trips this
+    # was written by something other than a claim.
+    case "$_bt" in
+      '' | *[!0-9]*) continue ;;
+    esac
+    [ "${#_bt}" -le 10 ] || continue
+    # The age needs a LOWER bound as well as an upper one. A stamp ahead of the
+    # clock is not a small age, it is a NEGATIVE one, and negative trivially
+    # passes `-gt $_max_age` — so a window stamped in the future would vouch as
+    # live for as long as the stamp stayed ahead, which is exactly the
+    # forever-live record this whole check exists to retire. Reachable without
+    # tampering: a clock corrected backwards after NTP or a suspend, or a
+    # checkout shared between hosts that disagree on time. A stamp that cannot
+    # be a valid age is a validation failure like any other, so it takes the
+    # wide path.
+    _age=$((_now - 10#$_bt))
+    [ "$_age" -ge 0 ] || continue
+    [ "$_age" -gt "$_max_age" ] && continue
     return 0
   done <<< "$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)"
   return 1
+}
+
+# (D273) Answer the D255 outermost gate for a RETRY. $1 is the narrowed= value
+# the primary capture persisted for THIS task (empty when the state file
+# predates D273, belongs to another task, or was never written); $2 is the
+# task id. TRUE (status 0) means narrow.
+#
+# A verdict reached at capture time is a FACT ABOUT THAT CAPTURE. Re-deriving
+# it at retry time asks a different question — "is a window open NOW" — and a
+# completion landing in the gap between a failed PUT and before_review changes
+# the answer, so the retry uploaded a wide snapshot over a narrowed one and
+# double-attributed a commit. Replaying removes the gap entirely.
+#
+# The value is compared, never executed or interpolated. Only the exact literal
+# `yes` narrows: `no` and ANY other content — a truncated write, a hand-edited
+# line, a tampered file — fall through to the wide path, which over-reports but
+# can never lose this task's own work. Only a genuinely ABSENT verdict
+# re-derives, which is exactly the older-state-file case that must keep
+# behaving as it did before this change.
+replay_narrowing_decision() {
+  case "${1:-}" in
+    yes) return 0 ;;
+    '') another_open_window_exists "${2:-}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# (D273) The per-task home for that verdict, mirroring the TASK_OWNED_ family.
+# .stride-diff-upload-state carries a `narrowed=` line too, but it holds ONE
+# task at a time and record_diff_upload_state TRUNCATES it — so the interleaved
+# completion this fix is about (another task completing between a failed PUT
+# and before_review) overwrites the state file with its own task_id and the
+# verdict is gone exactly when it is needed. A per-task record survives that,
+# because a completion only rewrites the line it owns.
+#
+# LIFETIME IS BOUNDED WITHOUT ANY EVICTION CHANGE. Reads happen between a
+# capture and that same completion's before_review — seconds to minutes — and
+# the next claim rebuilds the cache from select_kept_window_records, which
+# emits only the base/head/owned families and therefore drops this one
+# wholesale. A record that outlives its completion is cleared by the next
+# claim, and until then it is one short line. Nothing here touches D268/D274
+# eviction policy.
+task_narrowed_key() {
+  local _s
+  _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
+  case "$_s" in
+    "" | TRUSTED | OWNER | UNPROVEN) return 0 ;;
+  esac
+  printf 'TASK_NARROWED_%s' "$_s"
+}
+
+task_narrowed_for() {
+  local _key
+  _key=$(task_narrowed_key "${1:-}")
+  [ -n "$_key" ] || return 1
+  read_task_record "$_key"
+}
+
+# Best-effort, never fatal — a missing record only means the resolver falls
+# back to the state file and then to re-derivation.
+record_task_narrowed() {
+  local _tid="${1:-}" _val="${2:-}" _key
+  [ -n "$_tid" ] || return 0
+  _key=$(task_narrowed_key "$_tid")
+  [ -n "$_key" ] || return 0
+  {
+    grep -v -e "^${_key}=" "$ENV_CACHE" 2>/dev/null || true
+    printf "%s=%s\n" "$_key" "$(sq_escape "$_val")"
+  } | write_env_cache || true
+  return 0
+}
+
+# (D273) The capture-time verdict for $1, from the per-task record first and
+# the state file's `narrowed=` line second. Empty means no verdict is on
+# record and the caller must re-derive — the older-state-file case, and the
+# case where a claim rebuilt the cache between capture and retry.
+resolve_capture_narrowing() {
+  local _rec
+  _rec=$(task_narrowed_for "${1:-}") || _rec=""
+  if [ -n "$_rec" ]; then
+    printf '%s' "$_rec"
+    return 0
+  fi
+  printf '%s' "${2:-}"
 }
 
 # (D236) capture_changed_files diffs base..working-tree, so every commit made
@@ -2057,6 +2297,23 @@ finalize_after_doing() {
       record_task_owned "$_tid" "$SNAP_OWNED_SET"
       SNAP_OWNED_RECORDED=true
     fi
+    # (D273) The narrowing verdict this capture reaches, persisted below so the
+    # before_review self-heal REPLAYS it instead of re-deriving it against
+    # retry-time state. Default "no": every path that never reaches the
+    # narrowing branch — a refusal, no owned record, an empty owned range —
+    # captured wide, and wide is also the value a tampered or unreadable line
+    # must degrade to.
+    local _narrowed=no
+    # (D273) Stamp the SAFE default before the capture runs, not just the real
+    # verdict after it — the same write-before-capture guarantee record_task_owned
+    # takes above, and for the same reason. Without it a completion killed
+    # inside capture_changed_files (exactly what the self-heal exists for) can
+    # leave a PREVIOUS window's `yes` on record for the retry to replay,
+    # narrowing a window whose verdict was never computed. That is reachable on
+    # the unproven-claim path, where the self-filter at claim has no owner id to
+    # work from — so it must be closed here, where no id is needed. A kill
+    # anywhere in the capture now leaves `no`, the wide answer.
+    record_task_narrowed "$_tid" "$_narrowed"
     if [ "${SNAP_BASE_REFUSED:-false}" = "true" ]; then
       snapshot='[]'
     else
@@ -2088,6 +2345,7 @@ finalize_after_doing() {
         if [ -n "$_owned_range" ]; then
           if another_open_window_exists "$_tid"; then
             _cap_ranges="$_owned_range"
+            _narrowed=yes
           elif [ -n "$_cap_ranges" ]; then
             _cap_ranges="${_cap_ranges}"$'\n'"${_owned_range}"
           fi
@@ -2100,6 +2358,11 @@ finalize_after_doing() {
     # later can subtract this window. Written after the capture so it records
     # the HEAD the snapshot was actually taken against.
     record_task_head_ref "$_tid"
+    # (D273) Stamp the verdict this capture reached, next to the head it was
+    # taken against and BEFORE any PUT is attempted — so the before_review
+    # self-heal replays it however the PUT goes, and whatever another agent's
+    # completion does to the shared state file in the gap.
+    record_task_narrowed "$_tid" "$_narrowed"
 
     # No-op silently if any prerequisite is missing — preserves the on-disk
     # snapshot for legacy --argjson cf consumers.
@@ -2118,6 +2381,16 @@ finalize_after_doing() {
         # re-checks the same preconditions itself. (D142) The resolved base
         # rides along so the self-heal reuses this task window's judgment.
         record_diff_upload_state "$_tid" "$_http_code" "${SNAP_BASE_RESOLVED:-}"
+        # (D273) Persist the narrowing verdict alongside the base, appended
+        # after the truncating write the same way refused_base is. The base
+        # alone was never enough: the self-heal re-DERIVED the D255 outermost
+        # gate at retry time, so a completion landing in the gap between a
+        # failed PUT and before_review could flip another_open_window_exists
+        # and let the retry upload a WIDE snapshot over this narrowed one —
+        # one commit then attributed to two tasks. A decision reached at
+        # capture time is a fact about THIS capture; re-deriving it later asks
+        # a different question and gets a different answer.
+        printf 'narrowed=%s\n' "$_narrowed" >> "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
         # (D226) A refusal is durable, not just a line on stderr that scrolls
         # away — the same reasoning as W1658's unresolved marker. It also stops
         # the before_review self-heal from re-capturing against the foreign
@@ -2173,10 +2446,16 @@ finalize_before_doing() {
     [ -n "$_owner" ] && _key=$(task_base_ref_key "$_owner")
     [ -n "$_key" ] || _owner=""
   fi
+  # (D273) TASK_BASE_AT_ is dropped here and re-emitted below for exactly the
+  # windows the selector keeps, so a stamp can never outlive the base it dates.
+  # TASK_NARROWED_ is dropped and NOT re-emitted: a claim opens a new window,
+  # and a verdict from a previous completion must not survive into it — the
+  # same reasoning that clears .stride-diff-upload-state at claim time.
   _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
     -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_UNPROVEN=' \
     -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' \
     -e '^TASK_HEAD_REF_[A-Za-z0-9_]*=' -e '^TASK_OWNED_[A-Za-z0-9_]*=' \
+    -e '^TASK_BASE_AT_[A-Za-z0-9_]*=' -e '^TASK_NARROWED_[A-Za-z0-9_]*=' \
     "$ENV_CACHE" 2>/dev/null || true)
   # (D268) The cap keeps a long-lived checkout from growing the cache without
   # bound — but the old per-family `tail` dropped the OLDEST record, which is
@@ -2210,6 +2489,73 @@ finalize_before_doing() {
   if [ -n "$_owned_self_key" ]; then
     _records=$(printf '%s\n' "$_records" | grep -v -e "^${_owned_self_key}=" || true)
   fi
+  # (D273) Carry each KEPT window's claim-time stamp forward. This is not a
+  # change to eviction policy and deliberately not part of
+  # select_kept_window_records — which windows survive is decided there and
+  # read here; a new family simply follows that decision instead of being
+  # silently erased by the rebuild. Without this the stamps vanish at the next
+  # claim, every surviving window reads as unstamped, and the predicate would
+  # retire live windows wholesale.
+  local _at_lines="" _rec_line _rec_id _rec_key _rec_stamp _at_key _at_now _narrowed_self_key
+  while IFS= read -r _rec_line; do
+    case "$_rec_line" in
+      TASK_BASE_REF_*) : ;;
+      *) continue ;;
+    esac
+    _rec_id="${_rec_line%%=*}"
+    _rec_id="${_rec_id#TASK_BASE_REF_}"
+    case "$_rec_id" in
+      "" | TRUSTED | OWNER | UNPROVEN) continue ;;
+    esac
+    # Look each record up through the same sanitizer and the same shape-checked
+    # reader every other per-task lookup uses, and RE-EMIT it rather than
+    # copying the matched line. Copying a grep hit would promote a forged
+    # continuation line to a first-class record that survives the next claim;
+    # going through read_task_record means only a well-formed record is ever
+    # carried, and sq_escape re-normalizes it on the way out.
+    _rec_key=$(task_base_at_key "$_rec_id")
+    if [ -n "$_rec_key" ] && _rec_stamp=$(read_task_record "$_rec_key"); then
+      [ -n "$_rec_stamp" ] && _at_lines="${_at_lines}${_rec_key}=$(sq_escape "$_rec_stamp")"$'\n'
+    fi
+    # (D273) The narrowing verdict travels with its window too. Dropping the
+    # whole family at claim looked right — a claim opens a new window, so a
+    # stale verdict must not survive into it — but that reasoning is about the
+    # CLAIMING task's own record, and applying it to every task destroyed the
+    # verdict of any OTHER task still waiting to self-heal. An exploratory
+    # session drove it: one unrelated claim between a failed PUT and
+    # before_review left the retry with no verdict on either carrier (the state
+    # file is separately rm'd at claim), so it re-derived the D255 gate — the
+    # exact question this fix exists to stop it re-asking — and narrowed a
+    # snapshot that had captured wide, orphaning two real commits into no
+    # task's diff at all. Self's own record is dropped below, the same way
+    # self's owned record is.
+    _rec_key=$(task_narrowed_key "$_rec_id")
+    if [ -n "$_rec_key" ] && _rec_stamp=$(read_task_record "$_rec_key"); then
+      _at_lines="${_at_lines}${_rec_key}=$(sq_escape "$_rec_stamp")"$'\n'
+    fi
+  done <<< "$_records"
+  # (D273) Self's verdict belongs to the window this claim replaces. The
+  # reserve above already drops self's whole window from $_records on the
+  # proven path, and this mirrors _owned_self_key for the rest.
+  #
+  # The UNPROVEN path keeps self's stale verdict, and that is a deliberate
+  # trade rather than an oversight. With no validated owner there is no id this
+  # can trust, and filtering on an unvalidated one would drop ANOTHER task's
+  # verdict — the exact data-loss shape this whole carry-forward exists to
+  # close, swapped for a much narrower one. The residue is only readable by a
+  # completion that reaches before_review's self-heal without
+  # finalize_after_doing having run (killed between the pre and post phases),
+  # and only alongside an equally stale TASK_OWNED_ record, whose survival on
+  # this same path is the pre-existing D255 trade. Before D273 that corner
+  # re-derived and could narrow too, so this widens an already-unsound
+  # configuration rather than opening a new class.
+  if [ -n "$_owner" ]; then
+    _narrowed_self_key=$(task_narrowed_key "$_owner")
+    if [ -n "$_narrowed_self_key" ]; then
+      _at_lines=$(printf '%s' "$_at_lines" | grep -v -e "^${_narrowed_self_key}=" || true)
+      [ -n "$_at_lines" ] && _at_lines="${_at_lines}"$'\n'
+    fi
+  fi
   # (D226) Atomic, via the shared writer. A true race still loses one task's
   # record (last writer wins) — which degrades to a REFUSAL rather than a
   # wrong diff, since the surviving owner stamp will name someone else — but
@@ -2217,11 +2563,21 @@ finalize_before_doing() {
   {
     [ -n "$_preserved" ] && printf '%s\n' "$_preserved"
     [ -n "$_records" ] && printf '%s\n' "$_records"
+    [ -n "$_at_lines" ] && printf '%s' "$_at_lines"
     echo "TASK_BASE_REF=$(sq_escape "$_base_ref")"
     echo "TASK_BASE_REF_TRUSTED='1'"
     if [ -n "$_owner" ]; then
       echo "TASK_BASE_REF_OWNER=$(sq_escape "$_owner")"
       echo "$_key=$(sq_escape "$_base_ref")"
+      # (D273) Stamp this window's open time next to the base it dates, from
+      # the same validated owner id. An unstampable clock leaves no line,
+      # which the predicate reads as dead — the safe direction.
+      _at_key=$(task_base_at_key "$_owner")
+      _at_now=$(date +%s 2>/dev/null || printf '')
+      case "$_at_now" in
+        '' | *[!0-9]*) : ;;
+        *) [ -n "$_at_key" ] && echo "$_at_key=$(sq_escape "$_at_now")" ;;
+      esac
     else
       # Marks a base this version wrote without being able to prove its owner,
       # so a later completion can tell it apart from a pre-fix cache.
@@ -2271,11 +2627,16 @@ self_heal_changed_files_upload() {
   # semantics anchor at after_doing time; avoid pointless API load).
   # Missing file, different task id, or non-2xx/empty code → retry.
   local _state_file="$PROJECT_DIR/.stride-diff-upload-state"
-  local _state_task="" _state_code="" _state_base=""
+  local _state_task="" _state_code="" _state_base="" _state_narrowed=""
   if [ -f "$_state_file" ]; then
     _state_task=$(grep '^task_id=' "$_state_file" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
     _state_code=$(grep '^http_code=' "$_state_file" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
     _state_base=$(grep '^base=' "$_state_file" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
+    # (D273) The capture-time narrowing verdict, read on the same terms as the
+    # base: only a record for THIS task may speak for this capture.
+    if [ "$_state_task" = "$_tid" ]; then
+      _state_narrowed=$(grep '^narrowed=' "$_state_file" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
+    fi
   fi
   if [ "$_state_task" = "$_tid" ]; then
     case "$_state_code" in
@@ -2341,14 +2702,22 @@ self_heal_changed_files_upload() {
   # ANOTHER completion lands in the gap between the failed PUT and this retry
   # (multi-agent on one checkout), the answer can shift and the retry's
   # judgment diverges from the primary's — over-report direction on the
-  # demonstrated open-to-closed flip, an accepted consequence of re-deriving
-  # rather than persisting the capture-time decision.
-  local _owned_rec _owned_range
+  # demonstrated open-to-closed flip.
+  # (D273) That divergence is now closed from the other end: the primary
+  # capture PERSISTS its verdict and this retry replays it, so the retry
+  # answers the question the capture answered rather than re-asking it of
+  # retry-time state. Only the D255 narrowing verdict is replayed —
+  # attribution above stays re-derived on purpose, because the retry's wide
+  # path covers the sweep commit without the primary's union logic.
+  local _owned_rec _owned_range _retry_narrowed=no
   if [ "$_refused" != "true" ] && _owned_rec=$(task_owned_for "$_tid"); then
     if [ -n "$_owned_rec" ] && [ "$_owned_rec" != "$STRIDE_OWNED_OVERFLOW" ] \
-      && another_open_window_exists "$_tid"; then
+      && replay_narrowing_decision "$(resolve_capture_narrowing "$_tid" "$_state_narrowed")" "$_tid"; then
       _owned_range=$(owned_set_to_range "$_owned_rec")
-      [ -n "$_owned_range" ] && _own_ranges="$_owned_range"
+      if [ -n "$_owned_range" ]; then
+        _own_ranges="$_owned_range"
+        _retry_narrowed=yes
+      fi
     fi
   fi
   if [ "$_refused" = "true" ]; then
@@ -2359,6 +2728,16 @@ self_heal_changed_files_upload() {
   printf '%s\n' "$_snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
   _http_code=$(upload_changed_files_snapshot "$_tid" "$_api_base" "$_token")
   record_diff_upload_state "$_tid" "$_http_code" "$_snap_base"
+  # (D273) Same truncation reasoning as the refusal stamp below: re-record the
+  # verdict THIS upload actually captured under, so the durable record still
+  # describes the snapshot the server now holds. BOTH carriers are updated, not
+  # just the state file — resolve_capture_narrowing prefers the per-task
+  # record, so leaving that one stale would make the durable claim true of the
+  # file a human reads and false of the one the code reads. They can genuinely
+  # diverge: _retry_narrowed is yes only when owned_set_to_range resolved, so a
+  # replayed yes whose range comes back empty uploads wide.
+  printf 'narrowed=%s\n' "$_retry_narrowed" >> "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+  record_task_narrowed "$_tid" "$_retry_narrowed"
   # (D226) record_diff_upload_state TRUNCATES the state file, so a refusal
   # that reaches the retry must be re-stamped or the durable record is erased
   # by the very path that most needs it on file.
@@ -3108,6 +3487,31 @@ extract_response_payload() {
 # client owns it, and covers the next key added without anyone remembering to
 # update the filter.
 #
+# (D273) That protection is per-FAMILY, not automatic — a new family needs its
+# own prefix here, and TASK_NARROWED was added without one. The consequence was
+# concrete rather than theoretical: apply_env_lines APPENDS these lines to the
+# cache in the same before_review invocation that then runs the self-heal, and
+# task_narrowed_for reads the file with `tail -n 1`, so a server-supplied
+# TASK_NARROWED_<id> outranked the record the capture wrote and steered the
+# retry into narrowing — an outside party forcing the UNDER-report direction
+# this whole subsystem exists to prevent. TASK_BASE_AT is fenced on the same
+# terms: a supplied stamp would let an outside party keep a dead window alive
+# (or retire a live one) and reach the same narrowing decision one step
+# earlier. Every client-owned family belongs in this list.
+#
+# (D273) STRIDE_ is fenced for the same reason one level up. The executor's own
+# tuning knobs are client-owned by definition — none is meant to arrive from the
+# server — and STRIDE_OPEN_WINDOW_MAX_AGE_SECS in particular decides the age
+# horizon, so a supplied value of 9999999999 would make every abandoned window
+# read live again and restore the exact D271 under-report this task retires.
+# Fencing the prefix rather than the one name covers the next knob added.
+#
+# NOTE (out of scope here, filed separately): this filter is a DENY-list, so
+# every key it does not name still reaches apply_env_lines' eval and the env
+# cache — including PATH, BASH_ENV, IFS and GIT_SSH_COMMAND. That is a
+# pre-existing hole, not one this task opened, and closing it properly means
+# turning this into an ALLOW-list of the documented hook-env keys.
+#
 # The match is case-SENSITIVE here and case-INsensitive in the ps1 twin, and
 # that difference is deliberate: each matches the variable semantics of its own
 # platform. Bash variables are case-sensitive, so Task_Base_Ref_100 lands in a
@@ -3132,7 +3536,7 @@ extract_hook_env() {
     | if type == "object" then . else {} end
     | to_entries[]
     | select(.key | test("^[A-Za-z_][A-Za-z0-9_]*$"))
-    | select(.key != "HOOK_NAME" and (.key | startswith("TASK_BASE_REF") | not) and (.key | startswith("TASK_OWNED") | not))
+    | select(.key != "HOOK_NAME" and (.key | startswith("TASK_BASE_REF") | not) and (.key | startswith("TASK_OWNED") | not) and (.key | startswith("TASK_NARROWED") | not) and (.key | startswith("TASK_BASE_AT") | not) and (.key | startswith("STRIDE_") | not))
     | .key + "=" + (.value | tostring | @sh)
   ' 2>/dev/null || true
 }
@@ -3598,11 +4002,47 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # policy and the family-desync answer (head/owned live and die with their
     # base; a half-bounded window can no longer be produced by the cap).
     _kept_window_records=$(select_kept_window_records || true)
+    # (D273) Carry each KEPT window's claim-time stamp through the rebuild.
+    # This branch emits ONLY the selector's three families plus the six fixed
+    # identity keys, so without this every TASK_BASE_AT_ line is erased at the
+    # very next claim — every surviving open window would then read as
+    # unstamped, the predicate would retire live windows wholesale, and the
+    # D255 nesting 23u/23w pin would stop narrowing. Eviction policy is
+    # untouched: which windows survive is still decided entirely by
+    # select_kept_window_records, and this only lets a newer family follow the
+    # decision it already made.
+    _kept_window_stamps=""
+    while IFS= read -r _kept_line; do
+      case "$_kept_line" in
+        TASK_BASE_REF_*) : ;;
+        *) continue ;;
+      esac
+      _kept_id="${_kept_line%%=*}"
+      _kept_id="${_kept_id#TASK_BASE_REF_}"
+      case "$_kept_id" in
+        "" | TRUSTED | OWNER | UNPROVEN) continue ;;
+      esac
+      # Same sanitizer + shape-checked reader + re-emit as the finalize
+      # carry-forward, and the same two families: the claim stamp AND the
+      # narrowing verdict, which another task may still need for a self-heal
+      # that has not run yet. finalize_before_doing drops self's verdict
+      # immediately after this; see its comment for why carrying other tasks'
+      # matters and why a copied grep hit is not safe.
+      _kept_key=$(task_base_at_key "$_kept_id")
+      if [ -n "$_kept_key" ] && _kept_stamp=$(read_task_record "$_kept_key"); then
+        [ -n "$_kept_stamp" ] && _kept_window_stamps="${_kept_window_stamps}${_kept_key}=$(sq_escape "$_kept_stamp")"$'\n'
+      fi
+      _kept_key=$(task_narrowed_key "$_kept_id")
+      if [ -n "$_kept_key" ] && _kept_stamp=$(read_task_record "$_kept_key"); then
+        _kept_window_stamps="${_kept_window_stamps}${_kept_key}=$(sq_escape "$_kept_stamp")"$'\n'
+      fi
+    done <<< "$_kept_window_records"
     # Values are single-quote escaped via sq_escape (W1453) so titles with
     # spaces, quotes, or dollar signs survive the `set -a` sourcing without
     # any shell interpretation.
     {
       [ -n "$_kept_window_records" ] && printf '%s\n' "$_kept_window_records"
+      [ -n "$_kept_window_stamps" ] && printf '%s' "$_kept_window_stamps"
       echo "TASK_ID=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.id // empty')")"
       echo "TASK_IDENTIFIER=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.identifier // empty')")"
       echo "TASK_TITLE=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.title // empty')")"
@@ -3620,6 +4060,14 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # behind would let a stripped cache still claim ownership. The per-task
     # TASK_BASE_REF_<id> records are deliberately kept: they belong to tasks
     # other than this claim and are the whole point of the isolation.
+    # (D273) TASK_BASE_AT_ and TASK_NARROWED_ are both KEPT here, like the
+    # per-task base records this branch already keeps and for the same reason:
+    # they belong to OTHER tasks. This branch could not identify the claiming
+    # task, so it cannot single out self's record — and a blanket strip is the
+    # wrong trade, because it would destroy the verdict of a task still waiting
+    # to self-heal, leaving its retry to re-derive the D255 gate and narrow a
+    # snapshot that captured wide. finalize_before_doing drops self's own
+    # verdict on the proven path.
     _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
       -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_UNPROVEN=' "$ENV_CACHE" 2>/dev/null || true)
     if [ -n "$_preserved" ]; then

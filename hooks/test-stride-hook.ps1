@@ -2603,7 +2603,7 @@ TASK_NARROWED_77=yes
         "$(@($cacheK | Where-Object { $_ -match '^TASK_BASE_REF_OWNER=' }).Count)"
 
     # 10l (D260): mirrors bash 14q. One parseable claim wrote every identity key
-    # twice — the rewrite from the data block, then Set-HookEnv's append from
+    # twice — the rewrite from the data block, then Set-HookEnv's write from
     # the env block — so a first-match reader and a sourcing reader disagreed
     # under a data-vs-env skew. The forwarded env block wins, because that is
     # already what the export puts in the section's process env; only the cache
@@ -3523,7 +3523,8 @@ Assert-Eq "16h: a first-match reader gets the supplied value" "GOAL_ID=55" "$($w
 # 16i (D257): mirrors test-stride-hook.sh 20i. 16g/16h pin that a SINGLE run
 # cannot duplicate a key — Set-AfterGoalEnv builds one env map and a hashtable
 # holds no duplicate key. This port's real exposure is ACROSS runs: Set-HookEnv
-# appends, and nothing truncates the cache between two after_goal runs in one
+# appended then (D260 made it replace in place), and nothing truncates the
+# cache between two after_goal runs in one
 # claim window. Run 1 establishes GOAL_ID=7 via the fallback; run 2 omits both
 # the GOAL_ID env key and parent_id, so its defined-but-empty default appended
 # a second, contradictory line. A first-match reader then read the PREVIOUS
@@ -3587,7 +3588,7 @@ Assert-Eq "16j (D257): a sibling the current run omitted does not keep the previ
     "$(@($w16jCache | Where-Object { $_ -match '^GOAL_TITLE=' }) | Select-Object -First 1)"
 
 # 16k (D257): the scope guard, and it has to be built differently from 20l to
-# mean anything on this side. The .ps1 filter runs BEFORE Set-HookEnv appends,
+# mean anything on this side. The .ps1 filter runs BEFORE Set-HookEnv writes,
 # so a non-GOAL key written by the SAME run can never be dropped by it — an
 # assertion about the current run would pass no matter how wide the regex got.
 # The key that can actually be lost is one a PREVIOUS run wrote, which the

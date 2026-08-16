@@ -1354,7 +1354,7 @@ task_owned_key() {
 # The shape check is a security boundary, not tidiness. A server-supplied hook
 # env VALUE may legitimately contain newlines — TASK_DESCRIPTION routinely does
 # — and extract_hook_env's @sh quoting preserves them, so apply_env_lines
-# appends a value spanning several PHYSICAL lines. A line-oriented reader then
+# writes a value spanning several PHYSICAL lines. A line-oriented reader then
 # reads a continuation line as a record of its own, which turns a value on an
 # ALLOWED key into a forged record on a fenced one: `"b\nTASK_NARROWED_200=yes"`
 # plants a line that outranks the one this client wrote and steers a retry into

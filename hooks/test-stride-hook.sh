@@ -5483,7 +5483,8 @@ STRIDE
 
   # 20i (D257): D245 fixed ONE geometry. Its replace-in-place lived inside the
   # parent-id fallback, so it ran only when that fallback fired — and
-  # apply_env_lines APPENDS on every call. A second after_goal run in the same
+  # apply_env_lines APPENDED on every call (D260 later made it replace in
+  # place; this is the geometry as it was). A second after_goal run in the same
   # claim window (no claim between, so nothing truncates the cache) whose
   # response omits BOTH the GOAL_ID env key and data.parent_id therefore had
   # the defaults loop append GOAL_ID='' AFTER run 1's real value, with no
@@ -5583,9 +5584,9 @@ STRIDE
     "$(grep -m1 '^GOAL_ID=' "$W20K_PROJ/.stride-env-cache" 2>/dev/null)"
 
   # 20l (D257): scope guard. The collapse is for the four GOAL_* keys only —
-  # every other key on the same after_goal env keeps apply_env_lines' documented
-  # append-only behaviour, here and for every other hook. A regression that
-  # widened the filter would silently change unrelated hooks' env handling.
+  # every other key on the same after_goal env is left to apply_env_lines,
+  # here and for every other hook. A regression that widened the filter would
+  # silently change unrelated hooks' env handling.
   W20L_PROJ="$TMPDIR_TEST/d257-scope"
   mkdir -p "$W20L_PROJ/.stride"
   printf '## after_goal\n```bash\ntrue\n```\n' > "$W20L_PROJ/.stride.md"
@@ -5602,8 +5603,9 @@ STRIDE
   # collapse actually operates on. Run 1 supplies a multi-line GOAL_TITLE whose
   # value contains a line reading `GOAL_ID=999` — a decoy that a plain
   # `grep -v '^GOAL_ID='` would delete from the MIDDLE of the value, corrupting
-  # it, which is precisely why apply_env_lines appends rather than rewrites and
-  # why D245's line-based idiom could not simply be extended to all four keys.
+  # it, which is precisely why apply_env_lines appended rather than rewriting
+  # (D260 rewrites now, quote-aware, for exactly this reason) and why D245's
+  # line-based idiom could not simply be extended to all four keys.
   # Run 2 then re-supplies a single-line title, so the whole multi-line record
   # must be removed as one unit — not partially, and not left behind.
   W20M_PROJ="$TMPDIR_TEST/d257-multiline"
@@ -6572,7 +6574,9 @@ assert_eq "23m2 (D258): all five record families plus STRIDE_ and HOOK_NAME are 
 # asymmetry those controls expose is what made the defect visible.
 #
 # Persistence is the reason this matters more than a one-shot bad read:
-# apply_env_lines appends, so a forged line wins on a last-match read;
+# apply_env_lines appended when this was found, so a forged line won on a
+# last-match read (under D260 it would DELETE the genuine record instead —
+# worse, not better, for any family that escapes the fence);
 # record_task_head_ref repairs only the COMPLETING task's own id, so a record
 # forged for any other id is never repaired; and select_kept_window_records
 # emits every surviving head line with no per-key dedup, so both lines would
@@ -7988,7 +7992,7 @@ assert_eq "23z15 (D273): an abandoned id that sanitizes to the completing task's
 # 23z16 (D273): the verdict is a CLIENT-owned record, so the server may not
 # supply one. Found by the security review of this change, not predicted by it:
 # extract_hook_env fences TASK_BASE_REF and TASK_OWNED by prefix, and the new
-# family shipped without an entry. apply_env_lines APPENDS the server's hook env
+# family shipped without an entry. apply_env_lines writes the server's hook env
 # to the cache during the very before_review invocation that runs the self-heal,
 # and task_narrowed_for takes `tail -n 1` — so an outside-supplied
 # TASK_NARROWED_<id>='yes' outranked the capture's own record and steered the
@@ -8045,7 +8049,7 @@ rm -rf "$D273_I" "$D273_I500" "$D273_I200"
 # 23z19 (D273): the fence is on KEYS, so it is not the whole defence — found by
 # the security review of this change, and reproduced before it was closed.
 # extract_hook_env emits KEY=@sh(value), and @sh escapes single quotes but
-# PRESERVES newlines; apply_env_lines then appends that text raw. So a newline
+# PRESERVES newlines; apply_env_lines then writes that text raw. So a newline
 # inside an ALLOWED key's value (BOARD_NAME here, but TASK_DESCRIPTION carries
 # newlines in normal traffic) plants a second PHYSICAL line that a line-oriented
 # reader takes for a record of its own — forging a fenced key past the fence.

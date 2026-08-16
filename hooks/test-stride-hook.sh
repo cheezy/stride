@@ -6319,6 +6319,106 @@ D226_ENV_OUT=$(
 assert_eq "23m: the whole TASK_BASE_REF family is fenced out of hook env" \
   "AGENT_NAME='ok'" "$D226_ENV_OUT"
 
+# 23m2 (D258): every client-owned record family, in one assertion. 23m pinned
+# the TASK_BASE_REF family; the other four were added over D255/D273/D258 and
+# nothing pinned them together, so a clause could be dropped from the filter
+# and only the family whose own case existed would notice. TASK_HEAD_REF was
+# the last one missing, and the sharpest: a head ref says where a task's window
+# CLOSES, so a forged one steers the D236/D244 attribution walk. Demonstrated
+# end to end — a forged TASK_HEAD_REF_<nested_id> made an outer task's uploaded
+# snapshot gain a nested task's file — which 23m3 below drives.
+D258_ENV_OUT=$(
+  # shellcheck disable=SC1090
+  . "$HOOK_SCRIPT" 2> /dev/null || true
+  HAS_JQ=true
+  extract_hook_env '{"hooks":[{"name":"before_review","env":{"TASK_BASE_REF_100":"x","TASK_HEAD_REF_100":"x","TASK_OWNED_100":"x","TASK_BASE_AT_100":"x","TASK_NARROWED_100":"x","STRIDE_OPEN_WINDOW_MAX_AGE_SECS":"9999999999","HOOK_NAME":"evil","AGENT_NAME":"ok"}}]}' before_review
+)
+assert_eq "23m2 (D258): all five record families plus STRIDE_ and HOOK_NAME are fenced out of hook env" \
+  "AGENT_NAME='ok'" "$D258_ENV_OUT"
+
+# 23m3 (D258): the end-to-end consequence, adapted from the staged /harden
+# draft. A genuine head record is seeded, then a /complete response carries a
+# contradictory TASK_HEAD_REF_77 for that SAME id, with TASK_BASE_REF and
+# TASK_BASE_REF_77 alongside as controls that were already fenced — the
+# asymmetry those controls expose is what made the defect visible.
+#
+# Persistence is the reason this matters more than a one-shot bad read:
+# apply_env_lines appends, so a forged line wins on a last-match read;
+# record_task_head_ref repairs only the COMPLETING task's own id, so a record
+# forged for any other id is never repaired; and select_kept_window_records
+# emits every surviving head line with no per-key dedup, so both lines would
+# outlive the next claim.
+W_HR_PROJ="$TMPDIR_TEST/d258-headref"
+mkdir -p "$W_HR_PROJ/.stride"
+cat > "$W_HR_PROJ/.stride.md" << 'STRIDE'
+## before_review
+```bash
+echo "before_review_ran"
+```
+STRIDE
+printf "TASK_HEAD_REF_77='aaaa111genuine'\n" > "$W_HR_PROJ/.stride-env-cache"
+printf '%s' '{"data":{"id":78},"hooks":[{"name":"before_review","env":{"TASK_HEAD_REF_77":"ffff999bogus","TASK_BASE_REF":"ffff999bogus","TASK_BASE_REF_77":"ffff999bogus"}}]}' \
+  > "$W_HR_PROJ/.stride/.last-api-response.json"
+W_HR_INPUT='{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/78/complete"},"tool_response":{"stdout":"{\"data\":{\"id\":78},\"hoo"}}'
+echo "$W_HR_INPUT" | CLAUDE_PROJECT_DIR="$W_HR_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "23m3 (D258): exactly one TASK_HEAD_REF_77 line survives a poisoned response env" "1" \
+  "$(grep -c '^TASK_HEAD_REF_77=' "$W_HR_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')"
+# NOTE this assertion is documentation, NOT regression coverage, and is titled
+# so: it passes against the pre-fix script too, because the injected line is
+# APPENDED and grep -m1 therefore still returns the genuine FIRST line. The
+# defect turns on the opposite read — the forged value wins on a LAST-match
+# read — so a first-match check cannot detect it. The decisive pair is the line
+# count above and the no-bogus-value-anywhere check below; this one records the
+# read semantics the persistence argument depends on.
+assert_eq "23m3 (D258): a first-match reader sees the genuine record (read-semantics note, not the regression check)" \
+  "TASK_HEAD_REF_77='aaaa111genuine'" \
+  "$(grep -m1 '^TASK_HEAD_REF_77=' "$W_HR_PROJ/.stride-env-cache" 2>/dev/null)"
+# And the read that the defect actually turned on: last-match must ALSO be the
+# genuine record. Pre-fix this returned the injected value.
+assert_eq "23m3 (D258): a LAST-match reader also sees the genuine record — the read the defect turned on" \
+  "TASK_HEAD_REF_77='aaaa111genuine'" \
+  "$(grep '^TASK_HEAD_REF_77=' "$W_HR_PROJ/.stride-env-cache" 2>/dev/null | tail -n 1)"
+if grep -q 'ffff999bogus' "$W_HR_PROJ/.stride-env-cache" 2>/dev/null; then
+  echo -e "  ${RED}FAIL${RESET}: 23m3 (D258): an injected record-namespace value reached the cache"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 23m3 (D258): no injected record-namespace value reached the cache at all"
+  PASS=$((PASS + 1))
+fi
+
+# 23m4 (D258): the OWN-ID edge case the task's testing_strategy names. 23m3
+# poisons a record for a task OTHER than the one completing, which is the
+# durable case — record_task_head_ref only ever repairs the completing task's
+# own id, so another id's forged record is never repaired. The own-id case is
+# the one where a later repair WOULD overwrite the injection, and the strategy
+# asks that the filter block the append anyway: relying on a later write to
+# undo an injection means the forged value is live in the window between them,
+# and the repair only happens at all if the completion reaches its capture.
+# The filter is prefix-based and id-blind, so this cannot regress
+# independently — but the declared coverage is delivered rather than assumed.
+#
+# Also recorded here because nothing else does: extract_hook_env is the SINGLE
+# chokepoint for both env paths — export_after_goal_env calls it, and so does
+# the routed-hook path — so one clause covers the after_goal case the strategy
+# lists as its second edge case. The ps1 8k2 mirror drives after_goal directly.
+W_HR2_PROJ="$TMPDIR_TEST/d258-headref-ownid"
+mkdir -p "$W_HR2_PROJ/.stride"
+cat > "$W_HR2_PROJ/.stride.md" << 'STRIDE'
+## before_review
+```bash
+echo "before_review_ran"
+```
+STRIDE
+printf "TASK_HEAD_REF_78='aaaa111genuine'\n" > "$W_HR2_PROJ/.stride-env-cache"
+printf '%s' '{"data":{"id":78},"hooks":[{"name":"before_review","env":{"TASK_HEAD_REF_78":"ffff999bogus"}}]}' \
+  > "$W_HR2_PROJ/.stride/.last-api-response.json"
+echo "$W_HR_INPUT" | CLAUDE_PROJECT_DIR="$W_HR2_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "23m4 (D258): an injected record for the COMPLETING task's own id is blocked at the filter too" \
+  "TASK_HEAD_REF_78='aaaa111genuine'" \
+  "$(grep '^TASK_HEAD_REF_78=' "$W_HR2_PROJ/.stride-env-cache" 2>/dev/null | tail -n 1)"
+assert_eq "23m4 (D258): and only one record for that id exists" "1" \
+  "$(grep -c '^TASK_HEAD_REF_78=' "$W_HR2_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')"
+
 # 23g: the self-heal's refusal branch — an entire code path that had no test.
 # before_review runs on a fresh budget and would otherwise re-capture against
 # the foreign base, undoing the primary refusal after its notice scrolled by.

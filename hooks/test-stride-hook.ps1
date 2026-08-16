@@ -1931,6 +1931,51 @@ if (@($agEnvCacheK | Where-Object { $_ -match '^HOOK_NAME=' }).Count -gt 0) {
     $script:Pass++
 }
 
+# 8k2 (D258): record-namespace containment, the same shape as 8k's HOOK_NAME
+# containment and mirroring bash 23m2/23m3. Until D258 this port fenced five
+# families but not TASK_HEAD_REF, the one that says where a task's window
+# CLOSES and so steers commit attribution. This port implements none of that
+# attribution subsystem, so an injected key is inert HERE — the case exists so
+# the two scripts are pinned to the same client-owned namespace rather than
+# drifting until whichever one gets the subsystem next inherits the gap.
+# A genuine seeded record must also survive untouched.
+$agEnvProjK2 = New-AfterGoalEnvProject -Suffix 'recordns'
+Set-Content -Path (Join-Path $agEnvProjK2 '.stride-env-cache') `
+    -Value "TASK_HEAD_REF_77=aaaa111genuine" -Encoding UTF8
+$agEnvInputK2 = Build-AfterGoalInputFull `
+    -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `
+    -Inner @{
+        data  = @{ id = 99; parent_id = 55 }
+        hooks = @(
+            @{ name = 'before_review' }
+            @{ name = 'after_goal'; env = @{
+                GOAL_ID           = '7'
+                TASK_HEAD_REF_77  = 'ffff999bogus'
+                TASK_BASE_REF_77  = 'ffff999bogus'
+                TASK_OWNED_77     = 'ffff999bogus'
+                TASK_BASE_AT_77   = 'ffff999bogus'
+                TASK_NARROWED_77  = 'yes'
+                STRIDE_OPEN_WINDOW_MAX_AGE_SECS = '9999999999'
+            } }
+        )
+    }
+$null = Invoke-HookScript -InputJson $agEnvInputK2 -Phase 'post' -ProjectDir $agEnvProjK2
+$agEnvCacheK2 = ''
+if (Test-Path (Join-Path $agEnvProjK2 '.stride-env-cache')) {
+    $agEnvCacheK2 = Get-Content (Join-Path $agEnvProjK2 '.stride-env-cache') -Raw -Encoding UTF8
+}
+if ($agEnvCacheK2 -match 'ffff999bogus' -or $agEnvCacheK2 -match 'STRIDE_OPEN_WINDOW_MAX_AGE_SECS') {
+    Write-Host "  FAIL: 8k2 (D258): an injected record-namespace value reached the env cache" -ForegroundColor Red
+    $script:Fail++
+} else {
+    Write-Host "  PASS: 8k2 (D258): no injected record-namespace value reached the env cache" -ForegroundColor Green
+    $script:Pass++
+}
+Assert-Contains "8k2 (D258): the genuine seeded head record is untouched" `
+    "TASK_HEAD_REF_77=aaaa111genuine" $agEnvCacheK2
+Assert-Contains "8k2 (D258): a legitimate server key on the same env still lands" `
+    "GOAL_ID=7" $agEnvCacheK2
+
 # 8l: env value with an embedded newline reaches the section exactly (the
 # process env keeps the raw value; only the line-based cache copy collapses
 # it), and omitted keys are defined-but-empty in the section child even

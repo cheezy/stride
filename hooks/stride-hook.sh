@@ -3499,6 +3499,30 @@ extract_response_payload() {
 # (or retire a live one) and reach the same narrowing decision one step
 # earlier. Every client-owned family belongs in this list.
 #
+# (D258) TASK_HEAD_REF was the last family still outside this list, and it was
+# the one with the sharpest consequence. D226's reasoning — that server data
+# must not set record-namespace keys — applies to head refs at least as hard:
+# they define where a task's window CLOSES, so they drive the D236/D244
+# commit-attribution walk directly. And an injected one is durable in a way an
+# injected base ref is not: apply_env_lines appends, so the forged line wins on
+# a last-match read; record_task_head_ref only ever repairs the COMPLETING
+# task's own id, so a record forged for any OTHER id is never repaired; and
+# select_kept_window_records emits every surviving head line without per-key
+# dedup, so both the genuine and the forged line outlive the next claim.
+#
+# Not theoretical — demonstrated end to end. A synthetic complete response for
+# an OUTER task whose hooks[].env carried TASK_HEAD_REF_<nested_id> pointing at
+# the root commit planted a forged window head, and the outer's uploaded
+# snapshot then gained the nested task's file relative to an uninjected
+# control. TASK_OWNED_* and TASK_BASE_REF_* controls in the same env were
+# correctly dropped, which is exactly what made the asymmetry visible.
+#
+# With this clause every client-owned record family is fenced: the five
+# task_*_key families plus STRIDE_. What remains is the structural gap the
+# note above describes — a deny-list cannot cover a key nobody has thought of,
+# and PATH/BASH_ENV/IFS/GIT_SSH_COMMAND still pass — which is filed as D275
+# and deliberately out of scope here.
+#
 # (D273) STRIDE_ is fenced for the same reason one level up. The executor's own
 # tuning knobs are client-owned by definition — none is meant to arrive from the
 # server — and STRIDE_OPEN_WINDOW_MAX_AGE_SECS in particular decides the age
@@ -3536,7 +3560,7 @@ extract_hook_env() {
     | if type == "object" then . else {} end
     | to_entries[]
     | select(.key | test("^[A-Za-z_][A-Za-z0-9_]*$"))
-    | select(.key != "HOOK_NAME" and (.key | startswith("TASK_BASE_REF") | not) and (.key | startswith("TASK_OWNED") | not) and (.key | startswith("TASK_NARROWED") | not) and (.key | startswith("TASK_BASE_AT") | not) and (.key | startswith("STRIDE_") | not))
+    | select(.key != "HOOK_NAME" and (.key | startswith("TASK_BASE_REF") | not) and (.key | startswith("TASK_HEAD_REF") | not) and (.key | startswith("TASK_OWNED") | not) and (.key | startswith("TASK_NARROWED") | not) and (.key | startswith("TASK_BASE_AT") | not) and (.key | startswith("STRIDE_") | not))
     | .key + "=" + (.value | tostring | @sh)
   ' 2>/dev/null || true
 }

@@ -1157,7 +1157,15 @@ function Get-HookEnvFromPayload {
             # (D273) STRIDE_* is fenced alongside them: the executor's own
             # tuning knobs are client-owned by definition and none is meant to
             # arrive from the server.
-            if ($key -eq 'HOOK_NAME' -or $key -like 'TASK_BASE_REF*' -or $key -like 'TASK_OWNED*' -or $key -like 'TASK_NARROWED*' -or $key -like 'TASK_BASE_AT*' -or $key -like 'STRIDE_*') { continue }
+            # (D258) TASK_HEAD_REF completes the set: it was the last of the
+            # five client-owned record families left unfenced on both sides.
+            # A forged head ref defines where a task's window closes, so it
+            # steers commit attribution — and it is durable, because a record
+            # forged for a task OTHER than the completing one is never
+            # repaired. Fenced here for parity even though this port
+            # implements none of the window-attribution subsystem, so the two
+            # scripts declare the same client-owned namespace.
+            if ($key -eq 'HOOK_NAME' -or $key -like 'TASK_BASE_REF*' -or $key -like 'TASK_HEAD_REF*' -or $key -like 'TASK_OWNED*' -or $key -like 'TASK_NARROWED*' -or $key -like 'TASK_BASE_AT*' -or $key -like 'STRIDE_*') { continue }
             $envMap[$key] = [string]$prop.Value
         }
         break

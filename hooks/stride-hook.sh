@@ -3565,21 +3565,104 @@ extract_hook_env() {
   ' 2>/dev/null || true
 }
 
-# Export assignment lines into the running shell and append them to the env
+# Export assignment lines into the running shell and write them to the env
 # cache (best-effort) so the values survive for follow-up agent commands.
 # Every line is KEY='escaped-value' (see extract_hook_env / sq_escape), so
-# the eval is confined to plain assignments. Appending — not rewriting — is
-# deliberate: sourcing is last-wins, and a line-based rewrite would corrupt
-# values with embedded newlines. The next claim truncates the cache anyway,
-# bounding growth. Never echoes values to stdout/stderr (they may contain
-# task descriptions or other sensitive content).
+# the eval is confined to plain assignments. Never echoes values to
+# stdout/stderr (they may contain task descriptions or other sensitive
+# content).
+#
+# (D260) This used to APPEND unconditionally, and the comment defending that
+# gave two reasons which no longer hold:
+#
+#   "a line-based rewrite would corrupt values with embedded newlines" — true
+#   of a LINE-based rewrite, which is why the collapse below is quote-aware
+#   instead (the same scanner D257 and D259 use). That objection was correct
+#   and is now answered rather than ignored.
+#
+#   "the next claim truncates the cache anyway, bounding growth" — too coarse.
+#   The claim truncates, then this function appends in the SAME invocation, so
+#   a single parseable claim ends with two lines per identity key: the rewrite
+#   wrote the data block's values, this wrote the env block's. Measured: with
+#   data status=doing/title="Task title in data" and hook.env
+#   TASK_STATUS=ready/TASK_TITLE="…(stale)", grep -m1 returns the data values
+#   and sourcing returns the env values, in ONE run. And within a claim window
+#   nothing truncates at all, so every later post hook appends another copy —
+#   measured going 2 → 3 → 4 lines for TASK_TITLE across two before_review
+#   invocations. Growth is bounded only across claims, not within a window.
+#
+# WHICH WRITER WINS: the forwarded env block, and that is a deliberate choice
+# rather than a consequence. The eval above runs after the cache load, so the
+# env value is already what the ## before_doing section receives in its
+# process env — verified by running a skewed claim and reading the section's
+# own stdout. Making the cache agree therefore changes no behaviour any
+# section can observe; the alternative the defect proposed, skipping the
+# forward for keys the rewrite already wrote, would have flipped the value the
+# section sees, which its own pitfall forbids. So: last write wins, exactly as
+# sourcing already resolved it, now with one line to read instead of two that
+# disagree.
+#
+# Scope is the keys THIS call writes. Every other line in the cache is passed
+# through untouched, including all five per-task record families — collapsing
+# those would reopen D226/D268/D273.
 apply_env_lines() {
-  local _lines="$1"
+  local _lines="$1" _keys _rewritten
   [ -n "$_lines" ] || return 0
   set -a
   eval "$_lines" 2>/dev/null || true
   set +a
-  printf '%s\n' "$_lines" >> "$ENV_CACHE" 2>/dev/null || true
+
+  # The keys this call is writing — read only from record-START lines, so a
+  # continuation line inside a multi-line value can never be mistaken for a key.
+  # Emitted SPACE-separated, not newline-separated, because awk's -v cannot
+  # carry an embedded newline: with one key a newline-joined list happens to
+  # work and with two it silently breaks, so the collapse would have been a
+  # no-op on exactly the multi-key case it exists for. Key names are
+  # [A-Za-z0-9_] (extract_hook_env's own test enforces it), so a space is an
+  # unambiguous delimiter.
+  _keys=$(printf '%s\n' "$_lines" | awk -v q="'" '
+    function scan(s,   i, c) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) { if (c == q) inq = 0 }
+        else if (esc) { esc = 0 }
+        else if (c == "\\") { esc = 1 }
+        else if (c == q) { inq = 1 }
+      }
+    }
+    BEGIN { inq = 0; esc = 0 }
+    { if (!inq && index($0, "=") > 1) printf "%s ", substr($0, 1, index($0, "=") - 1); scan($0) }
+  ' 2>/dev/null || true)
+
+  # Drop this call's keys from the cache, then re-append — one record per key,
+  # carrying the value just exported. Fails closed: if the scan cannot parse
+  # the cache (unbalanced quoting, or no awk) it falls back to the historical
+  # append, which duplicates rather than risking a dropped record.
+  if [ -n "$_keys" ] && [ -f "$ENV_CACHE" ] && _rewritten=$(awk -v q="'" -v keys="$_keys" '
+    function scan(s,   i, c) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) { if (c == q) inq = 0 }
+        else if (esc) { esc = 0 }
+        else if (c == "\\") { esc = 1 }
+        else if (c == q) { inq = 1 }
+      }
+    }
+    BEGIN { inq = 0; esc = 0; drop = 0; n = split(keys, k, " "); for (i = 1; i <= n; i++) if (k[i] != "") kill[k[i]] = 1 }
+    {
+      if (!inq) { drop = (index($0, "=") > 1 && (substr($0, 1, index($0, "=") - 1) in kill)) }
+      scan($0)
+      if (!drop) print
+    }
+    END { if (inq) exit 1 }
+  ' "$ENV_CACHE" 2>/dev/null); then
+    {
+      [ -n "$_rewritten" ] && printf '%s\n' "$_rewritten"
+      printf '%s\n' "$_lines"
+    } | write_env_cache || true
+  else
+    printf '%s\n' "$_lines" >> "$ENV_CACHE" 2>/dev/null || true
+  fi
 }
 
 # after_goal env: export what the server supplied, default every documented
@@ -3638,9 +3721,11 @@ ${_key}=''"
   # fallback above, so the guard ran only when that fallback fired.
   #
   # (D257) Two geometries stayed one response-shape away from that fix, and
-  # apply_env_lines is why: it APPENDS every line, supplied or defaulted, on
-  # every call. So within a single claim window, where no claim intervenes to
-  # truncate the cache:
+  # apply_env_lines was why: it APPENDED every line, supplied or defaulted, on
+  # every call. (D260 has since made it replace-in-place for the keys each call
+  # writes, so that append no longer happens — the history is kept because it
+  # is what these two geometries were.) So within a single claim window, where
+  # no claim intervenes to truncate the cache:
   #   1. Run 1 establishes GOAL_ID='7'. Run 2 omits both the GOAL_ID env key
   #      and data.parent_id, so the defaults loop above appends GOAL_ID=''
   #      AFTER the real value and the fallback never runs to clean it up.
@@ -3666,16 +3751,26 @@ ${_key}=''"
   # `set -u` section can reference it) -- and it is also what stops a previous
   # run's value from surviving into a run for a different goal.
   #
-  # Scope is exactly these four keys. apply_env_lines stays append-only for
-  # everything else and for every other hook: BOARD_*, COLUMN_* and AGENT_NAME
-  # ride the same after_goal env and are deliberately untouched here.
+  # Scope is exactly these four keys: BOARD_*, COLUMN_* and AGENT_NAME ride the
+  # same after_goal env and are deliberately untouched HERE.
+  #
+  # (D260) This block is NOT redundant with apply_env_lines' own collapse, and
+  # the reason is the parent-id fallback above. apply_env_lines collapses the
+  # keys IT was handed, but the fallback can set GOAL_ID afterwards — so
+  # without this block that later value would be appended beside the forwarded
+  # one. This block also emits all four keys from the exported values, which is
+  # what makes an omitted key resolve to the defaults loop's empty string
+  # rather than surviving from a previous run. Keys apply_env_lines never
+  # received are exactly the ones it cannot collapse.
   #
   # THE FILTER IS QUOTE-AWARE, AND IT HAS TO BE. A plain `grep -v '^KEY='` is
   # what D245 used, and it was safe there only because GOAL_ID is always a
   # numeric id. GOAL_TITLE and GOAL_DESCRIPTION are free-form and routinely
   # span lines, so a line-based filter deletes the middle of a value instead of
-  # a record — which is exactly the corruption apply_env_lines' own comment
-  # says is why it appends rather than rewrites. Test 10l pins the adversarial
+  # a record — the corruption apply_env_lines' comment used to cite as its
+  # reason for appending rather than rewriting (D260 answered that objection by
+  # making its own collapse quote-aware rather than by ignoring it). Test 10l
+  # pins the adversarial
   # shape deliberately: a GOAL_TITLE whose value contains a line reading
   # `GOAL_IDENTIFIER=sneaky`. Extending D245's idiom to all four keys as
   # literally specified would have silently truncated that value.

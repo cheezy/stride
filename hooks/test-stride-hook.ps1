@@ -2601,6 +2601,89 @@ TASK_NARROWED_77=yes
         "$(@($cacheK | Where-Object { $_ -match 'deadbeef' }).Count)"
     Assert-Eq "10k (D259): TASK_BASE_REF_OWNER is stripped" "0" `
         "$(@($cacheK | Where-Object { $_ -match '^TASK_BASE_REF_OWNER=' }).Count)"
+
+    # 10l (D260): mirrors bash 14q. One parseable claim wrote every identity key
+    # twice — the rewrite from the data block, then Set-HookEnv's append from
+    # the env block — so a first-match reader and a sourcing reader disagreed
+    # under a data-vs-env skew. The forwarded env block wins, because that is
+    # already what the export puts in the section's process env; only the cache
+    # stops contradicting itself.
+    $brL = New-GitRepo -Name 'g10-d260-skew'
+    # New-GitRepo's before_doing just echoes "claimed"; this case needs a
+    # section that prints the values under test, so the pitfall assertion below
+    # can read what the section actually received rather than inferring it.
+    Set-Content -Path (Join-Path $brL '.stride.md') -Value @'
+## before_doing
+```bash
+echo "s=[$TASK_STATUS] t=[$TASK_TITLE]"
+```
+
+## before_review
+```bash
+true
+```
+'@ -Encoding UTF8
+    $claimL = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = (@{
+            data = @{ id = 42; identifier = 'W42'; title = 'Task title in data'; status = 'doing'; complexity = 'small'; priority = 'high' }
+            hook = @{ name = 'before_doing'; env = @{ TASK_STATUS = 'ready'; TASK_TITLE = 'Task title in env (stale)'; TASK_DESCRIPTION = 'only in env' } }
+        } | ConvertTo-Json -Depth 8 -Compress); stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Depth 8 -Compress
+    $r = Invoke-HookScript -InputJson $claimL -Phase 'post' -ProjectDir $brL
+    Assert-Exit "10l (D260): skewed parseable claim exits 0" 0 $r.ExitCode
+    $cacheL = @(Get-Content -Path (Join-Path $brL '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    foreach ($k in @('TASK_ID', 'TASK_IDENTIFIER', 'TASK_TITLE', 'TASK_STATUS', 'TASK_COMPLEXITY', 'TASK_PRIORITY')) {
+        Assert-Eq "10l (D260): exactly one $k line after one parseable claim" "1" `
+            "$(@($cacheL | Where-Object { $_ -match "^$k=" }).Count)"
+    }
+    Assert-Eq "10l (D260): the surviving value is the forwarded env block's" "TASK_TITLE=Task title in env (stale)" `
+        "$(@($cacheL | Where-Object { $_ -match '^TASK_TITLE=' }) | Select-Object -First 1)"
+    Assert-Eq "10l (D260): a key only the env supplies is still forwarded, exactly once" "1" `
+        "$(@($cacheL | Where-Object { $_ -match '^TASK_DESCRIPTION=' }).Count)"
+    Assert-Eq "10l (D260): the per-task base record is untouched" "1" `
+        "$(@($cacheL | Where-Object { $_ -match '^TASK_BASE_REF_42=' }).Count)"
+    # The pitfall, pinned on this port too: only the cache line count may
+    # change, never the value the section receives in its process env.
+    Assert-Contains "10l (D260): the section still receives the forwarded env values, unchanged" `
+        "s=[ready] t=[Task title in env (stale)]" $r.Stdout
+    # And the accumulation the sh side measured at 2 -> 3 -> 4: a later post
+    # hook in the same window must not add another copy.
+    $completeL = @{
+        tool_input = @{ command = 'curl -X PATCH https://stride.example.com/api/tasks/42/complete' }
+        tool_response = @{ stdout = (@{
+            data = @{ id = 42 }
+            hooks = @(@{ name = 'before_review'; env = @{ TASK_ID = '42'; TASK_TITLE = 'Task title in env (stale)' } })
+        } | ConvertTo-Json -Depth 8 -Compress); stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Depth 8 -Compress
+    $null = Invoke-HookScript -InputJson $completeL -Phase 'post' -ProjectDir $brL
+    $null = Invoke-HookScript -InputJson $completeL -Phase 'post' -ProjectDir $brL
+    $cacheL2 = @(Get-Content -Path (Join-Path $brL '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "10l (D260): later post hooks in the same window do not accumulate copies" "1" `
+        "$(@($cacheL2 | Where-Object { $_ -match '^TASK_TITLE=' }).Count)"
+
+    # 10m (D260): mirrors bash 14r — testing_strategy edge case (b). An env
+    # block supplying NO TASK_* keys must leave the rewrite-only path exactly
+    # as it was. This needs its own ps1 case rather than inheriting the sh one,
+    # because the guard against a blanket sweep is a DIFFERENT mechanism here:
+    # Set-HookEnv keys its filter on $EnvMap.Keys, where the bash twin uses a
+    # quote-aware scan of the lines it was handed.
+    $brM = New-GitRepo -Name 'g10-d260-noTaskEnv'
+    $claimM = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = (@{
+            data = @{ id = 43; identifier = 'W43'; title = 'Only in data'; status = 'doing'; complexity = 'small'; priority = 'low' }
+            hook = @{ name = 'before_doing'; env = @{ BOARD_NAME = 'Stride Development'; AGENT_NAME = 'Someone' } }
+        } | ConvertTo-Json -Depth 8 -Compress); stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Depth 8 -Compress
+    $null = Invoke-HookScript -InputJson $claimM -Phase 'post' -ProjectDir $brM
+    $cacheM = @(Get-Content -Path (Join-Path $brM '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "10m (D260): rewrite-only path still writes exactly one TASK_TITLE line" "1" `
+        "$(@($cacheM | Where-Object { $_ -match '^TASK_TITLE=' }).Count)"
+    Assert-Eq "10m (D260): and it keeps the data block's value when the env supplies none" "TASK_TITLE=Only in data" `
+        "$(@($cacheM | Where-Object { $_ -match '^TASK_TITLE=' }) | Select-Object -First 1)"
+    Assert-Contains "10m (D260): a non-TASK key the env did supply still lands" `
+        "BOARD_NAME=Stride Development" "$($cacheM -join "`n")"
 }
 
 # ============================================================

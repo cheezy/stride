@@ -1301,10 +1301,33 @@ function Set-HookEnv {
         }
         $cacheLines += "$key=" + ($value -replace "`r?`n", ' ')
     }
+    # (D260) Replace-in-place for the keys THIS call writes, rather than a bare
+    # append. Appending left two lines per identity key after a single
+    # parseable claim — the rewrite wrote the data block's values, this wrote
+    # the env block's — so a first-match reader and a sourcing reader
+    # disagreed whenever the two blocks skewed, and within a claim window every
+    # later post hook added another copy. The forwarded env value wins, which
+    # is what the export above has already put in the process env, so no
+    # section can observe the change; only the cache stops contradicting
+    # itself. Keys this call does not write are passed through untouched,
+    # including all five per-task record families.
+    #
+    # A plain line filter is correct here, unlike in the bash twin, because the
+    # newline flattening above means a cache line on this side is always a
+    # whole record. Best-effort throughout: on any failure the export has
+    # already succeeded and the previous cache is left intact.
     try {
-        Add-Content -Path $EnvCache -Value $cacheLines -Encoding UTF8
+        $written = @($EnvMap.Keys)
+        $kept = @()
+        if (Test-Path $EnvCache) {
+            $kept = @(Get-Content -Path $EnvCache -Encoding UTF8 | Where-Object {
+                $idx = $_.IndexOf('=')
+                $idx -lt 1 -or ($written -notcontains $_.Substring(0, $idx))
+            })
+        }
+        Write-EnvCache -Lines ($kept + $cacheLines) | Out-Null
     } catch {
-        # Best-effort cache append — export already succeeded.
+        # Best-effort cache write — export already succeeded.
     }
 }
 
@@ -1338,12 +1361,20 @@ function Set-AfterGoalEnv {
     }
 
     # (D257) Drop any GOAL_* lines a PREVIOUS after_goal run in this same claim
-    # window left behind, so the append below leaves exactly one record per key.
-    # Set-HookEnv appends unconditionally, and nothing truncates the cache
+    # window left behind, so the write below leaves exactly one record per key.
+    # Set-HookEnv appended unconditionally then, and nothing truncates the cache
     # between two after_goal runs, so without this a first-match reader and a
     # sourcing reader disagree — and worse, a first-match reader stitches this
     # run's GOAL_ID to the previous run's GOAL_IDENTIFIER, naming the wrong
     # goal in whatever the section builds.
+    #
+    # (D260) Set-HookEnv now replaces in place for the keys each call writes,
+    # so this filter is largely subsumed by it. It is retained rather than
+    # deleted because it is not fully redundant: the parent-id fallback above
+    # can set GOAL_ID, and this runs before the write, so the two together
+    # still guarantee one record per key on every path. Retained also because
+    # deleting a guard whose replacement lives in a shared function is how a
+    # later refactor of that function silently reopens D257.
     #
     # This port's exposure is only ACROSS runs: Get-HookEnvFromPayload builds
     # one map per run and a hashtable cannot hold a duplicate key, so no single
@@ -1356,9 +1387,19 @@ function Set-AfterGoalEnv {
     # cannot be split across lines for the filter to corrupt. Do not copy this
     # simpler shape back into stride-hook.sh, which needs quote-state parsing.
     #
-    # Scoped to the four GOAL_* keys: every other key Set-HookEnv writes, on
-    # this hook and every other, keeps its append-only behaviour. Never move
-    # this into Set-HookEnv, which is shared by all five hooks.
+    # Scoped to the four GOAL_* keys.
+    #
+    # (D260) This paragraph used to end "Never move this into Set-HookEnv,
+    # which is shared by all five hooks" — and D260 then put an equivalent
+    # collapse there deliberately, so the prohibition is amended rather than
+    # left standing against the code. What it was protecting was correct: a
+    # BLANKET rewrite in a function every hook shares would have been wrong.
+    # What Set-HookEnv does now is narrower — it replaces only the keys the
+    # calling hook is itself writing in that call, so every other key, and
+    # every other hook's keys, are still passed through untouched. That is the
+    # distinction that makes the shared placement safe, and it is why the
+    # duplicate-per-post-hook accumulation could be fixed once instead of
+    # per-hook.
     # Routed through Write-EnvCache, not a direct Set-Content, for the same
     # reason every other rewrite on this side is: it stages to a temp file and
     # moves it into place, so a failure or a kill inside the write window

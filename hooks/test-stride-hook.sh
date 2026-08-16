@@ -4431,6 +4431,91 @@ STRIDE
   done
   assert_contains "14p (D259): and it writes the new task's identity" "TASK_ID='42'" "$D259_CACHE_P"
   rm -rf "$D259_DIR_P"
+
+  # 14q (D260): one parseable claim used to write every identity key TWICE —
+  # once from the identity rewrite reading the data block, then again from the
+  # hook-env forwarding append. Under a data-vs-env skew that left grep -m1 and
+  # sourcing disagreeing about the current task's own status and title, in ONE
+  # run. THE DECIDED WINNER IS THE FORWARDED ENV BLOCK, and this pins it: that
+  # is already the value the ## before_doing section receives in its process
+  # env (the forwarding eval runs after the cache load), so recording it
+  # changes nothing a section can observe — the task's own pitfall forbids
+  # changing that value, which is why the alternative fix shape (skip
+  # forwarding the duplicated keys) was rejected as inadmissible rather than
+  # merely less tidy.
+  D260_DIR=$(mktemp -d)
+  D260_STUB=$(mktemp -d)
+  make_curl_stub "$D260_STUB" "$D260_DIR/curl-call.txt" 0
+  (
+    cd "$D260_DIR" || exit 1
+    git init -q; git config user.email t@t.local; git config user.name t
+    printf '.stride.md\n.stride-env-cache\ncurl-call.txt\n' > .gitignore
+    printf '## before_doing\n```bash\necho "s=[$TASK_STATUS] t=[$TASK_TITLE]"\n```\n\n## before_review\n```bash\ntrue\n```\n' > .stride.md
+    echo v1 > f.txt; git add -A > /dev/null; git commit -q -m v1
+    mkdir -p .stride
+  )
+  D260_CLAIM=$(jq -nc --arg cmd "curl -X POST https://stride.example.com/api/tasks/claim" \
+    --arg out '{"data":{"id":42,"identifier":"W42","title":"Task title in data","status":"doing","complexity":"small","priority":"high"},"hook":{"name":"before_doing","env":{"TASK_STATUS":"ready","TASK_TITLE":"Task title in env (stale)","TASK_DESCRIPTION":"only in env"}}}' \
+    '{tool_input:{command:$cmd},tool_response:{stdout:$out}}')
+  D260_OUT=$(echo "$D260_CLAIM" | CLAUDE_PROJECT_DIR="$D260_DIR" bash "$HOOK_SCRIPT" post 2>&1)
+  D260_CACHE=$(cat "$D260_DIR/.stride-env-cache" 2>/dev/null)
+  for _k in TASK_ID TASK_IDENTIFIER TASK_TITLE TASK_STATUS TASK_COMPLEXITY TASK_PRIORITY; do
+    assert_eq "14q (D260): exactly one $_k line after one parseable claim" "1" \
+      "$(printf '%s\n' "$D260_CACHE" | grep -c "^${_k}=" || true)"
+  done
+  assert_eq "14q (D260): the surviving value is the forwarded env block's, and first-match now agrees with sourcing" \
+    "TASK_TITLE='Task title in env (stale)'" \
+    "$(printf '%s\n' "$D260_CACHE" | grep -m1 '^TASK_TITLE=')"
+  # The pitfall: the section's process env must be untouched by this change.
+  assert_contains "14q (D260): the section still receives the forwarded env values, unchanged" \
+    "s=[ready] t=[Task title in env (stale)]" "$D260_OUT"
+  # Edge case (a): a key the rewrite never writes must still be forwarded, once.
+  assert_eq "14q (D260): a key only the env supplies is still forwarded, exactly once" "1" \
+    "$(printf '%s\n' "$D260_CACHE" | grep -c '^TASK_DESCRIPTION=' || true)"
+  # The record families must pass through untouched — collapsing them would
+  # reopen D226/D268/D273.
+  assert_eq "14q (D260): the per-task base record is untouched" "1" \
+    "$(printf '%s\n' "$D260_CACHE" | grep -c '^TASK_BASE_REF_42=' || true)"
+  # The broader finding this fix also closes: duplicates ACCUMULATED across
+  # every post hook in a claim window, not just the two written at claim.
+  # Measured pre-fix at 2 -> 3 -> 4 lines for TASK_TITLE across two
+  # before_review invocations, bounded only by the next claim's truncation.
+  D260_COMPLETE=$(jq -nc --arg cmd "curl -X PATCH https://stride.example.com/api/tasks/42/complete" \
+    --arg out '{"data":{"id":42},"hooks":[{"name":"before_review","env":{"TASK_ID":"42","TASK_TITLE":"Task title in env (stale)"}}]}' \
+    '{tool_input:{command:$cmd},tool_response:{stdout:$out}}')
+  echo "$D260_COMPLETE" | CLAUDE_PROJECT_DIR="$D260_DIR" PATH="$D260_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  echo "$D260_COMPLETE" | CLAUDE_PROJECT_DIR="$D260_DIR" PATH="$D260_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  D260_CACHE2=$(cat "$D260_DIR/.stride-env-cache" 2>/dev/null)
+  assert_eq "14q (D260): later post hooks in the same window do not accumulate copies" "1" \
+    "$(printf '%s\n' "$D260_CACHE2" | grep -c '^TASK_TITLE=' || true)"
+  rm -rf "$D260_DIR" "$D260_STUB"
+
+  # 14r (D260): edge case (b) — an env block supplying NO TASK_* keys leaves the
+  # rewrite-only path exactly as it was. The collapse must be driven by the
+  # keys a call actually writes, never by a blanket TASK_* sweep, or a claim
+  # whose env carries only BOARD_*/AGENT_NAME would rewrite identity lines it
+  # was never given values for.
+  D260_DIR_B=$(mktemp -d)
+  (
+    cd "$D260_DIR_B" || exit 1
+    git init -q; git config user.email t@t.local; git config user.name t
+    printf '.stride.md\n.stride-env-cache\n' > .gitignore
+    printf '## before_doing\n```bash\ntrue\n```\n' > .stride.md
+    echo v1 > f.txt; git add -A > /dev/null; git commit -q -m v1
+    mkdir -p .stride
+  )
+  D260_CLAIM_B=$(jq -nc --arg cmd "curl -X POST https://stride.example.com/api/tasks/claim" \
+    --arg out '{"data":{"id":43,"identifier":"W43","title":"Only in data","status":"doing","complexity":"small","priority":"low"},"hook":{"name":"before_doing","env":{"BOARD_NAME":"Stride Development","AGENT_NAME":"Someone"}}}' \
+    '{tool_input:{command:$cmd},tool_response:{stdout:$out}}')
+  echo "$D260_CLAIM_B" | CLAUDE_PROJECT_DIR="$D260_DIR_B" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  D260_CACHE_B=$(cat "$D260_DIR_B/.stride-env-cache" 2>/dev/null)
+  assert_eq "14r (D260): rewrite-only path still writes exactly one TASK_TITLE line" "1" \
+    "$(printf '%s\n' "$D260_CACHE_B" | grep -c '^TASK_TITLE=' || true)"
+  assert_eq "14r (D260): and it keeps the data block's value when the env supplies none" \
+    "TASK_TITLE='Only in data'" "$(printf '%s\n' "$D260_CACHE_B" | grep -m1 '^TASK_TITLE=')"
+  assert_contains "14r (D260): a non-TASK key the env did supply still lands" \
+    "BOARD_NAME=" "$D260_CACHE_B"
+  rm -rf "$D260_DIR_B"
 fi
 
 # ============================================================

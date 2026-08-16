@@ -6633,7 +6633,7 @@ fi
 # durable case — record_task_head_ref only ever repairs the completing task's
 # own id, so another id's forged record is never repaired. The own-id case is
 # the one where a later repair WOULD overwrite the injection, and the strategy
-# asks that the filter block the append anyway: relying on a later write to
+# asks that the filter block the write anyway: relying on a later write to
 # undo an injection means the forged value is live in the window between them,
 # and the repair only happens at all if the completion reaches its capture.
 # The filter is prefix-based and id-blind, so this cannot regress

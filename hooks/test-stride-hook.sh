@@ -4287,6 +4287,150 @@ STRIDE
   fi
   assert_contains "14n: a real changed file is still captured" "a.txt" "$CF_OUT"
   rm -rf "$CF_DIR"
+
+  # 14o (D259): the unparseable-claim branch must give the SAME window hygiene
+  # the parseable one does. It was a four-key deny-list while its own comment
+  # said "keep the existing TASK_ identity lines", so GOAL_*, BOARD_*, COLUMN_*
+  # and AGENT_NAME crossed the window boundary. A fresh task window then opened
+  # with the PREVIOUS goal's identity exported to every hook and agent command
+  # in it. Nothing pinned either path's cleared set before this.
+  #
+  # The seeded cache is deliberately hostile: two contradictory GOAL_TITLE
+  # lines (so a survivor cannot be explained as "the one true value"), a
+  # multi-line TASK_DESCRIPTION that is DROPPED and a multi-line TASK_TITLE
+  # that is KEPT — both with continuations that read as cache lines, so the
+  # scan is exercised in both directions — and one record from each of the five
+  # per-task families that MUST survive: stripping TASK_BASE_AT_ or
+  # TASK_NARROWED_ would reopen the D273 defects.
+  #
+  # The strategy's other edge case, "unparseable claim with NO prior cache at
+  # all", is already pinned by 14h above: it removes the cache, drives an
+  # unparseable claim, and asserts no spurious TASK_ identity is invented. That
+  # geometry never enters this branch (the `elif` requires the file to exist),
+  # so it is cited rather than duplicated here.
+  D259_DIR=$(mktemp -d)
+  cat > "$D259_DIR/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "claimed"
+```
+STRIDE
+  cat > "$D259_DIR/.stride-env-cache" << 'CACHE'
+TASK_ID='41'
+TASK_IDENTIFIER='W41'
+GOAL_ID='6'
+GOAL_TITLE='Alpha Goal'
+GOAL_TITLE='Beta Goal'
+BOARD_ID='3'
+BOARD_NAME='Old Board'
+COLUMN_NAME='Doing'
+AGENT_NAME='Someone Else'
+TASK_DESCRIPTION='line1
+GOAL_ID=999
+line3'
+TASK_TITLE='kept1
+GOAL_ID=888
+kept3'
+TASK_BASE_REF='deadbeef'
+TASK_BASE_REF_TRUSTED='1'
+TASK_BASE_REF_OWNER='41'
+TASK_BASE_REF_UNPROVEN='1'
+TASK_BASE_REF_77='aaaa111'
+TASK_HEAD_REF_77='bbbb222'
+TASK_OWNED_77='cccc333'
+TASK_BASE_AT_77='1786846260'
+TASK_NARROWED_77='yes'
+CACHE
+  D259_CLAIM='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"Internal Server Error","stderr":"","interrupted":false}}'
+  echo "$D259_CLAIM" | CLAUDE_PROJECT_DIR="$D259_DIR" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  D259_CACHE=$(cat "$D259_DIR/.stride-env-cache" 2>/dev/null)
+  # GOAL_ID needs a different oracle from its siblings, and the reason is the
+  # point of the fixture: the KEPT TASK_TITLE value contains a line reading
+  # `GOAL_ID=888`, so `grep -c '^GOAL_ID='` legitimately returns 1 — that hit
+  # is DATA inside a record, not a record. Counting lines would therefore pin
+  # the wrong property and fail for the right behaviour. Sourcing asks the
+  # question that actually matters: is there a GOAL_ID *record*? A decoy inside
+  # a single-quoted value cannot set one.
+  assert_eq "14o (D259): no stale GOAL_ID record survives, and a decoy inside a kept value is not one" \
+    "UNSET" \
+    "$(set -a; . "$D259_DIR/.stride-env-cache" 2>/dev/null; set +a; printf '%s' "${GOAL_ID:-UNSET}")"
+  for _k in GOAL_TITLE BOARD_ID BOARD_NAME COLUMN_NAME AGENT_NAME; do
+    assert_eq "14o (D259): no stale $_k survives an unparseable claim" "0" \
+      "$(printf '%s\n' "$D259_CACHE" | grep -c "^${_k}=" || true)"
+  done
+  # The branch's stated purpose — TASK_ID recovery — must still hold.
+  assert_contains "14o (D259): TASK_ID still recoverable, the branch's stated purpose" \
+    "TASK_ID='41'" "$D259_CACHE"
+  # All five per-task record families must survive; two of them are load-bearing
+  # for D273 and stripping them would silently stop the D255 narrowing.
+  for _k in TASK_BASE_REF_77 TASK_HEAD_REF_77 TASK_OWNED_77 TASK_BASE_AT_77 TASK_NARROWED_77; do
+    assert_contains "14o (D259): the $_k attribution record survives the clear" \
+      "$_k=" "$D259_CACHE"
+  done
+  # The shared base keys keep being stripped, exactly as before.
+  for _k in TASK_BASE_REF TASK_BASE_REF_TRUSTED TASK_BASE_REF_OWNER TASK_BASE_REF_UNPROVEN; do
+    assert_eq "14o (D259): $_k is still stripped" "0" \
+      "$(printf '%s\n' "$D259_CACHE" | grep -c "^${_k}=" || true)"
+  done
+  # The multi-line record is dropped as ONE unit — no orphaned continuation
+  # line, which a line-based allow-list would have left behind.
+  assert_eq "14o (D259): a dropped multi-line record leaves no orphan continuation" "0" \
+    "$(printf '%s\n' "$D259_CACHE" | grep -c 'line3' || true)"
+  # The other half of the quote-awareness rationale, and the DANGEROUS one: a
+  # KEPT record whose value spans lines must survive whole. A naive line filter
+  # keeps the first line and drops the rest, leaving an unbalanced single quote
+  # in a file this script sources with `set -a` a few lines later — so the
+  # failure mode is not a lost title, it is a cache that will not source.
+  assert_eq "14o (D259): a KEPT multi-line record survives whole, and the cache still sources" \
+    "kept1|GOAL_ID=888|kept3" \
+    "$(set -a; . "$D259_DIR/.stride-env-cache" 2>/dev/null; set +a; printf '%s' "${TASK_TITLE:-UNSET}" | tr '\n' '|')"
+  rm -rf "$D259_DIR"
+
+  # 14o2 (D259): the fail-closed path. The scan assumes every line is
+  # sq_escape/@sh output with balanced quoting. If that ever stops holding, a
+  # desynchronised scanner could drop a record it could not parse — so it exits
+  # non-zero on EOF-inside-a-value and the branch falls back to the previous
+  # deny-list, which over-preserves (the very bug D259 fixes) rather than
+  # losing data. Over-preserving is recoverable; a dropped attribution record
+  # is not. The seeded cache carries a deliberately unbalanced line.
+  D259_DIR_F=$(mktemp -d)
+  cat > "$D259_DIR_F/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "claimed"
+```
+STRIDE
+  printf "TASK_ID='41'\nGOAL_ID='6'\nTASK_TITLE='unterminated\n" > "$D259_DIR_F/.stride-env-cache"
+  echo "$D259_CLAIM" | CLAUDE_PROJECT_DIR="$D259_DIR_F" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  D259_CACHE_F=$(cat "$D259_DIR_F/.stride-env-cache" 2>/dev/null)
+  assert_contains "14o2 (D259): an unbalanced cache falls back to the deny-list, keeping TASK_ID" \
+    "TASK_ID='41'" "$D259_CACHE_F"
+  assert_contains "14o2 (D259): the fallback over-preserves rather than dropping records it could not parse" \
+    "GOAL_ID='6'" "$D259_CACHE_F"
+  rm -rf "$D259_DIR_F"
+
+  # 14p (D259): the parseable-path control. The two branches are two ways of
+  # surviving the same event and owe the same guarantee, so the regression this
+  # pins is the pair diverging again — in either direction.
+  D259_DIR_P=$(mktemp -d)
+  cat > "$D259_DIR_P/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "claimed"
+```
+STRIDE
+  printf "GOAL_ID='6'\nBOARD_ID='3'\nAGENT_NAME='Someone Else'\n" > "$D259_DIR_P/.stride-env-cache"
+  D259_OK=$(jq -nc --arg cmd "curl -X POST https://stride.example.com/api/tasks/claim" \
+    --arg out '{"data":{"id":42,"identifier":"W42","title":"t","status":"in_progress","complexity":"small","priority":"high"}}' \
+    '{tool_input:{command:$cmd},tool_response:{stdout:$out}}')
+  echo "$D259_OK" | CLAUDE_PROJECT_DIR="$D259_DIR_P" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  D259_CACHE_P=$(cat "$D259_DIR_P/.stride-env-cache" 2>/dev/null)
+  for _k in GOAL_ID BOARD_ID AGENT_NAME; do
+    assert_eq "14p (D259): the parseable path also carries no stale $_k" "0" \
+      "$(printf '%s\n' "$D259_CACHE_P" | grep -c "^${_k}=" || true)"
+  done
+  assert_contains "14p (D259): and it writes the new task's identity" "TASK_ID='42'" "$D259_CACHE_P"
+  rm -rf "$D259_DIR_P"
 fi
 
 # ============================================================

@@ -2541,6 +2541,66 @@ echo "claimed"
     $cacheJ = Get-Content -Raw -Path (Join-Path $brJ '.stride-env-cache') -ErrorAction SilentlyContinue
     Assert-Contains "10j: id-only persisted payload caches the identifier" "TASK_IDENTIFIER=W99" $cacheJ
     Assert-Contains "10j: id-only persisted payload sets TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headJ" $cacheJ
+
+    # 10k (D259): mirrors bash 14o. This branch was a three-key deny-list while
+    # its own comment claimed to keep "TASK_ identity lines", so GOAL_*,
+    # BOARD_*, COLUMN_* and AGENT_NAME crossed the claim boundary and a fresh
+    # window opened carrying the previous goal's identity. It also never
+    # stripped TASK_BASE_REF_UNPROVEN, which the bash side has stripped since
+    # D226 — a divergence the deny-list shape hid.
+    #
+    # The seeded cache carries one record from each of the five per-task
+    # families, all of which must survive: stripping TASK_BASE_AT_ or
+    # TASK_NARROWED_ would reopen the defects D273 closed on the bash side, and
+    # the two ports must not disagree about what a claim window preserves.
+    $brK = New-GitRepo -Name 'g10-d259-hygiene'
+    Set-Content -Path (Join-Path $brK '.stride-env-cache') -Value @"
+TASK_ID=41
+TASK_IDENTIFIER=W41
+GOAL_ID=6
+GOAL_TITLE=Alpha Goal
+BOARD_ID=3
+BOARD_NAME=Old Board
+COLUMN_NAME=Doing
+AGENT_NAME=Someone Else
+TASK_BASE_REF=deadbeef
+TASK_BASE_REF_TRUSTED=1
+TASK_BASE_REF_OWNER=41
+TASK_BASE_REF_UNPROVEN=1
+TASK_BASE_REF_77=aaaa111
+TASK_HEAD_REF_77=bbbb222
+TASK_OWNED_77=cccc333
+TASK_BASE_AT_77=1786846260
+TASK_NARROWED_77=yes
+"@ -Encoding UTF8
+    $claimK = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = 'Internal Server Error'; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $claimK -Phase 'post' -ProjectDir $brK
+    Assert-Exit "10k (D259): unparseable claim over a polluted cache exits 0" 0 $r.ExitCode
+    $cacheK = @(Get-Content -Path (Join-Path $brK '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    foreach ($k in @('GOAL_ID', 'GOAL_TITLE', 'BOARD_ID', 'BOARD_NAME', 'COLUMN_NAME', 'AGENT_NAME')) {
+        Assert-Eq "10k (D259): no stale $k survives an unparseable claim" "0" `
+            "$(@($cacheK | Where-Object { $_ -match "^$k=" }).Count)"
+    }
+    Assert-Contains "10k (D259): TASK_ID still recoverable, the branch's stated purpose" `
+        "TASK_ID=41" "$($cacheK -join "`n")"
+    foreach ($k in @('TASK_BASE_REF_77', 'TASK_HEAD_REF_77', 'TASK_OWNED_77', 'TASK_BASE_AT_77', 'TASK_NARROWED_77')) {
+        Assert-Eq "10k (D259): the $k attribution record survives the clear" "1" `
+            "$(@($cacheK | Where-Object { $_ -match "^$k=" }).Count)"
+    }
+    # The shared base keys: assert on the stale VALUE, not on a line count.
+    # Unlike the bash twin, this port refreshes TASK_BASE_REF (and its trust
+    # marker) to current HEAD later in the SAME call — 10c pins that — so those
+    # keys are legitimately present afterwards, belonging to the NEW window. A
+    # zero-count assertion would therefore fail for the right behaviour. What
+    # must not survive is the PREVIOUS window's base, which is observable by
+    # value, and the owner stamp that would let a stripped cache still claim it.
+    Assert-Eq "10k (D259): the previous window's base value does not survive" "0" `
+        "$(@($cacheK | Where-Object { $_ -match 'deadbeef' }).Count)"
+    Assert-Eq "10k (D259): TASK_BASE_REF_OWNER is stripped" "0" `
+        "$(@($cacheK | Where-Object { $_ -match '^TASK_BASE_REF_OWNER=' }).Count)"
 }
 
 # ============================================================

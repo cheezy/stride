@@ -973,7 +973,45 @@ if ($HookName -eq 'before_doing') {
             # (D226) TASK_BASE_REF_OWNER goes with the base it stamps; the
             # per-task TASK_BASE_REF_<id> records are kept, since they belong
             # to tasks other than this claim.
-            $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' -and $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and $_ -notmatch '^TASK_BASE_REF_OWNER=' })
+            #
+            # (D259) An ALLOW-list, matching the bash twin. This was a
+            # three-key deny-list, so GOAL_*, BOARD_*, COLUMN_* and AGENT_NAME
+            # crossed the window boundary and a fresh task window opened with
+            # the previous goal's identity exported to every hook in it. It
+            # also missed TASK_BASE_REF_UNPROVEN, which the bash side had
+            # stripped since D226 — a divergence the deny-list shape hid and
+            # the allow-list removes by construction.
+            #
+            # Stated accurately: nothing refills those keys on THIS branch —
+            # it runs because the response did not parse, so the env-forwarding
+            # path yields nothing and AGENT_NAME/BOARD_*/COLUMN_* are simply
+            # ABSENT for the whole flaky window. They return on the next
+            # successful response, since all five hooks carry them. Absent is
+            # the point rather than a cost: a section should see nothing rather
+            # than the PREVIOUS window's board. GOAL_* is stronger still — it
+            # is supplied only on after_goal and never at claim time, so a
+            # survivor could not be corrected by any later response in this
+            # window.
+            #
+            # A plain line filter is correct here, unlike in the bash twin,
+            # because Set-HookEnv flattens newlines to spaces before writing —
+            # so a cache line on this side is always a whole record. Do not
+            # copy this simpler shape back into stride-hook.sh.
+            #
+            # NOTE this port's parseable branch above keeps only
+            # TASK_BASE_REF_<id>, so it drops FOUR of the five record families
+            # this branch preserves: TASK_HEAD_REF_<id> (D236, fenced by D258),
+            # TASK_OWNED_<id> (D255), and TASK_BASE_AT_<id>/TASK_NARROWED_<id>
+            # (D273). The two branches here therefore still disagree, in the
+            # opposite direction to the defect D259 fixes. None of those
+            # families has a reader on this port — the window-attribution
+            # subsystem was never ported — so the gap is latent, and it is a
+            # far larger port gap than this defect. Deliberately not fixed here.
+            $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object {
+                $_ -match '^TASK_(ID|IDENTIFIER|TITLE|STATUS|COMPLEXITY|PRIORITY)=' -or
+                ($_ -match '^TASK_(BASE_REF|HEAD_REF|OWNED|BASE_AT|NARROWED)_[A-Za-z0-9_]+=' -and
+                 $_ -notmatch '^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)=')
+            })
             if ($preserved.Count -gt 0) {
                 Write-EnvCache -Lines $preserved | Out-Null
             } else {

@@ -4182,8 +4182,78 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # to self-heal, leaving its retry to re-derive the D255 gate and narrow a
     # snapshot that captured wide. finalize_before_doing drops self's own
     # verdict on the proven path.
-    _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
-      -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_UNPROVEN=' "$ENV_CACHE" 2>/dev/null || true)
+    #
+    # (D259) This is an ALLOW-list, and it used to be a four-key deny-list —
+    # which meant the comment above and the code disagreed. The comment says
+    # "keep the existing TASK_ identity lines"; the code kept everything that
+    # was not one of four TASK_BASE_REF keys, so GOAL_*, BOARD_*, COLUMN_* and
+    # AGENT_NAME all crossed the window boundary. Measured: a cache holding
+    # GOAL_ID='6', two contradictory GOAL_TITLE lines and BOARD_ID='3' still
+    # held all four after an unparseable claim. A fresh task window then opened
+    # with the PREVIOUS goal's identity exported to every hook and agent
+    # command in it — a goal-status PATCH aimed at a goal this task does not
+    # belong to.
+    #
+    # The parseable branch above emits exactly the five per-task record
+    # families plus six fixed TASK_ identity keys, and nothing else. The two
+    # branches are two ways of surviving the same event, so they owe the same
+    # guarantee; this list is that branch's emitted set, which is why it is
+    # written as an allow-list rather than a deny-list with a fifth key added.
+    # A deny-list here also has to be extended every time a family is added and
+    # is silently wrong until someone notices — the accumulation that left
+    # TASK_HEAD_REF unfenced through three defects until D258.
+    #
+    # What clearing GOAL_*/BOARD_*/COLUMN_*/AGENT_NAME actually costs, stated
+    # accurately: on THIS branch nothing refills them. The branch runs because
+    # the response did not parse, so extract_hook_env yields nothing and
+    # apply_env_lines is a no-op — BOARD_*, COLUMN_*, AGENT_NAME,
+    # TASK_DESCRIPTION and TASK_NEEDS_REVIEW are simply ABSENT for the whole
+    # flaky window, including in the ## before_doing section that runs next.
+    # They return on the next successful API response, because all five hooks
+    # carry AGENT_NAME/BOARD_*/COLUMN_* in their env.
+    #
+    # That is the right trade, and absent is the point rather than a
+    # side-effect: a section reading BOARD_NAME during a flaky window should
+    # see nothing rather than the PREVIOUS window's board. GOAL_* is stronger
+    # still — it is supplied only on after_goal and never at claim time, so a
+    # surviving value could not be corrected by any later response in this
+    # window, which is why the parseable path already drops it.
+    #
+    # THE SCAN IS QUOTE-AWARE for the same reason D257's is: values reach this
+    # cache through apply_env_lines, TASK_DESCRIPTION routinely contains
+    # newlines, and a line-based allow-list would keep a record's first line
+    # and drop its continuations — or keep an orphaned continuation of a record
+    # it dropped. Records are identified by shell-quoting state; a line starts
+    # a record only when the scanner is outside quotes, and continuation lines
+    # inherit their record's decision. It fails closed: EOF while still inside
+    # a value means the sq_escape invariant was violated, so it falls back to
+    # the previous deny-list behaviour, which over-preserves (today's bug)
+    # rather than dropping a record it could not parse.
+    if ! _preserved=$(awk -v q="'" '
+      function scan(s,   i, c) {
+        for (i = 1; i <= length(s); i++) {
+          c = substr(s, i, 1)
+          if (inq) { if (c == q) inq = 0 }
+          else if (esc) { esc = 0 }
+          else if (c == "\\") { esc = 1 }
+          else if (c == q) { inq = 1 }
+        }
+      }
+      BEGIN { inq = 0; esc = 0; keep = 0 }
+      {
+        if (!inq) {
+          keep = ($0 ~ /^TASK_(ID|IDENTIFIER|TITLE|STATUS|COMPLEXITY|PRIORITY)=/) \
+            || ($0 ~ /^TASK_(BASE_REF|HEAD_REF|OWNED|BASE_AT|NARROWED)_[A-Za-z0-9_]+=/ \
+                && $0 !~ /^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)=/)
+        }
+        scan($0)
+        if (keep) print
+      }
+      END { if (inq) exit 1 }
+    ' "$ENV_CACHE" 2>/dev/null); then
+      _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
+        -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_UNPROVEN=' "$ENV_CACHE" 2>/dev/null || true)
+    fi
     if [ -n "$_preserved" ]; then
       printf '%s\n' "$_preserved" | write_env_cache || true
     else

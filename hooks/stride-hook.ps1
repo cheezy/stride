@@ -1060,7 +1060,8 @@ if (Test-Path $EnvCache) {
 # the `env` object from the hook entry of an intercepted response (singular
 # `.hook` on claim responses, `.hooks[]` on /complete and /mark_reviewed),
 # export every key into the Process environment (inherited by the bash -c
-# children that run the sections), and append it to the env cache so
+# children that run the sections), and write it to the env cache (D260:
+# replacing any prior record for the keys this call writes) so
 # follow-up agent commands (e.g. the after_goal PATCH) can still read the
 # values. Keys the server omits export as empty strings. Mirrors the bash
 # extract_response_payload / extract_hook_env / apply_env_lines /
@@ -1275,7 +1276,8 @@ function Resolve-SectionBudget {
 }
 
 # Export a map into the Process environment (inherited by the bash -c
-# children that run sections) and append it to the env cache, best-effort,
+# children that run sections) and write it to the env cache, best-effort
+# (D260: replace-in-place for the keys each call writes, not an append),
 # so the values survive for follow-up agent commands. The cache loader is
 # line-based, so embedded newlines are collapsed to spaces in the cached
 # copy — the process env keeps the exact value. SetEnvironmentVariable
@@ -1369,12 +1371,21 @@ function Set-AfterGoalEnv {
     # goal in whatever the section builds.
     #
     # (D260) Set-HookEnv now replaces in place for the keys each call writes,
-    # so this filter is largely subsumed by it. It is retained rather than
-    # deleted because it is not fully redundant: the parent-id fallback above
-    # can set GOAL_ID, and this runs before the write, so the two together
-    # still guarantee one record per key on every path. Retained also because
-    # deleting a guard whose replacement lives in a shared function is how a
-    # later refactor of that function silently reopens D257.
+    # and on THIS port that makes this filter FULLY redundant — state it
+    # accurately rather than borrowing the bash twin's reasoning, because the
+    # orderings differ and only one of the two comments can be right about
+    # each. Here the defaults loop puts all four GOAL_* keys into $envMap, the
+    # parent-id fallback assigns into that same map, and only then is
+    # Set-HookEnv called — so its collapse, keyed on $EnvMap.Keys, already
+    # covers every GOAL_* key including the fallback's. The bash twin's
+    # equivalent block is genuinely NOT redundant, because there
+    # apply_env_lines runs BEFORE the fallback, so a GOAL_ID the fallback sets
+    # afterwards would be appended beside the forwarded one.
+    #
+    # Retained anyway, as defence in depth and nothing more: it is the D257
+    # guarantee's local guard, and deleting it would make D257 depend entirely
+    # on a shared function three hundred lines away that a later refactor could
+    # narrow without anyone rechecking after_goal. It costs one filtered read.
     #
     # This port's exposure is only ACROSS runs: Get-HookEnvFromPayload builds
     # one map per run and a hashtable cannot hold a duplicate key, so no single
@@ -1414,8 +1425,10 @@ function Set-AfterGoalEnv {
                 Where-Object { $_ -notmatch '^(GOAL_ID|GOAL_IDENTIFIER|GOAL_TITLE|GOAL_DESCRIPTION)=' })
             Write-EnvCache -Lines $kept | Out-Null
         } catch {
-            # Best-effort: a failed filter leaves today's append behaviour,
+            # Best-effort: a failed filter leaves the prior lines in place,
             # which over-reports duplicates but never corrupts a value.
+            # (D260) Set-HookEnv's own collapse still runs afterwards, so even
+            # this degraded path ends with one record per GOAL_* key.
         }
     }
 

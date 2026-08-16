@@ -3393,9 +3393,10 @@ response_has_after_goal() {
 # truth for the variables the executor exports. The helpers below extract the
 # `env` object from the hook entry of an intercepted response (singular
 # `.hook` on claim responses, `.hooks[]` on /complete and /mark_reviewed),
-# escape each value, export it into the running shell (set -a), and append it
-# to the env cache so follow-up agent commands (e.g. the after_goal PATCH)
-# can still read the values. Keys the server omits export as empty strings.
+# escape each value, export it into the running shell (set -a), and write it
+# to the env cache (D260: replacing any prior record for the keys this call
+# writes, not appending) so follow-up agent commands (e.g. the after_goal
+# PATCH) can still read the values. Keys the server omits export as empty strings.
 
 # Single-quote a value for a file sourced by the shell. Embedded single
 # quotes become '\'' — nothing inside single quotes is ever interpreted, so
@@ -3504,11 +3505,17 @@ extract_response_payload() {
 # must not set record-namespace keys — applies to head refs at least as hard:
 # they define where a task's window CLOSES, so they drive the D236/D244
 # commit-attribution walk directly. And an injected one is durable in a way an
-# injected base ref is not: apply_env_lines appends, so the forged line wins on
-# a last-match read; record_task_head_ref only ever repairs the COMPLETING
-# task's own id, so a record forged for any OTHER id is never repaired; and
-# select_kept_window_records emits every surviving head line without per-key
-# dedup, so both the genuine and the forged line outlive the next claim.
+# injected base ref is not: record_task_head_ref only ever repairs the
+# COMPLETING task's own id, so a record forged for any OTHER id is never
+# repaired, and select_kept_window_records emits every surviving head line
+# without per-key dedup. When this was found, apply_env_lines appended, so the
+# forged line sat BESIDE the genuine one and won on a last-match read.
+# (D260) It now replaces in place for the keys each call writes, which makes
+# the consequence WORSE rather than better for any family that ever escapes
+# this filter: a forged key would DELETE the genuine record instead of merely
+# outranking it. Not reachable today — all five families plus STRIDE_ are
+# fenced below — but whoever adds the sixth family should know the blast
+# radius grew.
 #
 # Not theoretical — demonstrated end to end. A synthetic complete response for
 # an OUTER task whose hooks[].env carried TASK_HEAD_REF_<nested_id> pointing at

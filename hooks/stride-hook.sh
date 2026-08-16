@@ -1265,14 +1265,53 @@ write_env_cache() {
 # TASK_BASE_REF_OWNER, so an id sanitizing to either would emit a record line
 # that sets the trust flag or the owner from server data. Ids are integers, so
 # this is theoretical — and it costs two lines to keep it that way.
-task_base_ref_key() {
+# (D269) The ONE place a per-task record key is built, for all five families.
+#
+# They were five byte-identical copies differing only in a prefix string, and
+# that duplication had already bitten: D269's own text and pitfall say the
+# sanitizer is shared by THREE families and that any fix "must apply to all
+# THREE identically" — written before D273 added TASK_BASE_AT_ and
+# TASK_NARROWED_. A fix applied to the three the task names would have left two
+# families colliding. Folding them into one function makes "identically" true
+# by construction instead of by five copies staying in sync.
+#
+# THE INVARIANT: a task id is an integer. Not an assumption — the API documents
+# the response `id` as an integer (docs/api/get_tasks.md, get_tasks_id.md) and
+# the schema has no @primary_key override, so Ecto's default integer primary key
+# applies. This function ENFORCES that rather than restating it: a non-integer
+# id yields NO key, so no per-task record is written for it and the caller
+# degrades to the shared-base path exactly as it does for a reserved word.
+#
+# Why enforcement lives here and not only at the parse boundary: this is the
+# single choke point every family goes through, so one guard covers every entry
+# path — the /complete URL, the claim response, and the env-cache fallback —
+# including any added later. The URL parse already validates digits-only for
+# the same reason (D127, "only a NUMERIC id is authoritative"); this makes the
+# codebase consistent rather than introducing a new rule.
+#
+# What it fixes: `tr -c 'A-Za-z0-9_' '_'` is NOT injective, so two ids differing
+# only in punctuation collapsed to one key — `42-x` and `42.x` both became
+# suffix `42_x` and SHARED their base/head/owned records, letting one task's
+# completion consume or reset another's attribution state. Digits cannot
+# collide under that mapping, so refusing non-integers removes the collision
+# rather than re-encoding around it.
+#
+# The reserved-word guard is kept even though a digits-only id can no longer
+# produce TRUSTED/OWNER/UNPROVEN: it costs nothing, and it is what keeps this
+# safe if the id rule is ever widened. Order matters — sanitize, then reject.
+task_record_key() { # $1 = family prefix (with trailing _), $2 = task id
   local _s
-  _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
+  case "${2:-}" in
+    "" | *[!0-9]*) return 0 ;;
+  esac
+  _s=$(printf '%s' "$2" | tr -c 'A-Za-z0-9_' '_')
   case "$_s" in
     "" | TRUSTED | OWNER | UNPROVEN) return 0 ;;
   esac
-  printf 'TASK_BASE_REF_%s' "$_s"
+  printf '%s%s' "$1" "$_s"
 }
+
+task_base_ref_key() { task_record_key 'TASK_BASE_REF_' "${1:-}"; }
 
 # Prints the base recorded by the given task's OWN claim, or empty when none
 # is on record (an older cache, or a claim whose response never parsed).
@@ -1290,14 +1329,7 @@ task_base_ref_for() {
 # separate a nested task's commits from the outer task's own later ones — every
 # commit after the nested claim is a descendant of that claim's base, including
 # the outer task's.
-task_head_ref_key() {
-  local _s
-  _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
-  case "$_s" in
-    "" | TRUSTED | OWNER | UNPROVEN) return 0 ;;
-  esac
-  printf 'TASK_HEAD_REF_%s' "$_s"
-}
+task_head_ref_key() { task_record_key 'TASK_HEAD_REF_' "${1:-}"; }
 
 task_head_ref_for() {
   local _k _v
@@ -1334,14 +1366,7 @@ record_task_head_ref() {
 # (D255) Per-task owned-commit record: the commits this task's OWN after_doing
 # command loop authored (H0..H1 around the loop). ADDITIVE signal — absence,
 # emptiness, or OVERFLOW all degrade to the D244 window/purity fallback.
-task_owned_key() {
-  local _s
-  _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
-  case "$_s" in
-    "" | TRUSTED | OWNER | UNPROVEN) return 0 ;;
-  esac
-  printf 'TASK_OWNED_%s' "$_s"
-}
+task_owned_key() { task_record_key 'TASK_OWNED_' "${1:-}"; }
 
 # Prints the recorded owned set for the given task id. Return status is the
 # presence signal: 0 = a record EXISTS (value may legitimately be empty),
@@ -1657,14 +1682,7 @@ owned_set_to_range() {
 # that sweep can never reap it. One such record re-enabled the D255 narrowing
 # for every later outermost task in the checkout, permanently — the D271
 # under-report, resurrected by a record with no owner. This is that bound.
-task_base_at_key() {
-  local _s
-  _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
-  case "$_s" in
-    "" | TRUSTED | OWNER | UNPROVEN) return 0 ;;
-  esac
-  printf 'TASK_BASE_AT_%s' "$_s"
-}
+task_base_at_key() { task_record_key 'TASK_BASE_AT_' "${1:-}"; }
 
 # Epoch seconds recorded when the given task's window opened, or empty.
 task_base_at_for() {
@@ -1854,14 +1872,7 @@ replay_narrowing_decision() {
 # wholesale. A record that outlives its completion is cleared by the next
 # claim, and until then it is one short line. Nothing here touches D268/D274
 # eviction policy.
-task_narrowed_key() {
-  local _s
-  _s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9_' '_')
-  case "$_s" in
-    "" | TRUSTED | OWNER | UNPROVEN) return 0 ;;
-  esac
-  printf 'TASK_NARROWED_%s' "$_s"
-}
+task_narrowed_key() { task_record_key 'TASK_NARROWED_' "${1:-}"; }
 
 task_narrowed_for() {
   local _key

@@ -1525,8 +1525,15 @@ function Invoke-ChangedFilesUpload {
             $committedRange = @()
             $cfBase = ''
             if ($TaskId) {
-                $ownKey = 'TASK_BASE_REF_' + ($TaskId -replace '[^A-Za-z0-9_]', '_')
-                $cfBase = [System.Environment]::GetEnvironmentVariable($ownKey, 'Process')
+                # (D269) Same digits-only rule as the write side above: a
+                # non-integer id names no per-task record, so it must not be
+                # able to READ one either -- otherwise a colliding id could
+                # still pick up another task's base here.
+                $cfBase = ''
+                if ($TaskId -match '^[0-9]+$') {
+                    $ownKey = 'TASK_BASE_REF_' + ($TaskId -replace '[^A-Za-z0-9_]', '_')
+                    $cfBase = [System.Environment]::GetEnvironmentVariable($ownKey, 'Process')
+                }
                 # Records written by the bash twin are sq_escape'd and the
                 # cache loader keeps the literal quotes, so strip them.
                 if ($cfBase) { $cfBase = $cfBase.Trim("'") }
@@ -1727,11 +1734,29 @@ function Invoke-FinalizeBeforeDoing {
         if ($script:TaskIdentityRefreshed) {
             $owner = $script:TaskOwnerId
             if ($owner) {
-                $sanitized = $owner -replace '[^A-Za-z0-9_]', '_'
-                # The per-task keys share a namespace with the TRUSTED and
-                # OWNER markers; an id sanitizing to either would set those
-                # from data. Ids are integers, so this stays theoretical.
-                if ($sanitized -and $sanitized -ne 'TRUSTED' -and $sanitized -ne 'OWNER') {
+                # (D269) Digits-only, mirroring the bash twin's task_record_key.
+                # The -replace below is NOT injective: two ids differing only in
+                # punctuation ('42-x' and '42.x') both become '42_x' and would
+                # SHARE a per-task record, letting one task's completion consume
+                # another's. A task id is an integer -- documented in
+                # docs/api/get_tasks.md and enforced by the schema's default
+                # Ecto integer primary key -- so refusing a non-integer removes
+                # the collision at its source rather than re-encoding around it.
+                # Refusing means writing no per-task record, which degrades to
+                # the shared-base path exactly as a reserved word does.
+                if ($owner -notmatch '^[0-9]+$') {
+                    $sanitized = ''
+                } else {
+                    $sanitized = $owner -replace '[^A-Za-z0-9_]', '_'
+                }
+                # The per-task keys share a namespace with the TRUSTED, OWNER
+                # and UNPROVEN markers; an id sanitizing to one would set it
+                # from data. Unreachable for a digits-only id, kept because it
+                # is what keeps this safe if the id rule is ever widened.
+                # (D269) UNPROVEN was missing from this guard while the bash
+                # twin has excluded it since D226 -- a divergence the shared
+                # namespace made invisible.
+                if ($sanitized -and $sanitized -ne 'TRUSTED' -and $sanitized -ne 'OWNER' -and $sanitized -ne 'UNPROVEN') {
                     $ownerKey = 'TASK_BASE_REF_' + $sanitized
                 }
             }

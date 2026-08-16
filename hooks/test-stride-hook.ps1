@@ -2685,6 +2685,56 @@ true
         "$(@($cacheM | Where-Object { $_ -match '^TASK_TITLE=' }) | Select-Object -First 1)"
     Assert-Contains "10m (D260): a non-TASK key the env did supply still lands" `
         "BOARD_NAME=Stride Development" "$($cacheM -join "`n")"
+
+    # 10n (D269): a non-integer task id must name no per-task record. The
+    # -replace sanitizer is not injective -- '42-x' and '42.x' both become
+    # '42_x' -- so two logically distinct tasks would share TASK_BASE_REF_42_x
+    # and one completion could consume the other's base. A task id is an
+    # integer (documented in docs/api/get_tasks.md, enforced by the schema's
+    # default Ecto integer primary key), so the guard refuses non-integers at
+    # the source rather than re-encoding around them.
+    #
+    # This port implements only the TASK_BASE_REF family -- the other four are
+    # not ported -- so one family is all there is to assert here.
+    $brN = New-GitRepo -Name 'g10-d269-nonint'
+    $claimN = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = (@{
+            data = @{ id = '42-x'; identifier = 'W42'; title = 't'; status = 'in_progress'; complexity = 'small'; priority = 'high' }
+        } | ConvertTo-Json -Depth 8 -Compress); stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Depth 8 -Compress
+    $r = Invoke-HookScript -InputJson $claimN -Phase 'post' -ProjectDir $brN
+    Assert-Exit "10n (D269): a non-integer claim id exits 0" 0 $r.ExitCode
+    $cacheN = @(Get-Content -Path (Join-Path $brN '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "10n (D269): no per-task record is written under a sanitized non-integer id" "0" `
+        "$(@($cacheN | Where-Object { $_ -match '^TASK_BASE_REF_42_x=' }).Count)"
+    # The control: an integer id still gets its record, so the guard costs the
+    # real population nothing.
+    $brN2 = New-GitRepo -Name 'g10-d269-int'
+    $claimN2 = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = (@{
+            data = @{ id = 42; identifier = 'W42'; title = 't'; status = 'in_progress'; complexity = 'small'; priority = 'high' }
+        } | ConvertTo-Json -Depth 8 -Compress); stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Depth 8 -Compress
+    $null = Invoke-HookScript -InputJson $claimN2 -Phase 'post' -ProjectDir $brN2
+    $cacheN2 = @(Get-Content -Path (Join-Path $brN2 '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "10n (D269): an integer id still writes its per-task record" "1" `
+        "$(@($cacheN2 | Where-Object { $_ -match '^TASK_BASE_REF_42=' }).Count)"
+
+    # 10o (D269) — NOT WRITTEN, and the reason is recorded rather than left
+    # as a silent gap. The read-side guard in Invoke-ChangedFilesUpload
+    # (stride-hook.ps1) refuses to look up TASK_BASE_REF_<id> for a non-integer
+    # id, so a colliding id cannot pick up another task's base. I built a
+    # listener-based case for it and it passed against the PRE-fix script too,
+    # i.e. it proved nothing, so it was removed rather than shipped green: the
+    # committed-range effect of that lookup is not observable through the PUT
+    # body on this port, and finding an observable surface needed more digging
+    # than a minor warrants. The guard is defence-in-depth — post-D269 the
+    # write side means no such record is created, so it only matters for
+    # records left by older versions — and the bash twin's equivalent IS
+    # covered by 23z15/23z15c. Whoever ports the remaining families here should
+    # pin it then, when there is a reader worth pinning.
 }
 
 # ============================================================

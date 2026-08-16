@@ -7961,13 +7961,25 @@ else
 fi
 rm -rf "$D273_G" "$D273_G500" "$D273_G200"
 
-# 23z15 (D273): the edge the task's testing_strategy named — an abandoned claim
-# whose id SANITIZES to the same key as the completing task's. task_base_ref_key
-# maps every non-alphanumeric to '_', so such an id is not a second record at
-# all: it is the same cache line, which the predicate already excludes as self.
-# The age check never sees it, and cannot be tricked by it into vouching for a
-# window that does not exist. Asserted against the function directly, so the
-# claim is about the predicate rather than about one drive's geometry.
+# 23z15 (D273, superseded in part by D269): the edge D273's testing_strategy
+# named — a record whose id SANITIZES into the caller's key space.
+#
+# WHEN THIS WAS WRITTEN the sanitizer mapped every non-alphanumeric to '_', so
+# `10-0` and `10_0` produced the same key and the predicate excluded the record
+# as self. D269 removed the collision at its source: a non-integer id names NO
+# record, so such a line cannot be read at all.
+#
+# THE FIXTURE IS BUILT TO TELL THOSE TWO APART, because the first version of
+# this rewrite could not. It asserted the new mechanism while the record was
+# actually being skipped at the D273 age gate for a stamp that was simply
+# absent — the same skip a pre-D269 script would perform, so the stated reason
+# was asserted rather than demonstrated. Here the caller is an INTEGER id
+# (100), the phantom record carries a NON-integer id (10_0), and it is given a
+# FRESH stamp. Pre-D269 that phantom is a live absorber: its key resolves, its
+# stamp is found, self-exclusion does not apply because the ids differ, so the
+# predicate answers "open window". Post-D269 the non-integer id names no
+# record, so neither its head nor its stamp can be looked up and it vouches for
+# nothing. The two answers differ, which is what makes this a test.
 (
   # shellcheck source=/dev/null
   HAS_JQ=true RESPONSE_PAYLOAD='{}' source "$HOOK_SCRIPT" > /dev/null 2>&1 || true
@@ -7984,10 +7996,9 @@ rm -rf "$D273_G" "$D273_G500" "$D273_G200"
     git commit -q -m v1
   )
   D273_H_SHA=$( cd "$D273_H" && git rev-parse HEAD )
-  # `10-0` and `10_0` sanitize to the same key, so the second write is the same
-  # line — exactly what a colliding abandoned claim would produce.
   printf "TASK_BASE_REF_10_0='%s'\n" "$D273_H_SHA" > "$ENV_CACHE"
-  if another_open_window_exists "10-0"; then
+  printf "TASK_BASE_AT_10_0='%s'\n" "$(date +%s)" >> "$ENV_CACHE"
+  if another_open_window_exists 100; then
     echo "COLLIDE_OPEN" > "$D273_H/result"
   else
     echo "COLLIDE_SELF" > "$D273_H/result"
@@ -7995,8 +8006,78 @@ rm -rf "$D273_G" "$D273_G500" "$D273_G200"
   cp "$D273_H/result" "$TMPDIR_TEST/d273_collide" 2>/dev/null || true
   rm -rf "$D273_H"
 ) > /dev/null 2>&1 || true
-assert_eq "23z15 (D273): an abandoned id that sanitizes to the completing task's own key is the SAME record, excluded as self" \
+assert_eq "23z15 (D273/D269): a freshly-stamped record under a NON-integer id vouches for no window, because that id names no record" \
   "COLLIDE_SELF" "$(cat "$TMPDIR_TEST/d273_collide" 2>/dev/null)"
+
+# 23z15b (D269): the self-exclusion 23z15 used to demonstrate, driven with an
+# integer id so it still exercises a live path after D269. A task must not treat
+# its OWN open window as another task's absorber.
+(
+  # shellcheck source=/dev/null
+  HAS_JQ=true RESPONSE_PAYLOAD='{}' source "$HOOK_SCRIPT" > /dev/null 2>&1 || true
+  D269_S=$(mktemp -d)
+  PROJECT_DIR="$D269_S"
+  ENV_CACHE="$D269_S/.stride-env-cache"
+  (
+    cd "$D269_S" || exit 1
+    git init -q; git config user.email "test@test.local"; git config user.name "Test"
+    echo v1 > f.txt; git add f.txt > /dev/null; git commit -q -m v1
+  )
+  D269_S_SHA=$( cd "$D269_S" && git rev-parse HEAD )
+  printf "TASK_BASE_REF_100='%s'\n" "$D269_S_SHA" > "$ENV_CACHE"
+  printf "TASK_BASE_AT_100='%s'\n" "$(date +%s)" >> "$ENV_CACHE"
+  if another_open_window_exists 100; then printf 'OPEN' > "$TMPDIR_TEST/d269_self"; else printf 'SELF' > "$TMPDIR_TEST/d269_self"; fi
+  rm -rf "$D269_S"
+) > /dev/null 2>&1 || true
+assert_eq "23z15b (D269): a task's own FRESH open window is still excluded as self, not counted as an absorber" \
+  "SELF" "$(cat "$TMPDIR_TEST/d269_self" 2>/dev/null)"
+
+# 23z15c (D269): the headline — two ids differing only in punctuation can no
+# longer share a per-task record family. The repro that found it: claim `42-x`,
+# complete it, then claim `42.x`; both sanitized to suffix `42_x`, so
+# TASK_OWNED_42_x / TASK_BASE_REF_42_x / TASK_HEAD_REF_42_x were SHARED and the
+# second claim inherited the first task's records, treating the claim as a
+# re-claim of the same key and dropping the shared self record.
+#
+# Asserted across ALL FIVE families, because they share one sanitizer and the
+# task's own pitfall demands the disposition apply to every one identically —
+# while its text says THREE, having been written before D273 added the last
+# two. Driving all five is what makes that pitfall verifiable rather than
+# assumed.
+(
+  # shellcheck source=/dev/null
+  HAS_JQ=true RESPONSE_PAYLOAD='{}' source "$HOOK_SCRIPT" > /dev/null 2>&1 || true
+  {
+    printf 'colliding:'
+    for _k in task_base_ref_key task_head_ref_key task_owned_key task_base_at_key task_narrowed_key; do
+      printf ' %s=[%s|%s]' "$_k" "$($_k '42-x')" "$($_k '42.x')"
+    done
+    printf '\ninteger:'
+    for _k in task_base_ref_key task_head_ref_key task_owned_key task_base_at_key task_narrowed_key; do
+      printf ' %s' "$($_k '42')"
+    done
+    printf '\nreserved: [%s][%s][%s] allpunct:[%s] underscore:[%s] long:[%s]' \
+      "$(task_base_ref_key TRUSTED)" "$(task_base_ref_key OWNER)" "$(task_base_ref_key UNPROVEN)" \
+      "$(task_base_ref_key './-')" "$(task_base_ref_key '10_0')" \
+      "$(task_base_ref_key '00000000000000000000000000000042')"
+  } > "$TMPDIR_TEST/d269_keys" 2>/dev/null || true
+) > /dev/null 2>&1 || true
+D269_KEYS=$(cat "$TMPDIR_TEST/d269_keys" 2>/dev/null)
+# Every family yields NO key for either colliding id, so they cannot share one.
+assert_eq "23z15c (D269): all five families refuse both colliding ids, so no two ids differing only in punctuation can share a record" \
+  "colliding: task_base_ref_key=[|] task_head_ref_key=[|] task_owned_key=[|] task_base_at_key=[|] task_narrowed_key=[|]" \
+  "$(printf '%s\n' "$D269_KEYS" | grep '^colliding:')"
+# Integer ids are untouched — the guard must not cost the real population.
+assert_eq "23z15c (D269): integer ids still produce their five distinct family keys" \
+  "integer: TASK_BASE_REF_42 TASK_HEAD_REF_42 TASK_OWNED_42 TASK_BASE_AT_42 TASK_NARROWED_42" \
+  "$(printf '%s\n' "$D269_KEYS" | grep '^integer:')"
+# The reserved-word guard is preserved (D269 pitfall), and the named edge cases.
+# `10_0` is refused too: underscore is in the sanitizer's alphabet but not in
+# the integer invariant, so this records that the guard is digits-only rather
+# than merely punctuation-stripping.
+assert_eq "23z15c (D269): reserved words, all-punctuation, underscore and long ids all yield no key" \
+  "reserved: [][][] allpunct:[] underscore:[] long:[TASK_BASE_REF_00000000000000000000000000000042]" \
+  "$(printf '%s\n' "$D269_KEYS" | grep '^reserved:')"
 
 # 23z16 (D273): the verdict is a CLIENT-owned record, so the server may not
 # supply one. Found by the security review of this change, not predicted by it:

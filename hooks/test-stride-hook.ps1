@@ -1738,7 +1738,8 @@ echo "gid=[$GOAL_ID] gident=[$GOAL_IDENTIFIER] gtitle=[$GOAL_TITLE] tid=[$TASK_I
 }
 
 # 8f: server-supplied GOAL_* env on the after_goal entry is exported to the
-# section and appended to the env cache for the follow-up PATCH.
+# section and written to the env cache for the follow-up PATCH (D260:
+# Set-HookEnv replaces in place for the keys each call writes).
 $agEnvProjF = New-AfterGoalEnvProject -Suffix 'supplied'
 $agEnvInputF = Build-AfterGoalInputFull `
     -PrimaryCommand 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete' `

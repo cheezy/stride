@@ -3124,7 +3124,8 @@ STRIDE
   }
 
   # 10f: server-supplied GOAL_* env on the after_goal entry is exported to
-  # the section and appended to the env cache for the follow-up PATCH.
+  # the section and written to the env cache for the follow-up PATCH (D260:
+  # via apply_env_lines' replace-in-place, one record per key).
   AG_ENV_PROJ_F=$(ag_env_project "supplied")
   AG_ENV_INNER_F=$(jq -nc '{data: {id: 99, parent_id: 55}, hooks: [
     {"name":"before_review"},
@@ -6594,16 +6595,24 @@ printf '%s' '{"data":{"id":78},"hooks":[{"name":"before_review","env":{"TASK_HEA
   > "$W_HR_PROJ/.stride/.last-api-response.json"
 W_HR_INPUT='{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/78/complete"},"tool_response":{"stdout":"{\"data\":{\"id\":78},\"hoo"}}'
 echo "$W_HR_INPUT" | CLAUDE_PROJECT_DIR="$W_HR_PROJ" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
-assert_eq "23m3 (D258): exactly one TASK_HEAD_REF_77 line survives a poisoned response env" "1" \
+# (D260 INVERTED WHICH OF THESE IS DECISIVE — measured, by removing the
+# TASK_HEAD_REF clause from extract_hook_env's fence and re-running this case.)
+#
+# When D258 shipped, apply_env_lines APPENDED, so an escaped forged key left
+# TWO lines: the count assertion below failed (2, not 1) and first-match still
+# returned the genuine line, which is why it was labelled a read-semantics note
+# rather than coverage. D260 made apply_env_lines replace in place for the keys
+# each call writes, and TASK_HEAD_REF_77 is such a key — so an escaped forged
+# key now DELETES the genuine record instead of sitting after it.
+#
+# Measured with the fence clause removed: the count assertion PASSES (one line
+# — the forged one) and first-match FAILS. So the count is no longer decisive
+# and first-match now is, the exact reverse of the D258-era reasoning. Both are
+# kept: between them they pin the shape under either write path, which is what
+# a reader needs when the next change moves it again.
+assert_eq "23m3 (D258/D260): exactly one TASK_HEAD_REF_77 line survives a poisoned response env (no longer decisive on its own since D260 collapses to one line either way)" "1" \
   "$(grep -c '^TASK_HEAD_REF_77=' "$W_HR_PROJ/.stride-env-cache" 2>/dev/null | tr -d ' ')"
-# NOTE this assertion is documentation, NOT regression coverage, and is titled
-# so: it passes against the pre-fix script too, because the injected line is
-# APPENDED and grep -m1 therefore still returns the genuine FIRST line. The
-# defect turns on the opposite read — the forged value wins on a LAST-match
-# read — so a first-match check cannot detect it. The decisive pair is the line
-# count above and the no-bogus-value-anywhere check below; this one records the
-# read semantics the persistence argument depends on.
-assert_eq "23m3 (D258): a first-match reader sees the genuine record (read-semantics note, not the regression check)" \
+assert_eq "23m3 (D258/D260): a first-match reader sees the genuine record — decisive since D260, because a forged key would now REPLACE it" \
   "TASK_HEAD_REF_77='aaaa111genuine'" \
   "$(grep -m1 '^TASK_HEAD_REF_77=' "$W_HR_PROJ/.stride-env-cache" 2>/dev/null)"
 # And the read that the defect actually turned on: last-match must ALSO be the

@@ -2733,8 +2733,17 @@ true
     # than a minor warrants. The guard is defence-in-depth — post-D269 the
     # write side means no such record is created, so it only matters for
     # records left by older versions — and the bash twin's equivalent IS
-    # covered by 23z15/23z15c. Whoever ports the remaining families here should
-    # pin it then, when there is a reader worth pinning.
+    # covered by 23z15/23z15c.
+    #
+    # BE PRECISE ABOUT THE OBSTACLE, because the first version of this note was
+    # not: it said the effect "is not observable through the PUT body on this
+    # port", which is wrong and would tell a future porter the surface does not
+    # exist. It does — $committedRange is consumed as the D142 override that
+    # RETAINS an otherwise baseline-excluded path, and test 7d already decodes
+    # and asserts the filtered list from a captured PUT body. The real gap is
+    # narrower and fixable: no ps1 fixture has ever built a
+    # .stride-dirty-baseline, which is what makes the override's effect visible.
+    # Build one and this guard is pinnable with the existing listener idiom.
 }
 
 # ============================================================

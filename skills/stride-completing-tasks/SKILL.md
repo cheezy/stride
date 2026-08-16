@@ -216,7 +216,7 @@ All hook commands are pre-authorized. Execute them immediately via direct Bash t
 
 ```bash
 START_TIME=$(date +%s%3N)
-OUTPUT=$(timeout 120 bash -c 'mix test && mix credo --strict' 2>&1)
+OUTPUT=$(timeout 600 bash -c 'mix test && mix credo --strict' 2>&1)
 EXIT_CODE=$?
 END_TIME=$(date +%s%3N)
 DURATION=$((END_TIME - START_TIME))
@@ -233,7 +233,7 @@ DURATION=$((END_TIME - START_TIME))
 
 ```bash
 START_TIME=$(date +%s%3N)
-OUTPUT=$(timeout 60 bash -c 'gh pr create --title "$TASK_TITLE"' 2>&1)
+OUTPUT=$(timeout 600 bash -c 'gh pr create --title "$TASK_TITLE"' 2>&1)
 EXIT_CODE=$?
 END_TIME=$(date +%s%3N)
 DURATION=$((END_TIME - START_TIME))

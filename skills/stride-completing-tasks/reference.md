@@ -196,11 +196,11 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim" \
   -H 'Content-Type: application/json' \
   -d "$(jq -n \
     --arg agent_name 'Claude Opus 4.6' \
-    --arg notes 'All tests passing. PR #123 created.' \
+    --arg notes 'All tests passing (after_doing mix test: <N> tests, <M> failures). PR #123 created.' \
     --arg summary 'Brief one-line summary for tracking.' \
     --arg complexity 'small' \
     --arg files 'lib/foo.ex, test/foo_test.exs' \
-    --arg report '## Review Summary\n\nApproved — 0 issues found.' \
+    --arg report $'## Review Summary\n\nApproved — 0 issues found.' \
     '{
        agent_name: $agent_name,
        time_spent_minutes: 45,
@@ -241,7 +241,7 @@ to the command's literal output:
 {
   "agent_name": "Claude Opus 4.6",
   "time_spent_minutes": 45,
-  "completion_notes": "All tests passing (after_doing mix test: 230 tests, 0 failures). PR #123 created.",
+  "completion_notes": "All tests passing (after_doing mix test: <N> tests, <M> failures). PR #123 created.",
   "completion_summary": "Brief one-line summary for tracking.",
   "actual_complexity": "small",
   "actual_files_changed": "lib/foo.ex, test/foo_test.exs",
@@ -302,13 +302,13 @@ to the command's literal output:
 
 ✅ # Execute after_doing hook first
    START_TIME=$(date +%s%3N)
-   OUTPUT=$(timeout 120 bash -c 'mix test' 2>&1)
+   OUTPUT=$(timeout 600 bash -c 'mix test' 2>&1)
    EXIT_CODE=$?
    # ...capture results
 
    # Execute before_review hook second
    START_TIME=$(date +%s%3N)
-   OUTPUT=$(timeout 60 bash -c 'gh pr create' 2>&1)
+   OUTPUT=$(timeout 600 bash -c 'gh pr create' 2>&1)
    EXIT_CODE=$?
    # ...capture results
 

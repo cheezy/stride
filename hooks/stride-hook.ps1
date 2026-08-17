@@ -325,10 +325,33 @@ function Get-EnvCacheLine {
 # sq_escape renders an embedded quote as `'\''`, whose middle quote is
 # backslash-escaped OUTSIDE the run and must not flip the state.
 #
-# Returns $null when the file ends INSIDE a quoted run. That is a truncated or
-# hand-mangled cache, and the honest answer is "I cannot tell where the records
-# are", so every caller skips its rewrite and leaves the previous cache intact
-# rather than emitting a guess. Fail closed, exactly as the bash twin does.
+# SCOPE, stated so a future reader does not assume more: the scanner models
+# SINGLE-quoted runs and backslash escapes. It does NOT model double-quoted
+# runs or `#` comments, so it diverges from sh on inputs only a legacy or
+# hand-authored cache can hold. Two shapes, both fail-closed:
+#   `A="x<LF>MARKER<LF>"` splits into separate records and MARKER stands alone;
+#   a bare pre-D280 title of `He said "don't"` is ONE line to sh (the
+#   apostrophe sits inside double quotes) while this scanner opens a run at it
+#   and may refuse the whole file.
+# Neither can promote an interior line — the failure is always a merge or a
+# refusal — and the next claim truncates and rewrites the cache quoted, so a
+# legacy cache self-heals within one window.
+# That is deliberate rather than overlooked, on two grounds. The bash twin's own
+# awk filter has the identical gap, so closing it here alone would make the two
+# executors disagree about where records end — the very thing this function
+# exists to prevent. And it is unreachable from either writer: everything goes
+# through sq_escape / ConvertTo-ShSingleQuoted, which cannot emit a bare `"`,
+# backtick or `$(` outside a single-quoted run. Reaching it needs a cache
+# authored by something else entirely, at which point the attacker already has
+# write access to a file bash sources directly and needs no promotion step.
+#
+# Returns Ok=$false when the file ends INSIDE a quoted run. That is a truncated
+# or hand-mangled cache, and the honest answer is "I cannot tell where the
+# records are", so every caller skips its rewrite and leaves the previous cache
+# intact rather than emitting a guess. Fail closed, exactly as the bash twin
+# does. All six filters AND the bulk loader check it — the unparseable branch
+# checks it too, and must, because that is the one site where falling through
+# does not merely skip a rewrite: it reaches Remove-Item and deletes the cache.
 function Split-EnvCacheRecord {
     $records = @()
     $current = $null

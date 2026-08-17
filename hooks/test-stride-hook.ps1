@@ -5668,7 +5668,7 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 
 ## after_review
 ```bash
-echo "bashenv=[${BASH_ENV:-unset}] ldp=[${LD_PRELOAD:-unset}] gitssh=[${GIT_SSH_COMMAND:-unset}] gitdiff=[${GIT_EXTERNAL_DIFF:-unset}] home=[${STRIDE_PROBE_HOME:-unset}] base99=[${TASK_BASE_REF_99:-unset}] taskid=[${TASK_ID:-unset}]"
+echo "bashenv=[${BASH_ENV:-unset}] ldp=[${LD_PRELOAD:-unset}] gitssh=[${GIT_SSH_COMMAND:-unset}] gitdiff=[${GIT_EXTERNAL_DIFF:-unset}] home=[${STRIDE_PROBE_HOME:-unset}] base99=[${TASK_BASE_REF_99:-unset}] taskid=[${TASK_ID:-unset}] lower=[${task_id:-unset}] board=[${BOARD_NAME:-unset}] goal=[${GOAL_ID:-unset}] column=[${COLUMN_NAME:-unset}]"
 ```
 
 ## after_goal
@@ -5685,6 +5685,8 @@ echo "bashenv=[${BASH_ENV:-unset}] ldp=[${LD_PRELOAD:-unset}] gitssh=[${GIT_SSH_
         "task_id='lowercase-must-not-alias'",
         "='orphan-fragment'",
         "BOARD_NAME='Legit Board'",
+        "GOAL_ID='55'",
+        "COLUMN_NAME='Doing'",
         "TASK_BASE_REF_99='deadbeefcafe'"
     )
     $g23LoadInput = @{
@@ -5707,11 +5709,23 @@ echo "bashenv=[${BASH_ENV:-unset}] ldp=[${LD_PRELOAD:-unset}] gitssh=[${GIT_SSH_
     # the owner check. This is the half a blanket deny-list would have broken.
     Assert-Contains "23g: but a client-owned TASK_BASE_REF_<id> record still loads" `
         "base99=[deadbeefcafe]" $r.Stdout
-    # NOT BOARD_NAME: this leg drives an UNPARSEABLE claim, whose branch strips
-    # BOARD_*/GOAL_*/COLUMN_*/AGENT_NAME as stale window state (D259) before the
-    # loader ever reads the file. Asserting it here would be asserting the wrong
-    # layer. TASK_ID is on that branch's keep-list, so it isolates the loader.
     Assert-Contains "23g: and an ordinary identity key still loads" "taskid=[42]" $r.Stdout
+    # The ADMIT half of the allow-list, which nothing else covered: the whole
+    # forwarded namespace must still cross. (An earlier draft of this comment
+    # claimed the leg drove an unparseable claim whose branch strips these -
+    # it does not; it drives mark_reviewed, which leaves the cache alone. The
+    # wrong rationale is why these three assertions were missing.)
+    Assert-Contains "23g: a forwarded BOARD_* key still loads" "board=[Legit Board]" $r.Stdout
+    Assert-Contains "23g: a forwarded GOAL_* key still loads" "goal=[55]" $r.Stdout
+    Assert-Contains "23g: a forwarded COLUMN_* key still loads" "column=[Doing]" $r.Stdout
+    # The case-sensitivity of the allow-list, asserted where it is OBSERVABLE.
+    # Seeding task_id and checking TASK_ID proves nothing on this suite's host:
+    # the alias only exists on Windows, so on macOS/Linux swapping the loader's
+    # -cnotmatch for -notmatch left this leg fully green. bash IS
+    # case-sensitive, so a lowercase key that wrongly passed the allow-list
+    # would arrive as its own variable - which is directly checkable here.
+    Assert-Contains "23g: a lowercase key is refused by the case-sensitive allow-list" `
+        "lower=[unset]" $r.Stdout
 } else {
     Write-Host "  SKIP: 23g: the loader-fence test needs git" -ForegroundColor Yellow
 }

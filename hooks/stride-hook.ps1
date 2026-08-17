@@ -189,6 +189,69 @@ function Get-TaskOwnedKey    { param([string]$TaskId) return (Get-TaskRecordKey 
 function Get-TaskBaseAtKey   { param([string]$TaskId) return (Get-TaskRecordKey -Prefix 'TASK_BASE_AT_'   -TaskId $TaskId) }
 function Get-TaskNarrowedKey { param([string]$TaskId) return (Get-TaskRecordKey -Prefix 'TASK_NARROWED_'  -TaskId $TaskId) }
 
+# Read the env cache as bash sees it: raw bytes, split on LF, nothing stripped.
+#
+# (W2101) The ONE place either the reader or the writer below is allowed to turn
+# the cache file into lines. Both used to do it their own way — the reader raw,
+# the writer through Get-Content — and that split is a divergence generator, not
+# a style inconsistency: .NET's line reader strips a trailing CR and treats a
+# lone CR as a terminator, so a CRLF-terminated line that BOTH executors
+# correctly call ABSENT (22h2) was silently normalised to LF by any write and
+# became FOUND to both afterwards — the forged continuation promoted into a
+# first-class record that the claim-branch comment at the bottom of this file
+# warns against — while a value carrying a bare CR was split in two, unbalancing
+# the quoting for bash's `source`. bash's `grep -v` is byte-faithful; so is this.
+#
+# ReadAllBytes + an explicit decode, NOT ReadAllText: every ReadAllText overload
+# sets detectEncodingFromByteOrderMarks, which EATS a UTF-8 BOM. A cache written
+# by a pre-fix stride-hook.ps1 under Windows PowerShell 5.1 (the legacy case
+# Write-EnvCache documents) carries one, and eating it would make the FIRST line
+# read as a clean KEY='value' here while bash's `^KEY=` sees the BOM bytes and
+# reports ABSENT. Decoding the bytes verbatim keeps the BOM in the first line,
+# so both executors agree it is not a record.
+#
+# SCOPE OF THE BYTE-FAITHFULNESS CLAIM, stated exactly rather than generously:
+# it holds for VALID UTF-8. The decoder's invalid-byte fallback is replacement,
+# not throw, so a byte sequence that is not valid UTF-8 decodes to U+FFFD and a
+# Set-TaskRecord rewrite re-encodes it as EF BF BD — the one byte class where
+# this splitter and bash's byte-oriented `grep -v` still disagree. Inherited
+# unchanged from the ReadAllText/Get-Content pair this function replaced, so it
+# is neither introduced nor widened here, and it is inert while 22r holds. It is
+# NOT closed by throwing on invalid bytes: that would make one bad byte anywhere
+# blind the reader to every record in the file, while bash keeps reading the
+# valid lines — a NEW executor divergence, which is the exact thing this
+# function exists to prevent. Closing it properly means a byte-preserving
+# codepath through the writer too, which is the D281 root cause; folded there.
+# 22h5 pins the current behaviour so the seam is visible rather than assumed.
+#
+# Resolve to an ABSOLUTE path first, for the reason Write-EnvCache states at
+# length: the provider cmdlets around this layer (Test-Path in Read-TaskRecord,
+# Set-TaskRecord's guard) resolve against PowerShell's location, while
+# [System.IO.File]::* resolves against [Environment]::CurrentDirectory, which
+# Set-Location does NOT update — and Invoke-StrideSection does Set-Location
+# $ProjectDir. With a relative CLAUDE_PROJECT_DIR the guard and the read would
+# disagree about which file they are talking about.
+#
+# Throws are the caller's to handle: absent file, sharing violation, unreadable.
+function Get-EnvCacheLine {
+    $cachePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EnvCache)
+    $bytes = [System.IO.File]::ReadAllBytes($cachePath)
+    $raw = (New-Object System.Text.UTF8Encoding($false)).GetString($bytes)
+    $lines = @($raw -split "`n")
+    # Write-EnvCache terminates the LAST line too, so a faithful split yields a
+    # trailing empty element that is not a line. Drop exactly that one — never
+    # blank lines elsewhere, which bash would also keep. The Count -le 1 arm is
+    # not a micro-optimisation: 0..($lines.Count - 2) on a one-element array is
+    # 0..-1, which PowerShell walks DOWNWARDS as @(0, -1) and would duplicate
+    # the very element being dropped. An empty file must yield no lines.
+    if ($lines.Count -le 1) {
+        if ($lines.Count -eq 1 -and $lines[0] -eq '') { return @() }
+        return $lines
+    }
+    if ($lines[-1] -eq '') { $lines = @($lines[0..($lines.Count - 2)]) }
+    return $lines
+}
+
 # Read a record from the FILE, with a strict full-line shape check.
 #
 # Mirror of bash's read_task_record. Returns @{ Found; Value } — absence and
@@ -215,9 +278,23 @@ function Read-TaskRecord {
     $absent = @{ Found = $false; Value = '' }
     if (-not $Key) { return $absent }
     if (-not (Test-Path $EnvCache)) { return $absent }
+    # Split on LF ONLY, from the raw bytes — see Get-EnvCacheLine for why the
+    # CR and the BOM both have to survive the trip to this regex, and why the
+    # writer below now reads through the same function rather than its own.
     $lines = @()
-    try { $lines = @(Get-Content -Path $EnvCache -Encoding UTF8 -ErrorAction Stop) } catch { return $absent }
-    $re = New-Object System.Text.RegularExpressions.Regex ('^' + [regex]::Escape($Key) + "='([^']*)'$")
+    try {
+        $lines = @(Get-EnvCacheLine)
+    } catch { return $absent }
+    # \z, not $ — the same house rule, and for the same reason, as
+    # Get-TaskRecordKey's id gate: .NET's $ ALSO matches immediately before a
+    # trailing newline, so `KEY='value'` followed by a newline and anything else
+    # would pass. That is unreachable today only because Get-EnvCacheLine
+    # guarantees LF-free lines — an invariant held in a DIFFERENT function. \z
+    # makes this reader's shape check self-contained instead, so a future change
+    # to the splitter cannot quietly widen what counts as a record. Behaviour is
+    # identical under the current splitter. bash's `grep '$'` is a line-oriented
+    # anchor and is already correct, so parity is unaffected.
+    $re = New-Object System.Text.RegularExpressions.Regex ('^' + [regex]::Escape($Key) + "='([^']*)'\z")
     $last = $null
     foreach ($line in $lines) { if ($re.IsMatch($line)) { $last = $line } }
     if ($null -eq $last) { return $absent }
@@ -284,7 +361,13 @@ function Set-TaskRecord {
     $kept = @()
     if (Test-Path $EnvCache) {
         try {
-            $kept = @(Get-Content -Path $EnvCache -Encoding UTF8 -ErrorAction Stop |
+            # (W2101) Read through the SAME byte-faithful splitter the reader
+            # uses. Get-Content here would re-terminate a CRLF line as LF and
+            # split a CR-bearing value, so a write would change what the reader
+            # — and bash — consider a record. Dropping the key is bash's
+            # `grep -v '^KEY='`: prefix match, so a CRLF-terminated line for
+            # this key goes too, exactly as it does there.
+            $kept = @(Get-EnvCacheLine |
                 Where-Object { $_ -notmatch ('^' + [regex]::Escape($Key) + '=') })
         } catch {
             # The cache EXISTS but could not be read — a sharing violation while
@@ -1315,6 +1398,10 @@ if ($HookName -eq 'before_doing') {
             # line — so a forged continuation is never promoted into a
             # first-class record. Close this gap with that same shape, not by
             # widening the filter below.
+            # Test 22p PINS the gap by value across two sequential claims, so
+            # closing it turns that test red rather than leaving it silently
+            # asserting the old behaviour — flip its four not-survive cases when
+            # the re-emit lands.
             $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object {
                 $_ -match '^TASK_(ID|IDENTIFIER|TITLE|STATUS|COMPLEXITY|PRIORITY)=' -or
                 ($_ -match '^TASK_(BASE_REF|HEAD_REF|OWNED|BASE_AT|NARROWED)_[A-Za-z0-9_]+=' -and

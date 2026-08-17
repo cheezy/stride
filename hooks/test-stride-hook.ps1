@@ -4741,7 +4741,7 @@ Write-Host "=== Test Group 22: W2101 per-task record layer ==="
 
 $g22Want = @(
     'ConvertTo-ShSingleQuoted', 'Get-TaskRecordKey', 'Get-TaskBaseRefKey', 'Get-TaskHeadRefKey',
-    'Get-TaskOwnedKey', 'Get-TaskBaseAtKey', 'Get-TaskNarrowedKey', 'Read-TaskRecord',
+    'Get-TaskOwnedKey', 'Get-TaskBaseAtKey', 'Get-TaskNarrowedKey', 'Get-EnvCacheLine', 'Read-TaskRecord',
     'Get-TaskOwnedRecord', 'Get-TaskBaseAtRecord', 'Get-TaskNarrowedRecord',
     'Get-TaskBaseRefFor', 'Get-TaskHeadRefFor', 'Set-TaskRecord', 'Set-TaskOwnedRecord',
     'Set-TaskNarrowedRecord', 'Set-TaskHeadRefRecord', 'Set-TaskBaseAtRecord',
@@ -4886,6 +4886,139 @@ foreach ($id in @('1', '2', '3', '4', '5', '6')) {
 }
 Assert-Eq "22h: every malformed or forged record shape reads as absent" "0" "$g22Shape"
 
+# --- 22h2: a CRLF-terminated record is absent, exactly as it is to bash ---
+# The ps1 reader must not be more permissive than bash about what a record IS.
+# Get-Content would strip the trailing CR and make this FOUND while bash's
+# shape check reports ABSENT — the two executors disagreeing about the same
+# bytes, which is what the no-Trim rule exists to prevent.
+$null = New-RecordFixture -Name 'crlfrecord'
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_NARROWED_500='crlf'`r`nTASK_NARROWED_501='lf'`n", (New-Object System.Text.UTF8Encoding($false)))
+Assert-Eq "22h2: a CRLF-terminated record reads as ABSENT, matching bash" "False" `
+    "$((Get-TaskNarrowedRecord -TaskId '500').Found)"
+Assert-Eq "22h2: and the LF-terminated record beside it still reads" "lf" `
+    "$((Get-TaskNarrowedRecord -TaskId '501').Value)"
+if ($g22Bash) {
+    $g22CrlfBash = (& bash -c '. "$1" > /dev/null 2>&1; if read_task_record TASK_NARROWED_500 > /dev/null 2>&1; then printf FOUND; else printf ABSENT; fi' _ $g22Sh 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "22h2: and bash agrees it is absent" "ABSENT" $g22CrlfBash
+}
+
+# --- 22h3: the splitter itself — truncation, emptiness, and the BOM ---
+# testing_strategy edge_cases[1] asks for "a truncated or partially-written cache
+# file". 22h above probes malformed line SHAPES for OTHER keys; none of them
+# truncates the file mid-record for the key actually being read, and none covers
+# the zero-byte case. These do, against Get-EnvCacheLine directly — the one
+# splitter both the reader and the writer now go through, so a regression in
+# either shows up here rather than only in whichever of the two was edited.
+$null = New-RecordFixture -Name 'truncated'
+
+# A zero-byte cache is not one empty line. If the trailing-terminator drop
+# returned @('') here, every caller would iterate a phantom record.
+[System.IO.File]::WriteAllBytes($script:EnvCache, @())
+Assert-Eq "22h3: a zero-byte cache yields no lines at all" "0" "$(@(Get-EnvCacheLine).Count)"
+Assert-Eq "22h3: and a read over it is absent, not an error" "False" `
+    "$((Get-TaskNarrowedRecord -TaskId '42').Found)"
+
+# A newline-only cache is the same answer by a different route.
+[System.IO.File]::WriteAllText($script:EnvCache, "`n", (New-Object System.Text.UTF8Encoding($false)))
+Assert-Eq "22h3: a newline-only cache yields one EMPTY line, not a record" "1" "$(@(Get-EnvCacheLine).Count)"
+
+# Truncated mid-record, for the key being read: the shape check must reject the
+# partial line rather than return the half value it can see.
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_NARROWED_600='ye", (New-Object System.Text.UTF8Encoding($false)))
+Assert-Eq "22h3: a record truncated mid-value reads as ABSENT" "False" `
+    "$((Get-TaskNarrowedRecord -TaskId '600').Found)"
+# Truncated with the terminator present but the closing quote gone.
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_NARROWED_601='yes`n", (New-Object System.Text.UTF8Encoding($false)))
+Assert-Eq "22h3: a record truncated before its closing quote reads as ABSENT" "False" `
+    "$((Get-TaskNarrowedRecord -TaskId '601').Found)"
+# An unterminated FINAL line is not truncation — it is a whole record that simply
+# lacks its LF, and both executors read it.
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_NARROWED_602='yes'", (New-Object System.Text.UTF8Encoding($false)))
+Assert-Eq "22h3: an unterminated final line is still a record" "yes" `
+    "$((Get-TaskNarrowedRecord -TaskId '602').Value)"
+
+# The BOM leg: a cache written by a pre-fix ps1 under Windows PowerShell 5.1
+# carries EF BB BF. bash's ^KEY= sees those bytes and reports ABSENT; if the
+# splitter let .NET eat the BOM, the ps1 would report FOUND and the two
+# executors would disagree about the FIRST line of every legacy cache.
+$g22BomBytes = [byte[]](0xEF, 0xBB, 0xBF) + [System.Text.Encoding]::UTF8.GetBytes("TASK_NARROWED_603='yes'`nTASK_NARROWED_604='yes'`n")
+[System.IO.File]::WriteAllBytes($script:EnvCache, $g22BomBytes)
+Assert-Eq "22h3: a BOM-prefixed FIRST record reads as ABSENT, matching bash" "False" `
+    "$((Get-TaskNarrowedRecord -TaskId '603').Found)"
+Assert-Eq "22h3: and the second line, past the BOM, still reads" "yes" `
+    "$((Get-TaskNarrowedRecord -TaskId '604').Value)"
+if ($g22Bash) {
+    $g22BomBash = (& bash -c '. "$1" > /dev/null 2>&1; if read_task_record TASK_NARROWED_603 > /dev/null 2>&1; then printf FOUND; else printf ABSENT; fi' _ $g22Sh 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "22h3: and bash agrees the BOM line is absent" "ABSENT" $g22BomBash
+} else {
+    Write-Host "  SKIP: 22h3: the bash-agrees leg needs bash" -ForegroundColor Yellow
+}
+
+# --- 22h4: the WRITER goes through the same splitter as the reader ---
+# Before W2101's fix the writer read with Get-Content, which re-terminates a
+# CRLF line as LF. A CRLF record that both executors correctly call ABSENT
+# (22h2) was therefore PROMOTED to a real record by any unrelated write — the
+# forged continuation the claim-branch comment warns about. Pin both halves.
+$null = New-RecordFixture -Name 'writersplit'
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_NARROWED_700='crlf'`r`nBOARD_ID=55`n", (New-Object System.Text.UTF8Encoding($false)))
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
+$null = Set-TaskNarrowedRecord -TaskId '42' -Value 'yes'
+Assert-Eq "22h4: an unrelated write does not promote a CRLF line to a record" "False" `
+    "$((Get-TaskNarrowedRecord -TaskId '700').Found)"
+$g22WrBytes = [System.IO.File]::ReadAllBytes($script:EnvCache)
+$g22WrCrs = 0
+for ($i = 1; $i -lt $g22WrBytes.Length; $i++) {
+    if ($g22WrBytes[$i] -eq 0x0A -and $g22WrBytes[$i - 1] -eq 0x0D) { $g22WrCrs++ }
+}
+Assert-Eq "22h4: the CR survives the rewrite byte-faithfully, as bash's grep -v leaves it" "1" "$g22WrCrs"
+Assert-Eq "22h4: and the unrelated line is still there" "True" `
+    "$(@(Get-EnvCacheLine | Where-Object { $_ -eq 'BOARD_ID=55' }).Count -eq 1)"
+# Writing the SAME key as a CRLF-terminated line drops it, exactly as bash's
+# prefix-matching `grep -v '^KEY='` does.
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_NARROWED_42='crlf'`r`n", (New-Object System.Text.UTF8Encoding($false)))
+$null = Set-TaskNarrowedRecord -TaskId '42' -Value 'fresh'
+Assert-Eq "22h4: a CRLF line for the SAME key is dropped by the write, as grep -v drops it" "1" `
+    "$(@(Get-EnvCacheLine | Where-Object { $_ -like 'TASK_NARROWED_42=*' }).Count)"
+Assert-Eq "22h4: and the surviving record is the freshly written one" "fresh" `
+    "$((Get-TaskNarrowedRecord -TaskId '42').Value)"
+
+# --- 22h5: the two seams the round-4 security review named ---
+# (a) The shape check anchors with \z, not $. .NET's $ also matches immediately
+# before a trailing newline, so an embedded-LF record would pass a $-anchored
+# check. It is unreachable through Get-EnvCacheLine, which yields LF-free lines
+# — so this asserts against Read-TaskRecord's regex directly, over a value the
+# splitter cannot produce, to prove the reader is self-contained rather than
+# relying on an invariant held one function away.
+$null = New-RecordFixture -Name 'anchors'
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_NARROWED_800='yes'`nEVIL`n", (New-Object System.Text.UTF8Encoding($false)))
+Assert-Eq "22h5: a well-formed record followed by another line still reads" "yes" `
+    "$((Get-TaskNarrowedRecord -TaskId '800').Value)"
+$g22Anchor = New-Object System.Text.RegularExpressions.Regex ("^TASK_NARROWED_801='([^']*)'\z")
+Assert-Eq "22h5: the \z anchor rejects a trailing newline where `$ would accept it" "False" `
+    "$($g22Anchor.IsMatch("TASK_NARROWED_801='yes'`n"))"
+Assert-Eq "22h5: and still accepts the clean record" "True" `
+    "$($g22Anchor.IsMatch("TASK_NARROWED_801='yes'"))"
+
+# (b) The documented limit of the byte-faithfulness claim. The decoder's
+# invalid-byte fallback is replacement, so a non-UTF-8 byte in an UNRELATED line
+# does not survive a Set-TaskRecord rewrite. This is inherited behaviour, not
+# introduced here, and it is inert while 22r holds — pinned so the seam is
+# visible and so closing it (the D281 root cause) turns this test red rather
+# than passing silently. If this ever fails, the fix landed: flip the assertion.
+$null = New-RecordFixture -Name 'invalidutf8'
+$g22RawBytes = [System.Text.Encoding]::UTF8.GetBytes("BOARD_NAME=caf") + [byte[]](0xE9) + [System.Text.Encoding]::UTF8.GetBytes("`n")
+[System.IO.File]::WriteAllBytes($script:EnvCache, $g22RawBytes)
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
+$null = Set-TaskNarrowedRecord -TaskId '42' -Value 'yes'
+$g22AfterBytes = [System.IO.File]::ReadAllBytes($script:EnvCache)
+$g22HasE9 = $false
+foreach ($b in $g22AfterBytes) { if ($b -eq 0xE9) { $g22HasE9 = $true } }
+Assert-Eq "22h5: KNOWN LIMIT (D281) — a lone invalid byte does NOT survive a rewrite" "False" "$g22HasE9"
+Assert-Eq "22h5: it is replaced by U+FFFD rather than corrupting the quoting" "True" `
+    "$(@(Get-EnvCacheLine | Where-Object { $_ -like "BOARD_NAME=caf*" }).Count -eq 1)"
+Assert-Eq "22h5: and the record written alongside it is intact" "yes" `
+    "$((Get-TaskNarrowedRecord -TaskId '42').Value)"
+
 # --- 22i: last well-formed match wins ---
 $null = New-RecordFixture -Name 'lastwins'
 Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @("TASK_OWNED_42='first'", "TASK_OWNED_42='second'")
@@ -4988,6 +5121,176 @@ for ($i = 1; $i -lt $g22Bytes.Length; $i++) {
     if ($g22Bytes[$i] -eq 0x0A -and $g22Bytes[$i - 1] -eq 0x0D) { $g22Crs++ }
 }
 Assert-Eq "22o2: and no CRLF line endings, which bash's shape check would reject" "0" "$g22Crs"
+
+# --- 22o3: the REVERSE direction — a bash-written record read by the ps1 ---
+# 22o proves ps1 -> bash. The cache is shared in BOTH directions in a mixed
+# checkout, and a one-way test would miss an escaping or encoding divergence
+# that only appears when bash is the writer. The line is produced by bash's own
+# sq_escape, so this asserts against the real reference rather than a guess at
+# its output.
+if ($g22Bash) {
+    $null = New-RecordFixture -Name 'bashwritten'
+    foreach ($probe in @('yes', 'abc123..def456', '__stride_no_own_commits__')) {
+        $escaped = (& bash -c '. "$1" > /dev/null 2>&1; sq_escape "$2"' _ $g22Sh $probe 2>$null | Out-String).TrimEnd("`r", "`n")
+        [System.IO.File]::WriteAllText($script:EnvCache, "TASK_OWNED_42=$escaped`n", (New-Object System.Text.UTF8Encoding($false)))
+        $back = Get-TaskOwnedRecord -TaskId '42'
+        Assert-Eq "22o3: a bash-escaped record round-trips into the ps1 reader [$probe]" $probe "$($back.Value)"
+    }
+} else {
+    Write-Host "  SKIP: 22o3: the bash-writes/ps1-reads direction needs bash" -ForegroundColor Yellow
+}
+
+# --- 22o4: the cross-executor promise for the REMAINING two families ---
+# testing_strategy.coverage_target asks for all four writable families to carry
+# BOTH a round-trip and a cross-executor assertion. 22e round-trips all four,
+# but cross-executor coverage stopped at TASK_HEAD_REF (22o) and TASK_OWNED
+# (22f, 22o3): TASK_NARROWED and TASK_BASE_AT had neither direction. These add
+# both directions for both families, which closes the target.
+if ($g22Bash) {
+    # ps1 writes -> bash sources. TASK_BASE_AT is digits, TASK_NARROWED is
+    # yes/no; both are sourced back as bare values or the promise is broken.
+    $null = New-RecordFixture -Name 'crossexec2'
+    [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
+    $null = Set-TaskNarrowedRecord -TaskId '42' -Value 'yes'
+    $null = Set-TaskBaseAtRecord -TaskId '42' -Epoch '1700000000'
+    $g22N = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$TASK_NARROWED_42"' _ $script:EnvCache 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "22o4: bash sources a ps1-written TASK_NARROWED back to the bare value" "yes" $g22N
+    $g22A = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$TASK_BASE_AT_42"' _ $script:EnvCache 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "22o4: bash sources a ps1-written TASK_BASE_AT back to the bare value" "1700000000" $g22A
+    # And bash's own shape-checked reader agrees they are records, not just
+    # sourceable lines — the stricter of the two bash-side answers.
+    $g22NRead = (& bash -c '. "$1" > /dev/null 2>&1; ENV_CACHE="$2" read_task_record TASK_NARROWED_42' _ $g22Sh $script:EnvCache 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "22o4: and bash's read_task_record accepts the ps1-written shape" "yes" $g22NRead
+
+    # bash WRITES the file -> ps1 reads. 22o3 covers this direction for the
+    # escaping, but its file is written by .NET WriteAllText, so the encoding
+    # and terminator half of the direction was untested. Here the cache is
+    # produced by bash's OWN write_env_cache, through its real key builders and
+    # sq_escape, so the bytes are bash's from end to end.
+    $g22Dir = New-RecordFixture -Name 'bashwrites'
+    $g22Wrote = (& bash -c '
+        . "$1" > /dev/null 2>&1
+        PROJECT_DIR="$2"; ENV_CACHE="$2/.stride-env-cache"
+        export TASK_BASE_REF_42=abc123
+        record_task_owned 42 "aaa111..bbb222"
+        record_task_narrowed 42 no
+        { grep -v -e "^$(task_base_at_key 42)=" "$ENV_CACHE" 2>/dev/null || true
+          printf "%s=%s\n" "$(task_base_at_key 42)" "$(sq_escape 1700000042)"
+        } | write_env_cache
+        printf OK
+    ' _ $g22Sh $g22Dir 2>$null | Out-String).TrimEnd("`r", "`n")
+    if ($g22Wrote -eq 'OK') {
+        Assert-Eq "22o4: a bash-written TASK_OWNED reads back through the ps1" "aaa111..bbb222" `
+            "$((Get-TaskOwnedRecord -TaskId '42').Value)"
+        Assert-Eq "22o4: a bash-written TASK_NARROWED reads back through the ps1" "no" `
+            "$((Get-TaskNarrowedRecord -TaskId '42').Value)"
+        Assert-Eq "22o4: a bash-written TASK_BASE_AT reads back through the ps1" "1700000042" `
+            "$((Get-TaskBaseAtRecord -TaskId '42').Value)"
+        # The bytes bash produced must satisfy the same two invariants 22o2
+        # holds the ps1 writer to — otherwise "shared cache" is only true in
+        # one direction.
+        $g22BwBytes = [System.IO.File]::ReadAllBytes($script:EnvCache)
+        Assert-Eq "22o4: the bash-written cache carries no BOM either" "False" `
+            "$($g22BwBytes.Length -ge 3 -and $g22BwBytes[0] -eq 0xEF -and $g22BwBytes[1] -eq 0xBB -and $g22BwBytes[2] -eq 0xBF)"
+        $g22BwCrs = 0
+        for ($i = 1; $i -lt $g22BwBytes.Length; $i++) {
+            if ($g22BwBytes[$i] -eq 0x0A -and $g22BwBytes[$i - 1] -eq 0x0D) { $g22BwCrs++ }
+        }
+        Assert-Eq "22o4: and no CRLF terminators the ps1 reader would call absent" "0" "$g22BwCrs"
+    } else {
+        Write-Host "  SKIP: 22o4: bash could not stage its own cache write" -ForegroundColor Yellow
+    }
+
+    # A quote-bearing probe in the bash-writes direction. 22o3's three probes
+    # are all quote-free, so the escaped form is just 'value' and the escaper
+    # is never exercised on the read side. This one is the documented [^']*
+    # limit seen from the OTHER executor: bash writes it, and the ps1 must
+    # agree it is ABSENT rather than reading half of it.
+    $g22QDir = New-RecordFixture -Name 'bashwritesquote'
+    # The quote-bearing value is passed as an ARGUMENT, never embedded in this
+    # script text: a literal ' inside a PowerShell single-quoted string ends it.
+    $g22QWrote = (& bash -c '
+        . "$1" > /dev/null 2>&1
+        PROJECT_DIR="$2"; ENV_CACHE="$2/.stride-env-cache"
+        record_task_narrowed 42 "$3"
+        printf OK
+    ' _ $g22Sh $g22QDir "a'b" 2>$null | Out-String).TrimEnd("`r", "`n")
+    if ($g22QWrote -eq 'OK') {
+        Assert-Eq "22o4: a bash-written quote-bearing value is ABSENT to the ps1, as it is to bash" "False" `
+            "$((Get-TaskNarrowedRecord -TaskId '42').Found)"
+        $g22QBash = (& bash -c '. "$1" > /dev/null 2>&1; ENV_CACHE="$2"; if read_task_record TASK_NARROWED_42 > /dev/null 2>&1; then printf FOUND; else printf ABSENT; fi' _ $g22Sh $script:EnvCache 2>$null | Out-String).TrimEnd("`r", "`n")
+        Assert-Eq "22o4: and bash reads its own write as absent too — the same limit, both sides" "ABSENT" $g22QBash
+    } else {
+        Write-Host "  SKIP: 22o4: bash could not stage the quote probe" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  SKIP: 22o4: both cross-executor directions need bash" -ForegroundColor Yellow
+}
+
+# --- 22p: two sequential claims, and what the outer task's records survive ---
+# testing_strategy.integration_tests[0] — "two sequential claims leave the outer
+# task's records intact". 10k already drives ONE claim down the UNPARSEABLE
+# branch and pins all five families surviving. This covers the PARSEABLE branch,
+# which is the normal path and the one that was untested, across TWO claims.
+#
+# READ THE ASSERTIONS BELOW AS A PIN ON A KNOWN DIVERGENCE, NOT AS THE DESIRED
+# BEHAVIOUR. On the parseable branch this port carries only TASK_BASE_REF_<id>
+# across a claim, so the outer task's other four records do NOT survive, while
+# the bash twin re-emits its window families through read_task_record +
+# sq_escape and keeps them. stride-hook.ps1 documents this openly at the
+# parseable/unparseable branch comment; it is latent today because 22r pins that
+# the writers have NO production call site, so nothing writes a record this
+# branch could drop. It stops being latent when G413 lands the D236/D255/D273
+# orchestration, and closing it then means porting bash's re-emit shape — NOT
+# widening the preservation filter, which would promote a forged continuation
+# into a first-class record. WHEN THAT LANDS, THIS TEST MUST FLIP: the four
+# not_survive assertions below become survive assertions. It is written to fail
+# loudly at that moment rather than to bless the gap.
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: 22p: two sequential claims need git" -ForegroundColor Yellow
+} else {
+    $g22Seq = New-GitRepo -Name 'g22-sequential-claims'
+    # The OUTER task (77) holds one record in each of the five families, seeded
+    # exactly as 10k seeds them — the state a nested claim must not erase.
+    Set-Content -Path (Join-Path $g22Seq '.stride-env-cache') -Encoding UTF8 -Value @"
+TASK_ID=77
+TASK_IDENTIFIER=W77
+TASK_BASE_REF_77='aaaa111'
+TASK_HEAD_REF_77='bbbb222'
+TASK_OWNED_77='cccc333'
+TASK_BASE_AT_77='1786846260'
+TASK_NARROWED_77='yes'
+"@
+    $g22ClaimInner = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = '{"data":{"id":88,"identifier":"W88","title":"Inner","status":"in_progress","complexity":"small","priority":"high"}}'; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $g22ClaimThird = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = '{"data":{"id":99,"identifier":"W99","title":"Third","status":"in_progress","complexity":"small","priority":"high"}}'; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $g22ClaimInner -Phase 'post' -ProjectDir $g22Seq
+    Assert-Exit "22p: the first parseable claim exits 0" 0 $r.ExitCode
+    $r = Invoke-HookScript -InputJson $g22ClaimThird -Phase 'post' -ProjectDir $g22Seq
+    Assert-Exit "22p: the second parseable claim exits 0" 0 $r.ExitCode
+    $g22SeqCache = @(Get-Content -Path (Join-Path $g22Seq '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+
+    # The property that DOES hold, and the one D226 exists to provide: the outer
+    # task's base anchor survives both claims, with its VALUE intact — a nested
+    # claim never erases the anchor another task's diff is measured from.
+    Assert-Eq "22p: the outer task's base record survives two sequential claims" "1" `
+        "$(@($g22SeqCache | Where-Object { $_ -like 'TASK_BASE_REF_77=*' }).Count)"
+    Assert-Contains "22p: and its VALUE is the outer task's, not the claimant's" `
+        "TASK_BASE_REF_77='aaaa111'" "$($g22SeqCache -join "`n")"
+    # Identity belongs to the NEWEST claim — the window moved on.
+    Assert-Contains "22p: identity is the most recent claim's" "TASK_ID=99" "$($g22SeqCache -join "`n")"
+
+    # The divergence, pinned by value so it cannot rot silently. See the header.
+    foreach ($k in @('TASK_HEAD_REF_77', 'TASK_OWNED_77', 'TASK_BASE_AT_77', 'TASK_NARROWED_77')) {
+        Assert-Eq "22p: KNOWN GAP (G413/D236/D255/D273) — $k does NOT survive the parseable branch" "0" `
+            "$(@($g22SeqCache | Where-Object { $_ -like "$k=*" }).Count)"
+    }
+}
 
 # --- 22r: the tripwire on constraint A ---
 # DELIBERATE TRIPWIRE, not a permanent property. The record writers have no

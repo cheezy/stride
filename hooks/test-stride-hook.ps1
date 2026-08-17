@@ -5630,19 +5630,31 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     Write-Host "  SKIP: 23d2: the lone-CR test needs git" -ForegroundColor Yellow
 }
 
-# --- 23g: the loader refuses shell-steering names outright ---
+# --- 23g: the loader exports ONLY the cache's own namespace (allow-list) ---
 # Defence in depth behind 23d2: even if some future writer lands a forged line,
 # the loader must not export a name that steers the section child's interpreter.
 # Seeded directly into a cache, because the point is what the LOADER does with a
 # line it is handed, independent of how that line got there.
+#
+# GIT_SSH_COMMAND and GIT_EXTERNAL_DIFF are in here on purpose. The first
+# version of this gate was a DENY-list and it named neither, while this script
+# shells out to git constantly — so they were exactly as good as BASH_ENV for an
+# attacker. That is the argument for the allow-list: a deny-list has to
+# enumerate every lever, and it missed two on the first try.
 if (Get-Command git -ErrorAction SilentlyContinue) {
     $g23LoadProj = New-GitRepo -Name 'g23-loader-fence'
+    # MUST NOT be a claim. A claim rewrites the cache BEFORE the loader reads
+    # it — the unparseable branch strips BOARD_*/GOAL_*/COLUMN_*/AGENT_NAME as
+    # stale window state, and the parseable branch truncates outright — so the
+    # poisoned keys would be gone before the loader ever saw them and this test
+    # would pass with the allow-list REMOVED. Caught by mutation; the earlier
+    # 23c had the same defect. mark_reviewed routes to after_review and leaves
+    # the cache alone, so the loader is the only thing under test here.
     Set-Content -Path (Join-Path $g23LoadProj '.stride.md') -Encoding UTF8 -Value @'
 # Stride Configuration
 
 ## before_doing
 ```bash
-echo "bashenv=[${BASH_ENV:-unset}] ldp=[${LD_PRELOAD:-unset}] base99=[${TASK_BASE_REF_99:-unset}]"
 ```
 
 ## after_doing
@@ -5655,6 +5667,7 @@ echo "bashenv=[${BASH_ENV:-unset}] ldp=[${LD_PRELOAD:-unset}] base99=[${TASK_BAS
 
 ## after_review
 ```bash
+echo "bashenv=[${BASH_ENV:-unset}] ldp=[${LD_PRELOAD:-unset}] gitssh=[${GIT_SSH_COMMAND:-unset}] gitdiff=[${GIT_EXTERNAL_DIFF:-unset}] home=[${STRIDE_PROBE_HOME:-unset}] base99=[${TASK_BASE_REF_99:-unset}] taskid=[${TASK_ID:-unset}]"
 ```
 
 ## after_goal
@@ -5665,24 +5678,155 @@ echo "bashenv=[${BASH_ENV:-unset}] ldp=[${LD_PRELOAD:-unset}] base99=[${TASK_BAS
         "TASK_ID='42'",
         "BASH_ENV='/tmp/evil'",
         "LD_PRELOAD='/tmp/evil.so'",
+        "GIT_SSH_COMMAND='/tmp/evil.sh'",
+        "GIT_EXTERNAL_DIFF='/tmp/evil.sh'",
+        "STRIDE_PROBE_HOME='/tmp/evil'",
+        "task_id='lowercase-must-not-alias'",
         "='orphan-fragment'",
+        "BOARD_NAME='Legit Board'",
         "TASK_BASE_REF_99='deadbeefcafe'"
     )
-    $g23LoadClaim = @{
-        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
-        tool_response = @{ stdout = 'not json at all'; stderr = ''; interrupted = $false }
+    $g23LoadInput = @{
+        tool_input = @{ command = 'curl -X PATCH https://stride.example.com/api/tasks/99/mark_reviewed' }
     } | ConvertTo-Json -Depth 10 -Compress
-    $r = Invoke-HookScript -InputJson $g23LoadClaim -Phase 'post' -ProjectDir $g23LoadProj
-    Assert-Exit "23g: a claim over a poisoned cache exits 0" 0 $r.ExitCode
+    $r = Invoke-HookScript -InputJson $g23LoadInput -Phase 'post' -ProjectDir $g23LoadProj
+    Assert-Exit "23g: a mark_reviewed over a poisoned cache exits 0" 0 $r.ExitCode
     Assert-Contains "23g: the loader refuses to export BASH_ENV" "bashenv=[unset]" $r.Stdout
     Assert-Contains "23g: the loader refuses to export LD_PRELOAD" "ldp=[unset]" $r.Stdout
-    # ...but the client-owned record families MUST still load, or the D226
-    # snapshot-base mechanism silently dies. This is the half a blanket
-    # deny-list would have broken.
+    Assert-Contains "23g: the loader refuses GIT_SSH_COMMAND (missed by the first deny-list)" `
+        "gitssh=[unset]" $r.Stdout
+    Assert-Contains "23g: the loader refuses GIT_EXTERNAL_DIFF (missed by the first deny-list)" `
+        "gitdiff=[unset]" $r.Stdout
+    Assert-Contains "23g: the loader refuses a STRIDE_* key, which is client-owned" `
+        "home=[unset]" $r.Stdout
+    # ...but the cache's own namespace MUST still load. The client-owned record
+    # families in particular: each hook invocation is a fresh process, so this
+    # loader is their only cross-invocation transport, and denying them would
+    # collapse D226's per-task isolation into the shared base path and disable
+    # the owner check. This is the half a blanket deny-list would have broken.
     Assert-Contains "23g: but a client-owned TASK_BASE_REF_<id> record still loads" `
         "base99=[deadbeefcafe]" $r.Stdout
+    # NOT BOARD_NAME: this leg drives an UNPARSEABLE claim, whose branch strips
+    # BOARD_*/GOAL_*/COLUMN_*/AGENT_NAME as stale window state (D259) before the
+    # loader ever reads the file. Asserting it here would be asserting the wrong
+    # layer. TASK_ID is on that branch's keep-list, so it isolates the loader.
+    Assert-Contains "23g: and an ordinary identity key still loads" "taskid=[42]" $r.Stdout
 } else {
     Write-Host "  SKIP: 23g: the loader-fence test needs git" -ForegroundColor Yellow
+}
+
+# --- 23h: a CR-bearing line authored by the BASH twin is not split on re-emit ---
+# The round-2 hole, and the one the writers' own flatten cannot close: this path
+# never authors the value. stride-hook.sh sq_escapes its identity values but
+# does NOT flatten (a divergence the ps1 documents), so bash legitimately writes
+# `TASK_TITLE='a<CR>BASH_ENV=/tmp/evil<CR>b'` as ONE physical line with the CR
+# inert inside the quotes. If a ps1 pass-through re-emit reads that with
+# Get-Content, .NET's line reader honours the CR, the one line becomes three,
+# the filter keeps the fragments, and Write-EnvCache re-joins them with LF —
+# PROMOTING `BASH_ENV=/tmp/evil` into a genuine cache line that bash then
+# sources under set -a. Reading through Get-EnvCacheLine keeps it one line.
+#
+# Seeded as raw bytes, exactly as bash would leave it. Drives Set-HookEnv's
+# re-emit, which is the pass-through with the widest reach.
+if ((Get-Command git -ErrorAction SilentlyContinue) -and $g23Bash) {
+    $g23ReProj = New-GitRepo -Name 'g23-reemit'
+    $g23ReCache = Join-Path $g23ReProj '.stride-env-cache'
+    $g23ReCr = [char]13
+    [System.IO.File]::WriteAllText($g23ReCache,
+        "TASK_TITLE='Fix$($g23ReCr)BASH_ENV=/tmp/evil$($g23ReCr)b'`nTASK_ID='42'`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    $g23ReInput = Build-AfterGoalInputFull `
+        -PrimaryCommand 'curl -X PATCH https://stride.example.com/api/tasks/99/complete' `
+        -Inner @{
+            data  = @{ id = 99; parent_id = 55 }
+            hooks = @(@{ name = 'before_review'; env = @{ BOARD_NAME = 'Board' } })
+        }
+    $r = Invoke-HookScript -InputJson $g23ReInput -Phase 'post' -ProjectDir $g23ReProj
+    Assert-Exit "23h: a re-emit over a bash-authored CR line exits 0" 0 $r.ExitCode
+    # Read the PHYSICAL lines - raw bytes, split on LF only. Get-Content is the
+    # wrong reader here for the same reason it is wrong inside the hook: it
+    # honours the CR and would report a BASH_ENV "line" that does not exist on
+    # disk, failing this test against correct code. (It did, on the first draft.)
+    $g23ReRaw = (New-Object System.Text.UTF8Encoding($false)).GetString(
+        [System.IO.File]::ReadAllBytes($g23ReCache))
+    $g23ReLines = @($g23ReRaw -split "`n" | Where-Object { $_ -ne '' })
+    # THE assertion: the CR must not have manufactured a physical record.
+    Assert-Eq "23h: the bash-authored CR does NOT become a BASH_ENV line" "0" `
+        "$(@($g23ReLines | Where-Object { $_ -match '^BASH_ENV=' }).Count)"
+    # And the original line survived as one record rather than three fragments.
+    Assert-Eq "23h: the CR-bearing title is still exactly one line" "1" `
+        "$(@($g23ReLines | Where-Object { $_ -like 'TASK_TITLE=*' }).Count)"
+    # The security property, asserted through bash itself: sourcing the
+    # re-emitted cache must not define BASH_ENV. Deliberately NOT a byte
+    # comparison of the CR-bearing title - Out-String rewrites embedded CRs, so
+    # that form fails against correct code too. This asks the question that
+    # actually matters and its answer carries no CR.
+    $g23ReBashEnv = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "${BASH_ENV:-unset}"' _ $g23ReCache 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "23h: and bash does not get BASH_ENV defined by sourcing it" "unset" $g23ReBashEnv
+} else {
+    Write-Host "  SKIP: 23h: the bash-authored re-emit test needs git and bash" -ForegroundColor Yellow
+}
+
+# --- 23i: the LF route, which the flatten CANNOT close from this side ---
+# The bash twin writes its identity values sq_escaped but NOT flattened, by
+# design: `source` reassembles a quoted value across a newline, so bash needs no
+# flatten. In a mixed checkout that means a hostile title of
+# `x<LF>TASK_BASE_REF_99=deadbeefcafe<LF>y` legitimately lands as THREE physical
+# lines, and the middle one is record-shaped to this port's line-oriented
+# loader. No amount of flattening on the ps1 side prevents that - this path
+# never authored the value. The shape gate is what closes it: a forged
+# continuation is BARE (its quotes belong to the value it was cut out of),
+# while every record this version writes is quoted.
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $g23LfProj = New-GitRepo -Name 'g23-lf-forge'
+    Set-Content -Path (Join-Path $g23LfProj '.stride.md') -Encoding UTF8 -Value @'
+# Stride Configuration
+
+## before_doing
+```bash
+```
+
+## after_doing
+```bash
+```
+
+## before_review
+```bash
+```
+
+## after_review
+```bash
+echo "forged=[${TASK_BASE_REF_99:-unset}] real=[${TASK_BASE_REF_77:-unset}] legacy=[${TASK_BASE_REF_88:-unset}]"
+```
+
+## after_goal
+```bash
+```
+'@
+    # Exactly what bash leaves on disk for a hostile title: the value's own
+    # quotes open on line 1 and close on line 3, so the middle line is BARE.
+    [System.IO.File]::WriteAllText((Join-Path $g23LfProj '.stride-env-cache'),
+        "TASK_TITLE='x`nTASK_BASE_REF_99=deadbeefcafe`ny'`n" +
+        "TASK_BASE_REF_77='cafebabe1234'`n" +
+        "TASK_BASE_REF_88=beefcafe5678`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    $g23LfInput = @{
+        tool_input = @{ command = 'curl -X PATCH https://stride.example.com/api/tasks/99/mark_reviewed' }
+    } | ConvertTo-Json -Depth 10 -Compress
+    $r = Invoke-HookScript -InputJson $g23LfInput -Phase 'post' -ProjectDir $g23LfProj
+    Assert-Exit "23i: a run over an LF-forged cache exits 0" 0 $r.ExitCode
+    Assert-Contains "23i: the BARE forged record is refused by the shape gate" `
+        "forged=[unset]" $r.Stdout
+    Assert-Contains "23i: a genuine QUOTED record still loads" `
+        "real=[cafebabe1234]" $r.Stdout
+    # The documented cost of the shape gate, pinned so it is a decision rather
+    # than a surprise: a pre-D280 ps1 wrote these bare, and they are refused
+    # until finalize rewrites them quoted. Degrades toward absence, which the
+    # base resolver treats as the conservative direction.
+    Assert-Contains "23i: KNOWN COST - a legacy BARE record is refused until rewritten" `
+        "legacy=[unset]" $r.Stdout
+} else {
+    Write-Host "  SKIP: 23i: the LF-forge test needs git" -ForegroundColor Yellow
 }
 
 # --- 23e: a ps1-written cache is readable by bash's STRICT record grep ---

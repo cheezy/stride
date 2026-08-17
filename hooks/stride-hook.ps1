@@ -1397,13 +1397,24 @@ if ($HookName -eq 'before_doing') {
             # base-ref records across it — a nested claim must not erase an
             # outer task's anchor. The shared TASK_BASE_REF / _TRUSTED /
             # _OWNER keys are still dropped here, exactly as D142 requires.
+            # (D280 r2) Get-EnvCacheLine, not Get-Content. This is a
+            # PASS-THROUGH re-emit: it copies lines already on disk into a
+            # rewrite. .NET's line reader honours a lone CR, so a CR-bearing
+            # value authored by the UNCHANGED bash twin — which sq_escapes but
+            # does not flatten — arrives here as one physical line and leaves as
+            # several, and Write-EnvCache then re-joins them with LF, PROMOTING
+            # an attacker's fragment into a genuine cache line that bash sources.
+            # Flattening our own writes does not help: this path never authored
+            # the value. Every reader of this file must agree on what a line is.
             $keptBaseRecords = @()
             if (Test-Path $EnvCache) {
-                $keptBaseRecords = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object {
+                try {
+                $keptBaseRecords = @(Get-EnvCacheLine | Where-Object {
                     $_ -match '^TASK_BASE_REF_[A-Za-z0-9_]+=' -and
                     $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and
                     $_ -notmatch '^TASK_BASE_REF_OWNER='
                 } | Select-Object -Last 20)
+                } catch { $keptBaseRecords = @() }
             }
             # (D280) THE HEADLINE HOLE. Every one of these six values comes
             # straight off the API response and used to be written bare, into a
@@ -1494,7 +1505,9 @@ if ($HookName -eq 'before_doing') {
             # closing it turns that test red rather than leaving it silently
             # asserting the old behaviour — flip its four not-survive cases when
             # the re-emit lands.
-            $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object {
+            # (D280 r2) Pass-through re-emit — Get-EnvCacheLine for the same
+            # reason as the claim block above: a CR must not manufacture a line.
+            $preserved = @(Get-EnvCacheLine | Where-Object {
                 $_ -match '^TASK_(ID|IDENTIFIER|TITLE|STATUS|COMPLEXITY|PRIORITY)=' -or
                 ($_ -match '^TASK_(BASE_REF|HEAD_REF|OWNED|BASE_AT|NARROWED)_[A-Za-z0-9_]+=' -and
                  $_ -notmatch '^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)=')
@@ -1562,22 +1575,76 @@ if ($HookName -eq 'before_doing') {
 #   2. Enforce the key shape, with \z rather than $ per the house rule. A
 #      fragment like `='value'` has an empty key and is now dropped rather than
 #      exported.
-#   3. Refuse names that steer the shell. These are never legitimate cache
-#      keys — the cache holds TASK_*, GOAL_*, BOARD_*, COLUMN_*, AGENT_NAME and
-#      the five client-owned record families — so refusing them costs nothing
-#      and closes the BASH_ENV route by construction.
+#   3. Export only keys in the cache's OWN namespace — an ALLOW-list.
 #
-# What is deliberately NOT denied: the client-owned TASK_BASE_REF* /
-# TASK_HEAD_REF* / TASK_OWNED* / TASK_NARROWED* / TASK_BASE_AT* families. Those
-# are fenced out of the SERVER payload (Get-HookEnvFromPayload) because the
-# client owns them, but the client WRITES them here and Get-TaskBaseRefFor reads
-# them straight back out of this process environment. Denying them at the loader
-# would silently break the D226 snapshot-base mechanism — the fence belongs at
-# the payload boundary, which already has it, not at this one.
-$script:StrideShellSteeringKeys = @(
-    'BASH_ENV', 'ENV', 'PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES',
-    'IFS', 'SHELLOPTS', 'BASHOPTS', 'PS4', 'GLOBIGNORE'
-)
+# On (3): this started as a deny-list of shell-steering names (BASH_ENV, PATH,
+# LD_PRELOAD, …) and that shape was wrong, not merely incomplete. A deny-list
+# has to enumerate every lever an attacker might reach for, and the first draft
+# already missed GIT_EXTERNAL_DIFF and GIT_SSH_COMMAND — as good as BASH_ENV
+# here, since this script shells out to git constantly — plus CDPATH, LD_AUDIT,
+# BASH_XTRACEFD, NODE_OPTIONS, PERL5OPT and HOME. An allow-list inverts the
+# burden: it survives the next variable nobody has thought of, which is the only
+# property that matters for a list guarding an interpreter's environment.
+#
+# The namespace below is what this cache legitimately NEEDS to carry — the six
+# identity keys, the GOAL_*/BOARD_*/COLUMN_*/AGENT_NAME the server forwards, and
+# the five client-owned record families, all TASK_-prefixed. A future key
+# outside it fails CLOSED — it silently does not load — which is the correct
+# direction for this gate and why the allow-list is stated here, next to the
+# enumeration it depends on, rather than hidden in a helper.
+#
+# SCOPE OF THE CLAIM, stated exactly: this closes the route THROUGH THE CACHE.
+# It does NOT make BASH_ENV unreachable in general, and a reader must not
+# conclude that it does. Get-HookEnvFromPayload fences only HOOK_NAME, the five
+# record families and STRIDE_*, so any other server-supplied hook-env key —
+# BASH_ENV, PATH and GIT_SSH_COMMAND included — is still accepted and exported
+# straight into the Process environment by Set-HookEnv, bypassing this loader
+# entirely. That gap is pre-existing, identical in the bash twin, and already
+# filed as D275 with a recorded decision to defer; it is named here rather than
+# fixed so this comment does not read as a completeness claim it cannot support.
+#
+# The client-owned TASK_BASE_REF* / TASK_HEAD_REF* / TASK_OWNED* /
+# TASK_NARROWED* / TASK_BASE_AT* families ARE allowed, deliberately. They are
+# fenced out of the SERVER payload (Get-HookEnvFromPayload) because the client
+# owns them, but the client WRITES them here and Get-TaskBaseRefFor reads them
+# straight back out of this process environment — and each hook invocation is a
+# fresh process, so this loader is their ONLY cross-invocation transport.
+# Denying them would leave the per-task base permanently empty in every
+# consuming invocation, collapsing D226's isolation into the shared
+# TASK_BASE_REF path and disabling the owner check — a security regression, not
+# just a functional one. The fence belongs at the payload boundary, which has it.
+#
+# Allowing those families is what makes the SHAPE GATE below necessary. The CR
+# route is closed from both ends — every writer flattens, every pass-through
+# re-emit reads through Get-EnvCacheLine — but the LF route is NOT, and cannot
+# be from this side: the bash twin writes `TASK_TITLE=$(sq_escape ...)` WITHOUT
+# flattening (stride-hook.sh), by design, because `source` reassembles a quoted
+# value across a newline. So in a mixed checkout a hostile title of
+# `x<LF>TASK_BASE_REF_99=deadbeefcafe<LF>y` legitimately becomes three physical
+# lines, and the middle one is shaped like a record on this side.
+#
+# THE SHAPE GATE closes it: a record family value must present the strict
+# `'...'` form that both executors' record readers demand. A forged
+# continuation is always BARE — it is the interior of someone else's quoted
+# value, so its own quotes are already consumed — while every record this
+# version writes is quoted. Same check as Read-TaskRecord, applied at the point
+# where a forged line would otherwise become a live environment variable.
+#
+# The one cost, stated rather than discovered later: a cache written by a
+# PRE-D280 ps1 recorded `TASK_BASE_REF_<id>=<sha>` bare, so those legacy records
+# are refused for one claim window until finalize rewrites them quoted. That
+# degrades toward ABSENCE, which the base resolver already treats as the
+# conservative direction (no base → refuse or widen, never silently narrow), so
+# the failure mode is a wider diff rather than a wrong one.
+$script:StrideCacheKeyPattern = '^(?:(?:TASK|GOAL|BOARD|COLUMN)_[A-Za-z0-9_]*|AGENT_NAME)\z'
+# [0-9]+, NOT [A-Za-z0-9_]+. The per-task record namespace is digits-only ids,
+# because that is all Get-TaskRecordKey (and bash's task_record_key) will build
+# a key for. Matching the wider character class swept in TASK_BASE_REF_OWNER,
+# _TRUSTED and _UNPROVEN — which are CONTROL FLAGS sharing the prefix, not
+# records, and which this file reserves precisely so they cannot collide. The
+# shape gate then refused a bare TASK_BASE_REF_OWNER and silently disabled the
+# D226 foreign-owner refusal. Caught by test 21cc; the tight class is the fix.
+$script:StrideRecordKeyPattern = '^TASK_(?:BASE_REF|HEAD_REF|OWNED|NARROWED|BASE_AT)_[0-9]+\z'
 $script:StrideCacheLines = @()
 if (Test-Path $EnvCache) {
     # Get-EnvCacheLine THROWS where Get-Content merely errored (absent file,
@@ -1593,8 +1660,18 @@ if ($script:StrideCacheLines.Count -gt 0) {
         $cacheKey = $Matches[1]
         $cacheValue = $Matches[2]
         if ($cacheKey -notmatch '^[A-Za-z_][A-Za-z0-9_]*\z') { continue }
-        if ($script:StrideShellSteeringKeys -contains $cacheKey.ToUpperInvariant()) { continue }
-        if ($cacheKey -like 'BASH_FUNC_*') { continue }
+        # -cmatch: the namespace is UPPERCASE by construction, and a
+        # case-insensitive match would admit `task_id` — which is a distinct
+        # variable to bash (case-sensitive) but the SAME one to Windows
+        # (case-insensitive), the exact split the env fence at
+        # Get-HookEnvFromPayload documents. Matching case-sensitively here keeps
+        # the allow-list meaning one thing on both platforms.
+        if ($cacheKey -cnotmatch $script:StrideCacheKeyPattern) { continue }
+        # The shape gate, for the five client-owned record families only. A
+        # forged LF continuation is bare; a real record is quoted. Applies
+        # BEFORE unquoting, because the quotes are the evidence.
+        if ($cacheKey -cmatch $script:StrideRecordKeyPattern -and
+            $cacheValue -cnotmatch "^'[^']*'\z") { continue }
         [System.Environment]::SetEnvironmentVariable(
             $cacheKey, (ConvertFrom-ShSingleQuoted -Value $cacheValue), 'Process')
     }
@@ -1885,7 +1962,10 @@ function Set-HookEnv {
         $written = @($EnvMap.Keys)
         $kept = @()
         if (Test-Path $EnvCache) {
-            $kept = @(Get-Content -Path $EnvCache -Encoding UTF8 | Where-Object {
+            # (D280 r2) Pass-through re-emit — Get-EnvCacheLine, not
+            # Get-Content, so a CR-bearing line authored elsewhere cannot be
+            # split into fragments this filter then keeps and promotes.
+            $kept = @(Get-EnvCacheLine | Where-Object {
                 $idx = $_.IndexOf('=')
                 $idx -lt 1 -or ($written -notcontains $_.Substring(0, $idx))
             })
@@ -1985,7 +2065,8 @@ function Set-AfterGoalEnv {
     # same reason.
     if (Test-Path $EnvCache) {
         try {
-            $kept = @(Get-Content -Path $EnvCache -Encoding UTF8 |
+            # (D280 r2) Pass-through re-emit — Get-EnvCacheLine, not Get-Content.
+            $kept = @(Get-EnvCacheLine |
                 Where-Object { $_ -notmatch '^(GOAL_ID|GOAL_IDENTIFIER|GOAL_TITLE|GOAL_DESCRIPTION)=' })
             Write-EnvCache -Lines $kept | Out-Null
         } catch {
@@ -3022,7 +3103,8 @@ function Invoke-FinalizeBeforeDoing {
         $preserved = @()
         $records = @()
         if (Test-Path $EnvCache) {
-            $existing = @(Get-Content $EnvCache -Encoding UTF8)
+            # (D280 r2) Pass-through re-emit — Get-EnvCacheLine, not Get-Content.
+            $existing = @(Get-EnvCacheLine)
             $preserved = @($existing | Where-Object {
                 $_ -notmatch '^TASK_BASE_REF=' -and
                 $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and

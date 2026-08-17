@@ -1137,18 +1137,47 @@ try {
 # the snapshot before PUT. The ps1 has no capture step, so this upload-side
 # filter is the equivalent enforcement point. A same-named file in a
 # subdirectory is kept; the legitimate change is kept.
+# (W2100) This was a pre-seeded snapshot in a NON-git directory, which tested
+# the upload-side filter because ps1 built no snapshot of its own. Now that it
+# does, a pre-seeded file is simply overwritten, so the fixture is a real repo
+# and the same expectation — exactly lib/foo.ex and sub/.stride-changed-files.json
+# survive — is asserted against the CAPTURE-side exclusion, which is the
+# stronger enforcement point. Upload-side filtering keeps its own coverage in
+# 7e2 immediately below, via the self-heal path — the only remaining path that
+# uploads a snapshot it did not build.
 $exclProj = Join-Path $TmpDir 'put-exclude-project'
 New-Item -ItemType Directory -Path $exclProj -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $exclProj 'lib') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $exclProj 'sub') -Force | Out-Null
 Set-Content -Path (Join-Path $exclProj '.stride.md') -Value @'
 ## after_doing
 ```bash
 echo "ran"
 ```
 '@ -Encoding UTF8
-Set-Content -Path (Join-Path $exclProj '.stride-changed-files.json') `
-    -Value '[{"path":".stride-diff-upload-state","diff":"state body"},{"path":"lib/foo.ex","diff":"real patch"},{"path":"sub/.stride-changed-files.json","diff":"user file"},{"path":".stride-changed-files.json","diff":"snapshot body"}]' -Encoding UTF8
 Set-Content -Path (Join-Path $exclProj '.stride-env-cache') `
     -Value "TASK_ID=99`nTASK_BASE_REF=abc" -Encoding UTF8
+& git -C $exclProj init -q 2>$null | Out-Null
+& git -C $exclProj config user.email 'test@example.com' 2>$null | Out-Null
+& git -C $exclProj config user.name 'Test' 2>$null | Out-Null
+& git -C $exclProj config commit.gpgsign false 2>$null | Out-Null
+# .stride.md and .stride-env-cache are gitignored so they do not surface as
+# untracked entries; the two ROOT artifacts deliberately are NOT ignored, so the
+# capture's own exclusion is what has to remove them.
+Set-Content -Path (Join-Path $exclProj '.gitignore') -Value ".stride.md`n.stride-env-cache`n" -Encoding UTF8
+Set-Content -Path (Join-Path $exclProj 'base.txt') -Value 'base' -Encoding UTF8
+& git -C $exclProj add .gitignore base.txt 2>$null | Out-Null
+& git -C $exclProj commit -q -m 'c1' 2>$null | Out-Null
+Set-Content -Path (Join-Path $exclProj 'lib/foo.ex') -Value 'defmodule Foo do' -Encoding UTF8
+& git -C $exclProj add lib/foo.ex 2>$null | Out-Null
+& git -C $exclProj commit -q -m 'c2' 2>$null | Out-Null
+# Real working-tree change plus the same-named subdirectory file that must survive.
+Set-Content -Path (Join-Path $exclProj 'lib/foo.ex') -Value "defmodule Foo do`n  def bar, do: :ok`nend" -Encoding UTF8
+Set-Content -Path (Join-Path $exclProj 'sub/.stride-changed-files.json') -Value 'user file' -Encoding UTF8
+# The root artifacts the capture must strip.
+Set-Content -Path (Join-Path $exclProj '.stride-diff-upload-state') -Value 'state body' -Encoding UTF8
+Set-Content -Path (Join-Path $exclProj '.stride-changed-files.json') `
+    -Value '[{"path":".stride-diff-upload-state","diff":"state body"},{"path":"lib/foo.ex","diff":"real patch"},{"path":"sub/.stride-changed-files.json","diff":"user file"},{"path":".stride-changed-files.json","diff":"snapshot body"}]' -Encoding UTF8
 
 $exclPort = 18879
 $exclFixture = Join-Path $TmpDir 'put-exclude-fixture.json'
@@ -1215,6 +1244,79 @@ try {
     if ($exclListenerJob -and $exclListenerJob.State -eq 'Running') {
         Stop-Job $exclListenerJob -ErrorAction SilentlyContinue
         Remove-Job $exclListenerJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 7e2 (W2100): the UPLOAD-side D67/W1457 filter, which 7e no longer covers now
+# that its fixture is a real repo and the hook builds its own clean snapshot.
+# The only remaining path that uploads a snapshot it did NOT build is the
+# before_review self-heal, which leaves an existing file untouched — so drive
+# that, with a deliberately artifact-bearing snapshot on disk, and assert the
+# PUT body came out filtered.
+#
+# This case is load-bearing beyond its own assertion: the upload filter had no
+# coverage at all for a while, and that is precisely how a 5.1 fail-open in it
+# (ConvertTo-Json -AsArray throwing into a catch that uploads the RAW bytes)
+# went unnoticed.
+# Deliberately NOT a git repo: the self-heal skips its build when a snapshot is
+# already on disk, and the upload filter is name-based, so no repository is
+# needed to exercise it. That also keeps this case testing the upload filter
+# and nothing else.
+$excl2Proj = Join-Path $TmpDir 'put-exclude-selfheal'
+New-Item -ItemType Directory -Path $excl2Proj -Force | Out-Null
+Set-Content -Path (Join-Path $excl2Proj '.stride.md') -Value @'
+## before_review
+```bash
+echo "reviewing"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $excl2Proj '.stride-env-cache') -Value "TASK_ID=42" -Encoding UTF8
+Set-Content -Path (Join-Path $excl2Proj '.stride-changed-files.json') `
+    -Value '[{"path":".stride-diff-upload-state","diff":"state body"},{"path":"lib/foo.ex","diff":"real patch"},{"path":"sub/.stride-changed-files.json","diff":"user file"},{"path":".stride_auth.md","diff":"SECRET"}]' -Encoding UTF8
+$excl2Port = 18893
+$excl2Fixture = Join-Path $TmpDir 'put-exclude-selfheal-fixture.json'
+if (Test-Path $excl2Fixture) { Remove-Item -Force $excl2Fixture }
+$excl2Job = Start-Job -ArgumentList $excl2Port, $excl2Fixture -ScriptBlock {
+    param($Port, $Fixture)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        $ctx = $l.GetContext()
+        $reader = [System.IO.StreamReader]::new($ctx.Request.InputStream)
+        @{ Body = $reader.ReadToEnd() } | ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+        $ctx.Response.StatusCode = 200
+        $ctx.Response.OutputStream.Close()
+    } catch {
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+}
+try {
+    $null = Wait-ForListener -Port $excl2Port
+    $excl2Cmd = "curl -X PATCH http://localhost:$excl2Port/api/tasks/42/complete -H `"Authorization: Bearer tok`""
+    $excl2Json = @{ tool_input = @{ command = $excl2Cmd } } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $excl2Json -Phase 'post' -ProjectDir $excl2Proj
+    Assert-Exit "7e2: the self-heal exits 0" 0 $r.ExitCode
+    Wait-Job $excl2Job -Timeout 8 | Out-Null
+    Remove-Job $excl2Job -Force -ErrorAction SilentlyContinue
+    if (Test-Path $excl2Fixture) {
+        $rec2 = Get-Content -Raw -Path $excl2Fixture | ConvertFrom-Json
+        $body2 = $rec2.Body | ConvertFrom-Json
+        $txt2 = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($body2.changed_files.data))
+        $paths2 = @(@($txt2 | ConvertFrom-Json) | ForEach-Object { $_.path })
+        Assert-Eq "7e2: the upload filter strips the root upload-state artifact" "False" "$($paths2 -contains '.stride-diff-upload-state')"
+        Assert-Eq "7e2: the upload filter strips the credential file" "False" "$($paths2 -contains '.stride_auth.md')"
+        Assert-Eq "7e2: the real change survives the upload filter" "True" "$($paths2 -contains 'lib/foo.ex')"
+        Assert-Eq "7e2: a same-named SUBDIRECTORY file survives the upload filter" "True" "$($paths2 -contains 'sub/.stride-changed-files.json')"
+    } else {
+        Write-Host "  FAIL: 7e2: the self-heal PUT did not arrive at the listener" -ForegroundColor Red
+        $script:FAIL++
+    }
+} finally {
+    if ($excl2Job -and $excl2Job.State -eq 'Running') {
+        Stop-Job $excl2Job -ErrorAction SilentlyContinue
+        Remove-Job $excl2Job -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -3109,8 +3211,10 @@ Assert-Exit "14a: claim with dirty tree exits 0" 0 $r.ExitCode
 $blContent = Get-Content -Raw -Path (Join-Path $blProj '.stride-dirty-baseline') -ErrorAction SilentlyContinue
 Assert-Contains "14a: claim wrote the dirty baseline" "dirty.txt" $blContent
 
-# 14b: The upload filter drops claim-dirty unchanged entries and the two
-# dot-files, keeps task work and re-modified entries.
+# 14b: The CAPTURE filter drops claim-dirty unchanged entries and the two
+# dot-files, keeps task work and re-modified entries. (W2100: this said "upload
+# filter" and tested one, until the hook began building its own snapshot — the
+# same header correction 7e got. Upload-side filtering is covered by 7e2.)
 $blUpProj = New-GitRepo -Name 'g14-upload'
 Set-Content -Path (Join-Path $blUpProj 'pre.txt') -Value 'one' -Encoding UTF8
 Set-Content -Path (Join-Path $blUpProj 'remod.txt') -Value 'two' -Encoding UTF8
@@ -3126,6 +3230,14 @@ Set-Content -Path (Join-Path $blUpProj '.stride-dirty-baseline') -Value @(
 ) -Encoding UTF8
 # remod.txt is modified AGAIN after the baseline; pre.txt stays as-claimed.
 Add-Content -Path (Join-Path $blUpProj 'remod.txt') -Value 'task edit' -Encoding UTF8
+# (W2100) work.txt and .stride_auth.md used to exist only inside the pre-seeded
+# snapshot, which was enough when ps1 merely uploaded that file. Now the hook
+# BUILDS the snapshot, so they must be real: work.txt is the task work that has
+# to survive, and .stride_auth.md — the credential file — has to be excluded by
+# the capture itself rather than by a filter applied to someone else's list.
+# It is deliberately NOT gitignored, so the exclusion is what removes it.
+Set-Content -Path (Join-Path $blUpProj 'work.txt') -Value 'task work' -Encoding UTF8
+Set-Content -Path (Join-Path $blUpProj '.stride_auth.md') -Value 'SECRET' -Encoding UTF8
 Set-Content -Path (Join-Path $blUpProj '.stride.md') -Value @'
 ## after_doing
 ```bash
@@ -3134,8 +3246,13 @@ echo "ran"
 '@ -Encoding UTF8
 Set-Content -Path (Join-Path $blUpProj '.stride-changed-files.json') `
     -Value '[{"path":"pre.txt","diff":"pre-existing"},{"path":"remod.txt","diff":"re-modified"},{"path":"work.txt","diff":"task work"},{"path":".stride_auth.md","diff":"SECRET"},{"path":".stride.md","diff":"hook file"}]' -Encoding UTF8
+# Anchor the base at HEAD so the assertion stays about the BASELINE filter:
+# with no committed range, tracked.txt (committed by New-GitRepo between HEAD~1
+# and HEAD) stays out of the change set and the surviving entries are exactly
+# the working-tree ones this case is about.
+$blHead = (& git -C $blUpProj rev-parse HEAD | Out-String).Trim()
 Set-Content -Path (Join-Path $blUpProj '.stride-env-cache') `
-    -Value "TASK_ID=99`nTASK_BASE_REF=abc" -Encoding UTF8
+    -Value "TASK_ID=99`nTASK_BASE_REF=$blHead" -Encoding UTF8
 
 $blPort = 18877
 $blFixture = Join-Path $TmpDir 'baseline-put-fixture.json'
@@ -4162,6 +4279,433 @@ if ($IsLinux -or $IsMacOS) {
         "cannot be retrieved because it has not been set" ($r19g.Stdout + $r19g.Stderr)
 } else {
     Write-Host "  SKIP: 19g: unwritable-directory case needs POSIX permissions" -ForegroundColor Yellow
+}
+
+# ============================================================
+# Test Group 21: W2100 — the changed-files CAPTURE engine
+# ============================================================
+# Counterparts to the bash suite's Test Group 7, which pins the per-file diff
+# contract (G148/W719). Before W2100 this side had no capture to test: the hook
+# only uploaded a snapshot something else had written, which on native Windows
+# was nobody.
+#
+# The bash suite `source`s the hook and calls capture_changed_files directly.
+# That is impossible here — stride-hook.ps1 ends its argument handling with
+# `exit 0`, and `exit` in a dot-sourced script kills the calling process — so
+# the git-backed cases run end to end through Invoke-HookScript, and the two
+# pure-logic cases (truncation, binary detection) run against test-local
+# mirrors exactly as the bash suite does with trunc_diff_inline and
+# is_binary_in_numstat. 21x then binds those mirrors to the real implementation
+# with a genuine >500-line diff, which the bash suite never does.
+Write-Host ""
+Write-Host "=== Test Group 21: W2100 changed-files capture engine ==="
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: Test Group 21 requires git" -ForegroundColor Yellow
+} else {
+
+# Mirror of the implementation's truncation, for the pure-logic cases.
+function Get-TruncatedDiffMirror {
+    param([string]$Text)
+    $maxLines = 500
+    $marker = '[diff truncated at 500 lines]'
+    $lineCount = 0
+    if ($Text) { $lineCount = ([regex]::Matches($Text, "`n")).Count + 1 }
+    if ($lineCount -le $maxLines) { return $Text }
+    $parts = $Text.Split("`n")
+    return (($parts[0..($maxLines - 2)]) -join "`n") + "`n" + $marker
+}
+
+$g21Marker = '[diff truncated at 500 lines]'
+$g21BinPlaceholder = '[binary file ' + [char]0x2014 + ' no diff captured]'
+
+# --- 21a-21c: truncation (mirrors sh 7a-7c) ---
+$t500 = (1..500 | ForEach-Object { "line $_" }) -join "`n"
+$r21a = Get-TruncatedDiffMirror -Text $t500
+Assert-Eq "21a: a 500-line diff is NOT truncated" "500" "$((([regex]::Matches($r21a, "`n")).Count + 1))"
+Assert-NotContains "21a: no marker on an exactly-500-line diff" $g21Marker $r21a
+
+$t750 = (1..750 | ForEach-Object { "line $_" }) -join "`n"
+$r21b = Get-TruncatedDiffMirror -Text $t750
+Assert-Eq "21b: a 750-line diff truncates to exactly 500 lines" "500" "$((([regex]::Matches($r21b, "`n")).Count + 1))"
+Assert-Contains "21b: the truncation marker is present" $g21Marker $r21b
+Assert-Eq "21b: the marker is the FINAL line" $g21Marker ($r21b.Split("`n")[-1])
+
+Assert-Eq "21c: empty input stays empty" "" (Get-TruncatedDiffMirror -Text '')
+
+# --- 21d-21f: binary detection from numstat (mirrors sh 7d-7f) ---
+$nzBin = "-`t-`tassets/logo.png" + [char]0 + "3`t1`tlib/foo.ex" + [char]0
+$binSet21 = & {
+    $set = @{}
+    $fields = @($nzBin.Split([char]0))
+    foreach ($rec in $fields) {
+        if (-not $rec) { continue }
+        $p = $rec.Split([char]9)
+        if ($p.Count -lt 3) { continue }
+        if ($p[0] -eq '-' -and $p[1] -eq '-') { $set[$p[2]] = $true }
+    }
+    $set
+}
+Assert-Eq "21d: a binary numstat record is detected" "True" "$($binSet21.ContainsKey('assets/logo.png'))"
+Assert-Eq "21e: a text numstat record is not flagged binary" "False" "$($binSet21.ContainsKey('lib/foo.ex'))"
+Assert-Eq "21f: a path absent from numstat is not flagged binary" "False" "$($binSet21.ContainsKey('nope.txt'))"
+
+# --- shared fixture helpers for the e2e cases ---
+function New-CaptureRepo {
+    param([string]$Name)
+    $dir = Join-Path $TmpDir $Name
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    & git -C $dir init -q 2>$null | Out-Null
+    & git -C $dir config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $dir config user.name 'Test' 2>$null | Out-Null
+    & git -C $dir config commit.gpgsign false 2>$null | Out-Null
+    # Root-anchored (leading /) on purpose: an unanchored pattern matches at any
+    # depth, which would gitignore sub/.stride-changed-files.json and make 21v —
+    # the case proving a same-named SUBDIRECTORY file is kept — pass vacuously
+    # by never presenting the file at all.
+    Set-Content -Path (Join-Path $dir '.gitignore') `
+        -Value "/.stride.md`n/.stride-env-cache`n/.stride-changed-files.json`n/.stride-diff-upload-state`n/.stride-dirty-baseline" -Encoding UTF8
+    Set-Content -Path (Join-Path $dir 'seed.txt') -Value 'seed' -Encoding UTF8
+    & git -C $dir add .gitignore seed.txt 2>$null | Out-Null
+    & git -C $dir commit -q -m 'seed' 2>$null | Out-Null
+    Set-Content -Path (Join-Path $dir '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+    return $dir
+}
+
+function Set-CaptureBase {
+    param([string]$Dir, [string]$TaskId = '42', [string]$BaseRef = '')
+    $lines = "TASK_ID=$TaskId"
+    if ($BaseRef) { $lines = $lines + "`nTASK_BASE_REF=$BaseRef" }
+    Set-Content -Path (Join-Path $Dir '.stride-env-cache') -Value $lines -Encoding UTF8
+}
+
+# Port 1 refuses instantly, so the PUT always fails fast and only the ON-DISK
+# snapshot is under test.
+function Invoke-CaptureRun {
+    param([string]$Dir, [string]$TaskId = '42')
+    $json = @{ tool_input = @{ command = "curl -X PATCH http://127.0.0.1:1/api/tasks/$TaskId/complete -H `"Authorization: Bearer tok`"" } } | ConvertTo-Json -Compress
+    return (Invoke-HookScript -InputJson $json -Phase 'pre' -ProjectDir $Dir)
+}
+
+function Get-CaptureEntries {
+    param([string]$Dir)
+    $p = Join-Path $Dir '.stride-changed-files.json'
+    if (-not (Test-Path $p)) { return $null }
+    $raw = Get-Content -Raw -Path $p
+    if (-not $raw) { return @() }
+    return @($raw | ConvertFrom-Json)
+}
+
+# --- 21g: tracked modify + binary + delete (mirrors sh 7g) ---
+$g21g = New-CaptureRepo -Name 'g21-mixed'
+Set-Content -Path (Join-Path $g21g 'a.txt') -Value 'original' -Encoding UTF8
+Set-Content -Path (Join-Path $g21g 'b.txt') -Value 'doomed' -Encoding UTF8
+[System.IO.File]::WriteAllBytes((Join-Path $g21g 'logo.png'), ([byte[]](0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0x00,0x01,0x02,0x03)))
+& git -C $g21g add . 2>$null | Out-Null
+& git -C $g21g commit -q -m 'base' 2>$null | Out-Null
+$g21gBase = (& git -C $g21g rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21g 'a.txt') -Value "original`nmodified" -Encoding UTF8
+[System.IO.File]::WriteAllBytes((Join-Path $g21g 'logo.png'), ([byte[]](0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0xFF,0xFE,0xFD,0xFC)))
+Remove-Item -Force (Join-Path $g21g 'b.txt')
+Set-CaptureBase -Dir $g21g -BaseRef $g21gBase
+$null = Invoke-CaptureRun -Dir $g21g
+$e21g = Get-CaptureEntries -Dir $g21g
+Assert-Eq "21g: three changed files are captured" "3" "$(@($e21g).Count)"
+$a21g = @($e21g | Where-Object { $_.path -eq 'a.txt' })
+Assert-Eq "21g: the modified text file is present" "1" "$($a21g.Count)"
+if ($a21g.Count -eq 1) {
+    Assert-Contains "21g: its diff carries the git header" "diff --git a/a.txt" $a21g[0].diff
+    Assert-Contains "21g: its diff carries the added line" "+modified" $a21g[0].diff
+}
+$p21g = @($e21g | Where-Object { $_.path -eq 'logo.png' })
+Assert-Eq "21g: the binary file is present" "1" "$($p21g.Count)"
+if ($p21g.Count -eq 1) {
+    Assert-Eq "21g: the binary file gets the placeholder, em dash and all" $g21BinPlaceholder $p21g[0].diff
+}
+Assert-Eq "21g: the deleted file is present" "1" "$(@($e21g | Where-Object { $_.path -eq 'b.txt' }).Count)"
+
+# --- 21h: non-git project yields a well-formed [] file, not an absent one (sh 7h) ---
+$g21h = Join-Path $TmpDir 'g21-nongit'
+New-Item -ItemType Directory -Path $g21h -Force | Out-Null
+Set-Content -Path (Join-Path $g21h '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+Set-CaptureBase -Dir $g21h
+$null = Invoke-CaptureRun -Dir $g21h
+$snap21h = Join-Path $g21h '.stride-changed-files.json'
+Assert-Eq "21h: a non-git project still writes a snapshot file" "True" "$(Test-Path $snap21h)"
+if (Test-Path $snap21h) {
+    Assert-Eq "21h: and its content is a well-formed empty array" "[]" ((Get-Content -Raw -Path $snap21h).Trim())
+}
+
+# --- 21i: no TASK_BASE_REF falls back to HEAD~1 (sh 7i) ---
+$g21i = New-CaptureRepo -Name 'g21-fallback'
+Set-Content -Path (Join-Path $g21i 'c.txt') -Value 'first' -Encoding UTF8
+& git -C $g21i add c.txt 2>$null | Out-Null
+& git -C $g21i commit -q -m 'c1' 2>$null | Out-Null
+Set-CaptureBase -Dir $g21i
+$null = Invoke-CaptureRun -Dir $g21i
+$e21i = Get-CaptureEntries -Dir $g21i
+Assert-Eq "21i: the HEAD~1 fallback captures the last commit's file" "1" "$(@($e21i | Where-Object { $_.path -eq 'c.txt' }).Count)"
+
+# --- 21j: a single-quoted TASK_BASE_REF is unquoted before use (sh 7j) ---
+$g21j = New-CaptureRepo -Name 'g21-quoted'
+$g21jBase = (& git -C $g21j rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21j 'tracked.txt') -Value 'changed' -Encoding UTF8
+& git -C $g21j add tracked.txt 2>$null | Out-Null
+& git -C $g21j commit -q -m 'work' 2>$null | Out-Null
+Set-Content -Path (Join-Path $g21j '.stride-env-cache') -Value "TASK_ID=42`nTASK_BASE_REF='$g21jBase'" -Encoding UTF8
+$null = Invoke-CaptureRun -Dir $g21j
+$e21j = Get-CaptureEntries -Dir $g21j
+Assert-Eq "21j: a quoted base ref still resolves" "1" "$(@($e21j | Where-Object { $_.path -eq 'tracked.txt' }).Count)"
+
+# --- 21k: a section whose commands are all comments still captures (sh 7k) ---
+$g21k = New-CaptureRepo -Name 'g21-comments'
+$g21kBase = (& git -C $g21k rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21k '.stride.md') -Value @'
+## after_doing
+```bash
+# only a comment
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $g21k 'seed.txt') -Value 'edited' -Encoding UTF8
+Set-CaptureBase -Dir $g21k -BaseRef $g21kBase
+$null = Invoke-CaptureRun -Dir $g21k
+Assert-Eq "21k: capture runs even when the section body is all comments" "1" `
+    "$(@((Get-CaptureEntries -Dir $g21k) | Where-Object { $_.path -eq 'seed.txt' }).Count)"
+
+# --- 21l: before_review leaves an EXISTING snapshot byte-for-byte alone (sh 7l) ---
+$g21l = New-CaptureRepo -Name 'g21-selfheal-existing'
+$g21lSnap = Join-Path $g21l '.stride-changed-files.json'
+Set-Content -Path $g21lSnap -Value '[{"path":"stale.txt","diff":"stale body"}]' -Encoding UTF8 -NoNewline
+$g21lBefore = Get-Content -Raw -Path $g21lSnap
+Set-CaptureBase -Dir $g21l
+$g21lJson = @{ tool_input = @{ command = "curl -X PATCH http://127.0.0.1:1/api/tasks/42/complete -H `"Authorization: Bearer tok`"" } } | ConvertTo-Json -Compress
+$null = Invoke-HookScript -InputJson $g21lJson -Phase 'post' -ProjectDir $g21l
+Assert-Eq "21l: the self-heal never re-captures over an existing snapshot" $g21lBefore (Get-Content -Raw -Path $g21lSnap)
+
+# --- 21m: base resolves but nothing differs (sh 7m) ---
+$g21m = New-CaptureRepo -Name 'g21-nochange'
+Set-CaptureBase -Dir $g21m -BaseRef (& git -C $g21m rev-parse HEAD | Out-String).Trim()
+$null = Invoke-CaptureRun -Dir $g21m
+Assert-Eq "21m: an empty change set is [] " "[]" ((Get-Content -Raw -Path (Join-Path $g21m '.stride-changed-files.json')).Trim())
+
+# --- 21n: a tracked file containing NULs is treated as binary (sh 7n) ---
+$g21n = New-CaptureRepo -Name 'g21-trackedbin'
+$g21nBase = (& git -C $g21n rev-parse HEAD | Out-String).Trim()
+[System.IO.File]::WriteAllBytes((Join-Path $g21n 'seed.txt'), ([byte[]](0x00,0x01,0x02,0x00,0x03)))
+Set-CaptureBase -Dir $g21n -BaseRef $g21nBase
+$null = Invoke-CaptureRun -Dir $g21n
+$e21n = @((Get-CaptureEntries -Dir $g21n) | Where-Object { $_.path -eq 'seed.txt' })
+Assert-Eq "21n: a tracked file rewritten with NULs is captured" "1" "$($e21n.Count)"
+if ($e21n.Count -eq 1) { Assert-Eq "21n: and gets the binary placeholder" $g21BinPlaceholder $e21n[0].diff }
+
+# --- 21o/21p: unstaged and staged-but-uncommitted (sh 7o/7p) ---
+$g21o = New-CaptureRepo -Name 'g21-unstaged'
+$g21oBase = (& git -C $g21o rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21o 'seed.txt') -Value "seed`nunstaged edit" -Encoding UTF8
+Set-CaptureBase -Dir $g21o -BaseRef $g21oBase
+$null = Invoke-CaptureRun -Dir $g21o
+$e21o = @((Get-CaptureEntries -Dir $g21o) | Where-Object { $_.path -eq 'seed.txt' })
+Assert-Eq "21o: an unstaged modification is captured" "1" "$($e21o.Count)"
+if ($e21o.Count -eq 1) { Assert-Contains "21o: with its body" "+unstaged edit" $e21o[0].diff }
+
+$g21p = New-CaptureRepo -Name 'g21-staged'
+$g21pBase = (& git -C $g21p rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21p 'seed.txt') -Value "seed`nstaged edit" -Encoding UTF8
+& git -C $g21p add seed.txt 2>$null | Out-Null
+Set-CaptureBase -Dir $g21p -BaseRef $g21pBase
+$null = Invoke-CaptureRun -Dir $g21p
+$e21p = @((Get-CaptureEntries -Dir $g21p) | Where-Object { $_.path -eq 'seed.txt' })
+Assert-Eq "21p: a staged-but-uncommitted modification is captured" "1" "$($e21p.Count)"
+if ($e21p.Count -eq 1) { Assert-Contains "21p: with its body" "+staged edit" $e21p[0].diff }
+
+# --- 21q/21r: untracked new files (sh 7q/7r) ---
+$g21q = New-CaptureRepo -Name 'g21-untracked'
+Set-CaptureBase -Dir $g21q -BaseRef (& git -C $g21q rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21q 'new_file.txt') -Value "line one" -Encoding UTF8
+$null = Invoke-CaptureRun -Dir $g21q
+$r21q = Invoke-CaptureRun -Dir $g21q
+# A healthy capture must be SILENT about drops. The drop notice is the only
+# signal a real omission has, so one that also fires on ordinary runs is worse
+# than none — and that is exactly what happened: Out-String's trailing newline
+# survived the NUL split as a phantom entry and tripped the control-character
+# rule on every repo with an untracked file. This assertion is what makes that
+# regression visible instead of ambient.
+Assert-NotContains "21q: a clean capture emits no drop notice" `
+    "dropped an unsafe snapshot path" ($r21q.Stdout + $r21q.Stderr)
+$e21q = @((Get-CaptureEntries -Dir $g21q) | Where-Object { $_.path -eq 'new_file.txt' })
+Assert-Eq "21q: an untracked new file is captured" "1" "$($e21q.Count)"
+if ($e21q.Count -eq 1) {
+    Assert-Contains "21q: its diff names the new file" "+++ b/new_file.txt" $e21q[0].diff
+    Assert-Contains "21q: and carries its content" "+line one" $e21q[0].diff
+}
+
+$g21r = New-CaptureRepo -Name 'g21-untrackedbin'
+Set-CaptureBase -Dir $g21r -BaseRef (& git -C $g21r rev-parse HEAD | Out-String).Trim()
+[System.IO.File]::WriteAllBytes((Join-Path $g21r 'blob.bin'), ([byte[]](0x00,0xFF,0x00,0xFE)))
+$null = Invoke-CaptureRun -Dir $g21r
+$e21r = @((Get-CaptureEntries -Dir $g21r) | Where-Object { $_.path -eq 'blob.bin' })
+Assert-Eq "21r: an untracked binary file is captured" "1" "$($e21r.Count)"
+if ($e21r.Count -eq 1) { Assert-Eq "21r: and gets the binary placeholder" $g21BinPlaceholder $e21r[0].diff }
+
+# --- 21s: committed since base, then modified again (sh 7s) ---
+$g21s = New-CaptureRepo -Name 'g21-commit-then-edit'
+$g21sBase = (& git -C $g21s rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21s 'seed.txt') -Value "seed`ncommitted" -Encoding UTF8
+& git -C $g21s add seed.txt 2>$null | Out-Null
+& git -C $g21s commit -q -m 'mid' 2>$null | Out-Null
+Set-Content -Path (Join-Path $g21s 'seed.txt') -Value "seed`ncommitted`nthen edited" -Encoding UTF8
+Set-CaptureBase -Dir $g21s -BaseRef $g21sBase
+$null = Invoke-CaptureRun -Dir $g21s
+$e21s = @((Get-CaptureEntries -Dir $g21s) | Where-Object { $_.path -eq 'seed.txt' })
+Assert-Eq "21s: a file committed then re-edited appears exactly once" "1" "$($e21s.Count)"
+if ($e21s.Count -eq 1) { Assert-Contains "21s: and its diff reaches the working-tree content" "+then edited" $e21s[0].diff }
+
+# --- 21t/21u/21v/21w: the hook's own artifacts (sh 7t-7w) ---
+$g21t = New-CaptureRepo -Name 'g21-artifacts'
+Set-CaptureBase -Dir $g21t -BaseRef (& git -C $g21t rev-parse HEAD | Out-String).Trim()
+New-Item -ItemType Directory -Path (Join-Path $g21t 'sub') -Force | Out-Null
+Set-Content -Path (Join-Path $g21t 'real.txt') -Value 'kept' -Encoding UTF8
+Set-Content -Path (Join-Path $g21t 'sub/.stride-diff-upload-state') -Value 'user file' -Encoding UTF8
+Set-Content -Path (Join-Path $g21t 'sub/.stride-changed-files.json') -Value 'user file' -Encoding UTF8
+$null = Invoke-CaptureRun -Dir $g21t
+$p21t = @((Get-CaptureEntries -Dir $g21t) | ForEach-Object { $_.path })
+Assert-Eq "21t: a real change survives alongside the artifacts" "True" "$($p21t -contains 'real.txt')"
+Assert-Eq "21t: the root upload-state artifact is excluded" "False" "$($p21t -contains '.stride-diff-upload-state')"
+Assert-Eq "21t: the root snapshot artifact is excluded" "False" "$($p21t -contains '.stride-changed-files.json')"
+Assert-Eq "21v: a same-named file in a SUBDIRECTORY is kept" "True" "$($p21t -contains 'sub/.stride-diff-upload-state')"
+Assert-Eq "21v: and so is the subdirectory snapshot name" "True" "$($p21t -contains 'sub/.stride-changed-files.json')"
+
+$g21u = New-CaptureRepo -Name 'g21-artifacts-committed'
+Set-Content -Path (Join-Path $g21u '.gitignore') -Value ".stride.md`n.stride-env-cache" -Encoding UTF8
+Set-Content -Path (Join-Path $g21u '.stride-diff-upload-state') -Value 'v1' -Encoding UTF8
+Set-Content -Path (Join-Path $g21u '.stride-changed-files.json') -Value '[]' -Encoding UTF8
+& git -C $g21u add .gitignore .stride-diff-upload-state .stride-changed-files.json 2>$null | Out-Null
+& git -C $g21u commit -q -m 'commit artifacts' 2>$null | Out-Null
+$g21uBase = (& git -C $g21u rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21u '.stride-diff-upload-state') -Value 'v2' -Encoding UTF8
+Set-Content -Path (Join-Path $g21u 'real.txt') -Value 'kept' -Encoding UTF8
+Set-CaptureBase -Dir $g21u -BaseRef $g21uBase
+$null = Invoke-CaptureRun -Dir $g21u
+$p21u = @((Get-CaptureEntries -Dir $g21u) | ForEach-Object { $_.path })
+Assert-Eq "21u: a COMMITTED and modified artifact is still excluded" "False" "$($p21u -contains '.stride-diff-upload-state')"
+Assert-Eq "21u: the real change beside it survives" "True" "$($p21u -contains 'real.txt')"
+
+$g21w = New-CaptureRepo -Name 'g21-artifacts-only'
+Set-CaptureBase -Dir $g21w -BaseRef (& git -C $g21w rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21w '.stride-diff-upload-state') -Value 'state' -Encoding UTF8
+$null = Invoke-CaptureRun -Dir $g21w
+Assert-Eq "21w: an artifacts-only working tree yields []" "[]" `
+    ((Get-Content -Raw -Path (Join-Path $g21w '.stride-changed-files.json')).Trim())
+
+# --- 21x: e2e truncation, binding 21a/21b's mirrors to the real code ---
+$g21x = New-CaptureRepo -Name 'g21-truncate'
+$g21xBase = (& git -C $g21x rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21x 'big.txt') -Value (((1..900) | ForEach-Object { "line $_" }) -join "`n") -Encoding UTF8
+Set-CaptureBase -Dir $g21x -BaseRef $g21xBase
+$null = Invoke-CaptureRun -Dir $g21x
+$e21x = @((Get-CaptureEntries -Dir $g21x) | Where-Object { $_.path -eq 'big.txt' })
+Assert-Eq "21x: a real >500-line diff is captured" "1" "$($e21x.Count)"
+if ($e21x.Count -eq 1) {
+    Assert-Eq "21x: the captured diff is exactly 500 lines" "500" "$((([regex]::Matches($e21x[0].diff, "`n")).Count + 1))"
+    Assert-Eq "21x: and the marker is its final line" $g21Marker ($e21x[0].diff.Split("`n")[-1])
+}
+
+# --- 21y: CRLF content survives capture (the --output path) ---
+$g21y = New-CaptureRepo -Name 'g21-crlf'
+# Pin the line-ending policy in the FIXTURE. A machine with core.autocrlf=input
+# (common, and the case here) strips the CR before a diff exists, so without
+# this the assertion would silently test the contributor's git config rather
+# than the capture — passing or failing for reasons that have nothing to do
+# with this code.
+& git -C $g21y config core.autocrlf false 2>$null | Out-Null
+Set-Content -Path (Join-Path $g21y '.gitattributes') -Value "* -text`n" -Encoding UTF8
+& git -C $g21y add .gitattributes 2>$null | Out-Null
+& git -C $g21y commit -q -m 'pin eol' 2>$null | Out-Null
+$g21yBase = (& git -C $g21y rev-parse HEAD | Out-String).Trim()
+[System.IO.File]::WriteAllText((Join-Path $g21y 'seed.txt'), "seed`r`ncrlf line`r`n", (New-Object System.Text.UTF8Encoding($false)))
+Set-CaptureBase -Dir $g21y -BaseRef $g21yBase
+$null = Invoke-CaptureRun -Dir $g21y
+$e21y = @((Get-CaptureEntries -Dir $g21y) | Where-Object { $_.path -eq 'seed.txt' })
+Assert-Eq "21y: a CRLF file is captured" "1" "$($e21y.Count)"
+if ($e21y.Count -eq 1) {
+    Assert-Contains "21y: the CR survives into the snapshot body" "crlf line`r" $e21y[0].diff
+}
+
+# --- 21z: a path containing spaces is emitted verbatim with forward slashes ---
+$g21z = New-CaptureRepo -Name 'g21-spaces'
+Set-CaptureBase -Dir $g21z -BaseRef (& git -C $g21z rev-parse HEAD | Out-String).Trim()
+New-Item -ItemType Directory -Path (Join-Path $g21z 'dir with space') -Force | Out-Null
+Set-Content -Path (Join-Path $g21z 'dir with space/file name.txt') -Value 'spaced' -Encoding UTF8
+$null = Invoke-CaptureRun -Dir $g21z
+$p21z = @((Get-CaptureEntries -Dir $g21z) | ForEach-Object { $_.path })
+Assert-Eq "21z: a path with spaces is emitted exactly, forward-slashed" "True" "$($p21z -contains 'dir with space/file name.txt')"
+
+# --- 21aa: a RENAMED binary still gets the placeholder (bash's numstat cannot) ---
+$g21aa = New-CaptureRepo -Name 'g21-rename'
+[System.IO.File]::WriteAllBytes((Join-Path $g21aa 'old.bin'), ([byte[]](0x00,0x11,0x22,0x33,0x00,0x44)))
+& git -C $g21aa add old.bin 2>$null | Out-Null
+& git -C $g21aa commit -q -m 'add bin' 2>$null | Out-Null
+$g21aaBase = (& git -C $g21aa rev-parse HEAD | Out-String).Trim()
+& git -C $g21aa mv old.bin new.bin 2>$null | Out-Null
+Set-CaptureBase -Dir $g21aa -BaseRef $g21aaBase
+$null = Invoke-CaptureRun -Dir $g21aa
+$e21aa = @((Get-CaptureEntries -Dir $g21aa) | Where-Object { $_.path -eq 'new.bin' })
+Assert-Eq "21aa: the rename destination is captured" "1" "$($e21aa.Count)"
+if ($e21aa.Count -eq 1) {
+    Assert-Eq "21aa: a RENAMED binary still gets the placeholder" $g21BinPlaceholder $e21aa[0].diff
+}
+
+# --- 21bb: the snapshot is written WITHOUT a UTF-8 BOM ---
+$g21bb = New-CaptureRepo -Name 'g21-bom'
+Set-CaptureBase -Dir $g21bb -BaseRef (& git -C $g21bb rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21bb 'x.txt') -Value 'x' -Encoding UTF8
+$null = Invoke-CaptureRun -Dir $g21bb
+$b21bb = [System.IO.File]::ReadAllBytes((Join-Path $g21bb '.stride-changed-files.json'))
+Assert-Eq "21bb: the snapshot has no UTF-8 BOM (it is base64'd verbatim onto the wire)" "False" `
+    "$($b21bb.Length -ge 3 -and $b21bb[0] -eq 0xEF -and $b21bb[1] -eq 0xBB -and $b21bb[2] -eq 0xBF)"
+
+# --- 21cc: a base owned by ANOTHER task is refused, and [] is written ---
+$g21cc = New-CaptureRepo -Name 'g21-refuse'
+$g21ccBase = (& git -C $g21cc rev-parse HEAD | Out-String).Trim()
+Set-Content -Path (Join-Path $g21cc 'seed.txt') -Value 'edited' -Encoding UTF8
+Set-Content -Path (Join-Path $g21cc '.stride-env-cache') `
+    -Value "TASK_ID=99`nTASK_BASE_REF=$g21ccBase`nTASK_BASE_REF_OWNER=55" -Encoding UTF8
+$r21cc = Invoke-CaptureRun -Dir $g21cc -TaskId '99'
+Assert-Eq "21cc: a foreign-owned base yields an empty snapshot, not another task's diff" "[]" `
+    ((Get-Content -Raw -Path (Join-Path $g21cc '.stride-changed-files.json')).Trim())
+Assert-Contains "21cc: and the refusal is announced" "REFUSING" ($r21cc.Stdout + $r21cc.Stderr)
+
+# --- 21dd: an option-shaped TASK_BASE_REF must not become a git OPTION ---
+# A base ref is a REVISION, so `--` cannot protect it. `--output=<path>` is
+# opened for writing by git during option PARSING, so an unguarded
+# `git diff --name-only <base> HEAD` truncates that file and writes the repo's
+# changed-file NAMES into it — an arbitrary-file overwrite, above the project
+# root, whose content is chosen by what is in the tree. TASK_BASE_REF comes from
+# .stride-env-cache, which is loaded with no validation, so a repository that
+# ships that file supplies the value.
+$g21dd = New-CaptureRepo -Name 'g21-optionbase'
+$g21ddVictim = Join-Path $TmpDir 'g21-victim.txt'
+Set-Content -Path $g21ddVictim -Value 'PRECIOUS CONTENT MUST SURVIVE' -Encoding UTF8 -NoNewline
+$g21ddBefore = Get-Content -Raw -Path $g21ddVictim
+Set-Content -Path (Join-Path $g21dd 'seed.txt') -Value 'edited' -Encoding UTF8
+Set-Content -Path (Join-Path $g21dd '.stride-env-cache') `
+    -Value "TASK_ID=42`nTASK_BASE_REF=--output=$g21ddVictim" -Encoding UTF8
+$null = Invoke-CaptureRun -Dir $g21dd
+Assert-Eq "21dd: an option-shaped TASK_BASE_REF does not overwrite a file outside the repo" `
+    $g21ddBefore (Get-Content -Raw -Path $g21ddVictim)
+Assert-Eq "21dd: and the capture still produces a well-formed snapshot" "True" `
+    "$((Test-Path (Join-Path $g21dd '.stride-changed-files.json')))"
+
 }
 
 # ============================================================

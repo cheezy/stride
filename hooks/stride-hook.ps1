@@ -31,6 +31,22 @@ $script:TaskOwnerId = ''
 # "exit 0" as "it ran and passed" get that wrong — see the after_goal marker.
 $script:LastSectionRanCommands = $false
 
+# (W2100) The snapshot base judgment, memoized once per process — mirror of the
+# bash twin's SNAP_BASE_RESOLVED_DONE. Invoke-FinalizeAfterDoing runs twice per
+# completion (once before the section's commands for the W1095 early upload,
+# once after), and re-deriving the base the second time could pick up a
+# different answer mid-run. The capture itself still re-runs per call, exactly
+# as bash's does; it is only the JUDGMENT that is fixed.
+# Declared here because Set-StrictMode makes reading an unset variable an error.
+$script:SnapBaseResolvedDone = $false
+$script:SnapBaseResolved = ''
+$script:SnapBaseRefused = $false
+
+# (W2100) Sentinel a range list carries when a task provably made no commits of
+# its own. Mirrors stride-hook.sh's __stride_no_own_commits__ — Expand-OwnRanges
+# must skip it rather than feed it to git as a revision.
+$script:StrideNoOwnCommits = '__stride_no_own_commits__'
+
 # (D226) Atomic env-cache write, mirroring the bash twin's write_env_cache.
 # Every truncating write goes through here so no reader can observe a partial
 # cache. The temp is staged in .stride/ — already hard-excluded from capture
@@ -1477,6 +1493,601 @@ function Resolve-StrideApiToken {
     return $token
 }
 
+# ============================================================================
+# (W2100) The changed-files CAPTURE engine — the BUILD half.
+#
+# Before this, stride-hook.ps1 only ever PUT a .stride-changed-files.json that
+# some other process had written. On native Windows that process is nobody:
+# stride-hook.sh:118 execs this script and exits, so a native-Windows run
+# produced no snapshot at all, silently. These functions mirror
+# stride-hook.sh's capture_changed_files and expand_own_ranges.
+#
+# Windows PowerShell 5.1 is the shipping host, so nothing here may use a 7-only
+# construct. Two traps are load-bearing and are called out at their sites:
+# ConvertTo-Json -AsArray does not exist on 5.1, and Set-Content -Encoding UTF8
+# writes a BOM there.
+# ============================================================================
+
+# Run a git command whose stdout must survive byte-for-byte, via --output.
+#
+# Why not `@(& git ...)`: PowerShell splits native stdout into lines and drops
+# the CR of every CRLF, so a CRLF diff would come back subtly wrong and its
+# truncation line count with it. It also re-decodes through
+# [Console]::OutputEncoding, mangling non-ASCII paths. Routing git's own
+# --output to a temp file and reading the bytes avoids both.
+#
+# The temp is staged in the project's .stride/ directory, which inherits that
+# directory's permissions and is hard-excluded from the capture by the
+# ^\.stride/ rule, so it can never surface as an entry in the snapshot being
+# built. It is deliberately NOT the system temp: see the body for why.
+#
+# Returns @{ Ok = [bool]; Text = [string] } and never throws. -AllowExit1 is for
+# `git diff`'s "files differ" status, which is success for our purposes.
+function Invoke-GitCapture {
+    param([string[]]$GitArgs, [switch]$AllowExit1)
+    # Stage in .stride/, NOT the system temp. git's --output creates the file at
+    # 0666-minus-umask, so on POSIX hosts (Linux CI, WSL, contributor machines)
+    # a world-readable /tmp would briefly expose every file's unified diff — the
+    # accidentally-committed secret this capture is explicitly bounded against
+    # included. The bash twin does not have that property: mktemp gives it 0600.
+    # .stride/ inherits the project directory's permissions, is already hard-
+    # excluded from the capture by the ^\.stride/ rule so it can never surface
+    # as an entry, and is the same staging location Write-EnvCache uses.
+    # No system-temp fallback. If .stride/ cannot be created the snapshot cannot
+    # be written either — Write-ChangedFilesSnapshot targets the same project
+    # directory — so falling back would relocate raw diff content into a
+    # world-readable directory in exchange for nothing. Fail this one capture
+    # instead; the caller degrades to '[]'.
+    #
+    # -PathType Container, not a bare Test-Path: a stray FILE named .stride
+    # would otherwise satisfy the guard, skip the New-Item, and silently empty
+    # every capture from then on.
+    $stageDir = Join-Path $ProjectDir '.stride'
+    try {
+        if (-not (Test-Path -LiteralPath $stageDir -PathType Container)) {
+            New-Item -ItemType Directory -Path $stageDir -Force -ErrorAction Stop | Out-Null
+        }
+    } catch {
+        return @{ Ok = $false; Text = '' }
+    }
+    # Prefixed so a kill-orphaned temp is identifiable as ours and sweepable,
+    # rather than an unexplained 8.3 name a `git add -A` gate might commit.
+    # Mirrors Write-EnvCache's `env-cache.` convention.
+    $tmp = Join-Path $stageDir ('capture.' + [System.IO.Path]::GetRandomFileName())
+    try {
+        # --output MUST be inserted right after the subcommand, never appended:
+        # everything after a `--` separator is a PATHSPEC, so an appended
+        # --output=<file> is silently read as a filename and the diff comes back
+        # empty rather than failing.
+        $full = @()
+        if ($GitArgs.Count -gt 0) {
+            $full = @($GitArgs[0], "--output=$tmp")
+            if ($GitArgs.Count -gt 1) { $full = $full + $GitArgs[1..($GitArgs.Count - 1)] }
+        } else {
+            $full = @("--output=$tmp")
+        }
+        & git -C $ProjectDir @full 2>$null | Out-Null
+        $code = $LASTEXITCODE
+        $ok = ($code -eq 0) -or ($AllowExit1 -and $code -eq 1)
+        if (-not $ok) { return @{ Ok = $false; Text = '' } }
+        if (-not (Test-Path -LiteralPath $tmp -PathType Leaf)) { return @{ Ok = $true; Text = '' } }
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        return @{ Ok = $true; Text = [System.IO.File]::ReadAllText($tmp, $enc) }
+    } catch {
+        return @{ Ok = $false; Text = '' }
+    } finally {
+        try { if (Test-Path -LiteralPath $tmp -PathType Leaf) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } } catch { }
+    }
+}
+
+# Invoke-GitCapture plus bash's trailing-newline strip.
+#
+# The regex matches \n ONLY, never \r?\n: bash's $( ) strips trailing newlines
+# and leaves any trailing \r in place, and this must match it byte for byte.
+function Get-GitDiffBody {
+    param([string[]]$GitArgs, [switch]$AllowExit1)
+    $r = Invoke-GitCapture -GitArgs $GitArgs -AllowExit1:$AllowExit1
+    if (-not $r.Ok) { return '' }
+    return ($r.Text -replace "\n+$", '')
+}
+
+# Split NUL-delimited git output. Used for every -z call, because splitting on
+# whitespace or newlines mis-parses paths containing spaces or newlines, and
+# git quotes such paths when -z is absent.
+function Split-NulList {
+    param([string]$Text)
+    if (-not $Text) { return @() }
+    return @($Text.Split([char]0) | Where-Object { $_ -ne '' })
+}
+
+# Neutralize a value before it reaches stderr.
+#
+# Several notices print values that came from the filesystem or from
+# .stride-env-cache, which is loaded with no key allow-list and no value
+# validation — so ESC can rewrite the agent's terminal and CR/LF can forge
+# additional "stride-hook:" lines, including a forged REFUSING or success line,
+# in the one output channel a refused or dropped capture has. Every such value
+# goes through here rather than each site remembering.
+function ConvertTo-PrintableForLog {
+    param([string]$Value, [int]$MaxLength = 200)
+    if ($null -eq $Value) { return '' }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $Value.ToCharArray()) {
+        if ([int]$ch -lt 32 -or [int]$ch -eq 127) {
+            [void]$sb.Append(('\x{0:X2}' -f [int]$ch))
+        } else {
+            [void]$sb.Append($ch)
+        }
+        # Bound the length too, so a multi-kilobyte forged value cannot flood
+        # the log even once it is escaped.
+        if ($sb.Length -ge $MaxLength) { [void]$sb.Append('...'); break }
+    }
+    return $sb.ToString()
+}
+
+# Defence in depth against a snapshot path escaping the repository root.
+#
+# git's own --name-only / ls-files output is already repo-relative with forward
+# slashes and never absolute or ..-bearing, so this cannot fire on today's
+# inputs. It mirrors the server's Kanban.Tasks.PathSafety, so a path that would
+# be rejected at the API is dropped here with a note instead of shipped.
+function Test-SafeRepoPath {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    if ($Path.StartsWith('/') -or $Path.StartsWith('\')) { return $false }
+    # Belt and braces alongside the `--` separators: a dash-leading path is what
+    # git would read as an option, and `--output=` is only the most destructive
+    # of several (-O orderfile, -I) it can reach. Rejecting the shape here means
+    # a future call site that forgets its separator still cannot be steered.
+    if ($Path.StartsWith('-')) { return $false }
+    if ($Path -match '^[A-Za-z]:') { return $false }
+    if ($Path.Contains('\')) { return $false }
+    foreach ($seg in $Path.Split('/')) { if ($seg -eq '..') { return $false } }
+    foreach ($ch in $Path.ToCharArray()) { if ([int]$ch -lt 32) { return $false } }
+    return $true
+}
+
+# Parse `git diff --numstat -z` and return a hashtable of binary paths.
+#
+# Record grammar: an ordinary record is "added\tdeleted\tpath\0"; a rename or
+# copy is "added\tdeleted\t\0" followed by "src\0dst\0". Binary is added and
+# deleted both '-'.
+#
+# The -z form is deliberate. Plain --numstat prints a COMPACTED path for a
+# rename ("a/{ => b}/f.md") that matches no path --name-only ever emits, so the
+# bash twin's scan can never match a renamed file and a renamed BINARY escapes
+# the placeholder. Taking the rename DESTINATION here fixes that; test 21aa
+# pins the divergence.
+function Get-NumstatBinarySet {
+    param([string]$NumstatZ)
+    $set = @{}
+    if (-not $NumstatZ) { return $set }
+    $fields = @($NumstatZ.Split([char]0))
+    $i = 0
+    while ($i -lt $fields.Count) {
+        $rec = $fields[$i]
+        if (-not $rec) { $i++; continue }
+        $parts = $rec.Split([char]9)
+        if ($parts.Count -lt 3) { $i++; continue }
+        $added = $parts[0]
+        $deleted = $parts[1]
+        $path = $parts[2]
+        if ($path -eq '') {
+            # Rename/copy: the next two fields are src then dst.
+            if (($i + 2) -lt $fields.Count) { $path = $fields[$i + 2] }
+            $i += 3
+        } else {
+            $i++
+        }
+        if ($path -and $added -eq '-' -and $deleted -eq '-') { $set[$path] = $true }
+    }
+    return $set
+}
+
+# Expand an own-ranges list into a concatenated patch.
+#
+# Mirrors stride-hook.sh's expand_own_ranges. Each non-empty line is
+# "<from> <to>"; the sentinel line is skipped. The pathspec MUST stay a
+# separate trailing argument rather than being folded into $GitArgs — placed
+# before the endpoints it silently yields an empty patch, which is the
+# documented reason the bash helper exists as its own function.
+function Expand-OwnRanges {
+    param([string]$Ranges, [string]$Path, [string[]]$GitArgs)
+    $out = New-Object System.Collections.Generic.List[string]
+    if (-not $Ranges) { return '' }
+    foreach ($line in $Ranges.Split("`n")) {
+        $t = $line.Trim()
+        if (-not $t) { continue }
+        if ($t -eq $script:StrideNoOwnCommits) { continue }
+        $sp = $t.IndexOf(' ')
+        if ($sp -lt 0) { continue }
+        $from = $t.Substring(0, $sp)
+        $to = $t.Substring($t.LastIndexOf(' ') + 1)
+        if (-not $from -or -not $to) { continue }
+        $args2 = @($GitArgs) + @($from, $to)
+        if ($Path) { $args2 = $args2 + @('--', $Path) }
+        $body = Get-GitDiffBody -GitArgs $args2
+        if ($body) { $out.Add($body) }
+    }
+    # Join with NOTHING when the caller asked git for NUL-delimited output.
+    # Both capture call sites use -z, and an LF between two chunks would become
+    # part of the boundary record: the first path of each later chunk turns into
+    # "`npath" (dropped as unsafe) and a boundary numstat record's added field
+    # into "`n-" (so a renamed or binary file loses its placeholder). Bash has no
+    # equivalent because its expand_own_ranges is never called with -z.
+    # Unreachable while every call site passes '' — but the PARITY NOTE tells a
+    # future implementer the remaining work is call sites plus the record_task_*
+    # writers, and this would be waiting for them.
+    if ($GitArgs -contains '-z') { return ($out -join '') }
+    return ($out -join "`n")
+}
+
+# (D142) Judge whether a base ref can be trusted to anchor the snapshot, and
+# recompute it from the task branch point when it cannot. Mirror of
+# stride-hook.sh's resolve_snapshot_base, including its three rules and its
+# stderr notice. Rule 3 exempts a base carrying TASK_BASE_REF_TRUSTED=1,
+# because a base this claim's own capture wrote IS the branch point by
+# construction and origin/main may legitimately have advanced past it.
+function Resolve-SnapshotBaseTrust {
+    param([string]$Base)
+    try {
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $Base }
+        & git -C $ProjectDir rev-parse --verify --quiet HEAD 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $Base }
+
+        $remoteHead = ''
+        $sym = (& git -C $ProjectDir symbolic-ref --quiet refs/remotes/origin/HEAD 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $sym) { $remoteHead = $sym -replace '^refs/remotes/', '' }
+        if (-not $remoteHead) {
+            foreach ($c in @('origin/main', 'origin/master')) {
+                & git -C $ProjectDir rev-parse --verify --quiet $c 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) { $remoteHead = $c; break }
+            }
+        }
+        if (-not $remoteHead) { return $Base }
+
+        $bp = (& git -C $ProjectDir merge-base HEAD $remoteHead 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $bp) { return $Base }
+
+        $reason = ''
+        $baseSha = ''
+        if ($Base) {
+            $baseSha = (& git -C $ProjectDir rev-parse --verify --quiet "$Base^{commit}" 2>$null | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { $baseSha = '' }
+        }
+        if (-not $Base -or -not $baseSha) {
+            $reason = 'empty or unresolvable'
+        } else {
+            & git -C $ProjectDir merge-base --is-ancestor $baseSha HEAD 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                $reason = 'not an ancestor of HEAD'
+            } else {
+                $trusted = [System.Environment]::GetEnvironmentVariable('TASK_BASE_REF_TRUSTED', 'Process')
+                if ($trusted) { $trusted = $trusted.Trim("'") }
+                if ($trusted -ne '1' -and $baseSha -ne $bp) {
+                    & git -C $ProjectDir merge-base --is-ancestor $baseSha $bp 2>$null | Out-Null
+                    if ($LASTEXITCODE -eq 0) {
+                        $reason = 'older than the task branch point, so the diff would span commits pulled from origin'
+                    }
+                }
+            }
+        }
+        if (-not $reason) { return $Base }
+
+        $shown = ConvertTo-PrintableForLog -Value $Base
+        if (-not $shown) { $shown = '<empty>' }
+        [Console]::Error.WriteLine("stride-hook: TASK_BASE_REF $shown is not trustworthy ($reason); recomputed the snapshot base from the task branch point: $bp")
+        return $bp
+    } catch {
+        return $Base
+    }
+}
+
+# (D226/D269) Choose the base for THIS task's snapshot, or REFUSE.
+#
+# Mirror of stride-hook.sh's select_task_snapshot_base. Precedence: this task's
+# own recorded base; then the shared TASK_BASE_REF when nothing contradicts it.
+# Two refusals, both of which upload an empty snapshot rather than another
+# task's diff: a shared base stamped by a different task, and an unproven base
+# with no per-task record.
+#
+# Returns @{ Refused = [bool]; Base = [string] }.
+function Resolve-TaskSnapshotBase {
+    param([string]$TaskId, [switch]$Quiet)
+
+    # A base ref is a REVISION, not a pathspec, so `--` cannot protect it: a
+    # value like `--output=../x` is read by git as an option and its handler
+    # opens that file for writing during option parsing. `git diff --name-only
+    # <base> HEAD` then truncates a file above the project root AND writes the
+    # repo's changed-file NAMES into it — an arbitrary-file overwrite whose
+    # content is chosen by what exists in the tree.
+    #
+    # The value reaches here from TASK_BASE_REF / TASK_BASE_REF_<id>, which are
+    # loaded from .stride-env-cache with no key allow-list and no validation, so
+    # a repository that ships that file supplies it. This function is the single
+    # producer for both the build half and the upload half's read, so rejecting
+    # the shape HERE is what keeps the two from drifting and covers any future
+    # call site. Mirrors the leading-dash rule in Test-SafeRepoPath.
+    $own = ''
+    if ($TaskId -and $TaskId -match '^[0-9]+$') {
+        # (D269) Digits-only, matching the write side: a non-integer id names no
+        # per-task record, so it must not be able to READ one either.
+        $sanitized = $TaskId -replace '[^A-Za-z0-9_]', '_'
+        # Mirror of the bash twin's task_record_key: refuse the reserved
+        # suffixes so a task id can never resolve to TASK_BASE_REF_TRUSTED,
+        # _OWNER or _UNPROVEN and read a control flag as if it were a base.
+        # The digits-only gate above already makes these unreachable; bash
+        # carries the check anyway as insurance for the day that rule widens,
+        # and dropping it in the port would silently lose that insurance.
+        if ($sanitized -notmatch '^(TRUSTED|OWNER|UNPROVEN)$') {
+            $ownKey = 'TASK_BASE_REF_' + $sanitized
+            $own = [System.Environment]::GetEnvironmentVariable($ownKey, 'Process')
+            if ($own) { $own = $own.Trim("'") }
+        }
+    }
+    if ($own -and $own.StartsWith('-')) {
+        if (-not $Quiet) {
+            [Console]::Error.WriteLine("stride-hook: refusing an option-shaped per-task base ref for task $(ConvertTo-PrintableForLog -Value $TaskId) (" + (ConvertTo-PrintableForLog -Value $own) + "); ignoring it.")
+        }
+        $own = ''
+    }
+    if ($own) { return @{ Refused = $false; Base = $own } }
+
+    $shared = [System.Environment]::GetEnvironmentVariable('TASK_BASE_REF', 'Process')
+    if ($shared) { $shared = $shared.Trim("'") }
+    if ($shared -and $shared.StartsWith('-')) {
+        if (-not $Quiet) {
+            [Console]::Error.WriteLine("stride-hook: refusing an option-shaped TASK_BASE_REF (" + (ConvertTo-PrintableForLog -Value $shared) + "); ignoring it.")
+        }
+        $shared = ''
+    }
+    $shownShared = ConvertTo-PrintableForLog -Value $shared
+    if (-not $shownShared) { $shownShared = '<empty>' }
+
+    $owner = [System.Environment]::GetEnvironmentVariable('TASK_BASE_REF_OWNER', 'Process')
+    if ($owner) { $owner = $owner.Trim("'") }
+    if ($TaskId -and $owner -and $owner -ne $TaskId) {
+        if (-not $Quiet) {
+            [Console]::Error.WriteLine("stride-hook: REFUSING the changed_files diff for task $(ConvertTo-PrintableForLog -Value $TaskId) " + [char]0x2014 + " cached TASK_BASE_REF $shownShared was written by task $(ConvertTo-PrintableForLog -Value $owner), so the captured diff would belong to another task. Uploading an empty snapshot instead.")
+        }
+        return @{ Refused = $true; Base = '' }
+    }
+
+    $unproven = [System.Environment]::GetEnvironmentVariable('TASK_BASE_REF_UNPROVEN', 'Process')
+    if ($unproven) { $unproven = $unproven.Trim("'") }
+    if ($TaskId -and $unproven -eq '1') {
+        if (-not $Quiet) {
+            [Console]::Error.WriteLine("stride-hook: REFUSING the changed_files diff for task $(ConvertTo-PrintableForLog -Value $TaskId) " + [char]0x2014 + " cached TASK_BASE_REF $shownShared was written by a claim that could not prove which task it belonged to, and no base is recorded for this task. Uploading an empty snapshot instead.")
+        }
+        return @{ Refused = $true; Base = '' }
+    }
+
+    return @{ Refused = $false; Base = $shared }
+}
+
+# Build the per-file diff snapshot. Mirror of stride-hook.sh's
+# capture_changed_files. Returns a JSON array STRING; never throws, never
+# returns $null, and degrades to the literal '[]' rather than to nothing —
+# the server distinguishes [] (a real empty change set) from a missing value.
+function Build-ChangedFilesSnapshot {
+    param([string]$Base, [string]$OwnRanges)
+    $maxLines = 500
+    $truncMarker = '[diff truncated at 500 lines]'
+    # The em dash MUST be built from its code point. This file has no BOM, and
+    # Windows PowerShell 5.1 decodes a BOM-less .ps1 as the ANSI codepage, so a
+    # literal em dash in a string would ship as mojibake on the very host this
+    # targets — invisible to pwsh 7 tests and invisible to the static gate.
+    $binPlaceholder = '[binary file ' + [char]0x2014 + ' no diff captured]'
+    try {
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return '[]' }
+
+        $useBase = $Base
+        if ($useBase) {
+            & git -C $ProjectDir rev-parse --verify --quiet $useBase 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) { $useBase = '' }
+        }
+        if (-not $useBase) {
+            & git -C $ProjectDir rev-parse --verify --quiet 'HEAD~1' 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) { return '[]' }
+            $useBase = 'HEAD~1'
+        }
+
+        # Tracked change set.
+        if ($OwnRanges) {
+            $rangeText = Expand-OwnRanges -Ranges $OwnRanges -Path '' -GitArgs @('diff', '--name-only', '-z')
+            $headText = Get-GitDiffBody -GitArgs @('diff', '--name-only', '-z', 'HEAD')
+            $tracked = @(Split-NulList $rangeText) + @(Split-NulList $headText)
+        } else {
+            $tracked = Split-NulList (Get-GitDiffBody -GitArgs @('diff', '--name-only', '-z', $useBase))
+        }
+
+        # -z here too, matching the tracked path above. Without it git QUOTES any
+        # non-ASCII or unusual path, so it arrives as a backslash-escaped literal
+        # and is then dropped by Test-SafeRepoPath — a file silently missing from
+        # the snapshot, which is the exact failure mode this task exists to end.
+        # ls-files has no --output, so it cannot go through Invoke-GitCapture;
+        # but -z leaves no newlines for PowerShell to split on, so the list
+        # arrives whole and is split on NUL here instead.
+        # (Write-DirtyBaseline at the top of this file still uses the unquoted
+        # form; that is pre-existing and out of scope here, not an endorsement.)
+        # This is the one git read that cannot use Invoke-GitCapture's byte-exact
+        # --output path (ls-files has no --output), so its bytes are decoded
+        # through [Console]::OutputEncoding. On Windows PowerShell 5.1 — the
+        # shipping host — that defaults to the console OEM code page, which
+        # would decode a non-ASCII untracked path as mojibake: it would pass
+        # Test-SafeRepoPath and then produce an empty --no-index diff. That is
+        # the same silent-loss class the -z change closed, relocated one layer
+        # down. Pin the encoding to UTF-8 for the duration and restore it, so
+        # the decode matches what git actually wrote.
+        $prevOutEnc = [Console]::OutputEncoding
+        $untrackedRaw = ''
+        try {
+            try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+            $untrackedRaw = (& git -C $ProjectDir ls-files -z --others --exclude-standard 2>$null | Out-String)
+            if ($LASTEXITCODE -ne 0) { $untrackedRaw = '' }
+        } finally {
+            try { [Console]::OutputEncoding = $prevOutEnc } catch { }
+        }
+        # TrimEnd the newline Out-String appends. Without this the final NUL is
+        # followed by a bare "`r`n", which Split-NulList emits as a phantom
+        # entry; it then fails Test-SafeRepoPath's control-character rule and
+        # fires the drop notice on EVERY capture that has any untracked file —
+        # making a real drop indistinguishable from noise, which is exactly what
+        # naming the path was meant to fix.
+        $untracked = @(Split-NulList ($untrackedRaw.TrimEnd("`r", "`n")))
+
+        # Self-exclusion: the hook's own root artifacts, and the whole root
+        # .stride/ directory. Root-anchored only — sub/.stride-changed-files.json
+        # is a user file and must survive.
+        $selfNames = @('.stride-diff-upload-state', '.stride-changed-files.json',
+                       '.stride-dirty-baseline', '.stride.md', '.stride_auth.md')
+        $seen = @{}
+        $paths = New-Object System.Collections.Generic.List[string]
+        $untrackedSet = @{}
+        foreach ($grp in @(@($tracked), @($untracked))) {
+            foreach ($p in $grp) {
+                if (-not $p) { continue }
+                if ($selfNames -contains $p) { continue }
+                if ($p -match '^\.stride/') { continue }
+                if (-not (Test-SafeRepoPath $p)) {
+                    # NAME the path. A dropped entry is the same class of event
+                    # as a missing snapshot — silent either way — and an
+                    # unnamed notice leaves no way to tell which file went, or
+                    # even how many. Exit stays 0 and stdout still reports
+                    # success, so this line is the only signal there is.
+                    #
+                    # ESCAPE it first. One of the rejection rules is "contains a
+                    # control character", so printing the path raw would detect a
+                    # hostile filename and then echo its ESC/CR/LF straight into
+                    # the terminal, the hook log and the agent's captured output
+                    # — able to rewrite the display or forge extra log lines.
+                    $safeName = ($p.ToCharArray() | ForEach-Object {
+                        if ([int]$_ -lt 32 -or [int]$_ -eq 127) { '\x{0:X2}' -f [int]$_ } else { $_ }
+                    }) -join ''
+                    [Console]::Error.WriteLine("stride-hook: dropped an unsafe snapshot path from the capture: $safeName")
+                    continue
+                }
+                if ($seen.ContainsKey($p)) { continue }
+                $seen[$p] = $true
+                $paths.Add($p)
+            }
+        }
+        foreach ($p in $untracked) { if ($p) { $untrackedSet[$p] = $true } }
+        if ($paths.Count -eq 0) { return '[]' }
+
+        # Binary set, and the D142 committed range used by the baseline filter.
+        if ($OwnRanges) {
+            $numstat = Expand-OwnRanges -Ranges $OwnRanges -Path '' -GitArgs @('diff', '--numstat', '-z')
+        } else {
+            $numstat = (Invoke-GitCapture -GitArgs @('diff', '--numstat', '-z', $useBase)).Text
+        }
+        $binSet = Get-NumstatBinarySet $numstat
+
+        $dirtyBaseline = Read-DirtyBaseline
+        $committedRange = Split-NulList (Get-GitDiffBody -GitArgs @('diff', '--name-only', '-z', $useBase, 'HEAD'))
+
+        $entries = New-Object System.Collections.Generic.List[object]
+        foreach ($p in $paths) {
+            # (W1457/D142) Claim-time dirty-baseline filter: a path already dirty
+            # at claim whose content is unchanged since is a pre-existing edit,
+            # not task work. A path the task's commits contain is task work by
+            # definition and is never dropped.
+            if ($dirtyBaseline -and $dirtyBaseline.ContainsKey($p) -and -not ($committedRange -contains $p)) {
+                $blHash = $dirtyBaseline[$p]
+                if ($blHash -ne 'unhashable') {
+                    $full = Join-Path $ProjectDir $p
+                    $curHash = 'absent'
+                    if (Test-Path -LiteralPath $full -PathType Leaf) {
+                        $curHash = (& git -C $ProjectDir hash-object -- $p 2>$null | Out-String).Trim()
+                        if ($LASTEXITCODE -ne 0 -or -not $curHash) { $curHash = '' }
+                    }
+                    if ($curHash -and $curHash -eq $blHash) { continue }
+                }
+            }
+
+            $isBinary = $false
+            $diffText = ''
+            if ($untrackedSet.ContainsKey($p)) {
+                # Exit 1 is the NORMAL result here ("files differ"); treating it
+                # as failure would empty every new-file patch.
+                # `--` is load-bearing, not tidiness. Without it a path that
+                # begins with a dash is parsed by git as an OPTION, and git's
+                # --output handler opens its target with xfopen(arg,"w") during
+                # option parsing — so a directory named `--output=..` yields the
+                # repo-relative path `--output=../victim` and TRUNCATES that
+                # file, one level above the project root, before git reaches its
+                # usage error. Filenames come from `git ls-files --others`,
+                # i.e. from whatever is on disk, so the name is attacker-chosen
+                # on any tree the hook runs over.
+                $diffText = Get-GitDiffBody -GitArgs @('diff', '--no-index', '--no-color', '--', '/dev/null', $p) -AllowExit1
+                foreach ($ln in $diffText.Split("`n")) {
+                    if ($ln -match '^Binary files .* differ$') { $isBinary = $true; break }
+                }
+            } else {
+                if ($binSet.ContainsKey($p)) { $isBinary = $true }
+                if (-not $isBinary) {
+                    if ($OwnRanges) {
+                        $rangePart = Expand-OwnRanges -Ranges $OwnRanges -Path $p -GitArgs @('diff')
+                        $headPart = Get-GitDiffBody -GitArgs @('diff', 'HEAD', '--', $p)
+                        $joined = @($rangePart, $headPart) | Where-Object { $_ }
+                        $diffText = ($joined -join "`n")
+                    } else {
+                        $diffText = Get-GitDiffBody -GitArgs @('diff', $useBase, '--', $p)
+                    }
+                }
+            }
+
+            if ($isBinary) {
+                # Placeholder is set AFTER detection and BEFORE truncation, so it
+                # is never line-counted and never cut.
+                $diffText = $binPlaceholder
+            } else {
+                # Line count is newline-count + 1, LF-based on both hosts (a CR is
+                # not a terminator). Trigger is STRICTLY greater than 500, so a
+                # diff of exactly 500 lines is not truncated. The cut keeps the
+                # first 499 lines and appends the marker as the final line, for
+                # exactly 500 total.
+                $lineCount = 0
+                if ($diffText) { $lineCount = ([regex]::Matches($diffText, "`n")).Count + 1 }
+                if ($lineCount -gt $maxLines) {
+                    $parts = $diffText.Split("`n")
+                    $diffText = (($parts[0..($maxLines - 2)]) -join "`n") + "`n" + $truncMarker
+                }
+            }
+
+            $entries.Add(([pscustomobject][ordered]@{ path = $p; diff = $diffText }))
+        }
+
+        if ($entries.Count -eq 0) { return '[]' }
+        # NOT ConvertTo-Json -AsArray: that parameter was added in PowerShell 6.2
+        # and does not exist on Windows PowerShell 5.1, the shipping host. Each
+        # entry is serialized on its own and the array is wrapped by hand, which
+        # behaves identically on both hosts for 0, 1 and many entries.
+        $parts = New-Object System.Collections.Generic.List[string]
+        foreach ($e in $entries) { $parts.Add(($e | ConvertTo-Json -Depth 3 -Compress)) }
+        return '[' + ($parts -join ',') + ']'
+    } catch {
+        return '[]'
+    }
+}
+
+# Persist the snapshot.
+#
+# NOT Set-Content -Encoding UTF8: on Windows PowerShell 5.1 that writes a UTF-8
+# BOM, and Invoke-ChangedFilesUpload base64s the file's raw bytes verbatim, so
+# the BOM would ride onto the wire and fail the server's JSON decode on every
+# native-Windows upload. This file has never been written from ps1 before, so
+# the exposure is new; test 21bb pins it.
+function Write-ChangedFilesSnapshot {
+    param([string]$Json)
+    try {
+        [System.IO.File]::WriteAllText(
+            (Join-Path $ProjectDir '.stride-changed-files.json'),
+            $Json + "`n",
+            (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
 # PUT the on-disk snapshot to /api/tasks/<id>/changed_files as the
 # transport-encoded envelope {"changed_files":{"encoding":"base64",
 # "data":"<b64>"}} so an edge request filter does not misread a unified code
@@ -1522,25 +2133,26 @@ function Invoke-ChangedFilesUpload {
             # paths get retained. This script builds no snapshot, but it does
             # read the base, so the read needs the same per-task selection the
             # bash twin applies.
+            # (W2100) Routed through the shared resolver so the read half and
+            # the build half cannot drift apart on which base belongs to this
+            # task. -Quiet because the build already printed any refusal; a
+            # refused base simply yields no committed-range override, which
+            # errs toward KEEPING entries — the safe direction.
             $committedRange = @()
+            $sel = Resolve-TaskSnapshotBase -TaskId $TaskId -Quiet
             $cfBase = ''
-            if ($TaskId) {
-                # (D269) Same digits-only rule as the write side above: a
-                # non-integer id names no per-task record, so it must not be
-                # able to READ one either -- otherwise a colliding id could
-                # still pick up another task's base here.
-                $cfBase = ''
-                if ($TaskId -match '^[0-9]+$') {
-                    $ownKey = 'TASK_BASE_REF_' + ($TaskId -replace '[^A-Za-z0-9_]', '_')
-                    $cfBase = [System.Environment]::GetEnvironmentVariable($ownKey, 'Process')
-                }
-                # Records written by the bash twin are sq_escape'd and the
-                # cache loader keeps the literal quotes, so strip them.
-                if ($cfBase) { $cfBase = $cfBase.Trim("'") }
-            }
-            if (-not $cfBase) {
-                $cfBase = [System.Environment]::GetEnvironmentVariable('TASK_BASE_REF', 'Process')
-                if ($cfBase) { $cfBase = $cfBase.Trim("'") }
+            if (-not $sel.Refused) { $cfBase = $sel.Base }
+            # (W2100) Second layer, matching what the build half already does
+            # before every use of its base: prove the value resolves to a real
+            # revision before handing it to git. A base ref cannot be protected
+            # by `--` because it is a revision, not a pathspec, so an
+            # option-shaped value would otherwise be parsed as an option here —
+            # and `--output=` writes to its target during option parsing.
+            # Resolve-TaskSnapshotBase already rejects the shape; this makes the
+            # sink safe on its own terms rather than relying on its producer.
+            if ($cfBase) {
+                & git -C $ProjectDir rev-parse --verify --quiet $cfBase 2>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) { $cfBase = '' }
             }
             if ($cfBase) {
                 try {
@@ -1579,13 +2191,30 @@ function Invoke-ChangedFilesUpload {
                 return $true
             })
             if ($filtered.Count -ne $entries.Count) {
-                # Pipe (not -InputObject) so an array is not double-wrapped into
-                # [[...]]; guard the empty case explicitly because piping zero
-                # items emits nothing rather than `[]`.
+                # (W2100) Serialize each entry and wrap the array BY HAND.
+                # ConvertTo-Json -AsArray was added in PowerShell 6.2 and does
+                # not exist on Windows PowerShell 5.1, the shipping host — there
+                # it threw a ParameterBindingException that the catch below
+                # swallowed as "not parseable", falling back to uploading the
+                # RAW bytes. That is a fail-OPEN: exactly when the filter had
+                # something to drop, the unfiltered snapshot went up instead,
+                # including .stride_auth.md, which the comment above says must
+                # never be uploaded. Hand-wrapping behaves identically on both
+                # hosts for 0, 1 and many entries.
+                #
+                # 7e2 pins the FILTER, not this 5.1 incompatibility: on pwsh 7 —
+                # the only host the suite runs on — the hand-wrapped and
+                # -AsArray forms are byte-identical, so 7e2 would pass either
+                # way, and the static gate checks cmdlet NAMES, never parameters.
+                # The 5.1 binding failure is therefore unpinned here by
+                # construction; a parameter-aware check is D277's job. Say so
+                # rather than letting the test name imply cover it does not give.
                 if ($filtered.Count -eq 0) {
                     $filteredJson = '[]'
                 } else {
-                    $filteredJson = $filtered | ConvertTo-Json -Depth 10 -Compress -AsArray
+                    $filteredParts = New-Object System.Collections.Generic.List[string]
+                    foreach ($fe in $filtered) { $filteredParts.Add(($fe | ConvertTo-Json -Depth 10 -Compress)) }
+                    $filteredJson = '[' + ($filteredParts -join ',') + ']'
                 }
                 $bytes = [System.Text.Encoding]::UTF8.GetBytes($filteredJson)
             }
@@ -1659,17 +2288,61 @@ function Get-TaskIdFromCommand {
 # TASK_ID) so behavior degrades to the legacy on-disk-only snapshot.
 function Invoke-FinalizeAfterDoing {
     if ($HookName -ne 'after_doing') { return }
-    $snapshotPath = Join-Path $ProjectDir '.stride-changed-files.json'
-    if (-not (Test-Path $snapshotPath)) { return }
-
-    $apiBase = Resolve-StrideApiUrl
-    $token = Resolve-StrideApiToken
 
     # (D127) Target the task id from the /complete URL, not the env cache, so a
     # stale TASK_ID from a hidden claim response cannot route the diff to the
     # wrong task. Fall back to the env-cache TASK_ID only if the URL carries no id.
+    # Resolved BEFORE the base choice because the base now depends on which task
+    # is completing — the same ordering the bash twin uses.
     $taskId = Get-TaskIdFromCommand -CommandText $Command
     if (-not $taskId) { $taskId = [System.Environment]::GetEnvironmentVariable('TASK_ID', 'Process') }
+
+    # (W2100) BUILD the snapshot. Previously this function returned early when
+    # the file was absent, which on native Windows was always — nothing else was
+    # ever going to write it. The build runs BEFORE the URL/token preconditions
+    # so a snapshot lands on disk even when no upload is possible.
+    if (-not $script:SnapBaseResolvedDone) {
+        $sel = Resolve-TaskSnapshotBase -TaskId $taskId
+        if ($sel.Refused) {
+            $script:SnapBaseRefused = $true
+            $script:SnapBaseResolved = ''
+        } else {
+            $script:SnapBaseRefused = $false
+            $script:SnapBaseResolved = Resolve-SnapshotBaseTrust -Base $sel.Base
+        }
+        $script:SnapBaseResolvedDone = $true
+    }
+    # Sweep any capture temp orphaned by a previous run's hard kill. The
+    # after_doing budget is a real kill, and a finally block does not survive
+    # one, so an orphan holds one file's unified diff until something removes
+    # it. It can never be uploaded (the ^\.stride/ rule excludes it), but a
+    # project whose gate does `git add -A` would otherwise commit it.
+    try {
+        $sweepDir = Join-Path $ProjectDir '.stride'
+        if (Test-Path -LiteralPath $sweepDir -PathType Container) {
+            # Age-gated: only sweep temps older than the after_doing budget.
+            # An unconditional sweep would delete a temp a CONCURRENT hook in
+            # this same project has open — on POSIX the unlink succeeds while
+            # git keeps writing to the unlinked inode, so that run's Test-Path
+            # fails and its diff body silently becomes an empty string. That is
+            # the silent-loss shape this task exists to end, so the sweep must
+            # not create it while cleaning up after it.
+            $sweepCutoff = (Get-Date).ToUniversalTime().AddMinutes(-15)
+            Get-ChildItem -LiteralPath $sweepDir -Filter 'capture.*' -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTimeUtc -lt $sweepCutoff } |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    } catch { }
+
+    $snapshot = '[]'
+    if (-not $script:SnapBaseRefused) {
+        try { $snapshot = Build-ChangedFilesSnapshot -Base $script:SnapBaseResolved -OwnRanges '' }
+        catch { $snapshot = '[]' }
+    }
+    Write-ChangedFilesSnapshot -Json $snapshot
+
+    $apiBase = Resolve-StrideApiUrl
+    $token = Resolve-StrideApiToken
     if (-not $apiBase -or -not $token -or -not $taskId) { return }
 
     $httpCode = Invoke-ChangedFilesUpload -TaskId $taskId -ApiBase $apiBase -Token $token
@@ -1691,21 +2364,65 @@ function Invoke-FinalizeAfterDoing {
 # already succeeded — PostToolUse cannot veto it). Skips silently when HEAD
 # is unresolvable (not a git repo) — the pre-section strip already removed
 # any inherited TASK_BASE_REF in that case.
-# (D226) PARITY NOTE. An earlier version of this comment claimed this script
-# had "no read half to fix". That was WRONG and review caught it: this script
-# does not BUILD a snapshot, but Invoke-ChangedFilesUpload does READ
-# TASK_BASE_REF and run `git diff --name-only <base> HEAD` to drive D142's
-# committed-range override. A foreign base there silently drops real task work
-# or retains foreign paths. That read is now routed through the per-task
-# record, so both halves are covered here:
+# (D226/W2100) PARITY NOTE. Read this before assuming either script does what
+# the other does. An earlier version claimed this script had "no read half to
+# fix"; a later one claimed there was "no diff built on this side to refuse".
+# Each was true when written and false within a release. This is the current
+# division, and it is a list, not a blanket claim.
 #   WRITE half — a nested claim overwriting the shared TASK_BASE_REF happens
 #     identically to the bash twin, and is mirrored below.
-#   READ half — smaller than the bash twin's (no capture step to protect, so
-#     no select_task_snapshot_base equivalent and nothing to REFUSE), but the
-#     base selection it does perform now prefers this task's own record.
-# The refusal path itself has no counterpart here, because there is no diff
-# built on this side to refuse. State that precisely rather than claiming
-# blanket parity — the last blanket claim in this comment was false.
+#   READ half — Invoke-ChangedFilesUpload reads TASK_BASE_REF to drive D142's
+#     committed-range override, preferring this task's own per-task record.
+#   BUILD half — (W2100) this script now BUILDS the snapshot instead of only
+#     uploading one it assumed someone else had written.
+#     Build-ChangedFilesSnapshot mirrors stride-hook.sh's capture_changed_files,
+#     Expand-OwnRanges mirrors expand_own_ranges, and Invoke-FinalizeAfterDoing
+#     writes the result to .stride-changed-files.json before the PUT. Before
+#     W2100 a NATIVE Windows run produced NO snapshot at all, silently:
+#     stride-hook.sh execs this script and exits, so nothing else was ever
+#     going to write one.
+#   REFUSAL — now has a subject, so it is ported. Resolve-TaskSnapshotBase
+#     mirrors select_task_snapshot_base including BOTH refusals (a shared base
+#     stamped by another task; an unproven base with no per-task record), and a
+#     refusal writes '[]' rather than another task's diff.
+#   TRUST GUARD — Resolve-SnapshotBaseTrust mirrors resolve_snapshot_base's
+#     D142 rules (empty/unresolvable, not an ancestor of HEAD, older than the
+#     task branch point), with TASK_BASE_REF_TRUSTED exempting rule 3.
+#   ONE DELIBERATE DIVERGENCE, in this side's favour — Get-NumstatBinarySet
+#     reads `--numstat -z` and takes the rename DESTINATION. Plain --numstat
+#     prints a COMPACTED path for a rename ("a/{ => b}/f") that matches no path
+#     --name-only emits, so the bash twin cannot flag a renamed BINARY and
+#     captures "Binary files ... differ" as its diff body instead. Pinned by
+#     test 21aa.
+# NOT PORTED, deliberately, and what it costs:
+#   * THE UPLOAD ITSELF, on 5.1. Invoke-ChangedFilesUpload calls
+#     Invoke-WebRequest -SkipHttpErrorCheck, which is PowerShell 7.0+, so on
+#     Windows PowerShell 5.1 parameter binding fails BEFORE the request is
+#     issued and the PUT never happens — recorded as '000', indistinguishable
+#     from a refused connection. So W2100 makes a native-Windows run WRITE a
+#     snapshot; it does not yet make it UPLOAD one. Filed as D277. Say this
+#     plainly rather than letting "writes the result before the PUT" above read
+#     as end-to-end parity — that over-claim is the exact shape this comment
+#     keeps having to correct.
+#   * The D236/D255/D273 nested-task narrowing ORCHESTRATION —
+#     attributed_commit_ranges, compute_owned_set, owned_set_to_range,
+#     record_task_owned/_narrowed, record_task_head_ref, another_open_window_exists,
+#     replay_narrowing_decision. The ENGINE is range-capable: the -OwnRanges
+#     parameter and Expand-OwnRanges are ported faithfully, so adding the
+#     orchestration later is a call-site change PLUS the three record_task_*
+#     writers — this script preserves TASK_HEAD_REF_* in the env cache but has
+#     never written one. Every call site here passes ''.
+#     Cost, stated plainly: on this host an OUTER task's snapshot still contains
+#     commits its NESTED tasks made. That is an over-report. It is never an
+#     under-report and never another task's diff.
+#   * The self-heal RE-capture. Invoke-SelfHealChangedFilesUpload builds a
+#     snapshot only when none is on disk (a completion killed inside the
+#     after_doing budget). It never re-captures over an existing one, because
+#     Write-DiffUploadState records no base= or narrowed= line for it to replay
+#     — and re-deriving those at retry time is the exact divergence D273 added
+#     persistence to prevent. Bash re-captures because bash persists them.
+# Keep this list honest and specific. Every blanket parity claim this comment
+# has ever made was false within one release.
 function Invoke-FinalizeBeforeDoing {
     if ($HookName -ne 'before_doing') { return }
     $baseRef = ''
@@ -1817,13 +2534,17 @@ function Invoke-FinalizeBeforeDoing {
 # (PostToolUse on the same completion curl) runs on a FRESH budget, so it
 # verifies the recorded outcome and re-PUTs the on-disk snapshot when no
 # healthy upload is on record for the current task. Best-effort: never
-# throws, never changes the hook's exit semantics. Unlike the bash twin
-# this script has no capture step — the on-disk snapshot is the source of
-# truth, so the retry re-uploads it as-is.
+# throws, never changes the hook's exit semantics.
+#
+# (W2100) It now BUILDS a snapshot when none is on disk — the case where the
+# after_doing gate was killed before the capture ran. It deliberately does NOT
+# re-capture over an existing snapshot, unlike the bash twin: Write-DiffUploadState
+# records no base= or narrowed= line for this side to replay, and re-deriving a
+# base at retry time without that persistence is the exact divergence D273 added
+# persistence to prevent. Build-if-absent is the honest subset.
 function Invoke-SelfHealChangedFilesUpload {
     if ($HookName -ne 'before_review') { return }
     $snapshotPath = Join-Path $ProjectDir '.stride-changed-files.json'
-    if (-not (Test-Path $snapshotPath)) { return }
     # (D127) Prefer the task id from the /complete URL over the env-cache TASK_ID
     # so the self-heal re-PUTs to the CORRECT task even after a stale claim.
     $taskId = Get-TaskIdFromCommand -CommandText $Command
@@ -1852,6 +2573,33 @@ function Invoke-SelfHealChangedFilesUpload {
     $token = Resolve-StrideApiToken
     if (-not $apiBase -or -not $token) { return }
 
+    # (W2100) Build only when nothing is on disk — the after_doing gate was
+    # killed before its capture ran. An existing snapshot is left byte-for-byte
+    # alone; see this function's header for why re-capturing here would be
+    # worse than not.
+    if (-not (Test-Path -LiteralPath $snapshotPath -PathType Leaf)) {
+        # Only build where there is something to capture FROM. Outside a git
+        # repo the build can only ever produce '[]', and writing then uploading
+        # that would be fabricating an empty answer for a question we cannot
+        # ask — it would also overwrite whatever the server already holds. With
+        # no repo and no snapshot there is nothing to heal, so return exactly as
+        # this function did before the build step existed.
+        $inRepo = $false
+        if (Get-Command git -ErrorAction SilentlyContinue) {
+            & git -C $ProjectDir rev-parse --verify --quiet HEAD 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $inRepo = $true }
+        }
+        if (-not $inRepo) { return }
+
+        $sel = Resolve-TaskSnapshotBase -TaskId $taskId
+        $healSnapshot = '[]'
+        if (-not $sel.Refused) {
+            try { $healSnapshot = Build-ChangedFilesSnapshot -Base (Resolve-SnapshotBaseTrust -Base $sel.Base) -OwnRanges '' }
+            catch { $healSnapshot = '[]' }
+        }
+        Write-ChangedFilesSnapshot -Json $healSnapshot
+    }
+
     $httpCode = Invoke-ChangedFilesUpload -TaskId $taskId -ApiBase $apiBase -Token $token
     Write-DiffUploadState -TaskId $taskId -HttpCode $httpCode
     # (W1658) before_review is the LAST retry. A non-2xx here means the diff is
@@ -1860,7 +2608,7 @@ function Invoke-SelfHealChangedFilesUpload {
     # actionable and never silently swallowed. A later successful PUT overwrites
     # the state file, clearing the mark.
     if ($httpCode -notmatch '^2') {
-        [Console]::Error.WriteLine("stride-hook: CHANGED_FILES UPLOAD UNRESOLVED for task $taskId (HTTP $httpCode) after the before_review retry — the review will show NO file diffs. Re-run the changed_files PUT to recover.")
+        [Console]::Error.WriteLine("stride-hook: CHANGED_FILES UPLOAD UNRESOLVED for task $(ConvertTo-PrintableForLog -Value $taskId) (HTTP $httpCode) after the before_review retry — the review will show NO file diffs. Re-run the changed_files PUT to recover.")
         try {
             Add-Content -Path (Join-Path $ProjectDir '.stride-diff-upload-state') -Value 'unresolved=yes' -Encoding UTF8
         } catch {

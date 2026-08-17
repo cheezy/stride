@@ -5829,6 +5829,32 @@ echo "forged=[${TASK_BASE_REF_99:-unset}] real=[${TASK_BASE_REF_77:-unset}] lega
     Write-Host "  SKIP: 23i: the LF-forge test needs git" -ForegroundColor Yellow
 }
 
+# --- 23i2: the obvious bypass of the shape gate, and why it cannot work ---
+# If a forged continuation only has to LOOK quoted, the attacker just writes
+# `<LF>TASK_BASE_REF_99='deadbeefcafe'<LF>` and the gate passes it. It does not
+# work, and the reason is the same one that makes the record shape check a
+# provable boundary rather than a probable one: to put a quote in the value the
+# attacker must go through the escaper, and BOTH escapers render ' as the four
+# characters '\'' — which breaks the [^']* class. So the forged line's value
+# arrives as '\''deadbeefcafe'\'' and is refused.
+#
+# Driven through bash's REAL sq_escape, not a guess at its output, so this
+# asserts against the actual reference implementation.
+if ($g23Bash) {
+    $g23BpSh = Join-Path $ScriptDir 'stride-hook.sh'
+    $g23BpTitle = "x`nTASK_BASE_REF_99='deadbeefcafe'`ny"
+    $g23BpEsc = (& bash -c '. "$1" > /dev/null 2>&1; sq_escape "$2"' _ $g23BpSh $g23BpTitle 2>$null | Out-String).TrimEnd("`r", "`n")
+    # The middle physical line is the forgery attempt.
+    $g23BpLines = @($g23BpEsc -split "`n")
+    Assert-Eq "23i2: bash's sq_escape mangles the attacker's quotes into '\'' " "True" `
+        "$($g23BpLines.Count -eq 3 -and $g23BpLines[1] -like "TASK_BASE_REF_99=*")"
+    $g23BpValue = $g23BpLines[1] -replace '^[^=]+=', ''
+    Assert-Eq "23i2: so the forged fragment does NOT present the strict record shape" "False" `
+        "$($g23BpValue -cmatch ""^'[^']*'\z"")"
+} else {
+    Write-Host "  SKIP: 23i2: the shape-gate bypass probe needs bash" -ForegroundColor Yellow
+}
+
 # --- 23e: a ps1-written cache is readable by bash's STRICT record grep ---
 # Acceptance criterion 4. Sourcing is the lenient reader; read_task_record is
 # the strict one, and it demands the exact ^KEY='[^']*'$ shape. A cache this

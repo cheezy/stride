@@ -5574,6 +5574,117 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     Write-Host "  SKIP: 23d: the newline-flatten test needs git" -ForegroundColor Yellow
 }
 
+# --- 23d2: a LONE CARRIAGE RETURN, the variant the first fix missed ---
+# 23d above only exercises LF, and it passed while this hole was open. Both
+# flatten sites originally matched `r?`n, which REQUIRES an LF, so a bare CR
+# went through untouched - and .NET's line reader honours a lone CR as a
+# terminator, so the loader split one logical line into several and exported
+# every fragment. Found by two independent security reviews and reproduced end
+# to end: the fragment can plant BASH_ENV, which non-interactive bash sources
+# before running a section, or forge another task's snapshot base.
+#
+# THE TEST USES [char]13 DIRECTLY, never "`r`n" - the whole point is a CR with
+# no LF after it. Writing this with "`r`n" reproduces 23d and proves nothing.
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $g23Cr = [char]13
+    foreach ($leg in @(
+        @{ Name = 'identity'; Payload = 'data' },
+        @{ Name = 'hookenv';  Payload = 'env'  }
+    )) {
+        $g23CrProj = New-GitRepo -Name "g23-cr-$($leg.Name)"
+        $g23CrMarker = Join-Path $TmpDir "g23-cr-marker-$($leg.Name)"
+        Remove-Item -Force $g23CrMarker -ErrorAction SilentlyContinue
+        # Two forgeries in one value: a BASH_ENV that would give code execution,
+        # and a base-ref record that would forge task 99's snapshot base.
+        $g23CrHostile = "Fix login" + $g23Cr + "BASH_ENV=/tmp/does-not-matter" + $g23Cr + "TASK_BASE_REF_99=deadbeefcafe" + $g23Cr + "X"
+        $g23CrInner = @{
+            data = @{ id = 42; identifier = 'W42'; title = 'Plain title'
+                      status = 'in_progress'; complexity = 'medium'; priority = 'high' }
+        }
+        if ($leg.Payload -eq 'data') {
+            $g23CrInner.data.title = $g23CrHostile
+        } else {
+            $g23CrInner['hook'] = @{ name = 'before_doing'; env = @{ BOARD_NAME = $g23CrHostile } }
+        }
+        $g23CrClaim = @{
+            tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+            tool_response = @{ stdout = ($g23CrInner | ConvertTo-Json -Depth 8 -Compress); stderr = ''; interrupted = $false }
+        } | ConvertTo-Json -Depth 10 -Compress
+        $r = Invoke-HookScript -InputJson $g23CrClaim -Phase 'post' -ProjectDir $g23CrProj
+        Assert-Exit "23d2 [$($leg.Name)]: a claim carrying a lone CR exits 0" 0 $r.ExitCode
+        $g23CrLines = @(Get-Content -Path (Join-Path $g23CrProj '.stride-env-cache') -Encoding UTF8)
+        # The CR must be flattened, so NO fragment becomes a line of its own.
+        Assert-Eq "23d2 [$($leg.Name)]: the CR plants no BASH_ENV line" "0" `
+            "$(@($g23CrLines | Where-Object { $_ -match '^BASH_ENV=' }).Count)"
+        Assert-Eq "23d2 [$($leg.Name)]: the CR forges no TASK_BASE_REF_99 record" "0" `
+            "$(@($g23CrLines | Where-Object { $_ -match '^TASK_BASE_REF_99=' }).Count)"
+        # And the raw bytes carry no CR at all - the writer refused it, so a
+        # later rewrite cannot promote a fragment to a real line either.
+        $g23CrBytes = [System.IO.File]::ReadAllBytes((Join-Path $g23CrProj '.stride-env-cache'))
+        $g23CrCount = 0
+        foreach ($b in $g23CrBytes) { if ($b -eq 0x0D) { $g23CrCount++ } }
+        Assert-Eq "23d2 [$($leg.Name)]: no CR byte survives into the cache at all" "0" "$g23CrCount"
+        Remove-Item -Force $g23CrMarker -ErrorAction SilentlyContinue
+    }
+} else {
+    Write-Host "  SKIP: 23d2: the lone-CR test needs git" -ForegroundColor Yellow
+}
+
+# --- 23g: the loader refuses shell-steering names outright ---
+# Defence in depth behind 23d2: even if some future writer lands a forged line,
+# the loader must not export a name that steers the section child's interpreter.
+# Seeded directly into a cache, because the point is what the LOADER does with a
+# line it is handed, independent of how that line got there.
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $g23LoadProj = New-GitRepo -Name 'g23-loader-fence'
+    Set-Content -Path (Join-Path $g23LoadProj '.stride.md') -Encoding UTF8 -Value @'
+# Stride Configuration
+
+## before_doing
+```bash
+echo "bashenv=[${BASH_ENV:-unset}] ldp=[${LD_PRELOAD:-unset}] base99=[${TASK_BASE_REF_99:-unset}]"
+```
+
+## after_doing
+```bash
+```
+
+## before_review
+```bash
+```
+
+## after_review
+```bash
+```
+
+## after_goal
+```bash
+```
+'@
+    Set-Content -Path (Join-Path $g23LoadProj '.stride-env-cache') -Encoding UTF8 -Value @(
+        "TASK_ID='42'",
+        "BASH_ENV='/tmp/evil'",
+        "LD_PRELOAD='/tmp/evil.so'",
+        "='orphan-fragment'",
+        "TASK_BASE_REF_99='deadbeefcafe'"
+    )
+    $g23LoadClaim = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = 'not json at all'; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Depth 10 -Compress
+    $r = Invoke-HookScript -InputJson $g23LoadClaim -Phase 'post' -ProjectDir $g23LoadProj
+    Assert-Exit "23g: a claim over a poisoned cache exits 0" 0 $r.ExitCode
+    Assert-Contains "23g: the loader refuses to export BASH_ENV" "bashenv=[unset]" $r.Stdout
+    Assert-Contains "23g: the loader refuses to export LD_PRELOAD" "ldp=[unset]" $r.Stdout
+    # ...but the client-owned record families MUST still load, or the D226
+    # snapshot-base mechanism silently dies. This is the half a blanket
+    # deny-list would have broken.
+    Assert-Contains "23g: but a client-owned TASK_BASE_REF_<id> record still loads" `
+        "base99=[deadbeefcafe]" $r.Stdout
+} else {
+    Write-Host "  SKIP: 23g: the loader-fence test needs git" -ForegroundColor Yellow
+}
+
 # --- 23e: a ps1-written cache is readable by bash's STRICT record grep ---
 # Acceptance criterion 4. Sourcing is the lenient reader; read_task_record is
 # the strict one, and it demands the exact ^KEY='[^']*'$ shape. A cache this
@@ -5602,8 +5713,17 @@ if ($g23Bash) {
 # this fires - go read it and confirm its values are escaped, then bump the
 # count. Do not bump it without reading the new site.
 $g23CodeLines = @(Get-Content -Path $HookScript | Where-Object { $_.TrimStart() -notlike '#*' })
-$g23WriteCalls = @($g23CodeLines | Where-Object { $_ -match 'Write-EnvCache\s+-Lines' }).Count
-Assert-Eq "23f: Write-EnvCache still has exactly 6 call sites (tripwire on new writers)" "6" "$g23WriteCalls"
+# Match ANY invocation, not `Write-EnvCache\s+-Lines`. The parameter is
+# [string[]]$Lines and binds POSITIONALLY, so a seventh writer spelled
+# `Write-EnvCache $newLines` would have left the old count at 6 and the tripwire
+# green — while completeness is the exact property this test exists to hold.
+# Subtract the one definition line rather than filtering it, so a renamed or
+# re-signatured definition also trips this rather than silently rebasing it.
+$g23WriteRefs = @($g23CodeLines | Where-Object { $_ -match 'Write-EnvCache' }).Count
+$g23WriteDefs = @($g23CodeLines | Where-Object { $_ -match 'function\s+Write-EnvCache' }).Count
+Assert-Eq "23f: Write-EnvCache is defined exactly once" "1" "$g23WriteDefs"
+Assert-Eq "23f: Write-EnvCache still has exactly 6 call sites (tripwire on new writers)" "6" `
+    "$($g23WriteRefs - $g23WriteDefs)"
 
 }
 

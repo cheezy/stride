@@ -156,6 +156,31 @@ function ConvertTo-ShSingleQuoted {
     return "'" + $Value.Replace("'", "'\''") + "'"
 }
 
+# Flatten every line terminator a reader of this cache might honour.
+#
+# (D280) THE ONE flattener, used by both server-fed write sites, so they cannot
+# drift apart again. They already did: both used `-replace "`r?`n", ' '`, which
+# requires an LF, so a LONE CARRIAGE RETURN passed straight through. Quoting
+# made the value inert to bash — `source` is genuinely defended — but quoting is
+# irrelevant to THIS port's own readers, and .NET's StreamReader.ReadLine (what
+# Get-Content uses) treats a bare CR as a line terminator. One logical cache
+# line therefore split into several records, and the bulk loader exported each
+# one. Demonstrated end to end, not theorised: a title carrying
+# `<CR>BASH_ENV=<attacker-controlled file><CR>` planted BASH_ENV, which
+# non-interactive bash sources before running a section — arbitrary command
+# execution from a single hostile API response. The next Write-EnvCache then
+# re-joined the CR-split lines with LF, promoting the forgery to a real line.
+#
+# The class is deliberately wider than CR and LF. NEL, LINE SEPARATOR and
+# PARAGRAPH SEPARATOR are line terminators to several .NET and PowerShell
+# readers, and no legitimate value in this cache — ids, titles, SHAs, yes/no,
+# epoch digits — has any business carrying one. Refusing the whole class costs
+# nothing and removes the next variant of this bug rather than the one instance.
+function ConvertTo-FlatEnvValue {
+    param([string]$Value)
+    return ($Value -replace '[\r\n\u0085\u2028\u2029]', ' ')
+}
+
 # The exact inverse of ConvertTo-ShSingleQuoted, for the bulk loader.
 #
 # (D280) bash gets unquoting FREE from `. "$ENV_CACHE"` — the shell strips the
@@ -345,8 +370,14 @@ function Get-TaskNarrowedRecord {
 
 # Environment-backed readers — the ported asymmetry described in the header.
 # Both return '' for absent AND empty, exactly as bash's ${!_k:-} does.
-# The .Trim("'") is this port's necessary addition: bash gets unquoting free
-# from sourcing the file, while our bulk loader sets the RHS verbatim.
+# The .Trim("'") was this port's necessary addition back when the bulk loader
+# set the RHS verbatim: bash got unquoting free from sourcing the file, and this
+# side did not. (D280) That premise is GONE — the loader now unquotes through
+# ConvertFrom-ShSingleQuoted, so these trims are no-ops on any cache this
+# version writes. They are kept deliberately, not left by accident: a cache
+# written by a pre-D280 ps1 quoted the record families but NOT the identity or
+# base lines, so the two shapes coexist during an upgrade, and these families
+# (hex SHAs, digits, yes/no) can never contain a quote for the trim to eat.
 function Get-TaskBaseRefFor {
     param([string]$TaskId)
     $key = Get-TaskBaseRefKey -TaskId $TaskId
@@ -417,10 +448,17 @@ function Set-TaskRecord {
 # an orphan-base guard and which deliberately do not.
 #
 # The base guard uses Get-TaskBaseRefFor (an ENV read), not Read-TaskRecord.
-# That is required, not preference: bash's guard is `[ -n "$(task_base_ref_for
-# ...)" ]`, and this port's own claim writer emits TASK_BASE_REF_<id> UNQUOTED,
-# so a strict-shape guard would find no base in any ps1-written cache and both
-# guarded writers would be permanently dead.
+# That is bash parity: bash's guard is `[ -n "$(task_base_ref_for ...)" ]`, an
+# env read on that side too, so this port matches it read for read.
+#
+# (D280) The ORIGINAL reason recorded here no longer holds and is corrected
+# rather than deleted, because it would mislead the next reader weighing a
+# tighter guard. It used to say a strict-shape guard would find no base in any
+# ps1-written cache, since this port's claim writer emitted TASK_BASE_REF_<id>
+# unquoted. Invoke-FinalizeBeforeDoing now writes that key through
+# ConvertTo-ShSingleQuoted, so a strict-shape guard WOULD find it. The env read
+# stays anyway — on parity grounds, which is the durable reason — but "it would
+# be permanently dead" is no longer true and is not the argument for keeping it.
 function Set-TaskOwnedRecord {
     param([string]$TaskId, [string]$Value)
     $key = Get-TaskOwnedKey -TaskId $TaskId
@@ -1385,7 +1423,11 @@ if ($HookName -eq 'before_doing') {
             # W1453; this block never did, which is the gap D280 closes here.
             # A deliberate divergence from the bash twin, which does not flatten
             # because `source` makes it unnecessary on that side.
-            $flat = { param($v) (([string]$v) -replace "`r?`n", ' ') }
+            # ConvertTo-FlatEnvValue, NOT an inline `r?`n replace: that form
+            # requires an LF and let a lone CR through, which Get-Content then
+            # honoured as a line terminator and the loader exported as a forged
+            # record. See the helper for the reproduced BASH_ENV route.
+            $flat = { param($v) (ConvertTo-FlatEnvValue -Value ([string]$v)) }
             $cacheLines = @(
                 "TASK_ID=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.id))
                 "TASK_IDENTIFIER=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.identifier))
@@ -1504,13 +1546,57 @@ if ($HookName -eq 'before_doing') {
 # so unquoting here leaves nothing for the trim to remove. They are left in
 # place deliberately rather than swept, because they also cover a cache written
 # by a pre-D280 ps1 that quoted records but not identity lines.
+#
+# (D280) THREE hardenings here, because this loader is the amplifier: whatever
+# it exports lands in the Process environment that every `bash -c` child running
+# a .stride.md section inherits, so a forged line here is not a bad value but a
+# live interpreter-steering primitive.
+#
+#   1. Read through Get-EnvCacheLine, which splits the RAW BYTES on LF only.
+#      Get-Content used .NET's line reader, which honours a LONE CR as a
+#      terminator — so a CR inside a value split one logical line into several
+#      and every fragment was exported. The writers now refuse CR too, and this
+#      makes the invariant hold from both ends rather than resting on the
+#      writers alone. It also makes this loader and Read-TaskRecord finally
+#      agree on what a line IS.
+#   2. Enforce the key shape, with \z rather than $ per the house rule. A
+#      fragment like `='value'` has an empty key and is now dropped rather than
+#      exported.
+#   3. Refuse names that steer the shell. These are never legitimate cache
+#      keys — the cache holds TASK_*, GOAL_*, BOARD_*, COLUMN_*, AGENT_NAME and
+#      the five client-owned record families — so refusing them costs nothing
+#      and closes the BASH_ENV route by construction.
+#
+# What is deliberately NOT denied: the client-owned TASK_BASE_REF* /
+# TASK_HEAD_REF* / TASK_OWNED* / TASK_NARROWED* / TASK_BASE_AT* families. Those
+# are fenced out of the SERVER payload (Get-HookEnvFromPayload) because the
+# client owns them, but the client WRITES them here and Get-TaskBaseRefFor reads
+# them straight back out of this process environment. Denying them at the loader
+# would silently break the D226 snapshot-base mechanism — the fence belongs at
+# the payload boundary, which already has it, not at this one.
+$script:StrideShellSteeringKeys = @(
+    'BASH_ENV', 'ENV', 'PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES',
+    'IFS', 'SHELLOPTS', 'BASHOPTS', 'PS4', 'GLOBIGNORE'
+)
+$script:StrideCacheLines = @()
 if (Test-Path $EnvCache) {
-    Get-Content $EnvCache -Encoding UTF8 | ForEach-Object {
-        $line = $_.Trim()
-        if ($line -and $line -match '^([^=]+)=(.*)$') {
-            [System.Environment]::SetEnvironmentVariable(
-                $Matches[1], (ConvertFrom-ShSingleQuoted -Value $Matches[2]), 'Process')
-        }
+    # Get-EnvCacheLine THROWS where Get-Content merely errored (absent file,
+    # sharing violation). Loading the cache is best-effort and must never take
+    # the hook down: degrade to no cached env, exactly as an absent file does.
+    try { $script:StrideCacheLines = @(Get-EnvCacheLine) } catch { $script:StrideCacheLines = @() }
+}
+if ($script:StrideCacheLines.Count -gt 0) {
+    foreach ($cacheLine in $script:StrideCacheLines) {
+        $line = $cacheLine.Trim()
+        if (-not $line) { continue }
+        if ($line -notmatch '^([^=]+)=(.*)\z') { continue }
+        $cacheKey = $Matches[1]
+        $cacheValue = $Matches[2]
+        if ($cacheKey -notmatch '^[A-Za-z_][A-Za-z0-9_]*\z') { continue }
+        if ($script:StrideShellSteeringKeys -contains $cacheKey.ToUpperInvariant()) { continue }
+        if ($cacheKey -like 'BASH_FUNC_*') { continue }
+        [System.Environment]::SetEnvironmentVariable(
+            $cacheKey, (ConvertFrom-ShSingleQuoted -Value $cacheValue), 'Process')
     }
 }
 
@@ -1627,7 +1713,15 @@ function Get-HookEnvFromPayload {
         if (-not ($envObj -is [PSCustomObject])) { continue }
         foreach ($prop in $envObj.PSObject.Properties) {
             $key = $prop.Name
-            if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
+            # (D280) \z, not $ — the house rule this file states for
+            # Get-TaskRecordKey and Read-TaskRecord, and for the same reason:
+            # .NET's $ ALSO matches immediately before a trailing newline, so a
+            # server key of "FOO`n" passed this gate and was concatenated
+            # unescaped into "$key=", producing a bare `FOO` line that bash
+            # EXECUTES as a command name when it sources the cache. Narrow
+            # (no arguments, no path, PATH-resolved) but a genuine unescaped
+            # write reaching a shell.
+            if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*\z') { continue }
             # (D226) Fenced by PREFIX, not equality. D142 excluded
             # TASK_BASE_REF as a client-only diff anchor; D226 added
             # TASK_BASE_REF_OWNER, _UNPROVEN, _TRUSTED and the per-task
@@ -1770,7 +1864,7 @@ function Set-HookEnv {
         # the defect D280 exists to close. Order matters only in that the
         # flatten must not run over the escaped form, where it could rewrite a
         # newline that quoting had already made safe to keep.
-        $cacheLines += "$key=" + (ConvertTo-ShSingleQuoted -Value ($value -replace "`r?`n", ' '))
+        $cacheLines += "$key=" + (ConvertTo-ShSingleQuoted -Value (ConvertTo-FlatEnvValue -Value $value))
     }
     # (D260) Replace-in-place for the keys THIS call writes, rather than a bare
     # append. Appending left two lines per identity key after a single

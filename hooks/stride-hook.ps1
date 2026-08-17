@@ -336,17 +336,28 @@ function Split-EnvCacheRecord {
     foreach ($line in (Get-EnvCacheLine)) {
         if ($null -eq $current) { $current = $line } else { $current = $current + "`n" + $line }
         $i = 0
+        # A backslash as the LAST character of a line, outside quotes, escapes
+        # the newline itself — sh line continuation, so the record continues.
+        # Measured against bash rather than assumed: `A=x\` followed by `B='y'`
+        # is ONE assignment to bash (A becomes "xB=y"), and a scanner that
+        # called them two records could drop the first and leave the second
+        # standing alone, changing what the file means. Inside quotes a
+        # backslash is literal, so this only applies to the outside state.
+        $escapedNewline = $false
         while ($i -lt $line.Length) {
             $ch = $line[$i]
             if ($inQuote) {
                 if ($ch -eq "'") { $inQuote = $false }
             } else {
-                if ($ch -eq '\') { $i++ }
+                if ($ch -eq '\') {
+                    if ($i -eq ($line.Length - 1)) { $escapedNewline = $true }
+                    $i++
+                }
                 elseif ($ch -eq "'") { $inQuote = $true }
             }
             $i++
         }
-        if (-not $inQuote) {
+        if (-not $inQuote -and -not $escapedNewline) {
             $records += $current
             $current = $null
         }
@@ -1575,6 +1586,13 @@ if ($HookName -eq 'before_doing') {
             # (D280 r2) Pass-through re-emit — Get-EnvCacheLine for the same
             # reason as the claim block above: a CR must not manufacture a line.
             $g280recsU = Split-EnvCacheRecord
+            # The same fail-closed guard the other five callers use, and it
+            # matters MORE here: with Records empty this branch falls through to
+            # Remove-Item and DESTROYS the cache, where every other site merely
+            # skips its rewrite. The bash twin over-preserves on this condition
+            # deliberately; throwing here lands in the enclosing catch, so the
+            # branch skips both the rewrite and the delete.
+            if (-not $g280recsU.Ok) { throw 'env cache ends inside a quoted value' }
             $preserved = @($g280recsU.Records | Where-Object {
                 $_ -match '^TASK_(ID|IDENTIFIER|TITLE|STATUS|COMPLEXITY|PRIORITY)=' -or
                 ($_ -match '^TASK_(BASE_REF|HEAD_REF|OWNED|BASE_AT|NARROWED)_[A-Za-z0-9_]+=' -and
@@ -1725,16 +1743,36 @@ $script:StrideCacheKeyPattern = '^(?:(?:TASK|GOAL|BOARD|COLUMN)_[A-Za-z0-9_]*|AG
 $script:StrideRecordKeyPattern = '^TASK_(?:BASE_REF|HEAD_REF|OWNED|NARROWED|BASE_AT)_[0-9]+\z'
 $script:StrideCacheLines = @()
 if (Test-Path $EnvCache) {
-    # Get-EnvCacheLine THROWS where Get-Content merely errored (absent file,
-    # sharing violation). Loading the cache is best-effort and must never take
-    # the hook down: degrade to no cached env, exactly as an absent file does.
-    try { $script:StrideCacheLines = @(Get-EnvCacheLine) } catch { $script:StrideCacheLines = @() }
+    # RECORDS, not physical lines. Reading lines here left the LF route only
+    # half closed: an interior line of a bash-authored multi-line value is
+    # record-shaped, and while the shape gate below refuses the digit-suffixed
+    # families, the four SHARED D226 control keys — TASK_BASE_REF,
+    # _TRUSTED, _OWNER, _UNPROVEN — are not in that namespace and sailed
+    # through. A forged TASK_BASE_REF_UNPROVEN=1 makes every later run refuse
+    # its own snapshot and upload an EMPTY diff for the task; a forged
+    # TASK_BASE_REF + _TRUSTED anchors the diff at an attacker-chosen commit.
+    # Reading records makes an interior line stop being a candidate key AT ALL,
+    # which closes the whole promotion class rather than an enumerated part of
+    # it — and makes this loader agree with what `. "$ENV_CACHE"` produces.
+    #
+    # Split-EnvCacheRecord throws where Get-Content merely errored, and returns
+    # Ok=$false for a cache ending inside a quoted run. Loading is best-effort
+    # and must never take the hook down: degrade to no cached env, exactly as
+    # an absent file does, and exactly as the other five callers do.
+    try {
+        $g280recsL = Split-EnvCacheRecord
+        if ($g280recsL.Ok) { $script:StrideCacheLines = @($g280recsL.Records) }
+        else { $script:StrideCacheLines = @() }
+    } catch { $script:StrideCacheLines = @() }
 }
 if ($script:StrideCacheLines.Count -gt 0) {
     foreach ($cacheLine in $script:StrideCacheLines) {
         $line = $cacheLine.Trim()
         if (-not $line) { continue }
-        if ($line -notmatch '^([^=]+)=(.*)\z') { continue }
+        # A record's VALUE may legitimately span physical lines, so the value
+        # half matches across newlines while the key half must not — a key
+        # containing a newline is not a key.
+        if ($line -notmatch '^([^=\r\n]+)=([\s\S]*)\z') { continue }
         $cacheKey = $Matches[1]
         $cacheValue = $Matches[2]
         if ($cacheKey -notmatch '^[A-Za-z_][A-Za-z0-9_]*\z') { continue }

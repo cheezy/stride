@@ -5797,7 +5797,7 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 
 ## after_review
 ```bash
-echo "forged=[${TASK_BASE_REF_99:-unset}] real=[${TASK_BASE_REF_77:-unset}] legacy=[${TASK_BASE_REF_88:-unset}]"
+echo "forged=[${TASK_BASE_REF_99:-unset}] real=[${TASK_BASE_REF_77:-unset}] legacy=[${TASK_BASE_REF_88:-unset}] unproven=[${TASK_BASE_REF_UNPROVEN:-unset}] shared=[${TASK_BASE_REF:-unset}] trusted=[${TASK_BASE_REF_TRUSTED:-unset}]"
 ```
 
 ## after_goal
@@ -5806,8 +5806,15 @@ echo "forged=[${TASK_BASE_REF_99:-unset}] real=[${TASK_BASE_REF_77:-unset}] lega
 '@
     # Exactly what bash leaves on disk for a hostile title: the value's own
     # quotes open on line 1 and close on line 3, so the middle line is BARE.
+    # The forged fragments include the four SHARED D226 control keys, not just
+    # a digit-suffixed record. Those are outside the record namespace, so the
+    # shape gate never covered them - they were only ever stopped by the loader
+    # reading RECORDS instead of physical lines. A forged _UNPROVEN makes every
+    # later run refuse its own snapshot and upload an empty diff; a forged
+    # TASK_BASE_REF + _TRUSTED anchors the diff at an attacker-chosen commit.
     [System.IO.File]::WriteAllText((Join-Path $g23LfProj '.stride-env-cache'),
-        "TASK_TITLE='x`nTASK_BASE_REF_99=deadbeefcafe`ny'`n" +
+        "TASK_TITLE='x`nTASK_BASE_REF_99=deadbeefcafe`nTASK_BASE_REF_UNPROVEN=1`n" +
+        "TASK_BASE_REF=deadbeefcafe`nTASK_BASE_REF_TRUSTED=1`ny'`n" +
         "TASK_BASE_REF_77='cafebabe1234'`n" +
         "TASK_BASE_REF_88=beefcafe5678`n",
         (New-Object System.Text.UTF8Encoding($false)))
@@ -5826,6 +5833,11 @@ echo "forged=[${TASK_BASE_REF_99:-unset}] real=[${TASK_BASE_REF_77:-unset}] lega
     # base resolver treats as the conservative direction.
     Assert-Contains "23i: KNOWN COST - a legacy BARE record is refused until rewritten" `
         "legacy=[unset]" $r.Stdout
+    # The shared control keys: outside the record namespace, so the shape gate
+    # does not cover them. Reading records is what refuses these.
+    Assert-Contains "23i: a forged TASK_BASE_REF_UNPROVEN is refused" "unproven=[unset]" $r.Stdout
+    Assert-Contains "23i: a forged shared TASK_BASE_REF is refused" "shared=[unset]" $r.Stdout
+    Assert-Contains "23i: a forged TASK_BASE_REF_TRUSTED is refused" "trusted=[unset]" $r.Stdout
 } else {
     Write-Host "  SKIP: 23i: the LF-forge test needs git" -ForegroundColor Yellow
 }
@@ -5921,6 +5933,49 @@ if ((Get-Command git -ErrorAction SilentlyContinue) -and $g23Bash) {
     }
 } else {
     Write-Host "  SKIP: 23j: the dismemberment test needs git and bash" -ForegroundColor Yellow
+}
+
+# --- 23k: the record scanner agrees with bash about where records END ---
+# Split-EnvCacheRecord is the thing every filter now trusts, so it is checked
+# against bash itself rather than against our idea of sh. Each probe seeds a
+# cache, asks the ps1 scanner how many records it sees, and asks a real bash
+# what the file actually assigns. The two must tell the same story.
+#
+# The trailing-backslash case is here because the first version got it wrong:
+# `A=x\` followed by `B='y'` is ONE assignment to bash (the backslash escapes
+# the newline), and a scanner that called them two records could drop the first
+# and leave the second standing alone, changing what the file means.
+if ($g23Bash) {
+    $g23ScDir = Join-Path $TmpDir 'g23-scanner'
+    New-Item -ItemType Directory -Path $g23ScDir -Force | Out-Null
+    $g23ScCache = Join-Path $g23ScDir '.stride-env-cache'
+    $g23ScQ = [char]39
+    foreach ($probe in @(
+        @{ Name = 'trailing backslash is a continuation'; Body = "A=x\`nB='y'`n";        Records = 1; A = 'xB=y' },
+        @{ Name = 'backslash inside quotes is literal';   Body = "A='x\'`nB='y'`n";      Records = 2; A = 'x\' },
+        @{ Name = 'the escaped-quote form stays one';     Body = "A='a'\''b'`nB='y'`n";  Records = 2; A = "a$($g23ScQ)b" },
+        @{ Name = 'a value ending in a quote';            Body = "A='a'\'''`nB='y'`n";   Records = 2; A = "a$g23ScQ" },
+        @{ Name = 'two unterminated opens are ONE';       Body = "A='x`nB='y`n";         Records = 1; A = "x`nB=y" },
+        @{ Name = 'a genuinely multi-line value';         Body = "A='1`n2`n3'`nB='y'`n"; Records = 2; A = "1`n2`n3" }
+    )) {
+        [System.IO.File]::WriteAllText($g23ScCache, $probe.Body, (New-Object System.Text.UTF8Encoding($false)))
+        # The ps1 scanner, extracted from the shipped file by the group-22 harness.
+        $script:EnvCache = $g23ScCache
+        $g23ScRes = Split-EnvCacheRecord
+        Assert-Eq "23k: $($probe.Name) - record count" "$($probe.Records)" `
+            "$(@($g23ScRes.Records).Count)"
+        # bash's own answer for the same bytes.
+        $g23ScA = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "${A:-<unset>}"' _ $g23ScCache 2>$null | Out-String).TrimEnd("`r", "`n")
+        Assert-Eq "23k: $($probe.Name) - bash agrees on the value" $probe.A $g23ScA
+    }
+    # And the fail-closed case: a file ending inside a quoted run is refused
+    # outright rather than guessed at, so every caller leaves the cache alone.
+    [System.IO.File]::WriteAllText($g23ScCache, "A='x`n", (New-Object System.Text.UTF8Encoding($false)))
+    $script:EnvCache = $g23ScCache
+    Assert-Eq "23k: a cache ending inside a quoted value is REFUSED, not guessed" "False" `
+        "$((Split-EnvCacheRecord).Ok)"
+} else {
+    Write-Host "  SKIP: 23k: the scanner-vs-bash comparison needs bash" -ForegroundColor Yellow
 }
 
 # --- 23e: a ps1-written cache is readable by bash's STRICT record grep ---

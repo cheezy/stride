@@ -8988,6 +8988,101 @@ else
 fi
 
 # ============================================================
+# Test Group 29: W2099 — Windows PowerShell 5.1 static-compatibility gate
+# ============================================================
+# stride-hook.sh execs powershell.exe (Windows PowerShell 5.1), not pwsh, so a
+# 7-only construct this machine's pwsh 7 happily accepts would fail only on a
+# user's Windows box. scripts/check-ps1-compat.sh runs PSScriptAnalyzer's
+# PSUseCompatibleSyntax and PSUseCompatibleCmdlets over hooks/*.ps1 targeting
+# 5.1.
+#
+# SYNTAX and CMDLET-NAME only. A clean run is NOT evidence the hook RUNS on
+# 5.1 — the verified blind spots are listed in README.md under "What this gate
+# cannot see", and runtime verification on a real Windows host is a separate
+# job that this group does not do and must not be read as doing.
+#
+# Exit codes: 0 clean, 1 findings or gate error, 2 tooling absent. A 2 SKIPs
+# rather than failing, matching how this suite already skips groups needing
+# jq, git, or python3 — pwsh is in that same class, and a permanently red
+# suite on machines without it would just train people to ignore reds, which
+# is the exact failure this whole gate exists to prevent.
+#
+# The ps1 twin suite has no Group 29: host-agnostic repo gates live in the
+# bash suite only, as with Group 28.
+echo ""
+echo "=== Test Group 29: W2099 PowerShell 5.1 static-compatibility gate ==="
+W2099_OUT=$(bash "$SCRIPT_DIR/../scripts/check-ps1-compat.sh" 2>&1)
+W2099_RC=$?
+if [ "$W2099_RC" -eq 2 ] && [ "${STRIDE_PS1_GATE_REQUIRED:-0}" = "1" ]; then
+  # Opt-in enforcement. The SKIP below is the right default for contributor
+  # machines, but it means a runner without pwsh reports a fully green suite
+  # while hooks/*.ps1 was never gated at all — and green is what readers act
+  # on. Set STRIDE_PS1_GATE_REQUIRED=1 wherever the gate is meant to be
+  # mandatory (CI, a release check) to turn absent tooling into a failure
+  # instead of a silent pass. Unset, behaviour is exactly as before.
+  echo -e "  ${RED}FAIL${RESET}: 29a: STRIDE_PS1_GATE_REQUIRED=1 but pwsh or PSScriptAnalyzer is not installed"
+  printf '%s\n' "$W2099_OUT"
+  FAIL=$((FAIL + 1))
+elif [ "$W2099_RC" -eq 2 ]; then
+  echo "  SKIP: 29a: pwsh or PSScriptAnalyzer not installed — the 5.1 gate needs both"
+  echo "        (set STRIDE_PS1_GATE_REQUIRED=1 to make this a failure instead)"
+  printf '%s\n' "$W2099_OUT"
+elif [ "$W2099_RC" -eq 0 ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 29a: hooks/*.ps1 clean against the PowerShell 5.1 syntax and cmdlet rules"
+  PASS=$((PASS + 1))
+  # Surface analyzer-version drift even on a PASS. The gate accepts any build
+  # at or above the pinned version so a contributor on a newer one is not
+  # blocked, which means the build supplying this verdict can differ from the
+  # one the repo pins. Swallowing the whole output here — the obvious thing to
+  # do on a green branch — would make that drift invisible in the one run that
+  # happens routinely. Only warn: lines are echoed, so a clean run stays quiet.
+  printf '%s\n' "$W2099_OUT" | grep '^warn:' || true
+else
+  echo -e "  ${RED}FAIL${RESET}: 29a: a hooks/*.ps1 file uses a construct Windows PowerShell 5.1 cannot run (or the gate errored)"
+  printf '%s\n' "$W2099_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
+# 29b: the gate must be able to go RED. A compatibility gate that cannot fail
+# is worse than no gate, because it certifies. Point the same script at a
+# scratch file of constructs 5.1 cannot parse and require a non-zero exit
+# naming BOTH rules — checking both is what catches the silent
+# half-misconfiguration where one rule goes quiet and the other still reports.
+if [ "$W2099_RC" -ne 2 ]; then
+  W2099_PROBE_DIR="$TMPDIR_TEST/w2099-probe"
+  mkdir -p "$W2099_PROBE_DIR"
+  cat > "$W2099_PROBE_DIR/probe.ps1" << 'PROBE'
+$x = 1
+$y = $x ? 'a' : 'b'
+$z = $null ?? 'c'
+Get-Uptime
+PROBE
+  W2099_NEG_OUT=$(bash "$SCRIPT_DIR/../scripts/check-ps1-compat.sh" "$W2099_PROBE_DIR" 2>&1)
+  W2099_NEG_RC=$?
+  # Assert on the SCAN's own findings, not on bare rule names appearing
+  # anywhere in the output. The self-test success banner and the
+  # GATE SELF-TEST FAILED block both name each rule, so a bare grep for the
+  # rule names is satisfied unconditionally and leaves rc==1 as the only
+  # load-bearing check — which a gate broken so that a rule goes silent also
+  # produces, from the self-test, having scanned nothing. Requiring the
+  # INCOMPATIBLE: prefix means only real findings against the scratch file can
+  # satisfy this, and the absence check rules out the self-test-failure path
+  # masquerading as a successful rejection.
+  if [ "$W2099_NEG_RC" -eq 1 ] \
+     && printf '%s' "$W2099_NEG_OUT" | grep -q "INCOMPATIBLE:.*PSUseCompatibleSyntax" \
+     && printf '%s' "$W2099_NEG_OUT" | grep -q "INCOMPATIBLE:.*PSUseCompatibleCmdlets" \
+     && ! printf '%s' "$W2099_NEG_OUT" | grep -q "GATE SELF-TEST FAILED"; then
+    echo -e "  ${GREEN}PASS${RESET}: 29b: the gate rejects 7-only syntax and a 7-only cmdlet in a scratch file"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 29b: the gate stayed green on a deliberately 7-only scratch file (rc=$W2099_NEG_RC) — it may be a no-op"
+    printf '%s\n' "$W2099_NEG_OUT"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$W2099_PROBE_DIR"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

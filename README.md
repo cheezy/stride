@@ -318,12 +318,128 @@ and where the budget table lives. Budgets sit 12-13% above post-extraction
 sizes, so ordinary edits pass and only sustained regrowth trips (D229
 philosophy); raising one is a deliberate, reviewed decision.
 
+**(v1.68.0+)** Group 29 runs `scripts/check-ps1-compat.sh`, a static Windows
+PowerShell 5.1 compatibility gate over `hooks/*.ps1` — all four files, the ps1
+test suites included. It runs PSScriptAnalyzer's `PSUseCompatibleSyntax`
+(`TargetVersions = 5.1`) and `PSUseCompatibleCmdlets`
+(`desktop-5.1.14393.206-windows`), pinned in
+`scripts/PSScriptAnalyzerSettings.psd1`, because `stride-hook.sh` execs
+`powershell.exe` (5.1) and not `pwsh`: a 7-only construct a contributor's
+pwsh 7 accepts would fail only on a user's Windows box. Every run first proves
+itself against an in-memory 7-only probe and fails when either rule stops
+firing, so a misconfigured settings file cannot pass as a clean run. The group
+skips — loudly, printing the install command — when pwsh or the analyzer is
+absent.
+
 ```
 bash hooks/test-stride-hook.sh
 pwsh hooks/test-stride-hook.ps1
 ```
 
-These run by default with no setup. They do not make network requests.
+These run by default with no setup, and they make no network requests — with
+one exception in both respects, described next.
+
+### The PowerShell 5.1 compatibility gate
+
+Group 29 — and the same gate run on its own — needs PSScriptAnalyzer installed
+once. That install is the suite's only setup step and its only network fetch,
+at install time only, never during a run:
+
+```
+pwsh -NoProfile -Command "Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser"
+```
+
+The version is pinned so a later run cannot silently take a different build.
+**Nothing in the plugin installs it for you** — no hook installs modules on
+your machine. Without it, Group 29 skips with that command in its output, and
+the rest of the suite is unaffected.
+
+Run the gate on its own with:
+
+```
+bash scripts/check-ps1-compat.sh              # scan hooks/*.ps1
+bash scripts/check-ps1-compat.sh --self-test  # prove the gate still detects 7-only code
+```
+
+Exit codes: `0` clean, `1` findings or a gate error, `2` pwsh or
+PSScriptAnalyzer not installed.
+
+When the analyzer in use is not the pinned version, the gate still runs and
+still passes — the pin is a lower bound at runtime so a contributor already on
+a newer build is not blocked — but it emits a `warn:` line naming both
+versions, and Group 29 surfaces that line even on a pass. Drift is visible
+rather than silent.
+
+Because absent tooling *skips*, a runner without pwsh reports a green suite
+having gated nothing. Where the gate is meant to be mandatory — CI, a release
+check — set `STRIDE_PS1_GATE_REQUIRED=1` and the skip becomes a failure:
+
+```
+STRIDE_PS1_GATE_REQUIRED=1 bash hooks/test-stride-hook.sh
+```
+
+The gate matches `hooks/*.ps1` and **does not recurse**, matching the scope it
+documents. If a `.ps1` ever lands in a subdirectory it is not scanned, so the
+gate names it in a `warn:` line rather than passing clean over an unexamined
+tree.
+
+#### What this gate cannot see
+
+A clean run means exactly this: no PowerShell 7-only **syntax**, and no cmdlet
+**name** the 5.1 profile knows to be 7-only. It is not evidence that the hook
+*runs* on 5.1 — runtime verification on a real Windows host is a separate job.
+The gaps below were each confirmed by execution, not assumed:
+
+- **7-only parameters on cmdlets that exist in 5.1 are invisible.**
+  `ForEach-Object -Parallel`, `Get-Content -AsByteStream` and
+  `ConvertFrom-Json -AsHashtable` all pass silently: the cmdlet rule checks
+  that a cmdlet *name* resolves, never which parameters it accepts.
+- **The .NET API surface is invisible.** A 3-argument
+  `[System.IO.File]::Move(src, dst, overwrite)` — an overload .NET Framework
+  does not have — is flagged by neither rule. Related and more important:
+  `Move-Item -Force` at `hooks/stride-hook.ps1:57` and `:154` is a *behaviour*
+  divergence, because 5.1 implements `-Force` as delete-then-move; the
+  consequence is written up at `hooks/stride-hook.ps1:40-46`. No static rule
+  can see it, so it is recorded here as a gap and **not** as a suppressed
+  finding — a suppression would falsely imply the analyzer had flagged it.
+- **`Set-StrictMode -Version Latest`** (`hooks/stride-hook.ps1:14`,
+  `hooks/stride-skill-gate.ps1:17`) is valid on both hosts, but `Latest`
+  resolves to a different strictness on each. Not flagged, by design.
+- **The syntax rule covers five constructs, not "7-only syntax" in general.**
+  An exploratory pass over ~40 constructs found it detects `? :`, `??`, `??=`,
+  `&&`/`||` pipeline chains, and `${x}?.Member` — and misses `${x}?[0]` (the
+  null-conditional *index*, introduced in the same release as the member form
+  it does catch), `clean{}` blocks, the background operator `&`, the 7.0
+  numeric literal suffixes (`100u`, `1n`, `1.5d`, `16l`, `5s`, `3y`), and the
+  `` `e `` / `` `u{} `` escape sequences. The escapes are the nastiest shape:
+  on 5.1 they are not errors at all, the backtick is simply dropped and the
+  script emits the literal text.
+- **The cmdlet profile's coverage is arbitrary within a single family.** Of
+  twelve genuinely 7-only cmdlets tested it flagged five and missed
+  `Get-Error`, `Join-String`, `Start-ThreadJob`, `Enable-ExperimentalFeature`,
+  `Debug-Runspace`, `Get-PSSubsystem` and `Switch-Process` — flagging
+  `Get-ExperimentalFeature` while missing `Enable-ExperimentalFeature`. It is
+  a name-membership test, so a *misspelled* cmdlet is equally invisible.
+- **7-only automatic variables and the whole .NET surface are invisible**, and
+  this is the class most likely to bite: `$IsWindows` / `$IsLinux` / `$IsMacOS`
+  / `$IsCoreCLR`, `$PSStyle`, `$PSNativeCommandUseErrorActionPreference`,
+  7-only types such as `[System.Half]` and `System.Text.Json`, and
+  .NET-Core-only method overloads. None produces a syntax or unknown-cmdlet
+  error — just different behaviour, or a runtime throw, on the user's machine.
+- **The profile is one specific 5.1 build** (`5.1.14393.206`, Windows Server
+  2016 era). Other 5.1 builds may differ at the margins.
+
+**Nesting does not hide anything, and neither do encodings** — both were
+tested. A `? :` inside a string interpolation, a here-string or a scriptblock
+parameter default is still flagged, as is `&&` inside a scriptblock; and BOMs,
+CRLF, latin-1 and a missing trailing newline all analyze correctly. A file
+whose bytes do not decode as script text is reported as a gate error rather
+than as clean, so "no findings" never stands in for "never analyzed".
+
+What it does catch, also verified by execution: `? :`, `??`, `??=`,
+`&&`/`||` pipeline chains and `${x}?.Member` (syntax); and profile-known
+7-only cmdlets such as `Get-Uptime`, `Test-Json`, `ConvertFrom-Markdown`,
+`Show-Markdown`, `Remove-Service` and `Remove-Alias`.
 
 ### Optional end-to-end PUT round-trip
 

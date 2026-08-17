@@ -1860,8 +1860,8 @@ $agEnvCacheF = ''
 if (Test-Path (Join-Path $agEnvProjF '.stride-env-cache')) {
     $agEnvCacheF = Get-Content (Join-Path $agEnvProjF '.stride-env-cache') -Raw -Encoding UTF8
 }
-Assert-Contains "8f: env cache carries GOAL_ID for the follow-up PATCH" "GOAL_ID=7" $agEnvCacheF
-Assert-Contains "8f: env cache carries GOAL_IDENTIFIER" "GOAL_IDENTIFIER=G7" $agEnvCacheF
+Assert-Contains "8f: env cache carries GOAL_ID for the follow-up PATCH" "GOAL_ID='7'" $agEnvCacheF
+Assert-Contains "8f: env cache carries GOAL_IDENTIFIER" "GOAL_IDENTIFIER='G7'" $agEnvCacheF
 
 # 8g: after_goal entry with NO env object — omitted GOAL_* keys export as
 # empty strings (never an error) and GOAL_ID falls back to data.parent_id.
@@ -1980,7 +1980,7 @@ $agEnvCacheJ = ''
 if (Test-Path (Join-Path $agEnvProjJ '.stride-env-cache')) {
     $agEnvCacheJ = Get-Content (Join-Path $agEnvProjJ '.stride-env-cache') -Raw -Encoding UTF8
 }
-Assert-Contains "8j: surviving cache carries GOAL_ID" "GOAL_ID=7" $agEnvCacheJ
+Assert-Contains "8j: surviving cache carries GOAL_ID" "GOAL_ID='7'" $agEnvCacheJ
 if (Test-Path (Join-Path $agEnvProjJ '.stride-changed-files.json')) {
     Write-Host "  FAIL: 8j: diff snapshot should still be removed on mark_reviewed" -ForegroundColor Red
     $script:Fail++
@@ -2077,7 +2077,7 @@ if ($agEnvCacheK2 -match 'ffff999bogus' -or $agEnvCacheK2 -match 'STRIDE_OPEN_WI
 Assert-Contains "8k2 (D258): the genuine seeded head record is untouched" `
     "TASK_HEAD_REF_77=aaaa111genuine" $agEnvCacheK2
 Assert-Contains "8k2 (D258): a legitimate server key on the same env still lands" `
-    "GOAL_ID=7" $agEnvCacheK2
+    "GOAL_ID='7'" $agEnvCacheK2
 
 # 8l: env value with an embedded newline reaches the section exactly (the
 # process env keeps the raw value; only the line-based cache copy collapses
@@ -2116,7 +2116,7 @@ $agEnvCacheL = ''
 if (Test-Path (Join-Path $agEnvProjL '.stride-env-cache')) {
     $agEnvCacheL = Get-Content (Join-Path $agEnvProjL '.stride-env-cache') -Raw -Encoding UTF8
 }
-Assert-Contains "8l: cached copy collapses the newline to a space" "GOAL_TITLE=line1 line3" $agEnvCacheL
+Assert-Contains "8l: cached copy collapses the newline to a space" "GOAL_TITLE='line1 line3'" $agEnvCacheL
 
 # ============================================================
 # Test Group 9: early upload + before_review self-heal (W1095,
@@ -2486,8 +2486,8 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     $r = Invoke-HookScript -InputJson $claimA -Phase 'post' -ProjectDir $brA
     Assert-Exit "10a: inline JSON claim exits 0" 0 $r.ExitCode
     $cacheA = Get-Content -Raw -Path (Join-Path $brA '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "10a: inline JSON writes the identifier" "TASK_IDENTIFIER=W42" $cacheA
-    Assert-Contains "10a: inline JSON sets TASK_BASE_REF to current HEAD" "TASK_BASE_REF=$headA" $cacheA
+    Assert-Contains "10a: inline JSON writes the identifier" "TASK_IDENTIFIER='W42'" $cacheA
+    Assert-Contains "10a: inline JSON sets TASK_BASE_REF to current HEAD" "TASK_BASE_REF='$headA'" $cacheA
 
     # 10b: a persisted-output notice pointing at a readable file containing the
     # API JSON writes the full cache from the file content.
@@ -2504,8 +2504,8 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     $r = Invoke-HookScript -InputJson $claimB -Phase 'post' -ProjectDir $brB
     Assert-Exit "10b: persisted-file claim exits 0" 0 $r.ExitCode
     $cacheB = Get-Content -Raw -Path (Join-Path $brB '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "10b: persisted file supplies the identifier" "TASK_IDENTIFIER=W77" $cacheB
-    Assert-Contains "10b: persisted file path sets TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headB" $cacheB
+    Assert-Contains "10b: persisted file supplies the identifier" "TASK_IDENTIFIER='W77'" $cacheB
+    Assert-Contains "10b: persisted file path sets TASK_BASE_REF to HEAD" "TASK_BASE_REF='$headB'" $cacheB
 
     # 10c: garbage stdout with no persisted file refreshes only TASK_BASE_REF,
     # preserves the prior TASK_ID line, and removes the stale snapshot.
@@ -2520,7 +2520,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Assert-Exit "10c: garbage-stdout claim exits 0" 0 $r.ExitCode
     $cacheC = Get-Content -Raw -Path (Join-Path $brC '.stride-env-cache') -ErrorAction SilentlyContinue
     Assert-Contains "10c: garbage stdout preserves the prior TASK_ID" "TASK_ID=42" $cacheC
-    Assert-Contains "10c: garbage stdout still refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headC" $cacheC
+    Assert-Contains "10c: garbage stdout still refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF='$headC'" $cacheC
     if (-not (Test-Path (Join-Path $brC '.stride-changed-files.json'))) {
         Write-Host "  PASS: 10c: base-ref-only refresh removes the stale snapshot" -ForegroundColor Green
         $script:PASS++
@@ -2541,7 +2541,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Assert-Exit "10d: missing-persisted-file claim exits 0" 0 $r.ExitCode
     $cacheD = Get-Content -Raw -Path (Join-Path $brD '.stride-env-cache') -ErrorAction SilentlyContinue
     Assert-Contains "10d: missing persisted file preserves the prior TASK_ID" "TASK_ID=42" $cacheD
-    Assert-Contains "10d: missing persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headD" $cacheD
+    Assert-Contains "10d: missing persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF='$headD'" $cacheD
 
     # 10e: a non-claim post invocation (complete URL) leaves TASK_BASE_REF
     # untouched at the previously-recorded base ref.
@@ -2593,7 +2593,7 @@ echo "claimed"
     Assert-Exit "10g: non-JSON-persisted-file claim exits 0" 0 $r.ExitCode
     $cacheG = Get-Content -Raw -Path (Join-Path $brG '.stride-env-cache') -ErrorAction SilentlyContinue
     Assert-Contains "10g: non-JSON persisted file preserves the prior TASK_ID" "TASK_ID=42" $cacheG
-    Assert-Contains "10g: non-JSON persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headG" $cacheG
+    Assert-Contains "10g: non-JSON persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF='$headG'" $cacheG
 
     # 10h: garbage stdout with NO pre-existing cache creates one containing only
     # TASK_BASE_REF (no TASK_ identity lines to preserve).
@@ -2607,7 +2607,7 @@ echo "claimed"
     $r = Invoke-HookScript -InputJson $claimH -Phase 'post' -ProjectDir $brH
     Assert-Exit "10h: absent-cache claim exits 0" 0 $r.ExitCode
     $cacheH = Get-Content -Raw -Path (Join-Path $brH '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "10h: absent cache is created with TASK_BASE_REF at HEAD" "TASK_BASE_REF=$headH" $cacheH
+    Assert-Contains "10h: absent cache is created with TASK_BASE_REF at HEAD" "TASK_BASE_REF='$headH'" $cacheH
     Assert-NotContains "10h: no spurious TASK_ID line created" "TASK_ID=" $cacheH
 
     # 10i: a persisted-output path containing spaces is recovered intact. Guards
@@ -2624,7 +2624,7 @@ echo "claimed"
     $r = Invoke-HookScript -InputJson $claimI -Phase 'post' -ProjectDir $brI
     Assert-Exit "10i: spaced-path claim exits 0" 0 $r.ExitCode
     $cacheI = Get-Content -Raw -Path (Join-Path $brI '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "10i: persisted path with spaces is recovered" "TASK_IDENTIFIER=W88" $cacheI
+    Assert-Contains "10i: persisted path with spaces is recovered" "TASK_IDENTIFIER='W88'" $cacheI
 
     # 10j: an id-only persisted payload (no {"data":...} envelope) caches its
     # identity lines instead of throwing under StrictMode and falling through —
@@ -2642,8 +2642,8 @@ echo "claimed"
     $r = Invoke-HookScript -InputJson $claimJ -Phase 'post' -ProjectDir $brJ
     Assert-Exit "10j: id-only persisted payload claim exits 0" 0 $r.ExitCode
     $cacheJ = Get-Content -Raw -Path (Join-Path $brJ '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "10j: id-only persisted payload caches the identifier" "TASK_IDENTIFIER=W99" $cacheJ
-    Assert-Contains "10j: id-only persisted payload sets TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headJ" $cacheJ
+    Assert-Contains "10j: id-only persisted payload caches the identifier" "TASK_IDENTIFIER='W99'" $cacheJ
+    Assert-Contains "10j: id-only persisted payload sets TASK_BASE_REF to HEAD" "TASK_BASE_REF='$headJ'" $cacheJ
 
     # 10k (D259): mirrors bash 14o. This branch was a three-key deny-list while
     # its own comment claimed to keep "TASK_ identity lines", so GOAL_*,
@@ -2740,7 +2740,7 @@ true
         Assert-Eq "10l (D260): exactly one $k line after one parseable claim" "1" `
             "$(@($cacheL | Where-Object { $_ -match "^$k=" }).Count)"
     }
-    Assert-Eq "10l (D260): the surviving value is the forwarded env block's" "TASK_TITLE=Task title in env (stale)" `
+    Assert-Eq "10l (D260): the surviving value is the forwarded env block's" "TASK_TITLE='Task title in env (stale)'" `
         "$(@($cacheL | Where-Object { $_ -match '^TASK_TITLE=' }) | Select-Object -First 1)"
     Assert-Eq "10l (D260): a key only the env supplies is still forwarded, exactly once" "1" `
         "$(@($cacheL | Where-Object { $_ -match '^TASK_DESCRIPTION=' }).Count)"
@@ -2783,10 +2783,10 @@ true
     $cacheM = @(Get-Content -Path (Join-Path $brM '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
     Assert-Eq "10m (D260): rewrite-only path still writes exactly one TASK_TITLE line" "1" `
         "$(@($cacheM | Where-Object { $_ -match '^TASK_TITLE=' }).Count)"
-    Assert-Eq "10m (D260): and it keeps the data block's value when the env supplies none" "TASK_TITLE=Only in data" `
+    Assert-Eq "10m (D260): and it keeps the data block's value when the env supplies none" "TASK_TITLE='Only in data'" `
         "$(@($cacheM | Where-Object { $_ -match '^TASK_TITLE=' }) | Select-Object -First 1)"
     Assert-Contains "10m (D260): a non-TASK key the env did supply still lands" `
-        "BOARD_NAME=Stride Development" "$($cacheM -join "`n")"
+        "BOARD_NAME='Stride Development'" "$($cacheM -join "`n")"
 
     # 10n (D269): a non-integer task id must name no per-task record. The
     # -replace sanitizer is not injective -- '42-x' and '42.x' both become
@@ -3432,7 +3432,7 @@ $d15bCache = ''
 if (Test-Path (Join-Path $d15bProj '.stride-env-cache')) {
     $d15bCache = Get-Content (Join-Path $d15bProj '.stride-env-cache') -Raw -Encoding UTF8
 }
-Assert-Contains "15b: truncated claim recovers identifier from the canonical file" "TASK_IDENTIFIER=W609" $d15bCache
+Assert-Contains "15b: truncated claim recovers identifier from the canonical file" "TASK_IDENTIFIER='W609'" $d15bCache
 
 # 15c (W1609): a valid claim stdout is captured to the canonical response file.
 $d15cProj = Join-Path $TmpDir 'd119-capture'
@@ -3568,7 +3568,7 @@ $w16aCache = ''
 if (Test-Path (Join-Path $w16aProj '.stride-env-cache')) {
     $w16aCache = Get-Content (Join-Path $w16aProj '.stride-env-cache') -Raw -Encoding UTF8
 }
-Assert-Contains "16a: env cache carries GOAL_ID for the follow-up PATCH" "GOAL_ID=55" $w16aCache
+Assert-Contains "16a: env cache carries GOAL_ID for the follow-up PATCH" "GOAL_ID='55'" $w16aCache
 
 # 16b: truncated stdout + present file whose after_goal env OMITS GOAL_ID but
 # data.parent_id is set -> parent-id fallback exports GOAL_ID under truncation.
@@ -3642,7 +3642,7 @@ $w16eCache = ''
 if (Test-Path (Join-Path $w16eProj '.stride-env-cache')) {
     $w16eCache = Get-Content (Join-Path $w16eProj '.stride-env-cache') -Raw -Encoding UTF8
 }
-Assert-Contains "16e: env cache carries GOAL_ID off the slim ack" "GOAL_ID=55" $w16eCache
+Assert-Contains "16e: env cache carries GOAL_ID off the slim ack" "GOAL_ID='55'" $w16eCache
 
 # 16f: negative control — slim ack whose hooks[] has NO after_goal entry ->
 # the section must NOT run (mirrors test-stride-hook.sh 20f).
@@ -3665,7 +3665,7 @@ Assert-NotContains "16f: slim ack without after_goal does not run the section" "
 # it must hold the parent_id value. Regression lock mirroring
 # test-stride-hook.sh 20g — Set-AfterGoalEnv builds one env map and writes the
 # cache once, so it structurally cannot duplicate; this pins that geometry.
-# (ps1 cache lines are unquoted: GOAL_ID=6.)
+# (D280) ps1 cache lines are now sq_escape-quoted: GOAL_ID='6'.
 $w16gProj = Join-Path $TmpDir 'd245-onegoalid'
 New-Item -ItemType Directory -Path (Join-Path $w16gProj '.stride') -Force | Out-Null
 Set-Content -Path (Join-Path $w16gProj '.stride.md') -Value @'
@@ -3685,7 +3685,7 @@ if (Test-Path (Join-Path $w16gProj '.stride-env-cache')) {
 }
 $w16gGoalLines = @($w16gCache | Where-Object { $_ -match '^GOAL_ID=' })
 Assert-Eq "16g: env cache carries exactly one GOAL_ID line when the fallback fires" "1" "$($w16gGoalLines.Count)"
-Assert-Eq "16g: a first-match reader gets the parent_id value" "GOAL_ID=6" "$($w16gGoalLines | Select-Object -First 1)"
+Assert-Eq "16g: a first-match reader gets the parent_id value" "GOAL_ID='6'" "$($w16gGoalLines | Select-Object -First 1)"
 
 # 16h: normal-path control for D245 — after_goal env WITH GOAL_ID: still
 # exactly one GOAL_ID line holding the server-supplied value (mirrors
@@ -3709,7 +3709,7 @@ if (Test-Path (Join-Path $w16hProj '.stride-env-cache')) {
 }
 $w16hGoalLines = @($w16hCache | Where-Object { $_ -match '^GOAL_ID=' })
 Assert-Eq "16h: env cache still carries exactly one GOAL_ID line on the normal path" "1" "$($w16hGoalLines.Count)"
-Assert-Eq "16h: a first-match reader gets the supplied value" "GOAL_ID=55" "$($w16hGoalLines | Select-Object -First 1)"
+Assert-Eq "16h: a first-match reader gets the supplied value" "GOAL_ID='55'" "$($w16hGoalLines | Select-Object -First 1)"
 
 # 16i (D257): mirrors test-stride-hook.sh 20i. 16g/16h pin that a SINGLE run
 # cannot duplicate a key — Set-AfterGoalEnv builds one env map and a hashtable
@@ -3741,7 +3741,7 @@ if (Test-Path (Join-Path $w16iProj '.stride-env-cache')) {
 }
 $w16iGoalLines = @($w16iCache | Where-Object { $_ -match '^GOAL_ID=' })
 Assert-Eq "16i (D257): exactly one GOAL_ID line after a second in-window after_goal" "1" "$($w16iGoalLines.Count)"
-Assert-Eq "16i (D257): the surviving line is defined-but-empty, not the previous goal's id" "GOAL_ID=" "$($w16iGoalLines | Select-Object -First 1)"
+Assert-Eq "16i (D257): the surviving line is defined-but-empty, not the previous goal's id" "GOAL_ID=''" "$($w16iGoalLines | Select-Object -First 1)"
 
 # 16j (D257): mirrors test-stride-hook.sh 20j. The three siblings never had any
 # de-duplication on this side either, so two in-window runs left a first-match
@@ -3771,11 +3771,11 @@ foreach ($k in @('GOAL_ID', 'GOAL_IDENTIFIER', 'GOAL_TITLE', 'GOAL_DESCRIPTION')
     $w16jLines = @($w16jCache | Where-Object { $_ -match "^$k=" })
     Assert-Eq "16j (D257): exactly one $k line after two in-window after_goal runs" "1" "$($w16jLines.Count)"
 }
-Assert-Eq "16j (D257): first-match GOAL_ID is the current goal's" "GOAL_ID=7" `
+Assert-Eq "16j (D257): first-match GOAL_ID is the current goal's" "GOAL_ID='7'" `
     "$(@($w16jCache | Where-Object { $_ -match '^GOAL_ID=' }) | Select-Object -First 1)"
-Assert-Eq "16j (D257): first-match GOAL_IDENTIFIER is the current goal's" "GOAL_IDENTIFIER=G7" `
+Assert-Eq "16j (D257): first-match GOAL_IDENTIFIER is the current goal's" "GOAL_IDENTIFIER='G7'" `
     "$(@($w16jCache | Where-Object { $_ -match '^GOAL_IDENTIFIER=' }) | Select-Object -First 1)"
-Assert-Eq "16j (D257): a sibling the current run omitted does not keep the previous goal's value" "GOAL_TITLE=" `
+Assert-Eq "16j (D257): a sibling the current run omitted does not keep the previous goal's value" "GOAL_TITLE=''" `
     "$(@($w16jCache | Where-Object { $_ -match '^GOAL_TITLE=' }) | Select-Object -First 1)"
 
 # 16k (D257): the scope guard, and it has to be built differently from 20l to
@@ -3805,10 +3805,10 @@ if (Test-Path (Join-Path $w16kProj '.stride-env-cache')) {
     $w16kCache = @(Get-Content (Join-Path $w16kProj '.stride-env-cache') -Encoding UTF8)
 }
 Assert-Contains "16k (D257): a non-GOAL key from an EARLIER run survives the collapse" `
-    "BOARD_NAME=Stride Development" "$($w16kCache -join "`n")"
+    "BOARD_NAME='Stride Development'" "$($w16kCache -join "`n")"
 Assert-Eq "16k (D257): and the GOAL_* collapse still applied on that run" "1" `
     "$(@($w16kCache | Where-Object { $_ -match '^GOAL_ID=' }).Count)"
-Assert-Eq "16k (D257): holding the second run's goal" "GOAL_ID=7" `
+Assert-Eq "16k (D257): holding the second run's goal" "GOAL_ID='7'" `
     "$(@($w16kCache | Where-Object { $_ -match '^GOAL_ID=' }) | Select-Object -First 1)"
 
 # ============================================================
@@ -3877,7 +3877,7 @@ git pull -q origin main
         $script:PASS++
     }
     $d142Cache = Get-Content -Raw -Path (Join-Path $cloneA '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "17a: claim records the POST-pull branch point as TASK_BASE_REF" "TASK_BASE_REF=$postPull" $d142Cache
+    Assert-Contains "17a: claim records the POST-pull branch point as TASK_BASE_REF" "TASK_BASE_REF='$postPull'" $d142Cache
     Assert-NotContains "17a: the stale prior-session TASK_BASE_REF was replaced" "1111111111111111111111111111111111111111" $d142Cache
 
     # 17b: committed-range override — a baseline entry whose path the task's
@@ -5283,7 +5283,7 @@ TASK_NARROWED_77='yes'
     Assert-Contains "22p: and its VALUE is the outer task's, not the claimant's" `
         "TASK_BASE_REF_77='aaaa111'" "$($g22SeqCache -join "`n")"
     # Identity belongs to the NEWEST claim — the window moved on.
-    Assert-Contains "22p: identity is the most recent claim's" "TASK_ID=99" "$($g22SeqCache -join "`n")"
+    Assert-Contains "22p: identity is the most recent claim's" "TASK_ID='99'" "$($g22SeqCache -join "`n")"
 
     # The divergence, pinned by value so it cannot rot silently. See the header.
     foreach ($k in @('TASK_HEAD_REF_77', 'TASK_OWNED_77', 'TASK_BASE_AT_77', 'TASK_NARROWED_77')) {
@@ -5308,6 +5308,302 @@ foreach ($w in @('Set-TaskOwnedRecord', 'Set-TaskNarrowedRecord', 'Set-TaskHeadR
     $g22CallSites += ($hits - 1)
 }
 Assert-Eq "22r: the record writers still have no production call site (tripwire)" "0" "$g22CallSites"
+
+}
+
+# ============================================================
+# Test Group 23: D280 — every env-cache write is sq_escape-quoted
+# ============================================================
+# The cache is SOURCED by stride-hook.sh under `set -a`, so every value this
+# port writes into it is shell syntax, not data. Before D280 three write sites
+# emitted `KEY=value` bare, and a server-supplied `$(command)` was a command
+# substitution bash EXECUTED at source time.
+#
+# The fix is two-sided and these tests hold both sides: the WRITERS quote via
+# ConvertTo-ShSingleQuoted, and the LOADER unquotes via ConvertFrom-ShSingleQuoted
+# so the process environment — inherited by every `bash -c` child running a
+# .stride.md section — still carries bare values, exactly as bash's `source`
+# produces. Either side alone is a regression, so 23c asserts the bare value
+# reaches a real section child rather than stopping at the cache.
+Write-Host ""
+Write-Host "=== Test Group 23: D280 env-cache quoting ==="
+
+$g23Want = @('ConvertTo-ShSingleQuoted', 'ConvertFrom-ShSingleQuoted')
+$g23Ast = [System.Management.Automation.Language.Parser]::ParseFile($HookScript, [ref]$null, [ref]$null)
+$g23Fns = $g23Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
+$g23Found = @()
+foreach ($f in $g23Fns) {
+    if ($g23Want -contains $f.Name) {
+        $g23Found += $f.Name
+        . ([scriptblock]::Create($f.Extent.Text))
+    }
+}
+$g23Missing = @($g23Want | Where-Object { $g23Found -notcontains $_ })
+if ($g23Missing.Count -gt 0) {
+    Write-Host "  FAIL: 23-harness: could not extract from stride-hook.ps1: $($g23Missing -join ', ')" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 23-harness: both escaper halves extracted from the real hook" -ForegroundColor Green
+    $script:PASS++
+
+$g23Bash = Get-Command bash -ErrorAction SilentlyContinue
+$g23Q = [char]39
+
+# --- 23a: the loader's unquote is the EXACT inverse of the writer's quote ---
+# Covers all three testing_strategy edge cases: a value that already contains
+# the sequence '\'' BEFORE escaping, an empty value, and a value that is only a
+# single quote. A .Trim("'") would fail the first and the last; that is why the
+# inverse is a real inverse and not a trim.
+$g23Probes = @(
+    'yes',
+    '',
+    "$g23Q",
+    "a$($g23Q)b",
+    "a$g23Q\$g23Q$($g23Q)b",
+    'Fix $(cmd)',
+    'back`tick',
+    'a\b',
+    '  padded  ',
+    "ends$g23Q"
+)
+$g23RoundFail = 0
+foreach ($probe in $g23Probes) {
+    if ((ConvertFrom-ShSingleQuoted -Value (ConvertTo-ShSingleQuoted -Value $probe)) -ne $probe) { $g23RoundFail++ }
+}
+Assert-Eq "23a: unquote(quote(v)) = v for every probe, including the '\'' and lone-quote cases" "0" "$g23RoundFail"
+# A legacy cache written by a PRE-D280 ps1 holds BARE values. The loader must
+# still read those, or upgrading the plugin blanks every cached variable.
+Assert-Eq "23a: a legacy bare value passes through the loader unchanged" "6341" `
+    (ConvertFrom-ShSingleQuoted -Value '6341')
+Assert-Eq "23a: a quoted empty value unwraps to the empty string" "" `
+    (ConvertFrom-ShSingleQuoted -Value "$g23Q$g23Q")
+
+# --- 23b: what bash actually does with the written form ---
+# Not a re-test of the escaper against itself: the line is written to a file and
+# SOURCED by a real bash, which is the sink the defect is about.
+if ($g23Bash) {
+    $g23Dir = Join-Path $TmpDir 'g23-source'
+    New-Item -ItemType Directory -Path $g23Dir -Force | Out-Null
+    $g23Cache = Join-Path $g23Dir '.stride-env-cache'
+    $g23SourceFail = 0
+    foreach ($probe in $g23Probes) {
+        [System.IO.File]::WriteAllText($g23Cache,
+            "PROBE=" + (ConvertTo-ShSingleQuoted -Value $probe) + "`n",
+            (New-Object System.Text.UTF8Encoding($false)))
+        $got = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$PROBE"' _ $g23Cache 2>$null | Out-String).TrimEnd("`r", "`n")
+        if ($got -ne $probe) { $g23SourceFail++ }
+    }
+    Assert-Eq "23b: every probe survives a real bash source byte for byte" "0" "$g23SourceFail"
+} else {
+    Write-Host "  SKIP: 23b: the bash source leg needs bash" -ForegroundColor Yellow
+}
+
+# --- 23c: THE REGRESSION TEST — a hostile value end to end ---
+# ONE WRITE SITE PER LEG, DELIBERATELY. The first draft of this test supplied
+# TASK_TITLE in BOTH data.title and the hook env block, and it passed with the
+# claim identity block's escaping REVERTED: Set-HookEnv runs later and replaces
+# the line in place (D260), so the env block's quoted value masked the identity
+# block's bare one. Verified by reverting that writer and watching this test
+# stay green. Keep the legs isolated, or this stops testing what it names.
+#
+# 23c1 - the claim identity block, with NO hook env in the response at all.
+if ($g23Bash -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    $g23Proj = New-GitRepo -Name 'g23-hostile'
+    $g23Marker = Join-Path $TmpDir 'g23-marker-must-not-exist'
+    Remove-Item -Force $g23Marker -ErrorAction SilentlyContinue
+    $g23Hostile = 'Fix $(touch ' + $g23Marker + ') login'
+    # This section is what makes the leg cover the LOADER too, in isolation.
+    # Within one run the claim handler writes the cache and the bulk loader
+    # reads it back immediately afterwards (stride-hook.ps1: the handler block
+    # closes just above the loader). With no hook env in this response there is
+    # no Set-HookEnv export, so the ONLY path by which $TASK_TITLE can reach
+    # this child is the loader unquoting what the identity block wrote. Drop
+    # ConvertFrom-ShSingleQuoted and this assertion sees 'Fix $(...) login'
+    # WITH the quotes attached.
+    Set-Content -Path (Join-Path $g23Proj '.stride.md') -Encoding UTF8 -Value @'
+# Stride Configuration
+
+## before_doing
+```bash
+echo "title=[$TASK_TITLE]"
+```
+
+## after_doing
+```bash
+```
+
+## before_review
+```bash
+```
+
+## after_review
+```bash
+```
+
+## after_goal
+```bash
+```
+'@
+    $g23Claim = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{
+            stdout = (@{
+                data = @{ id = 42; identifier = 'W42'; title = $g23Hostile
+                          status = 'in_progress'; complexity = 'medium'; priority = 'high' }
+            } | ConvertTo-Json -Depth 8 -Compress)
+            stderr = ''; interrupted = $false
+        }
+    } | ConvertTo-Json -Depth 10 -Compress
+    $r = Invoke-HookScript -InputJson $g23Claim -Phase 'post' -ProjectDir $g23Proj
+    Assert-Exit "23c1: a claim carrying a hostile title exits 0" 0 $r.ExitCode
+    # Guard the isolation the comment above depends on: if a future edit adds an
+    # env block here, the leg silently stops covering the identity block.
+    Assert-Eq "23c1: exactly one TASK_TITLE line, written by the identity block alone" "1" `
+        "$(@(Get-Content (Join-Path $g23Proj '.stride-env-cache') -Encoding UTF8 | Where-Object { $_ -like 'TASK_TITLE=*' }).Count)"
+    # Nothing executed while the hook itself ran...
+    Assert-Eq "23c1: the hook run alone executed no command substitution" "False" `
+        "$(Test-Path $g23Marker)"
+    # ...nor when bash SOURCES the cache it wrote, which is the real sink.
+    $g23Sourced = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$TASK_TITLE"' _ (Join-Path $g23Proj '.stride-env-cache') 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "23c1: sourcing the ps1-written cache executes no command substitution" "False" `
+        "$(Test-Path $g23Marker)"
+    # And the value is intact rather than mangled by the escaping.
+    Assert-Eq "23c1: the hostile title round-trips verbatim through a bash source" $g23Hostile $g23Sourced
+    # The LOADER half, isolated: no hook env in this response, so the loader is
+    # the only way this value can reach the section child - bare, not quoted.
+    Assert-Contains "23c1: the loader unquotes, so the section child sees the bare title" `
+        "title=[$g23Hostile]" $r.Stdout
+    Remove-Item -Force $g23Marker -ErrorAction SilentlyContinue
+} else {
+    Write-Host "  SKIP: 23c1: the end-to-end hostile-value test needs bash and git" -ForegroundColor Yellow
+}
+
+# 23c2 - Set-HookEnv, the OTHER server-fed writer, isolated in its own project.
+# Its section-child assertion covers the EXPORT half, not the loader: Set-HookEnv
+# calls SetEnvironmentVariable directly, so the child would see a bare value even
+# with the loader broken. Verified by mutation - dropping ConvertFrom-ShSingleQuoted
+# leaves this leg green. The loader is covered in isolation by 23c1, which
+# supplies no hook env at all.
+if ($g23Bash -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    $g23EnvProj = New-GitRepo -Name 'g23-hostile-env'
+    $g23Marker2 = Join-Path $TmpDir 'g23-marker2-must-not-exist'
+    Remove-Item -Force $g23Marker2 -ErrorAction SilentlyContinue
+    $g23Hostile2 = 'Board $(touch ' + $g23Marker2 + ') name'
+    Set-Content -Path (Join-Path $g23EnvProj '.stride.md') -Encoding UTF8 -Value @'
+# Stride Configuration
+
+## before_doing
+```bash
+echo "board=[$BOARD_NAME]"
+```
+
+## after_doing
+```bash
+```
+
+## before_review
+```bash
+```
+
+## after_review
+```bash
+```
+
+## after_goal
+```bash
+```
+'@
+    $g23EnvClaim = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{
+            stdout = (@{
+                data = @{ id = 43; identifier = 'W43'; title = 'Plain title'
+                          status = 'in_progress'; complexity = 'medium'; priority = 'high' }
+                hook = @{ name = 'before_doing'; env = @{
+                    BOARD_NAME = $g23Hostile2
+                    BOARD_ID = "3$($g23Q)quoted$($g23Q)" } }
+            } | ConvertTo-Json -Depth 8 -Compress)
+            stderr = ''; interrupted = $false
+        }
+    } | ConvertTo-Json -Depth 10 -Compress
+    $r = Invoke-HookScript -InputJson $g23EnvClaim -Phase 'post' -ProjectDir $g23EnvProj
+    Assert-Exit "23c2: a claim whose hook env carries a hostile value exits 0" 0 $r.ExitCode
+    $g23EnvCachePath = Join-Path $g23EnvProj '.stride-env-cache'
+    $g23Board = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$BOARD_NAME"' _ $g23EnvCachePath 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "23c2: sourcing the cache executes no command substitution" "False" `
+        "$(Test-Path $g23Marker2)"
+    Assert-Eq "23c2: the hostile env value round-trips verbatim through a bash source" $g23Hostile2 $g23Board
+    $g23BoardId = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$BOARD_ID"' _ $g23EnvCachePath 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "23c2: a quote-bearing env value survives the source verbatim" `
+        "3$($g23Q)quoted$($g23Q)" $g23BoardId
+    # The loader/export half: the section child must see the BARE value.
+    Assert-Contains "23c2: the before_doing section child sees the bare, unquoted value" `
+        "board=[$g23Hostile2]" $r.Stdout
+    Remove-Item -Force $g23Marker2 -ErrorAction SilentlyContinue
+} else {
+    Write-Host "  SKIP: 23c2: the hook-env hostile-value test needs bash and git" -ForegroundColor Yellow
+}
+
+# --- 23d: the flatten is RETAINED alongside the quoting ---
+# They close different halves and the task's pitfalls require both. Quoting
+# stops bash INTERPRETING a value; flattening stops it becoming a second
+# physical line, which this port's line-oriented loader would read as a record
+# of its own. 8l already pins Set-HookEnv's flatten; this pins the claim
+# identity block, which never flattened before D280.
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $g23NlProj = New-GitRepo -Name 'g23-newline'
+    $g23NlTitle = "Fix login`nTASK_BASE_REF_99='deadbeef'"
+    $g23NlClaim = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{
+            stdout = (@{ data = @{ id = 42; identifier = 'W42'; title = $g23NlTitle
+                                   status = 'in_progress'; complexity = 'medium'; priority = 'high' } } | ConvertTo-Json -Depth 8 -Compress)
+            stderr = ''; interrupted = $false
+        }
+    } | ConvertTo-Json -Depth 10 -Compress
+    $r = Invoke-HookScript -InputJson $g23NlClaim -Phase 'post' -ProjectDir $g23NlProj
+    Assert-Exit "23d: a claim carrying a newline in the title exits 0" 0 $r.ExitCode
+    $g23NlLines = @(Get-Content -Path (Join-Path $g23NlProj '.stride-env-cache') -Encoding UTF8)
+    Assert-Eq "23d: the newline is flattened, so the title occupies ONE physical line" "1" `
+        "$(@($g23NlLines | Where-Object { $_ -like 'TASK_TITLE=*' }).Count)"
+    Assert-Eq "23d: and the forged record line it carried is NOT a line of its own" "0" `
+        "$(@($g23NlLines | Where-Object { $_ -match '^TASK_BASE_REF_99=' }).Count)"
+    Assert-Contains "23d: the flattened title keeps both halves, separated by a space" `
+        "TASK_TITLE='Fix login TASK_BASE_REF_99=" "$($g23NlLines -join "`n")"
+} else {
+    Write-Host "  SKIP: 23d: the newline-flatten test needs git" -ForegroundColor Yellow
+}
+
+# --- 23e: a ps1-written cache is readable by bash's STRICT record grep ---
+# Acceptance criterion 4. Sourcing is the lenient reader; read_task_record is
+# the strict one, and it demands the exact ^KEY='[^']*'$ shape. A cache this
+# port writes has to satisfy both, or the two executors disagree about what a
+# record is.
+if ($g23Bash) {
+    $g23Sh = Join-Path $ScriptDir 'stride-hook.sh'
+    $g23StrictDir = Join-Path $TmpDir 'g23-strict'
+    New-Item -ItemType Directory -Path $g23StrictDir -Force | Out-Null
+    $g23StrictCache = Join-Path $g23StrictDir '.stride-env-cache'
+    [System.IO.File]::WriteAllText($g23StrictCache,
+        "TASK_BASE_REF_42=" + (ConvertTo-ShSingleQuoted -Value 'cafebabe1234') + "`n" +
+        "TASK_BASE_REF_TRUSTED=" + (ConvertTo-ShSingleQuoted -Value '1') + "`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    $g23Strict = (& bash -c '. "$1" > /dev/null 2>&1; ENV_CACHE="$2" read_task_record TASK_BASE_REF_42' _ $g23Sh $g23StrictCache 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "23e: bash's strict read_task_record accepts a ps1-written line" "cafebabe1234" $g23Strict
+} else {
+    Write-Host "  SKIP: 23e: the strict-grep leg needs bash" -ForegroundColor Yellow
+}
+
+# --- 23f: the completeness tripwire ---
+# The defect IS the existence of an unescaped writer, so completeness is the
+# property under test and a count is the only way to keep it true. Write-EnvCache
+# is the single choke point every cache write goes through (verified: it holds
+# the only file-mutating call against $EnvCache). If a NEW call site appears,
+# this fires - go read it and confirm its values are escaped, then bump the
+# count. Do not bump it without reading the new site.
+$g23CodeLines = @(Get-Content -Path $HookScript | Where-Object { $_.TrimStart() -notlike '#*' })
+$g23WriteCalls = @($g23CodeLines | Where-Object { $_ -match 'Write-EnvCache\s+-Lines' }).Count
+Assert-Eq "23f: Write-EnvCache still has exactly 6 call sites (tripwire on new writers)" "6" "$g23WriteCalls"
 
 }
 

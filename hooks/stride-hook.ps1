@@ -156,6 +156,34 @@ function ConvertTo-ShSingleQuoted {
     return "'" + $Value.Replace("'", "'\''") + "'"
 }
 
+# The exact inverse of ConvertTo-ShSingleQuoted, for the bulk loader.
+#
+# (D280) bash gets unquoting FREE from `. "$ENV_CACHE"` — the shell strips the
+# quoting as it parses. This port's loader is a line regex that sets the RHS
+# verbatim, so once the writers quote, the loader MUST unquote or every consumer
+# starts seeing a value wrapped in quotes. That is why the writer change and this
+# one have to land together: either alone is a regression.
+#
+# NOT a .Trim("'"). Trimming is not the inverse of the escaper and gets three
+# cases wrong: on 'a'\''b' it would strip only the outer pair and leave the
+# interior \'' untouched, yielding a'\''b instead of a'b; on the empty value ''
+# it collapses to nothing correctly by luck but for the wrong reason; and on a
+# value that legitimately ENDS in a quote it eats a character of real data.
+#
+# A line with no surrounding quotes is returned verbatim. That is the
+# back-compat arm and it is load-bearing: a cache written by a PRE-D280 ps1
+# holds bare values, and this loader still has to read those. It also means a
+# value that merely happens to start and end with a quote but was never escaped
+# (only reachable from such a legacy cache) is unwrapped once — accepted,
+# because the alternative is failing to read every legacy cache, and the five
+# constrained record families cannot carry a quote at all.
+function ConvertFrom-ShSingleQuoted {
+    param([string]$Value)
+    if ($Value.Length -lt 2) { return $Value }
+    if ($Value[0] -ne "'" -or $Value[$Value.Length - 1] -ne "'") { return $Value }
+    return $Value.Substring(1, $Value.Length - 2).Replace("'\''", "'")
+}
+
 # Build a per-task record key, or return '' to REFUSE.
 #
 # Mirror of bash's task_record_key, step for step and in the same order:
@@ -1339,14 +1367,36 @@ if ($HookName -eq 'before_doing') {
                     $_ -notmatch '^TASK_BASE_REF_OWNER='
                 } | Select-Object -Last 20)
             }
+            # (D280) THE HEADLINE HOLE. Every one of these six values comes
+            # straight off the API response and used to be written bare, into a
+            # file bash SOURCES under `set -a` — so a title of `Fix $(cmd)` was
+            # a command substitution bash executed, confirmed by a security
+            # review. They now go through the same escaper as the record layer,
+            # matching what the bash twin already does with sq_escape.
+            #
+            # FLATTENED AS WELL AS QUOTED, and the two close different halves.
+            # Quoting alone makes the value inert to BASH — a quoted value may
+            # legally span physical lines and `source` reassembles it. It does
+            # NOT protect this port's own bulk loader, which is line-oriented:
+            # a title carrying a newline still lands a second physical line, and
+            # a crafted one shaped like TASK_BASE_REF_42='<sha>' is then read by
+            # the loader as a record and consumed as another task's snapshot
+            # base. Set-HookEnv has flattened for exactly this reason since
+            # W1453; this block never did, which is the gap D280 closes here.
+            # A deliberate divergence from the bash twin, which does not flatten
+            # because `source` makes it unnecessary on that side.
+            $flat = { param($v) (([string]$v) -replace "`r?`n", ' ') }
             $cacheLines = @(
-                "TASK_ID=$($taskJson.id)"
-                "TASK_IDENTIFIER=$($taskJson.identifier)"
-                "TASK_TITLE=$($taskJson.title)"
-                "TASK_STATUS=$($taskJson.status)"
-                "TASK_COMPLEXITY=$($taskJson.complexity)"
-                "TASK_PRIORITY=$($taskJson.priority)"
+                "TASK_ID=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.id))
+                "TASK_IDENTIFIER=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.identifier))
+                "TASK_TITLE=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.title))
+                "TASK_STATUS=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.status))
+                "TASK_COMPLEXITY=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.complexity))
+                "TASK_PRIORITY=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.priority))
             ) + $keptBaseRecords
+            # $keptBaseRecords are raw lines already on disk, carried across the
+            # truncation verbatim — never re-escaped, or each claim would add
+            # another layer of quoting to a record it merely preserves.
             Write-EnvCache -Lines $cacheLines | Out-Null
         } elseif (Test-Path $EnvCache) {
             # (W1086/D142) No parseable response and no usable persisted
@@ -1440,11 +1490,26 @@ if ($HookName -eq 'before_doing') {
 }
 
 # Load cached env vars if available (all hooks benefit from this)
+#
+# (D280) The RHS is now sq_escape-shaped, so it is UNQUOTED here — this is the
+# half of the fix that keeps the process environment carrying bare values, which
+# is what bash's `source` produces and what every consumer already expects. The
+# blast radius if this is dropped is not limited to this script: the Process
+# environment is inherited by every `bash -c` child that runs a `.stride.md`
+# section, so a section would see TASK_ID='6341' with the quotes attached.
+#
+# Consumers that already carry a defensive .Trim("'") (the env-backed record
+# readers, and the snapshot-base resolvers) keep it and become no-ops: their
+# families are hex SHAs, digits and yes/no, none of which can contain a quote,
+# so unquoting here leaves nothing for the trim to remove. They are left in
+# place deliberately rather than swept, because they also cover a cache written
+# by a pre-D280 ps1 that quoted records but not identity lines.
 if (Test-Path $EnvCache) {
     Get-Content $EnvCache -Encoding UTF8 | ForEach-Object {
         $line = $_.Trim()
         if ($line -and $line -match '^([^=]+)=(.*)$') {
-            [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+            [System.Environment]::SetEnvironmentVariable(
+                $Matches[1], (ConvertFrom-ShSingleQuoted -Value $Matches[2]), 'Process')
         }
     }
 }
@@ -1696,7 +1761,16 @@ function Set-HookEnv {
         } else {
             $script:StrideEmptyEnvKeys = @($script:StrideEmptyEnvKeys | Where-Object { $_ -ne $key })
         }
-        $cacheLines += "$key=" + ($value -replace "`r?`n", ' ')
+        # (D280) Flatten THEN quote — both, in that order, and neither is
+        # redundant. The flatten (W1453) stops a value becoming a second
+        # physical line, which this port's line-oriented loader and every
+        # prefix filter below would misread as a record of its own. The quote
+        # stops bash INTERPRETING the value when it sources the file: without
+        # it a server-supplied `$(command)` executes at source time, which is
+        # the defect D280 exists to close. Order matters only in that the
+        # flatten must not run over the escaped form, where it could rewrite a
+        # newline that quoting had already made safe to keep.
+        $cacheLines += "$key=" + (ConvertTo-ShSingleQuoted -Value ($value -replace "`r?`n", ' '))
     }
     # (D260) Replace-in-place for the keys THIS call writes, rather than a bare
     # append. Appending left two lines per identity key after a single
@@ -2870,14 +2944,29 @@ function Invoke-FinalizeBeforeDoing {
                 ($ownerKey -eq '' -or $_ -notmatch ('^' + [regex]::Escape($ownerKey) + '='))
             } | Select-Object -Last 19)
         }
-        $newLines = $preserved + $records + "TASK_BASE_REF=$baseRef" + "TASK_BASE_REF_TRUSTED=1"
+        # (D280) Quoted for parity with the bash twin, which sq_escapes all five
+        # of these — including TASK_BASE_REF_TRUSTED, which it writes as the
+        # quoted literal '1'. These values are locally derived rather than
+        # server-supplied ($baseRef is `git rev-parse HEAD`, $owner is gated to
+        # digits), so this is the lowest-risk of the three write sites. It is
+        # quoted anyway because the acceptance criterion is that EVERY writer
+        # escapes: an unescaped writer left in place is the next reader's
+        # counter-example, and a rule with one exception stops being checkable.
+        # $preserved and $records are raw lines already on disk — passed through
+        # verbatim, never re-escaped.
+        $newLines = $preserved + $records +
+            ("TASK_BASE_REF=" + (ConvertTo-ShSingleQuoted -Value $baseRef)) +
+            ("TASK_BASE_REF_TRUSTED=" + (ConvertTo-ShSingleQuoted -Value '1'))
         if ($ownerKey) {
-            $newLines = $newLines + "TASK_BASE_REF_OWNER=$owner" + "$ownerKey=$baseRef"
+            $newLines = $newLines +
+                ("TASK_BASE_REF_OWNER=" + (ConvertTo-ShSingleQuoted -Value $owner)) +
+                ("$ownerKey=" + (ConvertTo-ShSingleQuoted -Value $baseRef))
         } else {
             # (D226) Marks a base written without a provable owner, so a later
             # completion can tell it apart from a pre-fix cache. Mirrors the
             # bash twin's TASK_BASE_REF_UNPROVEN.
-            $newLines = $newLines + "TASK_BASE_REF_UNPROVEN=1"
+            # (D280) Quoted, like the twin's `echo "TASK_BASE_REF_UNPROVEN='1'"`.
+            $newLines = $newLines + ("TASK_BASE_REF_UNPROVEN=" + (ConvertTo-ShSingleQuoted -Value '1'))
         }
         Write-EnvCache -Lines $newLines | Out-Null
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF', $baseRef, 'Process')

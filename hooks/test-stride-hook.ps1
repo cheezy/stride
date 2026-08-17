@@ -2796,8 +2796,13 @@ true
     # default Ecto integer primary key), so the guard refuses non-integers at
     # the source rather than re-encoding around them.
     #
-    # This port implements only the TASK_BASE_REF family -- the other four are
-    # not ported -- so one family is all there is to assert here.
+    # (W2101) All five families now have a key builder on this port, so the
+    # guard is asserted across all five -- as the bash twin does at
+    # test-stride-hook.sh:8052-8068 -- rather than on TASK_BASE_REF alone.
+    # The claim path still WRITES only TASK_BASE_REF_<id>: the other four have a
+    # record layer (Group 22) but no orchestration calling it yet, so what is
+    # asserted here is that no colliding record exists under ANY family, not
+    # that the claim was expected to write one.
     $brN = New-GitRepo -Name 'g10-d269-nonint'
     $claimN = @{
         tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
@@ -2810,6 +2815,15 @@ true
     $cacheN = @(Get-Content -Path (Join-Path $brN '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
     Assert-Eq "10n (D269): no per-task record is written under a sanitized non-integer id" "0" `
         "$(@($cacheN | Where-Object { $_ -match '^TASK_BASE_REF_42_x=' }).Count)"
+    # (W2101) Across ALL FIVE families, matching the bash twin's loop. The
+    # collision the sanitizer could create is namespace-wide, so asserting on
+    # one family would leave four unguarded the moment they gain a writer.
+    $g10nAll = 0
+    foreach ($fam in @('TASK_BASE_REF_42_x', 'TASK_HEAD_REF_42_x', 'TASK_OWNED_42_x',
+                       'TASK_BASE_AT_42_x', 'TASK_NARROWED_42_x')) {
+        $g10nAll += @($cacheN | Where-Object { $_ -match ('^' + [regex]::Escape($fam) + '=') }).Count
+    }
+    Assert-Eq "10n (W2101): and none is written under ANY of the five families" "0" "$g10nAll"
     # The control: an integer id still gets its record, so the guard costs the
     # real population nothing.
     $brN2 = New-GitRepo -Name 'g10-d269-int'
@@ -4705,6 +4719,292 @@ Assert-Eq "21dd: an option-shaped TASK_BASE_REF does not overwrite a file outsid
     $g21ddBefore (Get-Content -Raw -Path $g21ddVictim)
 Assert-Eq "21dd: and the capture still produces a well-formed snapshot" "True" `
     "$((Test-Path (Join-Path $g21dd '.stride-changed-files.json')))"
+
+}
+
+# ============================================================
+# Test Group 22: W2101 — the per-task record layer
+# ============================================================
+# Counterparts to the bash suite's Test Group 23 (D226 per-task snapshot base
+# isolation), plus the constraint proofs this port needs and bash does not.
+#
+# HARNESS: these are the suite's first true unit tests, and getting there needs
+# a trick. Dot-sourcing stride-hook.ps1 is impossible — its `exit 0` would
+# terminate the SUITE, not a child. Re-implementing the functions as test-local
+# mirrors (Group 21's approach for pure logic) is unacceptable here: a mirror of
+# the escaper proves nothing about the escaping the hook actually performs, and
+# escaping is the whole security property. So the functions are extracted from
+# the real file by AST and dot-sourced individually — the tests bind to the
+# shipped text.
+Write-Host ""
+Write-Host "=== Test Group 22: W2101 per-task record layer ==="
+
+$g22Want = @(
+    'ConvertTo-ShSingleQuoted', 'Get-TaskRecordKey', 'Get-TaskBaseRefKey', 'Get-TaskHeadRefKey',
+    'Get-TaskOwnedKey', 'Get-TaskBaseAtKey', 'Get-TaskNarrowedKey', 'Read-TaskRecord',
+    'Get-TaskOwnedRecord', 'Get-TaskBaseAtRecord', 'Get-TaskNarrowedRecord',
+    'Get-TaskBaseRefFor', 'Get-TaskHeadRefFor', 'Set-TaskRecord', 'Set-TaskOwnedRecord',
+    'Set-TaskNarrowedRecord', 'Set-TaskHeadRefRecord', 'Set-TaskBaseAtRecord',
+    'Write-EnvCache', 'ConvertTo-PrintableForLog'
+)
+$g22Ast = [System.Management.Automation.Language.Parser]::ParseFile($HookScript, [ref]$null, [ref]$null)
+$g22Fns = $g22Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
+$g22Found = @()
+foreach ($f in $g22Fns) {
+    if ($g22Want -contains $f.Name) {
+        $g22Found += $f.Name
+        . ([scriptblock]::Create($f.Extent.Text))
+    }
+}
+# A silently-missing extraction would make every case below pass vacuously —
+# the same "a vacuous scan is not a pass" principle the 5.1 gate applies.
+$g22Missing = @($g22Want | Where-Object { $g22Found -notcontains $_ })
+if ($g22Missing.Count -gt 0) {
+    Write-Host "  FAIL: 22-harness: could not extract from stride-hook.ps1: $($g22Missing -join ', ')" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 22-harness: all $($g22Want.Count) record-layer functions extracted from the real hook" -ForegroundColor Green
+    $script:PASS++
+
+$g22Bash = Get-Command bash -ErrorAction SilentlyContinue
+$g22Sh = Join-Path $ScriptDir 'stride-hook.sh'
+
+function New-RecordFixture {
+    param([string]$Name)
+    $d = Join-Path $TmpDir "g22-$Name"
+    New-Item -ItemType Directory -Path $d -Force | Out-Null
+    $script:ProjectDir = $d
+    $script:EnvCache = Join-Path $d '.stride-env-cache'
+    return $d
+}
+
+# --- 22a: key format byte-identity across all five families ---
+$null = New-RecordFixture -Name 'keys'
+$g22Keys = @(
+    (Get-TaskBaseRefKey  -TaskId '42'),
+    (Get-TaskHeadRefKey  -TaskId '42'),
+    (Get-TaskOwnedKey    -TaskId '42'),
+    (Get-TaskBaseAtKey   -TaskId '42'),
+    (Get-TaskNarrowedKey -TaskId '42')
+) -join ' '
+Assert-Eq "22a: all five key builders produce the bash key format" `
+    "TASK_BASE_REF_42 TASK_HEAD_REF_42 TASK_OWNED_42 TASK_BASE_AT_42 TASK_NARROWED_42" $g22Keys
+
+# --- 22b: the collision loop — no two ids differing only in punctuation share a record ---
+$g22Collide = 0
+foreach ($bad in @('42-x', '42.x')) {
+    foreach ($k in @((Get-TaskBaseRefKey -TaskId $bad), (Get-TaskHeadRefKey -TaskId $bad),
+                     (Get-TaskOwnedKey -TaskId $bad), (Get-TaskBaseAtKey -TaskId $bad),
+                     (Get-TaskNarrowedKey -TaskId $bad))) {
+        if ($k -ne '') { $g22Collide++ }
+    }
+}
+Assert-Eq "22b: a punctuated id yields no key in any of the five families" "0" "$g22Collide"
+
+# --- 22c: reserved suffixes, non-digits, and a long id ---
+$g22Reserved = 0
+# "42`n" is in this list deliberately: .NET's $ ALSO matches before a trailing
+# newline, so an unanchored gate would pass it and build a key bash refuses to
+# build — a silent cross-executor divergence in the one function whose job is
+# byte-for-byte fidelity. \z is what closes it, and this probe pins it.
+foreach ($bad in @('TRUSTED', 'OWNER', 'UNPROVEN', './-', '10_0', '', 'abc', "42`n", "42`r`n")) {
+    if ((Get-TaskRecordKey -Prefix 'TASK_OWNED_' -TaskId $bad) -ne '') { $g22Reserved++ }
+}
+Assert-Eq "22c: reserved words and non-digit ids are all refused" "0" "$g22Reserved"
+Assert-Eq "22c: a long digits-only id is accepted verbatim" `
+    "TASK_BASE_REF_00000000000000000000000000000042" (Get-TaskBaseRefKey -TaskId '00000000000000000000000000000042')
+
+# --- 22d: ConvertTo-ShSingleQuoted vs bash's sq_escape, byte for byte ---
+if ($g22Bash) {
+    $g22Vals = @('', 'yes', "a'b", "'", 'a\b', 'a$b', 'a`b', '__stride_no_own_commits__', 'OVERFLOW', 'abc..def,ghi')
+    $g22Mismatch = @()
+    foreach ($v in $g22Vals) {
+        $ps = ConvertTo-ShSingleQuoted -Value $v
+        $sh = (& bash -c '. "$1" > /dev/null 2>&1; sq_escape "$2"' _ $g22Sh $v 2>$null | Out-String).TrimEnd("`r", "`n")
+        if ($ps -ne $sh) { $g22Mismatch += "[$v] ps=$ps sh=$sh" }
+    }
+    Assert-Eq "22d: the escaper is byte-identical to bash sq_escape for every probe" "0" "$($g22Mismatch.Count)"
+    if ($g22Mismatch.Count -gt 0) { Write-Host "    $($g22Mismatch -join ' | ')" -ForegroundColor Red }
+} else {
+    Write-Host "  SKIP: 22d: byte-identity against sq_escape needs bash" -ForegroundColor Yellow
+}
+
+# --- 22e: round-trip through all four writable families ---
+$null = New-RecordFixture -Name 'roundtrip'
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
+$null = Set-TaskOwnedRecord    -TaskId '42' -Value 'yes'
+$null = Set-TaskNarrowedRecord -TaskId '42' -Value 'no'
+$null = Set-TaskHeadRefRecord  -TaskId '42' -Head 'deadbeef'
+$null = Set-TaskBaseAtRecord   -TaskId '42' -Epoch '1700000000'
+Assert-Eq "22e: TASK_OWNED round-trips" "yes" (Get-TaskOwnedRecord -TaskId '42').Value
+Assert-Eq "22e: TASK_NARROWED round-trips" "no" (Get-TaskNarrowedRecord -TaskId '42').Value
+Assert-Eq "22e: TASK_BASE_AT round-trips" "1700000000" (Get-TaskBaseAtRecord -TaskId '42').Value
+Assert-Eq "22e: TASK_HEAD_REF is written in the quoted on-disk shape" "True" `
+    "$((Get-Content -Raw -Path $script:EnvCache) -match ""(?m)^TASK_HEAD_REF_42='deadbeef'$"")"
+
+# --- 22f: the single-quote case — the constraint-B proof ---
+$null = New-RecordFixture -Name 'quote'
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
+$null = Set-TaskOwnedRecord -TaskId '42' -Value "a'b"
+$g22QLine = @(Get-Content -Path $script:EnvCache | Where-Object { $_ -like 'TASK_OWNED_42=*' })[0]
+Assert-Eq "22f: an embedded quote is escaped exactly as sq_escape would" "TASK_OWNED_42='a'\''b'" $g22QLine
+# The reader's [^']* class cannot express an escaped quote. That limitation is
+# PINNED here rather than hidden: the value is unreadable to BOTH readers, and
+# fail-closed is the correct direction.
+Assert-Eq "22f: and the strict reader treats it as absent (documented [^']* limit)" "False" `
+    "$((Get-TaskOwnedRecord -TaskId '42').Found)"
+if ($g22Bash) {
+    $g22Sourced = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$TASK_OWNED_42"' _ $script:EnvCache 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "22f: but the line is inert, valid shell that bash sources back exactly" "a'b" $g22Sourced
+} else {
+    Write-Host "  SKIP: 22f: the source-back leg needs bash" -ForegroundColor Yellow
+}
+
+# --- 22g: absent vs empty are different answers ---
+$null = New-RecordFixture -Name 'absent'
+Assert-Eq "22g: a missing record reads as absent" "False" "$((Get-TaskOwnedRecord -TaskId '42').Found)"
+Set-Content -Path $script:EnvCache -Value "TASK_OWNED_42=''" -Encoding UTF8
+$g22Empty = Get-TaskOwnedRecord -TaskId '42'
+Assert-Eq "22g: an empty record is FOUND, not absent" "True" "$($g22Empty.Found)"
+Assert-Eq "22g: and its value is the empty string" "" $g22Empty.Value
+
+# --- 22h: shape rejection, including the forged continuation ---
+$null = New-RecordFixture -Name 'shape'
+Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+    'TASK_NARROWED_1=yes',
+    'TASK_NARROWED_2="yes"',
+    " TASK_NARROWED_3='yes'",
+    "TASK_NARROWED_4='yes' # trailing",
+    "XTASK_NARROWED_5='yes'",
+    "BOARD_NAME='b",
+    "TASK_NARROWED_6=yes",
+    "'"
+)
+$g22Shape = 0
+foreach ($id in @('1', '2', '3', '4', '5', '6')) {
+    if ((Get-TaskNarrowedRecord -TaskId $id).Found) { $g22Shape++ }
+}
+Assert-Eq "22h: every malformed or forged record shape reads as absent" "0" "$g22Shape"
+
+# --- 22i: last well-formed match wins ---
+$null = New-RecordFixture -Name 'lastwins'
+Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @("TASK_OWNED_42='first'", "TASK_OWNED_42='second'")
+Assert-Eq "22i: the last well-formed record wins" "second" (Get-TaskOwnedRecord -TaskId '42').Value
+
+# --- 22j: writer dedupes and appends last, preserving unrelated lines ---
+$null = New-RecordFixture -Name 'dedupe'
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
+Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @('BOARD_ID=55', 'TASK_OWNED_42=malformed', 'BOARD_NAME=x')
+$null = Set-TaskOwnedRecord -TaskId '42' -Value 'yes'
+$g22Lines = @(Get-Content -Path $script:EnvCache)
+Assert-Eq "22j: exactly one line survives for the key" "1" "$(@($g22Lines | Where-Object { $_ -like 'TASK_OWNED_42=*' }).Count)"
+Assert-Eq "22j: and it is the LAST line, so last-match-wins means newest" "TASK_OWNED_42='yes'" $g22Lines[-1]
+Assert-Eq "22j: unrelated lines are preserved in order" "BOARD_ID=55 BOARD_NAME=x" `
+    (($g22Lines | Where-Object { $_ -like 'BOARD_*' }) -join ' ')
+
+# --- 22k: the orphan-base guard, and which families deliberately lack it ---
+$null = New-RecordFixture -Name 'orphan'
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_77', $null, 'Process')
+Assert-Eq "22k: TASK_OWNED refuses to record without a base partner" "False" `
+    "$(Set-TaskOwnedRecord -TaskId '77' -Value 'yes')"
+Assert-Eq "22k: TASK_HEAD_REF refuses too" "False" `
+    "$(Set-TaskHeadRefRecord -TaskId '77' -Head 'deadbeef')"
+Assert-Eq "22k: TASK_NARROWED has no base guard, by design" "True" `
+    "$(Set-TaskNarrowedRecord -TaskId '77' -Value 'no')"
+Assert-Eq "22k: TASK_BASE_AT has no base guard either" "True" `
+    "$(Set-TaskBaseAtRecord -TaskId '77' -Epoch '1700000000')"
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_77', 'abc123', 'Process')
+Assert-Eq "22k: with a base present, TASK_OWNED records" "True" `
+    "$(Set-TaskOwnedRecord -TaskId '77' -Value 'yes')"
+
+# --- 22l: head resolution falls back to git rev-parse ---
+$g22GitDir = New-RecordFixture -Name 'headgit'
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    & git -C $g22GitDir init -q 2>$null | Out-Null
+    & git -C $g22GitDir config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $g22GitDir config user.name 'Test' 2>$null | Out-Null
+    & git -C $g22GitDir config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $g22GitDir 'f.txt') -Value 'x' -Encoding UTF8
+    & git -C $g22GitDir add f.txt 2>$null | Out-Null
+    & git -C $g22GitDir commit -q -m 'c' 2>$null | Out-Null
+    $g22Sha = (& git -C $g22GitDir rev-parse HEAD | Out-String).Trim()
+    [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
+    $null = Set-TaskHeadRefRecord -TaskId '42'
+    # Read back through the FILE reader, not Get-TaskHeadRefFor: TASK_HEAD_REF
+    # is one of the two ENV-backed families (the ported asymmetry), so the
+    # env-backed reader cannot see a record that was just written to disk.
+    Assert-Eq "22l: with no -Head it records the repo's actual HEAD" $g22Sha `
+        (Read-TaskRecord -Key (Get-TaskHeadRefKey -TaskId '42')).Value
+} else {
+    Write-Host "  SKIP: 22l: head resolution needs git" -ForegroundColor Yellow
+}
+
+# --- 22m: TASK_BASE_AT is digits-only ---
+$null = New-RecordFixture -Name 'baseat'
+Assert-Eq "22m: a non-numeric epoch is refused" "False" "$(Set-TaskBaseAtRecord -TaskId '42' -Epoch 'abc')"
+$null = Set-TaskBaseAtRecord -TaskId '42'
+$g22Now = (Get-TaskBaseAtRecord -TaskId '42')
+Assert-Eq "22m: the default epoch is recorded and is digits-only" "True" `
+    "$($g22Now.Found -and $g22Now.Value -match '^[0-9]+$')"
+
+# --- 22n: CR/LF/NUL are refused (the deliberate divergence from bash) ---
+$null = New-RecordFixture -Name 'newline'
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
+$g22Bad = 0
+foreach ($v in @("a`nb", "a`rb", "a$([char]0)b")) {
+    if (Set-TaskNarrowedRecord -TaskId '42' -Value $v) { $g22Bad++ }
+}
+Assert-Eq "22n: a value with CR, LF or NUL is refused rather than written" "0" "$g22Bad"
+Assert-Eq "22n: and nothing was written for the key" "False" "$((Get-TaskNarrowedRecord -TaskId '42').Found)"
+
+# --- 22o: the cross-executor promise — bash sources what PowerShell wrote ---
+if ($g22Bash) {
+    $null = New-RecordFixture -Name 'crossexec'
+    [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
+    $null = Set-TaskHeadRefRecord -TaskId '42' -Head 'cafebabe1234'
+    $g22Read = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$TASK_HEAD_REF_42"' _ $script:EnvCache 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "22o: bash sources a ps1-written record back to the bare value" "cafebabe1234" $g22Read
+} else {
+    Write-Host "  SKIP: 22o: the source-back leg needs bash" -ForegroundColor Yellow
+}
+
+# --- 22o2: the on-disk BYTES, asserted on EVERY host ---
+# These two guard a shared primitive every cache write goes through, and they
+# must run where the divergence can actually occur. Nesting them under the bash
+# guard made them unrunnable on Windows PowerShell 5.1 — the ONLY host that can
+# produce a BOM or a CRLF — while on pwsh 7 a BOM is impossible by construction,
+# so the assertion was vacuously true wherever it did run. Neither needs bash.
+$null = New-RecordFixture -Name 'bytes'
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
+$null = Set-TaskHeadRefRecord -TaskId '42' -Head 'cafebabe1234'
+$null = Set-TaskNarrowedRecord -TaskId '42' -Value 'no'
+$g22Bytes = [System.IO.File]::ReadAllBytes($script:EnvCache)
+Assert-Eq "22o2: the cache carries no UTF-8 BOM for bash to choke on" "False" `
+    "$($g22Bytes.Length -ge 3 -and $g22Bytes[0] -eq 0xEF -and $g22Bytes[1] -eq 0xBB -and $g22Bytes[2] -eq 0xBF)"
+# A CR before any LF would break bash's ^KEY='...'$ shape check AND survive a
+# source into the value itself — TASK_BASE_REF would reach git as "<sha>`r".
+$g22Crs = 0
+for ($i = 1; $i -lt $g22Bytes.Length; $i++) {
+    if ($g22Bytes[$i] -eq 0x0A -and $g22Bytes[$i - 1] -eq 0x0D) { $g22Crs++ }
+}
+Assert-Eq "22o2: and no CRLF line endings, which bash's shape check would reject" "0" "$g22Crs"
+
+# --- 22r: the tripwire on constraint A ---
+# DELIBERATE TRIPWIRE, not a permanent property. The record writers have no
+# production call site, which is what makes "server input cannot reach a record"
+# structurally true rather than argued. When G413 adds one, UPDATE this test and
+# record where that call's value comes from — do not simply delete it.
+# COMMENT LINES DO NOT COUNT. The parity note names these writers in prose, and
+# a raw occurrence count reads that as four call sites — which is how this
+# tripwire first fired on its own documentation. Skip comment lines, then
+# subtract the one definition each.
+$g22CodeLines = @(Get-Content -Path $HookScript | Where-Object { $_.TrimStart() -notlike '#*' })
+$g22CallSites = 0
+foreach ($w in @('Set-TaskOwnedRecord', 'Set-TaskNarrowedRecord', 'Set-TaskHeadRefRecord', 'Set-TaskBaseAtRecord')) {
+    $hits = @($g22CodeLines | Where-Object { $_ -match [regex]::Escape($w) }).Count
+    $g22CallSites += ($hits - 1)
+}
+Assert-Eq "22r: the record writers still have no production call site (tripwire)" "0" "$g22CallSites"
 
 }
 

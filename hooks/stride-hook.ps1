@@ -69,7 +69,34 @@ function Write-EnvCache {
             New-Item -ItemType Directory -Path $stageDir -Force -ErrorAction Stop | Out-Null
         }
         $tmp = Join-Path $stageDir ("env-cache." + [System.IO.Path]::GetRandomFileName())
-        Set-Content -Path $tmp -Value $Lines -Encoding UTF8 -ErrorAction Stop
+        # (W2101) TWO byte-level divergences on Windows PowerShell 5.1 — the
+        # interpreter stride-hook.sh execs — both invisible to every pwsh-7 test
+        # and both breaking the same cross-executor promise:
+        #
+        #   BOM — Set-Content -Encoding UTF8 is BOM-less under pwsh 7 but
+        #     BOM-prefixed under 5.1, which makes the FIRST line's key
+        #     unmatchable to bash's `^KEY=` and garbled when sourced.
+        #   CRLF — WriteAllLines terminates with Environment.NewLine, which is
+        #     CRLF under 5.1. bash's read_task_record shape check `^KEY='...'$`
+        #     then fails on the trailing CR, and worse, a SOURCED value keeps it:
+        #     TASK_BASE_REF becomes "<sha>`r" and is handed to git that way.
+        #
+        # So the terminator is written explicitly as LF rather than left to the
+        # platform. Byte-identical to the previous behaviour under pwsh 7 on
+        # POSIX, so nothing already asserted moves.
+        $joined = ''
+        if ($Lines -and @($Lines).Count -gt 0) { $joined = (@($Lines) -join "`n") + "`n" }
+        # Resolve to an ABSOLUTE path before handing it to the .NET API. The
+        # provider cmdlets around this line (Test-Path, Move-Item, Remove-Item)
+        # resolve against PowerShell's location, while [System.IO.File]::*
+        # resolves against [Environment]::CurrentDirectory, which Set-Location
+        # does NOT update — and Invoke-StrideSection does Set-Location $ProjectDir
+        # before a before_doing capture reaches here. With a relative
+        # CLAUDE_PROJECT_DIR the two would disagree: the temp lands outside the
+        # intended tree, Move-Item cannot find it, and the cleanup misses it too,
+        # stranding a file containing the whole env cache somewhere unintended.
+        $tmpFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($tmp)
+        [System.IO.File]::WriteAllText($tmpFull, $joined, (New-Object System.Text.UTF8Encoding($false)))
         Move-Item -LiteralPath $tmp -Destination $EnvCache -Force -ErrorAction Stop
         return $true
     } catch {
@@ -80,6 +107,265 @@ function Write-EnvCache {
         return $false
     }
 }
+# ============================================================================
+# (W2101) The PER-TASK RECORD layer — the data half of the window/attribution
+# subsystem. Five families: TASK_BASE_REF, TASK_HEAD_REF, TASK_OWNED,
+# TASK_BASE_AT, TASK_NARROWED.
+#
+# Before this, only TASK_BASE_REF existed here, and only as an inline env read.
+# The other four appeared solely as string filters in the env FENCE, so nothing
+# on this side could read or write them and the later G413 children had nowhere
+# to persist a verdict.
+#
+# THIS LAYER HAS NO PRODUCTION CALL SITE. That is deliberate, not unfinished:
+# deciding WHEN to write a record is the orchestration (attributed_commit_ranges,
+# compute_owned_set, another_open_window_exists, replay_narrowing_decision),
+# which is explicitly out of scope. Writing a record at a moment bash does not
+# would make the two executors' caches diverge in CONTENT — strictly worse than
+# the current absence, since the same cache is written by one executor and read
+# by the other in a mixed checkout.
+#
+# TWO ASYMMETRIES ARE PORTED FAITHFULLY RATHER THAN TIDIED:
+#  * TASK_BASE_REF and TASK_HEAD_REF are read from the ENVIRONMENT; the other
+#    three go through Read-TaskRecord's file+shape check. Bash does exactly this
+#    (task_base_ref_for / task_head_ref_for use indirect expansion). The env read
+#    IS weaker — an exported variable can forge one, and absent and empty are
+#    indistinguishable — but these two feed the orphan-base guard and the
+#    snapshot-base resolution, so making this side stricter would have the two
+#    executors disagree about whether a window is usable, in precisely the mixed
+#    environment the pitfall is about. A known asymmetry for G413 to revisit on
+#    both platforms at once, never on one.
+#  * The delete filter on write is BROAD (`^KEY=`, any shape) while the read is
+#    STRICT (`^KEY='...'$`). Bash is identical. That is what lets a write clean
+#    up a malformed or forged line for its own key that a read would never have
+#    honoured.
+# ============================================================================
+
+# Quote a value the way bash's sq_escape does, for a file bash SOURCES.
+#
+# Wrap in single quotes; render every embedded ' as the four characters '\''
+# (close, escaped literal quote, reopen). Inside single quotes bash treats $,
+# backtick and backslash as inert, so this is what makes a hostile value data
+# rather than syntax — the whole of security consideration B.
+#
+# .Replace(), NOT -replace: -replace is regex and its REPLACEMENT string treats
+# $ specially. "'\''" contains no $ so -replace would happen to work today, but
+# a reader cannot see that at a glance and a later edit would not be safe.
+function ConvertTo-ShSingleQuoted {
+    param([string]$Value)
+    return "'" + $Value.Replace("'", "'\''") + "'"
+}
+
+# Build a per-task record key, or return '' to REFUSE.
+#
+# Mirror of bash's task_record_key, step for step and in the same order:
+# digits-only id gate, sanitize, reject the reserved control-flag suffixes,
+# concatenate. This is the single choke point D269 asked for — before it, the
+# same three steps were copied inline in two places on this side.
+#
+# The sanitize step is redundant behind a digits-only gate and is kept anyway,
+# exactly as bash keeps its `tr`, as insurance for the day that rule widens.
+# Note PowerShell's -match is case-INSENSITIVE where bash's `case` is not, so
+# the reserved check here refuses a superset; it can never build a key bash
+# would refuse to build. (A lowercase 'trusted' is not digits-only anyway, so
+# the branch is unreachable — stated rather than "fixed" with -cmatch, which
+# would read as a correction to a bug that does not exist.)
+function Get-TaskRecordKey {
+    param([string]$Prefix, [string]$TaskId)
+    # \z, not $: .NET's $ ALSO matches immediately before a trailing newline,
+    # so "42`n" would pass here and build TASK_BASE_REF_42_ where bash's
+    # `case *[!0-9]*` refuses outright and builds no key. The id is
+    # server-supplied, and this is the one function whose job is byte-for-byte
+    # fidelity with that gate.
+    if ($TaskId -notmatch '^[0-9]+\z') { return '' }
+    $sanitized = $TaskId -replace '[^A-Za-z0-9_]', '_'
+    if ($sanitized -match '^(TRUSTED|OWNER|UNPROVEN)\z') { return '' }
+    return $Prefix + $sanitized
+}
+
+function Get-TaskBaseRefKey  { param([string]$TaskId) return (Get-TaskRecordKey -Prefix 'TASK_BASE_REF_'  -TaskId $TaskId) }
+function Get-TaskHeadRefKey  { param([string]$TaskId) return (Get-TaskRecordKey -Prefix 'TASK_HEAD_REF_'  -TaskId $TaskId) }
+function Get-TaskOwnedKey    { param([string]$TaskId) return (Get-TaskRecordKey -Prefix 'TASK_OWNED_'     -TaskId $TaskId) }
+function Get-TaskBaseAtKey   { param([string]$TaskId) return (Get-TaskRecordKey -Prefix 'TASK_BASE_AT_'   -TaskId $TaskId) }
+function Get-TaskNarrowedKey { param([string]$TaskId) return (Get-TaskRecordKey -Prefix 'TASK_NARROWED_'  -TaskId $TaskId) }
+
+# Read a record from the FILE, with a strict full-line shape check.
+#
+# Mirror of bash's read_task_record. Returns @{ Found; Value } — absence and
+# emptiness are DIFFERENT answers, because TASK_OWNED_<id>='' (a task that ran
+# and owned nothing) is a real record whose misreading flips a verdict, and
+# under StrictMode a caller writing `if ($v)` would collapse the two.
+#
+# WHY THE FILE AND NEVER THE PROCESS ENV: the env cannot represent
+# absent-vs-empty; it is populated by a bulk loader that applies no shape check
+# at all; and an exported variable from ANY ancestor process would forge a
+# record for free. Reading the file is what makes the shape check meaningful.
+#
+# THE SHAPE CHECK IS THE SECURITY BOUNDARY. A server value carrying a newline
+# on an ALLOWED key becomes a second physical line like `TASK_NARROWED_42=yes`
+# — unquoted, so not KEY='value', so invisible here. To forge the shape an
+# attacker must supply a ', and both escapers turn any ' into '\'', which
+# breaks the [^']* class. That is why the defence is provable, not probable.
+#
+# No .Trim(), ever: the bulk loader trims, and if this reader did too then
+# " TASK_NARROWED_42='yes'" would be a record here but not to bash's
+# `grep '^TASK_...'` — the two executors would disagree about what a record IS.
+function Read-TaskRecord {
+    param([string]$Key)
+    $absent = @{ Found = $false; Value = '' }
+    if (-not $Key) { return $absent }
+    if (-not (Test-Path $EnvCache)) { return $absent }
+    $lines = @()
+    try { $lines = @(Get-Content -Path $EnvCache -Encoding UTF8 -ErrorAction Stop) } catch { return $absent }
+    $re = New-Object System.Text.RegularExpressions.Regex ('^' + [regex]::Escape($Key) + "='([^']*)'$")
+    $last = $null
+    foreach ($line in $lines) { if ($re.IsMatch($line)) { $last = $line } }
+    if ($null -eq $last) { return $absent }
+    return @{ Found = $true; Value = $re.Match($last).Groups[1].Value }
+}
+
+# File-backed readers (the three families bash reads through read_task_record).
+function Get-TaskOwnedRecord {
+    param([string]$TaskId)
+    return (Read-TaskRecord -Key (Get-TaskOwnedKey -TaskId $TaskId))
+}
+function Get-TaskBaseAtRecord {
+    param([string]$TaskId)
+    return (Read-TaskRecord -Key (Get-TaskBaseAtKey -TaskId $TaskId))
+}
+function Get-TaskNarrowedRecord {
+    param([string]$TaskId)
+    return (Read-TaskRecord -Key (Get-TaskNarrowedKey -TaskId $TaskId))
+}
+
+# Environment-backed readers — the ported asymmetry described in the header.
+# Both return '' for absent AND empty, exactly as bash's ${!_k:-} does.
+# The .Trim("'") is this port's necessary addition: bash gets unquoting free
+# from sourcing the file, while our bulk loader sets the RHS verbatim.
+function Get-TaskBaseRefFor {
+    param([string]$TaskId)
+    $key = Get-TaskBaseRefKey -TaskId $TaskId
+    if (-not $key) { return '' }
+    $v = [System.Environment]::GetEnvironmentVariable($key, 'Process')
+    if ($v) { $v = $v.Trim("'") }
+    if (-not $v) { return '' }
+    return $v
+}
+function Get-TaskHeadRefFor {
+    param([string]$TaskId)
+    $key = Get-TaskHeadRefKey -TaskId $TaskId
+    if (-not $key) { return '' }
+    $v = [System.Environment]::GetEnvironmentVariable($key, 'Process')
+    if ($v) { $v = $v.Trim("'") }
+    if (-not $v) { return '' }
+    return $v
+}
+
+# Write one record: drop any existing line for the key, append the new one last.
+#
+# Appending last is what makes the reader's last-match-wins mean "the newest",
+# and keeps the on-disk layout identical to bash's grep -v then printf.
+#
+# DELIBERATE DIVERGENCE — a value containing CR, LF or NUL is REFUSED rather
+# than written. Bash would write it faithfully, but the record would then span
+# two physical lines and BOTH readers' full-line check would reject it, so
+# nothing is lost; and unlike bash, this port's bulk loader has no shape check,
+# so a multi-physical-line record here would plant a forged KEY=value straight
+# into the process environment. None of the five families can legitimately carry
+# these characters (yes/no, epoch digits, hex SHAs, comma/.. ranges, and the
+# two sentinels).
+function Set-TaskRecord {
+    param([string]$Key, [string]$Value)
+    if (-not $Key) { return $false }
+    if ($Value -match "[\r\n\0]") {
+        [Console]::Error.WriteLine("stride-hook: refusing to record $Key " + [char]0x2014 + " the value contains a newline or NUL, which cannot survive the cache's one-line-per-record shape.")
+        return $false
+    }
+    $kept = @()
+    if (Test-Path $EnvCache) {
+        try {
+            $kept = @(Get-Content -Path $EnvCache -Encoding UTF8 -ErrorAction Stop |
+                Where-Object { $_ -notmatch ('^' + [regex]::Escape($Key) + '=') })
+        } catch {
+            # The cache EXISTS but could not be read — a sharing violation while
+            # another process holds it is far likelier on the Windows target than
+            # on POSIX. bash's `grep -v ... || true` degrades to an empty set
+            # here, but bash APPENDS while this writer REPLACES the file, so the
+            # same degradation would silently drop every other record. Refuse
+            # instead: the caller's contract is best-effort, and keeping the
+            # previous cache intact is what Write-EnvCache promises everywhere.
+            [Console]::Error.WriteLine("stride-hook: could not read the env cache to record $Key; leaving the cache untouched")
+            return $false
+        }
+    }
+    $new = @($kept) + @($Key + '=' + (ConvertTo-ShSingleQuoted -Value $Value))
+    return [bool](Write-EnvCache -Lines $new)
+}
+
+# The four writers. Guards mirror bash exactly, including which families have
+# an orphan-base guard and which deliberately do not.
+#
+# The base guard uses Get-TaskBaseRefFor (an ENV read), not Read-TaskRecord.
+# That is required, not preference: bash's guard is `[ -n "$(task_base_ref_for
+# ...)" ]`, and this port's own claim writer emits TASK_BASE_REF_<id> UNQUOTED,
+# so a strict-shape guard would find no base in any ps1-written cache and both
+# guarded writers would be permanently dead.
+function Set-TaskOwnedRecord {
+    param([string]$TaskId, [string]$Value)
+    $key = Get-TaskOwnedKey -TaskId $TaskId
+    if (-not $key) { return $false }
+    # Orphan-base rule: a window with no base partner is half-bounded and
+    # unusable, so bash refuses to record ownership without one.
+    if (-not (Get-TaskBaseRefFor -TaskId $TaskId)) { return $false }
+    return (Set-TaskRecord -Key $key -Value $Value)
+}
+function Set-TaskNarrowedRecord {
+    param([string]$TaskId, [string]$Value)
+    $key = Get-TaskNarrowedKey -TaskId $TaskId
+    if (-not $key) { return $false }
+    # No base guard — bash's record_task_narrowed has none. Do not add one.
+    return (Set-TaskRecord -Key $key -Value $Value)
+}
+function Set-TaskHeadRefRecord {
+    param([string]$TaskId, [string]$Head)
+    $key = Get-TaskHeadRefKey -TaskId $TaskId
+    if (-not $key) { return $false }
+    if (-not (Get-TaskBaseRefFor -TaskId $TaskId)) { return $false }
+    $value = $Head
+    if (-not $value) {
+        try {
+            $value = (& git -C $ProjectDir rev-parse HEAD 2>$null | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { $value = '' }
+        } catch {
+            $value = ''
+        }
+    }
+    if (-not $value) { return $false }
+    # Bash's record_task_head_ref hand-rolls its quoting instead of calling
+    # sq_escape. For a SHA the two are byte-identical, so faithfulness costs
+    # nothing — but that form is safe only by an argument about the value's
+    # domain, and this writer accepts a -Head override, so the argument does not
+    # hold here. One escaper is the same single-choke-point discipline D269
+    # imposed on the key builder.
+    return (Set-TaskRecord -Key $key -Value $value)
+}
+function Set-TaskBaseAtRecord {
+    param([string]$TaskId, [string]$Epoch)
+    $key = Get-TaskBaseAtKey -TaskId $TaskId
+    if (-not $key) { return $false }
+    # No base guard: bash's inline stamp sits inside the branch that has just
+    # written the base itself.
+    $value = $Epoch
+    if (-not $value) {
+        $epochStart = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)
+        $value = [string][int64][math]::Floor(([DateTime]::UtcNow - $epochStart).TotalSeconds)
+    }
+    # Digits-only, mirroring bash's `case '' | *[!0-9]*` rejection. \z for the
+    # same reason as Get-TaskRecordKey: $ would admit a trailing newline.
+    if ($value -notmatch '^[0-9]+\z') { return $false }
+    return (Set-TaskRecord -Key $key -Value $value)
+}
+
 # (D118) Canonical API-response snapshot. When present, after_goal detection,
 # env forwarding, and the claim env-cache refresh prefer it over the harness-
 # truncatable tool_response.stdout. Best-effort fast path only — the reliability
@@ -1019,10 +1305,16 @@ if ($HookName -eq 'before_doing') {
             # this branch preserves: TASK_HEAD_REF_<id> (D236, fenced by D258),
             # TASK_OWNED_<id> (D255), and TASK_BASE_AT_<id>/TASK_NARROWED_<id>
             # (D273). The two branches here therefore still disagree, in the
-            # opposite direction to the defect D259 fixes. None of those
-            # families has a reader on this port — the window-attribution
-            # subsystem was never ported — so the gap is latent, and it is a
-            # far larger port gap than this defect. Deliberately not fixed here.
+            # opposite direction to the defect D259 fixes. (W2101) Those
+            # families now have readers AND writers on this port, but no
+            # orchestration calls them, so nothing writes a record this branch
+            # could drop and the gap stays latent. It stops being latent the
+            # moment the D236/D255/D273 orchestration lands: the bash twin
+            # carries these records across a claim by RE-EMITTING them through
+            # read_task_record + sq_escape, never by copying the raw matched
+            # line — so a forged continuation is never promoted into a
+            # first-class record. Close this gap with that same shape, not by
+            # widening the filter below.
             $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object {
                 $_ -match '^TASK_(ID|IDENTIFIER|TITLE|STATUS|COMPLEXITY|PRIORITY)=' -or
                 ($_ -match '^TASK_(BASE_REF|HEAD_REF|OWNED|BASE_AT|NARROWED)_[A-Za-z0-9_]+=' -and
@@ -1808,23 +2100,15 @@ function Resolve-TaskSnapshotBase {
     # producer for both the build half and the upload half's read, so rejecting
     # the shape HERE is what keeps the two from drifting and covers any future
     # call site. Mirrors the leading-dash rule in Test-SafeRepoPath.
-    $own = ''
-    if ($TaskId -and $TaskId -match '^[0-9]+$') {
-        # (D269) Digits-only, matching the write side: a non-integer id names no
-        # per-task record, so it must not be able to READ one either.
-        $sanitized = $TaskId -replace '[^A-Za-z0-9_]', '_'
-        # Mirror of the bash twin's task_record_key: refuse the reserved
-        # suffixes so a task id can never resolve to TASK_BASE_REF_TRUSTED,
-        # _OWNER or _UNPROVEN and read a control flag as if it were a base.
-        # The digits-only gate above already makes these unreachable; bash
-        # carries the check anyway as insurance for the day that rule widens,
-        # and dropping it in the port would silently lose that insurance.
-        if ($sanitized -notmatch '^(TRUSTED|OWNER|UNPROVEN)$') {
-            $ownKey = 'TASK_BASE_REF_' + $sanitized
-            $own = [System.Environment]::GetEnvironmentVariable($ownKey, 'Process')
-            if ($own) { $own = $own.Trim("'") }
-        }
-    }
+    # (W2101) The digits-only gate, the sanitize and the reserved-suffix refusal
+    # that used to be copied inline here now live in Get-TaskRecordKey — the
+    # single choke point D269 asked for. Get-TaskBaseRefFor performs the same
+    # four steps in the same order and then the same env read and .Trim("'"), so
+    # every input maps to the same $own, including a null id and 'TRUSTED' (both
+    # refused before the read). Deliberately an ENV read, not Read-TaskRecord:
+    # bash's task_base_ref_for is an env read too, and switching would make this
+    # side stricter than the executor it shares a cache with.
+    $own = Get-TaskBaseRefFor -TaskId $TaskId
     if ($own -and $own.StartsWith('-')) {
         if (-not $Quiet) {
             [Console]::Error.WriteLine("stride-hook: refusing an option-shaped per-task base ref for task $(ConvertTo-PrintableForLog -Value $TaskId) (" + (ConvertTo-PrintableForLog -Value $own) + "); ignoring it.")
@@ -2409,9 +2693,14 @@ function Invoke-FinalizeAfterDoing {
 #     record_task_owned/_narrowed, record_task_head_ref, another_open_window_exists,
 #     replay_narrowing_decision. The ENGINE is range-capable: the -OwnRanges
 #     parameter and Expand-OwnRanges are ported faithfully, so adding the
-#     orchestration later is a call-site change PLUS the three record_task_*
-#     writers — this script preserves TASK_HEAD_REF_* in the env cache but has
-#     never written one. Every call site here passes ''.
+#     orchestration later is a call-site change PLUS the record_task_* writers.
+#     (W2101) THE RECORD LAYER NOW EXISTS: Get-TaskRecordKey, the five key
+#     builders, Read-TaskRecord, the per-family readers and the four writers
+#     (Set-TaskOwnedRecord / _Narrowed / _HeadRef / _BaseAt) are ported and
+#     covered by test Group 22. What is still missing is the ORCHESTRATION that
+#     decides WHEN to call them, so the writers have no production call site and
+#     every -OwnRanges call site here still passes ''. Adding one is a decision
+#     about whether the value is trusted, not a mechanical wiring change.
 #     Cost, stated plainly: on this host an OUTER task's snapshot still contains
 #     commits its NESTED tasks made. That is an over-report. It is never an
 #     under-report and never another task's diff.
@@ -2461,11 +2750,6 @@ function Invoke-FinalizeBeforeDoing {
                 # the collision at its source rather than re-encoding around it.
                 # Refusing means writing no per-task record, which degrades to
                 # the shared-base path exactly as a reserved word does.
-                if ($owner -notmatch '^[0-9]+$') {
-                    $sanitized = ''
-                } else {
-                    $sanitized = $owner -replace '[^A-Za-z0-9_]', '_'
-                }
                 # The per-task keys share a namespace with the TRUSTED, OWNER
                 # and UNPROVEN markers; an id sanitizing to one would set it
                 # from data. Unreachable for a digits-only id, kept because it
@@ -2473,9 +2757,10 @@ function Invoke-FinalizeBeforeDoing {
                 # (D269) UNPROVEN was missing from this guard while the bash
                 # twin has excluded it since D226 -- a divergence the shared
                 # namespace made invisible.
-                if ($sanitized -and $sanitized -ne 'TRUSTED' -and $sanitized -ne 'OWNER' -and $sanitized -ne 'UNPROVEN') {
-                    $ownerKey = 'TASK_BASE_REF_' + $sanitized
-                }
+                # (W2101) All three steps now come from Get-TaskRecordKey, which
+                # returns '' for exactly the cases this block returned no key
+                # for. Same inputs, same outputs; one copy instead of two.
+                $ownerKey = Get-TaskBaseRefKey -TaskId $owner
             }
             if (-not $ownerKey) { $owner = '' }
         }

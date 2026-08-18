@@ -6103,13 +6103,12 @@ Assert-Eq "23f: Write-EnvCache still has exactly 6 call sites (tripwire on new w
 # when the reason is recorded; an omission with a named blocker is a plan, one
 # without a reason is a gap):
 #   sh 23e/23e1/23e1b/23e2/23e4  D268/D274 window eviction
-#       BLOCKED on W2103. select_kept_window_records and dead_open_window_ids
-#       are not ported; this side still has the Select-Object -Last N count cap
-#       those cases exist to disprove. Nothing to assert until it is replaced.
+#       NO LONGER OMITTED - W2103 ported the eviction and mirrored these in
+#       Group 25 (25a-25i). Kept in this list, corrected rather than deleted,
+#       so the reason a reader once found here does not simply vanish.
 #   sh 23z12-23z14, 23z16, 23z19-23z21  D273 self-heal replay
-#       BLOCKED on a missing mechanism, not on effort: Write-DiffUploadState
-#       persists no `base=` or `narrowed=` line, so replay_narrowing_decision
-#       has nothing to replay from. There is no behaviour to assert yet.
+#       NO LONGER OMITTED - W2103 added the base=/narrowed= persistence these
+#       were blocked on, and Group 25's 25j/25k pin the replay.
 #   sh 23m/23m1/23m2  D258 hook-env fencing
 #       COVERED ELSEWHERE at test-stride-hook.ps1:2037-2079.
 #   sh 23z15c  non-integer id refusal
@@ -6171,9 +6170,10 @@ if ($g24Missing.Count -gt 0) {
 
 $g24Git = Get-Command git -ErrorAction SilentlyContinue
 # The extracted engine functions read $ProjectDir, so these cases must point it
-# at their own fixture repos. Save and restore it: Group 24 is last today, but
-# a group appended after this one would otherwise inherit a stale project dir
-# and fail for a reason that has nothing to do with it.
+# at their own fixture repos. Save and restore it - Group 25 now follows this
+# one, and without the restore it would inherit a stale project dir and fail for
+# a reason that has nothing to do with it. (That is no longer hypothetical: this
+# comment used to say "Group 24 is last today".)
 $g24SavedProjectDir = $ProjectDir
 
 # Build a repo with N sequential commits and return its SHAs, newest first.
@@ -6596,6 +6596,338 @@ if ($g24Git) {
 }
 
 $ProjectDir = $g24SavedProjectDir
+
+}
+
+# ============================================================
+# Test Group 25: W2103 — per-window eviction (D268/D273/D274)
+# ============================================================
+# Mirrors the assertions ace9b06 added for D274, by DEFECT ID rather than case
+# number. The defect being pinned: D268's per-family tail cap evicted the OLDEST
+# record, which is structurally the longest-lived OUTER task's anchor, and D274
+# found that capping OPEN windows by count reached the same defect from the
+# other side - the cap keeps the newest opens and drops the oldest, and the
+# oldest open window is structurally the live enclosing outer. Measured on the
+# hook itself: 19 open children left the outer intact, 20 lost both its anchor
+# and its deliverable.
+Write-Host ""
+Write-Host "=== Test Group 25: W2103 per-window eviction ==="
+
+$g25Want = @(
+    'Get-DeadOpenWindowId', 'Select-KeptWindowRecord', 'Get-CarriedWindowRecordLine',
+    'Resolve-CaptureNarrowing', 'Invoke-ReplayNarrowingDecision',
+    'Get-TaskNarrowedRecord', 'Test-AnotherOpenWindowExists', 'Get-OpenWindowMaxAgeSecs',
+    'Get-TaskHeadRefFor', 'Get-TaskBaseAtRecord', 'Write-DiffUploadState',
+    'Get-EnvCacheLine', 'Split-EnvCacheRecord', 'Read-TaskRecord',
+    'ConvertFrom-ShSingleQuoted', 'ConvertTo-ShSingleQuoted',
+    'Get-TaskRecordKey', 'Get-TaskBaseRefKey', 'Get-TaskHeadRefKey',
+    'Get-TaskOwnedKey', 'Get-TaskBaseAtKey', 'Get-TaskNarrowedKey'
+)
+$g25Ast = [System.Management.Automation.Language.Parser]::ParseFile($HookScript, [ref]$null, [ref]$null)
+$g25Found = @()
+foreach ($f in $g25Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+    if ($g25Want -contains $f.Name) { $g25Found += $f.Name; . ([scriptblock]::Create($f.Extent.Text)) }
+}
+foreach ($a in $g25Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+    if ($a.Left.Extent.Text -eq '$script:StrideOpenWindowSweepAt') { . ([scriptblock]::Create($a.Extent.Text)) }
+}
+$g25Missing = @($g25Want | Where-Object { $g25Found -notcontains $_ })
+if ($g25Missing.Count -gt 0) {
+    Write-Host "  FAIL: 25-harness: could not extract from stride-hook.ps1: $($g25Missing -join ', ')" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 25-harness: all $($g25Want.Count) eviction functions extracted from the real hook" -ForegroundColor Green
+    $script:PASS++
+
+$g25SavedProjectDir = $ProjectDir
+$g25Git = Get-Command git -ErrorAction SilentlyContinue
+
+# Build a repo and seed a cache with N open windows (base, no head partner).
+function New-G25Fixture {
+    param([string]$Name, [int]$OpenCount, [switch]$GarbageBases, [switch]$RealButUnreachable)
+    $d = Join-Path $TmpDir "g25-$Name"
+    Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Path $d -Force | Out-Null
+    & git -C $d init -q 2>$null | Out-Null
+    & git -C $d config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $d config user.name 'Test' 2>$null | Out-Null
+    & git -C $d config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $d 'seed.txt') -Value 'seed' -Encoding UTF8
+    & git -C $d add -A 2>$null | Out-Null
+    & git -C $d commit -q -m 'seed' 2>$null | Out-Null
+    $head = (& git -C $d rev-parse HEAD 2>$null | Out-String).Trim()
+    $lines = New-Object System.Collections.Generic.List[string]
+    for ($i = 1; $i -le $OpenCount; $i++) {
+        if ($GarbageBases) {
+            # SHA-shaped but resolves to nothing - the only signal the sweep acts on.
+            $v = ('{0:d40}' -f 0).Substring(0, 40 - "$i".Length) + "$i"
+        } elseif ($RealButUnreachable) {
+            $v = $head
+        } else {
+            $v = $head
+        }
+        $lines.Add("TASK_BASE_REF_$((100 + $i))='$v'") | Out-Null
+    }
+    Set-Content -Path (Join-Path $d '.stride-env-cache') -Value $lines -Encoding UTF8
+    return @{ Dir = $d; Head = $head }
+}
+
+# --- 25a (D274, sh 23e): 25 open windows whose bases do NOT resolve -> all swept ---
+if ($g25Git) {
+    $g25a = New-G25Fixture -Name 'garbage' -OpenCount 25 -GarbageBases
+    $ProjectDir = $g25a.Dir
+    $script:EnvCache = Join-Path $g25a.Dir '.stride-env-cache'
+    Assert-Eq "25a (D274): 25 open windows with unresolvable bases are all swept" "0" `
+        "$(@(Select-KeptWindowRecord).Count)"
+} else {
+    Write-Host "  SKIP: 25a: needs git" -ForegroundColor Yellow
+}
+
+# --- 25b (D274, sh 23e1): 25 open windows with LIVE bases -> ALL kept ---
+# This is the assertion the old count cap failed: it kept 20 and dropped 5, and
+# the 5 it dropped were the OLDEST, which is where the live enclosing outer is.
+if ($g25Git) {
+    $g25b = New-G25Fixture -Name 'live' -OpenCount 25
+    $ProjectDir = $g25b.Dir
+    $script:EnvCache = Join-Path $g25b.Dir '.stride-env-cache'
+    Assert-Eq "25b (D274): 25 open windows with live bases are ALL kept - no count cap" "25" `
+        "$(@(Select-KeptWindowRecord).Count)"
+    # And the OLDEST specifically - the one a count cap drops first, and the one
+    # that is structurally the live enclosing outer.
+    Assert-Eq "25b (D274): the OLDEST open window survives, which a count cap evicts first" "True" `
+        "$((@(Select-KeptWindowRecord)[0]) -like 'TASK_BASE_REF_101=*')"
+} else {
+    Write-Host "  SKIP: 25b: needs git" -ForegroundColor Yellow
+}
+
+# --- 25c (D274, sh 23e1b): detached HEAD, bases NOT ancestors -> still all kept ---
+# The sweep must act on NON-RESOLUTION ONLY. Ancestry is a property of where
+# HEAD points right now, so a bisect or a detached checkout makes a live outer's
+# base a non-ancestor - and DELETING its record is not recoverable when HEAD
+# comes back. If the sweep ever borrowed Test-AnotherOpenWindowExists's ancestry
+# check, this is the assertion that would catch it.
+if ($g25Git) {
+    # The bases must be REAL commits that are genuinely NOT ancestors of HEAD -
+    # a divergent branch, not a descendant. The first version of this fixture
+    # detached onto a DESCENDANT, so the seeded bases were still ancestors and
+    # an ancestry check in the sweep passed the test unnoticed. Caught by
+    # mutation; the geometry is the assertion.
+    $g25c = New-G25Fixture -Name 'detached' -OpenCount 0
+    $ProjectDir = $g25c.Dir
+    $script:EnvCache = Join-Path $g25c.Dir '.stride-env-cache'
+    $null = & git -C $g25c.Dir checkout -q -b sidebranch 2>$null
+    Set-Content -Path (Join-Path $g25c.Dir 'side.txt') -Value 'side' -Encoding UTF8
+    $null = & git -C $g25c.Dir add -A 2>$null
+    $null = & git -C $g25c.Dir commit -q -m 'side' 2>$null
+    $g25cSide = (& git -C $g25c.Dir rev-parse HEAD 2>$null | Out-String).Trim()
+    $null = & git -C $g25c.Dir checkout -q - 2>$null
+    # Sanity: the side commit must NOT be an ancestor of HEAD, or this proves
+    # nothing. A control, because a fixture that quietly stopped diverging would
+    # make the assertion below vacuous again.
+    $null = & git -C $g25c.Dir merge-base --is-ancestor $g25cSide HEAD 2>$null
+    Assert-Eq "25c: CONTROL - the seeded base is genuinely NOT an ancestor of HEAD" "False" `
+        "$($LASTEXITCODE -eq 0)"
+    $g25cLines = New-Object System.Collections.Generic.List[string]
+    for ($i = 1; $i -le 25; $i++) { $g25cLines.Add("TASK_BASE_REF_$((100 + $i))='$g25cSide'") | Out-Null }
+    Set-Content -Path $script:EnvCache -Value $g25cLines -Encoding UTF8
+    Assert-Eq "25c (D274): a resolvable NON-ANCESTOR base is kept - the sweep acts on resolution ONLY" "25" `
+        "$(@(Select-KeptWindowRecord).Count)"
+} else {
+    Write-Host "  SKIP: 25c: needs git" -ForegroundColor Yellow
+}
+
+# --- 25d (D274, sh 23e4): the outer's anchor survives 19 AND 20 open children ---
+# The measured defect: 19 open children left the outer intact, 20 lost both its
+# anchor and its deliverable. Both counts are asserted, because the boundary is
+# exactly where the defect lived.
+if ($g25Git) {
+    foreach ($n in @(19, 20, 22)) {
+        $g25d = New-G25Fixture -Name "outer$n" -OpenCount 0
+        $ProjectDir = $g25d.Dir
+        $script:EnvCache = Join-Path $g25d.Dir '.stride-env-cache'
+        $lines = New-Object System.Collections.Generic.List[string]
+        # The OUTER's own open anchor, written FIRST so it is the oldest.
+        $lines.Add("TASK_BASE_REF_100='$($g25d.Head)'") | Out-Null
+        for ($i = 1; $i -le $n; $i++) {
+            $lines.Add("TASK_BASE_REF_$((200 + $i))='$($g25d.Head)'") | Out-Null
+        }
+        Set-Content -Path $script:EnvCache -Value $lines -Encoding UTF8
+        $kept = @(Select-KeptWindowRecord)
+        Assert-Eq "25d (D274): with $n open children the OUTER's anchor survives" "True" `
+            "$([bool](@($kept | Where-Object { $_ -like 'TASK_BASE_REF_100=*' }).Count -eq 1))"
+        Assert-Eq "25d (D274): and with $n open children every window survives" "$($n + 1)" "$($kept.Count)"
+    }
+} else {
+    Write-Host "  SKIP: 25d: needs git" -ForegroundColor Yellow
+}
+
+# --- 25e (D274, sh 23e4): TWO enclosing levels both survive ---
+if ($g25Git) {
+    $g25e = New-G25Fixture -Name 'twolevel' -OpenCount 0
+    $ProjectDir = $g25e.Dir
+    $script:EnvCache = Join-Path $g25e.Dir '.stride-env-cache'
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("TASK_BASE_REF_100='$($g25e.Head)'") | Out-Null
+    $lines.Add("TASK_BASE_REF_110='$($g25e.Head)'") | Out-Null
+    for ($i = 1; $i -le 22; $i++) { $lines.Add("TASK_BASE_REF_$((300 + $i))='$($g25e.Head)'") | Out-Null }
+    Set-Content -Path $script:EnvCache -Value $lines -Encoding UTF8
+    $g25eKept = @(Select-KeptWindowRecord)
+    Assert-Eq "25e (D274): with two enclosing levels open, BOTH anchors survive" "True" `
+        "$([bool](@($g25eKept | Where-Object { $_ -like 'TASK_BASE_REF_100=*' -or $_ -like 'TASK_BASE_REF_110=*' }).Count -eq 2))"
+} else {
+    Write-Host "  SKIP: 25e: needs git" -ForegroundColor Yellow
+}
+
+# --- 25f (D274, sh 23e4): a provably-dead window is swept while live ones stay ---
+if ($g25Git) {
+    $g25f = New-G25Fixture -Name 'mixed' -OpenCount 0
+    $ProjectDir = $g25f.Dir
+    $script:EnvCache = Join-Path $g25f.Dir '.stride-env-cache'
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("TASK_BASE_REF_777='0000000000000000000000000000000000000000'") | Out-Null
+    for ($i = 1; $i -le 22; $i++) { $lines.Add("TASK_BASE_REF_$((400 + $i))='$($g25f.Head)'") | Out-Null }
+    Set-Content -Path $script:EnvCache -Value $lines -Encoding UTF8
+    $g25fKept = @(Select-KeptWindowRecord)
+    Assert-Eq "25f (D274): the all-zero dead window is swept" "0" `
+        "$(@($g25fKept | Where-Object { $_ -like 'TASK_BASE_REF_777=*' }).Count)"
+    Assert-Eq "25f (D274): while every live anchor is kept" "22" "$($g25fKept.Count)"
+    # A base that is NOT SHA-shaped is unusable but not PROVABLY dead, so it is
+    # KEPT. Deleting it would be acting on a signal that is not evidence.
+    $lines.Add("TASK_BASE_REF_888='not-a-sha'") | Out-Null
+    Set-Content -Path $script:EnvCache -Value $lines -Encoding UTF8
+    Assert-Eq "25f (D274): a non-SHA base is unusable but NOT swept - keeping is the safe direction" "1" `
+        "$(@(Select-KeptWindowRecord | Where-Object { $_ -like 'TASK_BASE_REF_888=*' }).Count)"
+} else {
+    Write-Host "  SKIP: 25f: needs git" -ForegroundColor Yellow
+}
+
+# --- 25g: below the threshold the sweep runs NO git and proves nothing dead ---
+# The ordinary cache - a handful of open windows - must pay nothing and, more
+# importantly, must never lose a record to a sweep that had no evidence.
+if ($g25Git) {
+    $g25g = New-G25Fixture -Name 'under' -OpenCount 5 -GarbageBases
+    $ProjectDir = $g25g.Dir
+    $script:EnvCache = Join-Path $g25g.Dir '.stride-env-cache'
+    Assert-Eq "25g: at or under the threshold nothing is swept, even unresolvable bases" "5" `
+        "$(@(Select-KeptWindowRecord).Count)"
+    Assert-Eq "25g: and Get-DeadOpenWindowId proves nothing dead below the threshold" "0" `
+        "$(@(Get-DeadOpenWindowId -SweepAt 20 -ReserveKey '').Count)"
+} else {
+    Write-Host "  SKIP: 25g: needs git" -ForegroundColor Yellow
+}
+
+# --- 25h: the reserved key is dual-purpose - excluded AND threshold minus one ---
+if ($g25Git) {
+    $g25h = New-G25Fixture -Name 'reserve' -OpenCount 20
+    $ProjectDir = $g25h.Dir
+    $script:EnvCache = Join-Path $g25h.Dir '.stride-env-cache'
+    $g25hAll = @(Select-KeptWindowRecord)
+    $g25hRes = @(Select-KeptWindowRecord -ReserveKey 'TASK_BASE_REF_101')
+    Assert-Eq "25h: without a reserve, all 20 windows are returned" "20" "$($g25hAll.Count)"
+    Assert-Eq "25h: the reserved key's own line is excluded" "0" `
+        "$(@($g25hRes | Where-Object { $_ -like 'TASK_BASE_REF_101=*' }).Count)"
+    Assert-Eq "25h: and the other 19 are still returned" "19" "$($g25hRes.Count)"
+} else {
+    Write-Host "  SKIP: 25h: needs git" -ForegroundColor Yellow
+}
+
+# --- 25i: CLOSED windows older than the anchor cap at 20, newer ones all kept ---
+if ($g25Git) {
+    $g25i = New-G25Fixture -Name 'closed' -OpenCount 0
+    $ProjectDir = $g25i.Dir
+    $script:EnvCache = Join-Path $g25i.Dir '.stride-env-cache'
+    $lines = New-Object System.Collections.Generic.List[string]
+    # 25 CLOSED windows (base + head) older than the anchor...
+    for ($i = 1; $i -le 25; $i++) {
+        $lines.Add("TASK_BASE_REF_$((500 + $i))='$($g25i.Head)'") | Out-Null
+    }
+    # ...the anchor, an OPEN window...
+    $lines.Add("TASK_BASE_REF_900='$($g25i.Head)'") | Out-Null
+    # ...and 3 CLOSED windows newer than it.
+    for ($i = 1; $i -le 3; $i++) {
+        $lines.Add("TASK_BASE_REF_$((600 + $i))='$($g25i.Head)'") | Out-Null
+    }
+    for ($i = 1; $i -le 25; $i++) { $lines.Add("TASK_HEAD_REF_$((500 + $i))='$($g25i.Head)'") | Out-Null }
+    for ($i = 1; $i -le 3; $i++) { $lines.Add("TASK_HEAD_REF_$((600 + $i))='$($g25i.Head)'") | Out-Null }
+    Set-Content -Path $script:EnvCache -Value $lines -Encoding UTF8
+    $g25iKept = @(Select-KeptWindowRecord)
+    Assert-Eq "25i: the open anchor survives" "1" `
+        "$(@($g25iKept | Where-Object { $_ -like 'TASK_BASE_REF_900=*' }).Count)"
+    Assert-Eq "25i: CLOSED windows NEWER than the anchor are ALL kept - evicting one would make the outer absorb it" "3" `
+        "$(@($g25iKept | Where-Object { $_ -match '^TASK_BASE_REF_60[0-9]=' }).Count)"
+    Assert-Eq "25i: CLOSED windows OLDER than the anchor cap at 20 of 25" "20" `
+        "$(@($g25iKept | Where-Object { $_ -match '^TASK_BASE_REF_5[0-9][0-9]=' }).Count)"
+    # Oldest evicted first: 501-505 go, 506-525 stay.
+    Assert-Eq "25i: and the OLDEST closed windows are the ones evicted" "0" `
+        "$(@($g25iKept | Where-Object { $_ -like 'TASK_BASE_REF_501=*' }).Count)"
+} else {
+    Write-Host "  SKIP: 25i: needs git" -ForegroundColor Yellow
+}
+
+# --- 25j (D273): the narrowing verdict is REPLAYED, not recomputed ---
+# A verdict reached at capture time is a FACT ABOUT THAT CAPTURE. Re-deriving it
+# at retry time asks a different question, because the retry's view of which
+# windows are open is not the capture's view - so a live re-derivation can
+# narrow a window whose verdict was never computed.
+if ($g25Git) {
+    $g25j = New-G25Fixture -Name 'replay' -OpenCount 0
+    $ProjectDir = $g25j.Dir
+    $script:EnvCache = Join-Path $g25j.Dir '.stride-env-cache'
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @("TASK_ID='42'")
+    # 'yes' replays as narrow WITHOUT consulting any live state.
+    Assert-Eq "25j (D273): a recorded 'yes' replays as narrow" "True" `
+        "$(Invoke-ReplayNarrowingDecision -Narrowed 'yes' -TaskId '42')"
+    # 'no' replays as wide - and must NOT fall through to a live check, which
+    # is the whole point of persisting it.
+    Assert-Eq "25j (D273): a recorded 'no' replays as WIDE, never re-derived" "False" `
+        "$(Invoke-ReplayNarrowingDecision -Narrowed 'no' -TaskId '42')"
+    # Only an ABSENT verdict falls through to a live check. With no open window
+    # on record that is False, which also proves the fall-through really runs.
+    Assert-Eq "25j (D273): only an ABSENT verdict falls through to a live check" "False" `
+        "$(Invoke-ReplayNarrowingDecision -Narrowed '' -TaskId '42')"
+
+    # The resolver prefers the PER-TASK RECORD over the state file, because the
+    # state file holds one task and is truncated on every write - an interleaved
+    # completion erases it exactly when it is needed.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_ID='42'",
+        "TASK_NARROWED_42='yes'")
+    Assert-Eq "25j (D273): the per-task record wins over the state file" "yes" `
+        (Resolve-CaptureNarrowing -TaskId '42' -StateValue 'no')
+    # With no record, the state file is the documented second source.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @("TASK_ID='42'")
+    Assert-Eq "25j (D273): with no record, the state file is the second source" "no" `
+        (Resolve-CaptureNarrowing -TaskId '42' -StateValue 'no')
+    # Neither: empty means "re-derive", which the replay turns into a live check.
+    Assert-Eq "25j (D273): neither source means empty, i.e. re-derive" "" `
+        (Resolve-CaptureNarrowing -TaskId '42' -StateValue '')
+} else {
+    Write-Host "  SKIP: 25j: needs git" -ForegroundColor Yellow
+}
+
+# --- 25k (D273): Write-DiffUploadState persists base= and narrowed= ---
+# Without these lines there is nothing for the replay to replay FROM, which is
+# why W2102 could not port the replay and recorded it as blocked.
+if ($g25Git) {
+    $g25k = New-G25Fixture -Name 'state' -OpenCount 0
+    $ProjectDir = $g25k.Dir
+    Write-DiffUploadState -TaskId '42' -HttpCode '200' -Base 'abc123' -Narrowed 'yes'
+    $g25kState = @(Get-Content -Path (Join-Path $g25k.Dir '.stride-diff-upload-state') -Encoding UTF8)
+    Assert-Eq "25k (D273): the state file carries base=" "1" `
+        "$(@($g25kState | Where-Object { $_ -eq 'base=abc123' }).Count)"
+    Assert-Eq "25k (D273): and narrowed=" "1" `
+        "$(@($g25kState | Where-Object { $_ -eq 'narrowed=yes' }).Count)"
+    # Omitted values write no line at all rather than an empty one, so a reader
+    # cannot mistake "not recorded" for "recorded as empty".
+    Write-DiffUploadState -TaskId '42' -HttpCode '000'
+    $g25kBare = @(Get-Content -Path (Join-Path $g25k.Dir '.stride-diff-upload-state') -Encoding UTF8)
+    Assert-Eq "25k (D273): an absent verdict writes NO narrowed= line, not an empty one" "0" `
+        "$(@($g25kBare | Where-Object { $_ -like 'narrowed=*' }).Count)"
+} else {
+    Write-Host "  SKIP: 25k: needs git" -ForegroundColor Yellow
+}
+
+$ProjectDir = $g25SavedProjectDir
 
 }
 

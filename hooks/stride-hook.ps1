@@ -66,6 +66,11 @@ $script:SnapOwnedSet = ''
 # post-loop captures classify identically - the ordering bash uses.
 $script:SnapOwnRanges = ''
 
+# (W2103/D274) The open-window sweep threshold. Below this many open windows the
+# sweep runs no git at all and proves nothing dead, so an ordinary cache pays
+# nothing. This is NOT a cap: open windows are never evicted by count.
+$script:StrideOpenWindowSweepAt = 20
+
 # (D226) Atomic env-cache write, mirroring the bash twin's write_env_cache.
 # Every truncating write goes through here so no reader can observe a partial
 # cache. The temp is staged in .stride/ — already hard-excluded from capture
@@ -662,6 +667,207 @@ function Set-TaskBaseAtRecord {
 # all four through the reader. A malformed head/owned value is therefore
 # dropped here and kept there. Fail-closed direction, and it is recorded in the
 # parity note.
+# (W2103/D274) Liveness sweep for OPEN windows - the replacement for D268's
+# open-window COUNT cap, which could not tell a live enclosing outer from an
+# abandoned claim and so evicted the outer. Returns the ids whose open window is
+# provably dead, or an empty array. Mirror of bash's dead_open_window_ids.
+#
+# FAIL-SAFE BY CONSTRUCTION, because a false positive here is the exact data
+# loss this subsystem exists to prevent:
+#   * below the threshold it runs NO git at all and proves nothing dead;
+#   * an unreadable repository returns empty, keeping every window;
+#   * a base whose value is not even SHA-shaped is KEPT, not swept - unusable
+#     is not the same as provably dead;
+#   * a record is dead ONLY when its base does not resolve to a commit.
+#
+# THAT LAST POINT IS HALF OF WHAT Test-AnotherOpenWindowExists CHECKS, AND THE
+# DIFFERENCE IS DELIBERATE - do not "share" the logic between them. That
+# predicate also skips a base that is not an ancestor of HEAD and one whose age
+# stamp is stale; this sweep must do NEITHER. Ancestry is a property of where
+# HEAD points RIGHT NOW: a detached HEAD, a bisect, or a checkout of an older
+# commit makes a live outer's base a non-ancestor for as long as that lasts.
+# SKIPPING such a base is recoverable the moment HEAD comes back; DELETING its
+# record is not, and one claim during a bisect with more than the threshold open
+# would erase live anchors permanently - D274's own outcome through a different
+# door. Non-resolution is the only irreversible signal, so it is the only one
+# this sweep acts on.
+#
+# Openness is read from the cache FILE (base ids minus head ids), matching the
+# selector this feeds - not from the environment, which is what the other
+# predicate reads.
+function Get-DeadOpenWindowId {
+    param([int]$SweepAt, [string]$ReserveKey)
+    $dead = @()
+    if (-not (Test-Path $EnvCache)) { return $dead }
+    $lines = @()
+    try {
+        $r = Split-EnvCacheRecord
+        if (-not $r.Ok) { return $dead }
+        $lines = @($r.Records)
+    } catch { return $dead }
+
+    $bases = New-Object System.Collections.Generic.List[object]
+    $heads = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($line in $lines) {
+        if ($line -match '^TASK_BASE_REF_([A-Za-z0-9_]+)=') {
+            $key = $line.Substring(0, $line.IndexOf('='))
+            if ($key -match '^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)\z') { continue }
+            if ($ReserveKey -and $key -eq $ReserveKey) { continue }
+            $bases.Add([pscustomobject]@{
+                Id = $Matches[1]
+                Value = (ConvertFrom-ShSingleQuoted -Value $line.Substring($line.IndexOf('=') + 1))
+            }) | Out-Null
+        } elseif ($line -match '^TASK_HEAD_REF_([A-Za-z0-9_]+)=') {
+            $null = $heads.Add($Matches[1])
+        }
+    }
+    $open = @($bases | Where-Object { -not $heads.Contains($_.Id) })
+    if ($open.Count -eq 0) { return $dead }
+    # STRICTLY greater, and no git below it. At or under the threshold this
+    # proves nothing dead and touches nothing.
+    if ($open.Count -le $SweepAt) { return $dead }
+    $null = & git -C $ProjectDir rev-parse --verify --quiet HEAD 2>$null
+    if ($LASTEXITCODE -ne 0) { return $dead }
+    foreach ($w in $open) {
+        # Only a SHA-shaped value can be PROVED absent; anything else is merely
+        # unusable, which is not a licence to delete it.
+        if (-not $w.Value) { continue }
+        if ($w.Value -notmatch '^[0-9a-fA-F]+\z') { continue }
+        $null = & git -C $ProjectDir rev-parse --verify --quiet ($w.Value + '^{commit}') 2>$null
+        if ($LASTEXITCODE -ne 0) { $dead += $w.Id }
+    }
+    return $dead
+}
+
+# (W2103/D268+D274) Per-window eviction, replacing the per-family tail cap.
+# Returns the BASE lines that survive; partners follow via
+# Get-CarriedWindowRecordLine, which already keeps a partner exactly when its
+# base survives - bash's no-orphan clause, obtained here for free.
+#
+# THE OLD CAP WAS WRONG IN BOTH DIRECTIONS. D268's per-family `tail -20` evicted
+# the OLDEST record, which is structurally the longest-lived OUTER task's own
+# anchor, so at 20 nested completions the outer uploaded an empty snapshot for
+# real work. D274 then found that capping OPEN windows by count reached the same
+# defect from the other side: the cap keeps the newest opens and drops the
+# oldest, and the oldest open window is structurally the live enclosing outer,
+# while the newer opens that triggered the eviction are exactly the ones kept.
+# Measured on the hook itself - 19 open children left the outer intact, 20 lost
+# both its anchor and its deliverable. No count cap can be made safe here.
+#
+# The rules, in order, and the order matters:
+#   1. EVERY surviving open window is kept, however many there are. The only
+#      opens already gone are ones the sweep PROVED dead.
+#   2. anchor = the oldest kept open window.
+#   3. CLOSED windows NEWER than the anchor are ALL kept - they are nested
+#      inside a live outer's window, and evicting one would make the outer
+#      absorb that nested task's commits: a wrong diff, strictly worse than
+#      the no-diff this subsystem degrades to everywhere else.
+#   4. CLOSED windows OLDER than every open window cap at 20, oldest evicted
+#      first - a window predating every live claim cannot intersect any live
+#      attribution.
+#
+# $ReserveKey is a base-ref KEY the caller is about to re-append for itself. It
+# is dual-purpose, matching the pre-D274 reserved-slot arithmetic: the line is
+# excluded AND the sweep threshold drops by one.
+function Select-KeptWindowRecord {
+    param([string]$ReserveKey)
+    $sweepAt = $script:StrideOpenWindowSweepAt
+    if ($ReserveKey) { $sweepAt = $sweepAt - 1 }
+    $dead = @(Get-DeadOpenWindowId -SweepAt $sweepAt -ReserveKey $ReserveKey)
+
+    $lines = @()
+    try {
+        $r = Split-EnvCacheRecord
+        if (-not $r.Ok) { return @() }
+        $lines = @($r.Records)
+    } catch { return @() }
+
+    $heads = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($line in $lines) {
+        if ($line -match '^TASK_HEAD_REF_([A-Za-z0-9_]+)=') { $null = $heads.Add($Matches[1]) }
+    }
+    # Base records in CACHE ORDER - oldest first, which is what makes "oldest
+    # kept open" and "evict oldest first" meaningful.
+    $bases = New-Object System.Collections.Generic.List[object]
+    foreach ($line in $lines) {
+        if ($line -notmatch '^TASK_BASE_REF_([A-Za-z0-9_]+)=') { continue }
+        $id = $Matches[1]
+        $key = $line.Substring(0, $line.IndexOf('='))
+        # UNPROVEN is excluded here as bash excludes it. The old cap A omitted
+        # it, which was a latent divergence; building the exclusion into the
+        # selector fixes both sites by construction.
+        if ($key -match '^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)\z') { continue }
+        if ($ReserveKey -and $key -eq $ReserveKey) { continue }
+        # A swept dead open window: its partners cannot survive it either, and
+        # deriving partners from surviving bases drops them with it.
+        if ($dead -contains $id) { continue }
+        $bases.Add([pscustomobject]@{ Id = $id; Line = $line; Open = (-not $heads.Contains($id)) }) | Out-Null
+    }
+    if ($bases.Count -eq 0) { return @() }
+
+    $keep = New-Object 'bool[]' $bases.Count
+    for ($i = 0; $i -lt $bases.Count; $i++) { if ($bases[$i].Open) { $keep[$i] = $true } }
+    $anchor = -1
+    for ($i = 0; $i -lt $bases.Count; $i++) { if ($keep[$i]) { $anchor = $i; break } }
+    # Closed windows OLDER than the anchor: walk DOWNWARD from the anchor and
+    # keep the newest 20. The downward walk is the off-by-one hazard - with no
+    # open window at all the limit is the whole list.
+    $limit = if ($anchor -ge 0) { $anchor - 1 } else { $bases.Count - 1 }
+    $c = 0
+    for ($i = $limit; $i -ge 0; $i--) {
+        if (-not $bases[$i].Open) { $c++; if ($c -le 20) { $keep[$i] = $true } }
+    }
+    # Closed windows NEWER than the anchor: all kept.
+    if ($anchor -ge 0) {
+        for ($i = $anchor; $i -lt $bases.Count; $i++) { if (-not $bases[$i].Open) { $keep[$i] = $true } }
+    }
+    $out = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $bases.Count; $i++) { if ($keep[$i]) { $out.Add($bases[$i].Line) | Out-Null } }
+    return $out.ToArray()
+}
+
+# (W2103/D273) The capture-time narrowing verdict for a task, from the per-task
+# record FIRST and the state file's narrowed= line second. Empty means no
+# verdict is on record and the caller must re-derive. Mirror of bash's
+# resolve_capture_narrowing.
+#
+# THE PER-TASK RECORD IS PREFERRED FOR A REASON. The state file holds ONE task
+# at a time and is TRUNCATED on every write, so the interleaved completion this
+# whole fix is about - another task completing between a failed PUT and
+# before_review - overwrites it with its own task id and the verdict is gone
+# exactly when it is needed. A per-task record survives that, because a
+# completion only rewrites the line it owns.
+#
+# Lifetime is bounded without any eviction change: reads happen between a
+# capture and that same completion's before_review, and the next claim rebuilds
+# the cache from Select-KeptWindowRecord, which emits only the base family and
+# therefore drops this one wholesale.
+function Resolve-CaptureNarrowing {
+    param([string]$TaskId, [string]$StateValue)
+    if ($TaskId) {
+        $rec = Get-TaskNarrowedRecord -TaskId $TaskId
+        if ($rec.Found -and $rec.Value) { return $rec.Value }
+    }
+    return $StateValue
+}
+
+# (W2103/D273) Answer the D255 outermost gate for a RETRY. $Narrowed is the
+# verdict the primary capture persisted for THIS task; empty means none is on
+# record. Mirror of bash's replay_narrowing_decision.
+#
+# A VERDICT REACHED AT CAPTURE TIME IS A FACT ABOUT THAT CAPTURE. Re-deriving it
+# at retry time asks a different question - the retry's view of which windows
+# are open is not the capture's view - so a live re-derivation can narrow a
+# window whose verdict was never computed, or widen one that was. Replay is the
+# whole point; the fall-through to a live check exists only for the case where
+# nothing was recorded at all.
+function Invoke-ReplayNarrowingDecision {
+    param([string]$Narrowed, [string]$TaskId)
+    if ($Narrowed -eq 'yes') { return $true }
+    if ($Narrowed -eq '') { return [bool](Test-AnotherOpenWindowExists -SelfTaskId $TaskId) }
+    return $false
+}
+
 function Get-CarriedWindowRecordLine {
     param([string[]]$BaseRecordLine, [string]$ExcludeTaskId)
     $out = New-Object System.Collections.Generic.List[string]
@@ -1584,13 +1790,17 @@ if ($HookName -eq 'before_doing') {
             $keptBaseRecords = @()
             if (Test-Path $EnvCache) {
                 try {
-                $g280recs = Split-EnvCacheRecord
-                if (-not $g280recs.Ok) { throw 'env cache ends inside a quoted value' }
-                $keptBaseRecords = @($g280recs.Records | Where-Object {
-                    $_ -match '^TASK_BASE_REF_[A-Za-z0-9_]+=' -and
-                    $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and
-                    $_ -notmatch '^TASK_BASE_REF_OWNER='
-                } | Select-Object -Last 20)
+                # (W2103/D268+D274) Per-window eviction, replacing the
+                # tail-20 cap. No reserved key here: this branch appends no
+                # base record of its own, so it reserves no slot - which is
+                # what the bash twin does at the same point.
+                #
+                # The old filter here also OMITTED TASK_BASE_REF_UNPROVEN,
+                # where bash and the other cap site both exclude it. Low impact
+                # (it is stripped moments later) but a real divergence; the
+                # selector excludes it by construction, so both sites are fixed
+                # at once rather than one being patched and the other not.
+                $keptBaseRecords = @(Select-KeptWindowRecord)
                 } catch { $keptBaseRecords = @() }
             }
             # (D280) THE HEADLINE HOLE. Every one of these six values comes
@@ -3430,10 +3640,20 @@ function Invoke-ChangedFilesUpload {
 # and HTTP code ONLY — never the URL or bearer token (the file lives
 # untracked in the project root alongside the other .stride artifacts).
 function Write-DiffUploadState {
-    param([string]$TaskId, [string]$HttpCode)
+    param([string]$TaskId, [string]$HttpCode, [string]$Base, [string]$Narrowed)
     try {
+        # (W2103/D273) base= and narrowed= complete the state the bash twin
+        # writes. The narrowing REPLAY prefers the per-task TASK_NARROWED_
+        # record over this line - the state file holds one task at a time and is
+        # truncated on every write, so an interleaved completion erases it
+        # exactly when it is needed - but writing it closes the recorded
+        # divergence and gives the resolver its documented second source for the
+        # case where a claim rebuilt the cache between capture and retry.
+        $lines = "task_id=$TaskId`nhttp_code=$HttpCode"
+        if ($Base) { $lines = $lines + "`nbase=$Base" }
+        if ($Narrowed) { $lines = $lines + "`nnarrowed=$Narrowed" }
         Set-Content -Path (Join-Path $ProjectDir '.stride-diff-upload-state') `
-            -Value "task_id=$TaskId`nhttp_code=$HttpCode" -Encoding UTF8
+            -Value $lines -Encoding UTF8
     } catch {
         # Best-effort: a failed state write must never block the hook.
     }
@@ -3611,7 +3831,8 @@ function Invoke-FinalizeAfterDoing {
     # (missing preconditions) deliberately writes nothing: missing state
     # means "no healthy upload on record" and the retry re-checks the same
     # preconditions itself.
-    Write-DiffUploadState -TaskId $taskId -HttpCode $httpCode
+    Write-DiffUploadState -TaskId $taskId -HttpCode $httpCode `
+        -Base $script:SnapBaseResolved -Narrowed $narrowed
 }
 
 # (D142) Rewrite TASK_BASE_REF — and re-record the dirty baseline — AFTER the
@@ -3683,28 +3904,30 @@ function Invoke-FinalizeAfterDoing {
 #     Write-DiffUploadState records no base= or narrowed= line for it to replay
 #     — and re-deriving those at retry time is the exact divergence D273 added
 #     persistence to prevent. Bash re-captures because bash persists them.
-#     (W2102) replay_narrowing_decision and resolve_capture_narrowing stay
-#     unported for that reason: there is nothing to replay FROM, so porting the
-#     replay alone would have to re-derive the verdict, which is the divergence.
-#     (W2102) The self-heal now computes ATTRIBUTED RANGES - that part needs no
-#     persisted state - but deliberately does NOT apply the D255 owned-set
-#     override or the D271 open-window gate that bash applies at the same point.
-#     Those two decide whether to NARROW, and deciding that at retry time is
-#     precisely what D273 added persistence to prevent: the retry's view of
-#     which windows are open is not the capture's view, so a live re-derivation
-#     can narrow a window whose verdict was never computed. Bash may apply them
-#     there because it replays a persisted verdict alongside; this port cannot,
-#     so it takes the wide path. The direction is over-report, the accepted
-#     failure. Implementing the gate without the replay would be a DIFFERENT
-#     divergence, and a less safe one, than leaving it out.
-#   * (W2102) The D268/D274 window EVICTION policy —
-#     select_kept_window_records, dead_open_window_ids, and the
-#     STRIDE_OPEN_WINDOW_SWEEP_AT horizon. This side still caps kept windows by
-#     COUNT (Select-Object -Last 19/20), which is the shape D274 deleted from
-#     bash outright because no count can distinguish a live enclosing outer from
-#     an abandoned claim. W2103 owns the replacement. Cost until then: a
-#     long-lived outer window can be evicted by count while still open, which
-#     costs its narrowing and over-reports.
+#     (W2103) That reason is now gone: base= and narrowed= are persisted, so the
+#     replay has something to replay from and both functions are ported. The
+#     self-heal still builds only when nothing is on disk - it does not
+#     RE-capture over an existing snapshot - which remains the honest subset.
+#     (W2103) The self-heal now applies the D255 owned-set override too, gated
+#     on the REPLAYED verdict rather than a live re-derivation - which is what
+#     W2102 could not do and recorded as blocked. Bash applies it at the same
+#     point on the same basis.
+#   * (W2103) THE D268/D274 EVICTION POLICY IS NOW PORTED, moved out of NOT
+#     PORTED rather than deleted so the history of the claim stays readable.
+#     Select-KeptWindowRecord and Get-DeadOpenWindowId replace both count caps.
+#     Open windows are never evicted by count - the only ones removed are those
+#     the sweep PROVED dead, and it proves that from non-resolution ALONE. It
+#     deliberately does not check ancestry or the age stamp the way
+#     Test-AnotherOpenWindowExists does: ancestry is a property of where HEAD
+#     points right now, so a bisect or detached checkout would make a live
+#     outer's base look dead, and deleting a record is not recoverable when HEAD
+#     comes back. Covered by test Group 25, whose 25c pins exactly that.
+#   * (W2103) THE D273 REPLAY IS NOW PORTED TOO. Write-DiffUploadState persists
+#     base= and narrowed=, Resolve-CaptureNarrowing prefers the per-task record
+#     over that file (the file holds one task and is truncated on every write,
+#     so an interleaved completion erases it exactly when it is needed), and
+#     Invoke-ReplayNarrowingDecision replays the verdict instead of re-deriving
+#     it. The self-heal now uses it, which is what the persistence is for.
 #   * (W2102) CONCURRENT CACHE WRITES, filed as D282. Set-TaskRecord reads the
 #     whole cache, filters one key and REWRITES the file, with no lock - and
 #     W2102 gave it production call sites that span the whole after_doing gate,
@@ -3801,13 +4024,13 @@ function Invoke-FinalizeBeforeDoing {
                 $_ -notmatch '^TASK_BASE_AT_[A-Za-z0-9_]+=' -and
                 $_ -notmatch '^TASK_NARROWED_[A-Za-z0-9_]+='
             })
-            $records = @($existing | Where-Object {
-                $_ -match '^TASK_BASE_REF_[A-Za-z0-9_]+=' -and
-                $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and
-                $_ -notmatch '^TASK_BASE_REF_OWNER=' -and
-                $_ -notmatch '^TASK_BASE_REF_UNPROVEN=' -and
-                ($ownerKey -eq '' -or $_ -notmatch ('^' + [regex]::Escape($ownerKey) + '='))
-            } | Select-Object -Last 19)
+            # (W2103/D268+D274) Per-window eviction, replacing the tail-19
+            # cap. $ownerKey is RESERVED: this branch appends a fresh base
+            # record for the completing task itself, so the selector both
+            # excludes that line and drops its sweep threshold by one - the
+            # same reserved-slot arithmetic the old cap expressed as 19
+            # rather than 20.
+            $records = @(Select-KeptWindowRecord -ReserveKey $ownerKey)
         }
         # (D280) Quoted for parity with the bash twin, which sq_escapes all five
         # of these — including TASK_BASE_REF_TRUSTED, which it writes as the
@@ -3911,11 +4134,15 @@ function Invoke-SelfHealChangedFilesUpload {
     $stateFile = Join-Path $ProjectDir '.stride-diff-upload-state'
     $stateTask = ''
     $stateCode = ''
+    $stateNarrowed = ''
     if (Test-Path $stateFile) {
         try {
             foreach ($line in Get-Content -Path $stateFile -Encoding UTF8) {
                 if ($line -match '^task_id=(.*)$' -and -not $stateTask) { $stateTask = $Matches[1] }
                 if ($line -match '^http_code=(.*)$' -and -not $stateCode) { $stateCode = $Matches[1] }
+                # (W2103/D273) The persisted verdict, the resolver's SECOND
+                # source behind the per-task record.
+                if ($line -match '^narrowed=(.*)$' -and -not $stateNarrowed) { $stateNarrowed = $Matches[1] }
             }
         } catch {
             # Unreadable state degrades to "retry".
@@ -3959,6 +4186,23 @@ function Invoke-SelfHealChangedFilesUpload {
             $healRanges = ''
             try { $healRanges = Get-AttributedCommitRange -OwnBase $healBase -SelfTaskId $taskId }
             catch { $healRanges = '' }
+            # (W2103/D273) REPLAY the capture-time verdict rather than
+            # re-deriving it. This is what the persistence above is for: the
+            # retry's view of which windows are open is not the capture's view,
+            # so a live re-derivation can narrow a window whose verdict was
+            # never computed. The per-task record is preferred over the state
+            # file because the file holds one task and is truncated on every
+            # write, so an interleaved completion erases it exactly when it is
+            # needed. Only when NOTHING is on record does this fall through to
+            # a live check - which is the documented older-state-file case.
+            $healNarrowed = Resolve-CaptureNarrowing -TaskId $taskId -StateValue $stateNarrowed
+            if ($script:SnapOwnedRecorded -and $script:SnapOwnedSet -and
+                $script:SnapOwnedSet -ne $script:StrideOwnedOverflow) {
+                $healOwnedRange = Convert-OwnedSetToRange -Set $script:SnapOwnedSet
+                if ($healOwnedRange -and (Invoke-ReplayNarrowingDecision -Narrowed $healNarrowed -TaskId $taskId)) {
+                    $healRanges = $healOwnedRange
+                }
+            }
             try { $healSnapshot = Build-ChangedFilesSnapshot -Base $healBase -OwnRanges $healRanges }
             catch { $healSnapshot = '[]' }
         }

@@ -6035,6 +6035,190 @@ Assert-Eq "23f: Write-EnvCache still has exactly 6 call sites (tripwire on new w
 }
 
 # ============================================================
+# Test Group 24: W2102 — the window classification engine
+# ============================================================
+# Mirrors sh Test Group 23 (D226 base isolation, test-stride-hook.sh:6199-8420).
+# MIRRORED BY GROUP TITLE AND DEFECT ID, NEVER BY CASE NUMBER — the two suites'
+# group numbering diverges from sh Group 7 onward, so sh 23 and ps1 22 are
+# unrelated and matching by number would pair the wrong assertions.
+#
+# OMITTED FROM THIS MIRROR, AND WHY (acceptance criterion 3 permits omissions
+# when the reason is recorded; an omission with a named blocker is a plan, one
+# without a reason is a gap):
+#   sh 23e/23e1/23e1b/23e2/23e4  D268/D274 window eviction
+#       BLOCKED on W2103. select_kept_window_records and dead_open_window_ids
+#       are not ported; this side still has the Select-Object -Last N count cap
+#       those cases exist to disprove. Nothing to assert until it is replaced.
+#   sh 23z12-23z14, 23z16, 23z19-23z21  D273 self-heal replay
+#       BLOCKED on a missing mechanism, not on effort: Write-DiffUploadState
+#       persists no `base=` or `narrowed=` line, so replay_narrowing_decision
+#       has nothing to replay from. There is no behaviour to assert yet.
+#   sh 23m/23m1/23m2  D258 hook-env fencing
+#       COVERED ELSEWHERE at test-stride-hook.ps1:2037-2079.
+#   sh 23z15c  non-integer id refusal
+#       COVERED ELSEWHERE by 22b, 22c and :2791-2849.
+#   sh 23v2 sub-blocks k=3..k=8  D272 ratchet
+#       DEFERRED. The k=2 sub-block below pins that this port REPRODUCES the
+#       ratchet rather than silently "fixing" it, which is the property that
+#       matters; the remaining sub-blocks are the same shape at other depths.
+Write-Host ""
+Write-Host "=== Test Group 24: W2102 window classification engine ==="
+
+$g24Want = @(
+    'Get-OwnedCommitSet', 'Convert-OwnedSetToRange', 'Get-OpenWindowMaxAgeSecs',
+    'Test-AnotherOpenWindowExists', 'Get-AttributedCommitRange',
+    'Get-EnvCacheLine', 'Split-EnvCacheRecord', 'Read-TaskRecord',
+    'ConvertFrom-ShSingleQuoted', 'ConvertTo-ShSingleQuoted', 'Get-TaskRecordKey',
+    'Get-TaskBaseRefKey', 'Get-TaskHeadRefKey', 'Get-TaskOwnedKey', 'Get-TaskBaseAtKey',
+    'Get-TaskOwnedRecord', 'Get-TaskBaseAtRecord', 'Get-TaskHeadRefFor', 'Get-TaskBaseRefFor'
+)
+$g24Ast = [System.Management.Automation.Language.Parser]::ParseFile($HookScript, [ref]$null, [ref]$null)
+$g24Found = @()
+foreach ($f in $g24Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+    if ($g24Want -contains $f.Name) {
+        $g24Found += $f.Name
+        . ([scriptblock]::Create($f.Extent.Text))
+    }
+}
+# The engine functions read script-scope SENTINELS, and extracting functions
+# alone leaves those unset — Set-StrictMode then throws on first read. Take the
+# assignments from the shipped file too, rather than restating the values here:
+# a local copy would keep passing after the real constant changed, which is the
+# same vacuity the function extraction exists to avoid.
+$g24WantVar = @('StrideOwnedOverflow', 'StrideNoOwnCommits')
+$g24FoundVar = @()
+foreach ($a in $g24Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+    $lhs = $a.Left.Extent.Text
+    foreach ($vn in $g24WantVar) {
+        if ($lhs -eq ('$script:' + $vn)) {
+            $g24FoundVar += $vn
+            . ([scriptblock]::Create($a.Extent.Text))
+        }
+    }
+}
+$g24MissingVar = @($g24WantVar | Where-Object { $g24FoundVar -notcontains $_ })
+if ($g24MissingVar.Count -gt 0) {
+    Write-Host "  FAIL: 24-harness: could not extract sentinels: $($g24MissingVar -join ', ')" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 24-harness: both engine sentinels extracted from the real hook" -ForegroundColor Green
+    $script:PASS++
+}
+$g24Missing = @($g24Want | Where-Object { $g24Found -notcontains $_ })
+if ($g24Missing.Count -gt 0) {
+    Write-Host "  FAIL: 24-harness: could not extract from stride-hook.ps1: $($g24Missing -join ', ')" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 24-harness: all $($g24Want.Count) engine functions extracted from the real hook" -ForegroundColor Green
+    $script:PASS++
+
+$g24Git = Get-Command git -ErrorAction SilentlyContinue
+# The extracted engine functions read $ProjectDir, so these cases must point it
+# at their own fixture repos. Save and restore it: Group 24 is last today, but
+# a group appended after this one would otherwise inherit a stale project dir
+# and fail for a reason that has nothing to do with it.
+$g24SavedProjectDir = $ProjectDir
+
+# Build a repo with N sequential commits and return its SHAs, newest first.
+function New-G24Repo {
+    param([string]$Name, [int]$Commits = 3)
+    $d = Join-Path $TmpDir "g24-$Name"
+    Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Path $d -Force | Out-Null
+    & git -C $d init -q 2>$null | Out-Null
+    & git -C $d config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $d config user.name 'Test' 2>$null | Out-Null
+    & git -C $d config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $d 'seed.txt') -Value 'seed' -Encoding UTF8
+    & git -C $d add -A 2>$null | Out-Null
+    & git -C $d commit -q -m 'seed' 2>$null | Out-Null
+    for ($i = 1; $i -le $Commits; $i++) {
+        Set-Content -Path (Join-Path $d "f$i.txt") -Value "v$i" -Encoding UTF8
+        & git -C $d add -A 2>$null | Out-Null
+        & git -C $d commit -q -m "c$i" 2>$null | Out-Null
+    }
+    return $d
+}
+
+# --- 24a: Get-OwnedCommitSet (sh 23z / D255) ---
+if ($g24Git) {
+    $g24aDir = New-G24Repo -Name 'ownedset' -Commits 3
+    $ProjectDir = $g24aDir
+    $g24aAll = @(& git -C $g24aDir rev-list HEAD 2>$null | Where-Object { $_ })
+    $g24aHead = $g24aAll[0]
+    $g24aRoot = $g24aAll[$g24aAll.Count - 1]
+    Assert-Eq "24a: missing endpoints yield the empty record" "" (Get-OwnedCommitSet -H0 '' -H1 $g24aHead)
+    Assert-Eq "24a: identical endpoints yield the empty record, not a SHA" "" `
+        (Get-OwnedCommitSet -H0 $g24aHead -H1 $g24aHead)
+    $g24aSet = Get-OwnedCommitSet -H0 $g24aRoot -H1 $g24aHead
+    Assert-Eq "24a: a normal delta returns every commit in the span" "3" `
+        "$(@($g24aSet -split ' ' | Where-Object { $_ }).Count)"
+    # NEWEST FIRST is load-bearing: Convert-OwnedSetToRange reads the LAST
+    # token as the oldest. Reversed, the range comes out backwards, git
+    # resolves it to nothing, and the under-report looks like a correct narrow.
+    Assert-Eq "24a: and in rev-list order, NEWEST first" $g24aHead `
+        "$(@($g24aSet -split ' ')[0])"
+} else {
+    Write-Host "  SKIP: 24a: the owned-set cases need git" -ForegroundColor Yellow
+}
+
+# --- 24a2: the 20-commit cap yields OVERFLOW, never a truncated list ---
+# A truncated list would be WORSE than no list: the classifier treats a
+# non-empty owned record as naming the window's commits exactly, so a partial
+# one would mis-subtract and lose the unlisted commits from their author.
+if ($g24Git) {
+    $g24bDir = New-G24Repo -Name 'overflow' -Commits 21
+    $ProjectDir = $g24bDir
+    $g24bAll = @(& git -C $g24bDir rev-list HEAD 2>$null | Where-Object { $_ })
+    $g24bSet = Get-OwnedCommitSet -H0 $g24bAll[$g24bAll.Count - 1] -H1 $g24bAll[0]
+    Assert-Eq "24a2: 21 commits yields the OVERFLOW sentinel" "OVERFLOW" $g24bSet
+    Assert-Eq "24a2: and never a truncated SHA list" "False" "$($g24bSet -match '[0-9a-f]{40}')"
+} else {
+    Write-Host "  SKIP: 24a2: the overflow case needs git" -ForegroundColor Yellow
+}
+
+# --- 24b: Convert-OwnedSetToRange (sh 23z / D255) ---
+if ($g24Git) {
+    $g24cDir = New-G24Repo -Name 'range' -Commits 3
+    $ProjectDir = $g24cDir
+    $g24cAll = @(& git -C $g24cDir rev-list HEAD 2>$null | Where-Object { $_ })
+    Assert-Eq "24b: an empty set yields no range" "" (Convert-OwnedSetToRange -Set '')
+    Assert-Eq "24b: OVERFLOW yields no range" "" (Convert-OwnedSetToRange -Set 'OVERFLOW')
+    # Newest-first input: [0]=newest, [last]=oldest. The range is <oldest>^ <newest>.
+    $g24cSet = ($g24cAll[0] + ' ' + $g24cAll[1] + ' ' + $g24cAll[2])
+    Assert-Eq "24b: a multi-SHA set yields <oldest>^ <newest>, in that order" `
+        ($g24cAll[2] + '^ ' + $g24cAll[0]) (Convert-OwnedSetToRange -Set $g24cSet)
+    Assert-Eq "24b: a single-SHA set yields <it>^ <it>" `
+        ($g24cAll[0] + '^ ' + $g24cAll[0]) (Convert-OwnedSetToRange -Set $g24cAll[0])
+    # A root commit has no parent, so ^ does not resolve. Matching nothing
+    # over-reports, which is the documented safer failure.
+    $g24cRoot = $g24cAll[$g24cAll.Count - 1]
+    Assert-Eq "24b: a root commit yields no range rather than an unresolvable one" "" `
+        (Convert-OwnedSetToRange -Set $g24cRoot)
+} else {
+    Write-Host "  SKIP: 24b: the range cases need git" -ForegroundColor Yellow
+}
+
+# --- 24c: Get-OpenWindowMaxAgeSecs (sh 23z11 / D273) ---
+# Every invalid shape falls back to the default rather than disabling the
+# check - that is the one direction this must never fail in, because a
+# disabled age check silently brings the narrowing back.
+$g24cOld = [System.Environment]::GetEnvironmentVariable('STRIDE_OPEN_WINDOW_MAX_AGE_SECS', 'Process')
+[System.Environment]::SetEnvironmentVariable('STRIDE_OPEN_WINDOW_MAX_AGE_SECS', $null, 'Process')
+Assert-Eq "24c: absent override yields the 14400 default" "14400" (Get-OpenWindowMaxAgeSecs)
+[System.Environment]::SetEnvironmentVariable('STRIDE_OPEN_WINDOW_MAX_AGE_SECS', '900', 'Process')
+Assert-Eq "24c: a valid override is honoured" "900" (Get-OpenWindowMaxAgeSecs)
+[System.Environment]::SetEnvironmentVariable('STRIDE_OPEN_WINDOW_MAX_AGE_SECS', '90x', 'Process')
+Assert-Eq "24c: a non-numeric override falls back, never disables" "14400" (Get-OpenWindowMaxAgeSecs)
+[System.Environment]::SetEnvironmentVariable('STRIDE_OPEN_WINDOW_MAX_AGE_SECS', '99999999999', 'Process')
+Assert-Eq "24c: an 11-digit override falls back on WIDTH, matching bash" "14400" (Get-OpenWindowMaxAgeSecs)
+[System.Environment]::SetEnvironmentVariable('STRIDE_OPEN_WINDOW_MAX_AGE_SECS', $g24cOld, 'Process')
+
+$ProjectDir = $g24SavedProjectDir
+
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

@@ -47,6 +47,13 @@ $script:SnapBaseRefused = $false
 # must skip it rather than feed it to git as a revision.
 $script:StrideNoOwnCommits = '__stride_no_own_commits__'
 
+# (W2102/D255) Sentinel an owned-set record carries when the loop delta held
+# more commits than the cap. Distinct from empty: empty means "the loop authored
+# nothing", OVERFLOW means "too many to name", and the two take DIFFERENT paths
+# in the classifier — empty falls back to the D244 purity heuristic, OVERFLOW
+# does too, but for the opposite reason (a truncated list would mis-subtract).
+$script:StrideOwnedOverflow = 'OVERFLOW'
+
 # (D226) Atomic env-cache write, mirroring the bash twin's write_env_cache.
 # Every truncating write goes through here so no reader can observe a partial
 # cache. The temp is staged in .stride/ — already hard-excluded from capture
@@ -2462,6 +2469,312 @@ function Get-NumstatBinarySet {
 # separate trailing argument rather than being folded into $GitArgs — placed
 # before the endpoints it silently yields an empty patch, which is the
 # documented reason the bash helper exists as its own function.
+# (W2102/D255) The owned set for the loop delta H0..H1: space-separated full
+# SHAs in rev-list order (NEWEST FIRST), capped at 20; over the cap returns the
+# OVERFLOW sentinel; identical or missing endpoints return '' (the empty
+# record, which is a real answer rather than an absence). Mirror of bash's
+# compute_owned_set.
+#
+# Newest-first is load-bearing, not incidental: Convert-OwnedSetToRange reads
+# the LAST token as the oldest commit. Reverse the order and the range comes
+# out backwards, git resolves it to nothing, and the resulting under-report
+# looks exactly like a correct narrow one.
+function Get-OwnedCommitSet {
+    param([string]$H0, [string]$H1)
+    if (-not $H0 -or -not $H1) { return '' }
+    if ($H0 -eq $H1) { return '' }
+    $shas = @()
+    try {
+        $shas = @(& git -C $ProjectDir rev-list "$H0..$H1" 2>$null | Where-Object { $_ })
+    } catch { return '' }
+    if ($LASTEXITCODE -ne 0) { return '' }
+    if ($shas.Count -eq 0) { return '' }
+    if ($shas.Count -gt 20) { return $script:StrideOwnedOverflow }
+    return ($shas -join ' ')
+}
+
+# (W2102/D255) Convert a non-empty owned set into ONE "<oldest>^ <newest>" range
+# line for Expand-OwnRanges. The set is contiguous by construction (a single
+# H0..H1 delta), so one range covers it. Mirror of bash's owned_set_to_range.
+#
+# Returns '' — callers fall back — when the set is empty or OVERFLOW, or when
+# the oldest commit's parent does not resolve (a root commit, or a rebase that
+# already rewrote the SHAs away). Matching nothing over-reports, which is the
+# documented safer failure.
+function Convert-OwnedSetToRange {
+    param([string]$Set)
+    if (-not $Set) { return '' }
+    if ($Set -eq $script:StrideOwnedOverflow) { return '' }
+    $toks = @($Set -split '\s+' | Where-Object { $_ })
+    if ($toks.Count -eq 0) { return '' }
+    $newest = $toks[0]
+    $oldest = $toks[$toks.Count - 1]
+    if (-not $oldest) { return '' }
+    $null = & git -C $ProjectDir rev-parse --verify "$oldest^" 2>$null
+    if ($LASTEXITCODE -ne 0) { return '' }
+    return ($oldest + '^ ' + $newest)
+}
+
+# (W2102/D273) The horizon that decides when an open window is too old to keep
+# vouching in Test-AnotherOpenWindowExists. Mirror of bash's
+# open_window_max_age_secs.
+#
+# Validated digits-only AND width-bounded, and the width bound is kept even
+# though PowerShell has neither of bash's failure modes (no octal reading, no
+# strtoimax overflow). The two executors must fall back on the same inputs, or
+# a checkout shared between hosts narrows on one and not the other. Ten digits
+# is ~317 years, well past any horizon anyone means.
+function Get-OpenWindowMaxAgeSecs {
+    $v = [System.Environment]::GetEnvironmentVariable('STRIDE_OPEN_WINDOW_MAX_AGE_SECS', 'Process')
+    if (-not $v) { return '14400' }
+    if ($v -notmatch '^[0-9]+\z') { return '14400' }
+    if ($v.Length -gt 10) { return '14400' }
+    return $v
+}
+
+# (W2102/D271+D273) TRUE when some task OTHER than $SelfTaskId has an OPEN
+# window on record — a TASK_BASE_REF_<id> line with no TASK_HEAD_REF_<id>
+# partner, since the head is written only at completion. Decides whether the
+# D255 owned-set narrowing is safe for the completing task's capture. Mirror of
+# bash's another_open_window_exists.
+#
+# READ DIRECTION IS ASYMMETRIC ON PURPOSE, and must not be tidied to one
+# source: bases come from the FILE (they are records), heads from the ENV (the
+# ported readers are env-backed, matching bash's task_head_ref_for), and the
+# claim stamp from the FILE. Bash makes the same split for the same reason, and
+# a "consistent" version would answer differently from the twin.
+#
+# EVERY validation failure takes the wide path — answer "no open window" — so
+# an unusable clock, an unresolvable base, or an unparseable stamp all degrade
+# toward over-reporting rather than toward absorbing another task's commits.
+function Test-AnotherOpenWindowExists {
+    param([string]$SelfTaskId)
+    $selfKey = ''
+    if ($SelfTaskId) { $selfKey = Get-TaskBaseRefKey -TaskId $SelfTaskId }
+    # No usable clock means the age check cannot run, and D271's rule is that a
+    # validation failure vouches for nothing.
+    $now = 0
+    try { $now = [int64][Math]::Floor((Get-Date -UFormat %s)) } catch { return $false }
+    if ($now -le 0) { return $false }
+    $maxAge = [int64](Get-OpenWindowMaxAgeSecs)
+
+    $lines = @()
+    try {
+        $r = Split-EnvCacheRecord
+        if (-not $r.Ok) { return $false }
+        $lines = @($r.Records)
+    } catch { return $false }
+
+    foreach ($line in $lines) {
+        if ($line -notmatch '^TASK_BASE_REF_[A-Za-z0-9_]+=') { continue }
+        $bkey = $line.Substring(0, $line.IndexOf('='))
+        if ($selfKey -and $bkey -eq $selfKey) { continue }
+        if ($bkey -match '^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)\z') { continue }
+        $id = $bkey.Substring('TASK_BASE_REF_'.Length)
+        # A head partner means the window CLOSED. Env-backed, as bash is.
+        if (Get-TaskHeadRefFor -TaskId $id) { continue }
+        $b = ConvertFrom-ShSingleQuoted -Value $line.Substring($line.IndexOf('=') + 1)
+        if (-not $b) { continue }
+        $null = & git -C $ProjectDir rev-parse --verify --quiet "$b^{commit}" 2>$null
+        if ($LASTEXITCODE -ne 0) { continue }
+        $null = & git -C $ProjectDir merge-base --is-ancestor $b HEAD 2>$null
+        if ($LASTEXITCODE -ne 0) { continue }
+        # Resolvable and an ancestor is necessary but NOT sufficient: an
+        # abandoned claim leaves exactly that shape behind permanently. Age the
+        # record out by when the window was OPENED, from the stamp its own
+        # claim wrote. A MISSING stamp reads DEAD, deliberately — every window
+        # opened by a hook carrying this change is stamped, so an unstamped
+        # record was written by an older version and is by construction from an
+        # earlier session.
+        $stamp = ''
+        $rec = Get-TaskBaseAtRecord -TaskId $id
+        if ($rec.Found) { $stamp = $rec.Value }
+        if (-not $stamp) { continue }
+        if ($stamp -notmatch '^[0-9]+\z') { continue }
+        if ($stamp.Length -gt 10) { continue }
+        $age = $now - [int64]$stamp
+        # A stamp AHEAD of the clock is not a small age, it is a negative one,
+        # and negative trivially passes the -gt test — so a future-stamped
+        # window would vouch as live forever, which is the exact record this
+        # check exists to retire. Reachable without tampering: a clock
+        # corrected backwards, or a checkout shared between hosts.
+        if ($age -lt 0) { continue }
+        # Age exactly AT the horizon counts as LIVE (strict -gt), as bash.
+        if ($age -gt $maxAge) { continue }
+        return $true
+    }
+    return $false
+}
+
+# (W2102/D236+D244+D255+D256) The attribution engine. Given this task's own
+# base, return the commit ranges that belong to THIS task — every other task's
+# recorded window subtracted, but only where subtracting it is provably safe.
+# Mirror of bash's attributed_commit_ranges.
+#
+# THREE DISTINCT RETURN VALUES, and collapsing any two is a defect:
+#   ''                        no window applies; the caller keeps its ordinary
+#                             single-base behaviour.
+#   $script:StrideNoOwnCommits  attribution applied and this task provably made
+#                             no commits of its own; the caller must emit an
+#                             EMPTY snapshot. Merging this with '' is the D236
+#                             outer-absorbs-its-children bug.
+#   range lines               "<from>^ <to>", oldest-first, one per contiguous run.
+function Get-AttributedCommitRange {
+    param([string]$OwnBase, [string]$SelfTaskId)
+    if (-not $OwnBase) { return '' }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return '' }
+    $null = & git -C $ProjectDir rev-parse --verify $OwnBase 2>$null
+    if ($LASTEXITCODE -ne 0) { return '' }
+
+    $selfKey = ''
+    if ($SelfTaskId) { $selfKey = Get-TaskBaseRefKey -TaskId $SelfTaskId }
+
+    # --- Phase A: collect every OTHER task's window ------------------------
+    # A window needs BOTH ends: the base says where it started, the D236 head
+    # record says where it stopped. Without the end marker it cannot be
+    # bounded, so it is skipped rather than guessed at.
+    $windows = New-Object System.Collections.Generic.List[string]
+    $superseded = New-Object System.Collections.Generic.HashSet[string]
+    $ownedCovered = New-Object System.Collections.Generic.HashSet[string]
+    $lines = @()
+    try {
+        $r = Split-EnvCacheRecord
+        if ($r.Ok) { $lines = @($r.Records) }
+    } catch { $lines = @() }
+
+    foreach ($line in $lines) {
+        if ($line -notmatch '^TASK_BASE_REF_[A-Za-z0-9_]+=') { continue }
+        $bkey = $line.Substring(0, $line.IndexOf('='))
+        if ($selfKey -and $bkey -eq $selfKey) { continue }
+        if ($bkey -match '^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)\z') { continue }
+        $id = $bkey.Substring('TASK_BASE_REF_'.Length)
+        $b = ConvertFrom-ShSingleQuoted -Value $line.Substring($line.IndexOf('=') + 1)
+        $h = Get-TaskHeadRefFor -TaskId $id
+        if (-not $b -or -not $h) { continue }
+        $null = & git -C $ProjectDir rev-parse --verify $b 2>$null
+        if ($LASTEXITCODE -ne 0) { continue }
+        $null = & git -C $ProjectDir rev-parse --verify $h 2>$null
+        if ($LASTEXITCODE -ne 0) { continue }
+        $null = & git -C $ProjectDir merge-base --is-ancestor $OwnBase $b 2>$null
+        if ($LASTEXITCODE -ne 0) { continue }
+        $null = & git -C $ProjectDir merge-base --is-ancestor $h HEAD 2>$null
+        if ($LASTEXITCODE -ne 0) { continue }
+        # (D255) A window whose task recorded a NON-EMPTY owned set names its
+        # commits exactly, so the purity heuristic is superseded for it.
+        # Empty, OVERFLOW and absent all fall back to D244 classification —
+        # empty because with manual commits "the loop authored nothing" does
+        # NOT mean "the task authored nothing", and treating '' as
+        # subtract-nothing re-opens W2066 for every hand-committing agent.
+        $ownedRec = Get-TaskOwnedRecord -TaskId $id
+        if ($ownedRec.Found -and $ownedRec.Value -and $ownedRec.Value -ne $script:StrideOwnedOverflow) {
+            $null = $superseded.Add($b + ' ' + $h)
+            foreach ($oc in @($ownedRec.Value -split '\s+' | Where-Object { $_ })) {
+                $null = $ownedCovered.Add($oc)
+            }
+        }
+        $windows.Add($b + ' ' + $h) | Out-Null
+    }
+    if ($windows.Count -eq 0) { return '' }
+
+    # --- Phase B: expand each window once ---------------------------------
+    $sets = New-Object System.Collections.Generic.List[object]
+    $idx = 0
+    foreach ($w in $windows) {
+        # (D255) Owned windows contribute their exact SHAs and skip
+        # classification entirely.
+        if ($superseded.Contains($w)) { continue }
+        $sp = $w.IndexOf(' ')
+        $wb = $w.Substring(0, $sp)
+        $wh = $w.Substring($sp + 1)
+        # `<base>..<head>` is base-EXCLUSIVE and that is load-bearing: a nested
+        # task's base is normally the outer task's own last commit, so
+        # including it attributes the outer's work to its child. Do not "fix".
+        $setLines = @()
+        try { $setLines = @(& git -C $ProjectDir rev-list "$wb..$wh" 2>$null | Where-Object { $_ }) } catch { $setLines = @() }
+        if ($setLines.Count -eq 0) { continue }
+        $idx++
+        $hs = New-Object System.Collections.Generic.HashSet[string]
+        foreach ($s in $setLines) { $null = $hs.Add($s) }
+        # Size and Index MUST be [int]. Sort-Object compares strings otherwise,
+        # and "10" sorts before "9".
+        $sets.Add([pscustomobject]@{ Size = [int]$setLines.Count; Index = [int]$idx; Lines = $setLines; Set = $hs })
+    }
+
+    # --- Phase C: the D256 purity fixpoint --------------------------------
+    # Classify smallest-set-first. A window's residual is reduced ONLY by
+    # (a) commits in a D255 owned record and (b) the sets of windows ALREADY
+    # classified PURE that NEST INSIDE this one — subset, never mere
+    # intersection. D244 computed each residual against every other window's
+    # full span, which let two CONCURRENTLY open windows mutually "cover" the
+    # commits they merely shared: both read PURE and the union subtracted the
+    # outer's own commit, losing its author's work. Mutual coverage is
+    # evidence of AMBIGUITY, not purity — a commit has one owner.
+    $coveredSet = New-Object System.Collections.Generic.HashSet[string]
+    $pool = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($e in @($sets | Sort-Object @{Expression = { $_.Size }}, @{Expression = { $_.Index }})) {
+            $cov = New-Object System.Collections.Generic.HashSet[string]
+            foreach ($s in $e.Lines) { if ($ownedCovered.Contains($s)) { $null = $cov.Add($s) } }
+            foreach ($p in $pool) {
+                # Pool set SUBSET-OF this set. Two ways to get this wrong, both
+                # silent: reversing the operands tests the opposite relation,
+                # and omitting the Count guard lets an EMPTY pool set cover
+                # everything (IsSubsetOf on empty is true) — every residual
+                # collapses to 0, everything reads PURE, and D244 reopens.
+                if ($p.Set.Count -gt 0 -and $p.Set.IsSubsetOf($e.Set)) {
+                    foreach ($s in $p.Lines) { $null = $cov.Add($s) }
+                }
+            }
+            $residual = 0
+            if ($cov.Count -gt 0) {
+                $residual = @($e.Lines | Where-Object { -not $cov.Contains($_) }).Count
+            } else {
+                $residual = $e.Lines.Count
+            }
+            # Residual <= 1: PURE (the one residual is that task's own
+            # auto-commit) and its full span joins the covered set. Residual
+            # >= 2: AMBIGUOUS — an outer commit landed mid-window — so it
+            # contributes NOTHING and falls through to the caller.
+            if ($residual -le 1) {
+                foreach ($s in $e.Lines) { $null = $coveredSet.Add($s) }
+                $pool.Add($e) | Out-Null
+            }
+        }
+    } catch {
+        # Every failure in this fixpoint must degrade toward AMBIGUOUS
+        # (over-report). Leaving only the owned SHAs covered is the PowerShell
+        # re-expression of bash's "mktemp failed, so every fallback window is
+        # ambiguous". A zero-residual default is the one branch that would fail
+        # toward subtracting a span, i.e. toward lost work.
+        $coveredSet = New-Object System.Collections.Generic.HashSet[string]
+    }
+    foreach ($s in $ownedCovered) { $null = $coveredSet.Add($s) }
+
+    # --- Phase D: walk oldest-first, grouping survivors into runs ---------
+    # --reverse here, unlike Phase B's plain rev-list, so runs group correctly.
+    $walk = @()
+    try { $walk = @(& git -C $ProjectDir rev-list --reverse "$OwnBase..HEAD" 2>$null | Where-Object { $_ }) } catch { $walk = @() }
+    $out = New-Object System.Collections.Generic.List[string]
+    $runStart = ''
+    $runPrev = ''
+    foreach ($c in $walk) {
+        if ($coveredSet.Contains($c)) {
+            if ($runStart) {
+                $out.Add($runStart + '^ ' + $runPrev) | Out-Null
+                $runStart = ''
+                $runPrev = ''
+            }
+            continue
+        }
+        if (-not $runStart) { $runStart = $c }
+        $runPrev = $c
+    }
+    if ($runStart) { $out.Add($runStart + '^ ' + $runPrev) | Out-Null }
+
+    if ($out.Count -eq 0) { return $script:StrideNoOwnCommits }
+    return (($out -join "`n") + "`n")
+}
+
 function Expand-OwnRanges {
     param([string]$Ranges, [string]$Path, [string[]]$GitArgs)
     $out = New-Object System.Collections.Generic.List[string]

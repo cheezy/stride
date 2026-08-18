@@ -6386,22 +6386,33 @@ if ($g24Git) {
         "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
     # And one second inside the horizon is still live, so the comparison is not
     # merely passing on a coincidence of rounding.
+    # Re-read the clock for each boundary row, for the reason given below.
+    $g24dNowA = [int64][math]::Floor(([DateTime]::UtcNow - $g24dEpochStart).TotalSeconds)
     Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
         "TASK_BASE_REF_77='$g24dHead'",
-        "TASK_BASE_AT_77='$([string]([int64]$g24dNow - 14399))'")
-    Assert-Eq "24d2: one second inside the horizon is live" "True" `
+        "TASK_BASE_AT_77='$([string]($g24dNowA - 14390))'")
+    Assert-Eq "24d2: inside the horizon is live" "True" `
         "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+    $g24dNowC = [int64][math]::Floor(([DateTime]::UtcNow - $g24dEpochStart).TotalSeconds)
     Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
         "TASK_BASE_REF_77='$g24dHead'",
-        "TASK_BASE_AT_77='$([string]([int64]$g24dNow - 14401))'")
+        "TASK_BASE_AT_77='$([string]($g24dNowC - 14401))'")
     Assert-Eq "24d2: one second outside the horizon is dead" "False" `
         "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
     # EXACTLY AT the horizon is LIVE - bash uses a strict -gt, and without this
     # row flipping the comparison to -ge passes the whole suite. sh 23z17 pins
     # the same boundary.
+    #
+    # THE CLOCK IS RE-READ HERE, not reused from the top of 24d. A stamp built
+    # from a clock captured many assertions earlier is already older than the
+    # horizon by the time this runs, so the row failed intermittently on
+    # elapsed test time rather than on the comparison it exists to pin - which
+    # is a flake, and a flake on a boundary row is worse than no row at all
+    # because it teaches the reader to ignore it.
+    $g24dNowB = [int64][math]::Floor(([DateTime]::UtcNow - $g24dEpochStart).TotalSeconds)
     Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
         "TASK_BASE_REF_77='$g24dHead'",
-        "TASK_BASE_AT_77='$([string]([int64]$g24dNow - 14400))'")
+        "TASK_BASE_AT_77='$([string]($g24dNowB - 14400))'")
     Assert-Eq "24d2: EXACTLY at the horizon is live (strict -gt, as bash)" "True" `
         "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
 

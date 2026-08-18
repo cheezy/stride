@@ -723,6 +723,12 @@ function Get-DeadOpenWindowId {
     }
     $open = @($bases | Where-Object { -not $heads.Contains($_.Id) })
     if ($open.Count -eq 0) { return $dead }
+    # NO GIT, NO EVIDENCE. Without this guard `& git` raises a terminating
+    # CommandNotFoundException under $ErrorActionPreference = 'Stop', the claim
+    # rewrite's catch sets its kept list to @(), and every surviving window
+    # record is erased from the rebuilt cache - the exact opposite of this
+    # function's own fail-safe contract. bash degrades with `|| return 0`.
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $dead }
     # STRICTLY greater, and no git below it. At or under the threshold this
     # proves nothing dead and touches nothing.
     if ($open.Count -le $SweepAt) { return $dead }
@@ -3649,9 +3655,22 @@ function Write-DiffUploadState {
         # exactly when it is needed - but writing it closes the recorded
         # divergence and gives the resolver its documented second source for the
         # case where a claim rebuilt the cache between capture and retry.
+        # REFUSE a value that cannot survive the file's one-line-per-field
+        # shape, exactly as Set-TaskRecord refuses one for the cache. This file
+        # is newline-delimited and its reader is FIRST-MATCH-WINS, so a base
+        # carrying an embedded LF writes an extra physical line - and an
+        # injected `narrowed=` would sit AHEAD of the genuine one and win,
+        # steering the self-heal's replayed verdict. The base is only gated on
+        # a leading dash upstream, and this file already documents that a
+        # repository shipping a .stride-env-cache supplies that value, so it is
+        # not trusted to be SHA-shaped here.
+        #
+        # Refusing the LINE rather than sanitising the value: a truncated or
+        # rewritten base is a wrong answer presented as a right one, where an
+        # absent line means "not recorded" and the reader already handles it.
         $lines = "task_id=$TaskId`nhttp_code=$HttpCode"
-        if ($Base) { $lines = $lines + "`nbase=$Base" }
-        if ($Narrowed) { $lines = $lines + "`nnarrowed=$Narrowed" }
+        if ($Base -and $Base -notmatch "[\r\n\0]") { $lines = $lines + "`nbase=$Base" }
+        if ($Narrowed -and $Narrowed -notmatch "[\r\n\0]") { $lines = $lines + "`nnarrowed=$Narrowed" }
         Set-Content -Path (Join-Path $ProjectDir '.stride-diff-upload-state') `
             -Value $lines -Encoding UTF8
     } catch {
@@ -3901,7 +3920,7 @@ function Invoke-FinalizeAfterDoing {
 #   * The self-heal RE-capture. Invoke-SelfHealChangedFilesUpload builds a
 #     snapshot only when none is on disk (a completion killed inside the
 #     after_doing budget). It never re-captures over an existing one, because
-#     Write-DiffUploadState records no base= or narrowed= line for it to replay
+#     (W2103) Write-DiffUploadState NOW records base= and narrowed=, so the replay is possible and is used; what stays unported is the RE-capture over an existing snapshot
 #     — and re-deriving those at retry time is the exact divergence D273 added
 #     persistence to prevent. Bash re-captures because bash persists them.
 #     (W2103) That reason is now gone: base= and narrowed= are persisted, so the
@@ -4158,6 +4177,14 @@ function Invoke-SelfHealChangedFilesUpload {
     # killed before its capture ran. An existing snapshot is left byte-for-byte
     # alone; see this function's header for why re-capturing here would be
     # worse than not.
+    # (W2103/D273) Declared BEFORE the conditional build so the state write at
+    # the end of this function is defined on EVERY path. The build below runs
+    # only when nothing is on disk; on the ordinary retry path - a snapshot
+    # already exists and is left byte-for-byte alone - there is no fresh base or
+    # verdict to carry, and the state file must then keep what it already had
+    # rather than being handed an undefined value.
+    $healBase = ''
+    $healNarrowed = $stateNarrowed
     if (-not (Test-Path -LiteralPath $snapshotPath -PathType Leaf)) {
         # Only build where there is something to capture FROM. Outside a git
         # repo the build can only ever produce '[]', and writing then uploading
@@ -4196,9 +4223,18 @@ function Invoke-SelfHealChangedFilesUpload {
             # needed. Only when NOTHING is on record does this fall through to
             # a live check - which is the documented older-state-file case.
             $healNarrowed = Resolve-CaptureNarrowing -TaskId $taskId -StateValue $stateNarrowed
-            if ($script:SnapOwnedRecorded -and $script:SnapOwnedSet -and
-                $script:SnapOwnedSet -ne $script:StrideOwnedOverflow) {
-                $healOwnedRange = Convert-OwnedSetToRange -Set $script:SnapOwnedSet
+            # THE DURABLE RECORD, not the process-local script state. This
+            # function runs in the before_review invocation - a DIFFERENT
+            # PROCESS from the after_doing one that computed the owned set - so
+            # $script:SnapOwnedRecorded is always $false here and gating on it
+            # made this whole block unreachable in production. bash reads
+            # task_owned_for for exactly that reason: the record survives across
+            # processes, the variable does not.
+            $healOwnedSet = ''
+            $healOwnedRec = Get-TaskOwnedRecord -TaskId $taskId
+            if ($healOwnedRec.Found) { $healOwnedSet = $healOwnedRec.Value }
+            if ($healOwnedSet -and $healOwnedSet -ne $script:StrideOwnedOverflow) {
+                $healOwnedRange = Convert-OwnedSetToRange -Set $healOwnedSet
                 if ($healOwnedRange -and (Invoke-ReplayNarrowingDecision -Narrowed $healNarrowed -TaskId $taskId)) {
                     $healRanges = $healOwnedRange
                 }
@@ -4210,7 +4246,15 @@ function Invoke-SelfHealChangedFilesUpload {
     }
 
     $httpCode = Invoke-ChangedFilesUpload -TaskId $taskId -ApiBase $apiBase -Token $token
-    Write-DiffUploadState -TaskId $taskId -HttpCode $httpCode
+    # (W2103/D273) Carry base= and narrowed= THROUGH the self-heal's own write.
+    # This write TRUNCATES the file, so omitting them here would drop the very
+    # lines the replay depends on - the retry would persist a state that has
+    # forgotten its own verdict, and a later reader would fall through to a live
+    # re-derivation. bash re-appends narrowed= at the same point for the same
+    # reason. $healNarrowed is the verdict this retry REPLAYED, not a fresh
+    # derivation, so persisting it keeps the capture-time fact intact.
+    Write-DiffUploadState -TaskId $taskId -HttpCode $httpCode `
+        -Base $healBase -Narrowed $healNarrowed
     # (W1658) before_review is the LAST retry. A non-2xx here means the diff is
     # definitively lost for this task — surface it loudly (distinct from the
     # per-attempt warning) and mark the state file unresolved so the failure is

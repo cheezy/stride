@@ -6857,11 +6857,77 @@ if ($g25Git) {
         "$(@($g25iKept | Where-Object { $_ -match '^TASK_BASE_REF_60[0-9]=' }).Count)"
     Assert-Eq "25i: CLOSED windows OLDER than the anchor cap at 20 of 25" "20" `
         "$(@($g25iKept | Where-Object { $_ -match '^TASK_BASE_REF_5[0-9][0-9]=' }).Count)"
-    # Oldest evicted first: 501-505 go, 506-525 stay.
+    # Oldest evicted first: 501-505 go, 506-525 stay. Pin the BOUNDARY, not
+    # just that 501 went - counting 20 survivors and checking 501 is absent
+    # holds even if the downward walk starts one index off, because only the
+    # IDENTITY of the evicted set changes. 505-out/506-in is what the walk
+    # start actually decides.
     Assert-Eq "25i: and the OLDEST closed windows are the ones evicted" "0" `
         "$(@($g25iKept | Where-Object { $_ -like 'TASK_BASE_REF_501=*' }).Count)"
+    Assert-Eq "25i: the eviction boundary is exact - 505 is evicted" "0" `
+        "$(@($g25iKept | Where-Object { $_ -like 'TASK_BASE_REF_505=*' }).Count)"
+    Assert-Eq "25i: and 506, one newer, survives" "1" `
+        "$(@($g25iKept | Where-Object { $_ -like 'TASK_BASE_REF_506=*' }).Count)"
+    Assert-Eq "25i: and the NEWEST closed window older than the anchor survives" "1" `
+        "$(@($g25iKept | Where-Object { $_ -like 'TASK_BASE_REF_525=*' }).Count)"
 } else {
     Write-Host "  SKIP: 25i: needs git" -ForegroundColor Yellow
+}
+
+# --- 25h2: the reserve DECREMENT and the strict threshold actually decide ---
+# 25h proves the reserved line is excluded, but all its windows have live bases
+# so the THRESHOLD never decides anything - deleting the decrement left the
+# suite green. These two fixtures make each arithmetic choice observable.
+if ($g25Git) {
+    # Reserve decrement: 21 open windows with unresolvable bases, one reserved.
+    # 20 remain, threshold drops 20 -> 19, so 20 > 19 sweeps them all. WITHOUT
+    # the decrement the threshold stays 20, 20 > 20 is false, and all 20 survive.
+    $g25h2 = New-G25Fixture -Name 'reservethreshold' -OpenCount 21 -GarbageBases
+    $ProjectDir = $g25h2.Dir
+    $script:EnvCache = Join-Path $g25h2.Dir '.stride-env-cache'
+    Assert-Eq "25h2: the reserve decrement lowers the threshold, so the sweep fires" "0" `
+        "$(@(Select-KeptWindowRecord -ReserveKey 'TASK_BASE_REF_101').Count)"
+
+    # Strict threshold: EXACTLY 20 open windows with unresolvable bases must NOT
+    # sweep, because the comparison is "more than", not "at least". Flipping
+    # -le to -lt sweeps all 20 here.
+    $g25h3 = New-G25Fixture -Name 'exactthreshold' -OpenCount 20 -GarbageBases
+    $ProjectDir = $g25h3.Dir
+    $script:EnvCache = Join-Path $g25h3.Dir '.stride-env-cache'
+    Assert-Eq "25h3: EXACTLY at the threshold nothing is swept - the comparison is strict" "20" `
+        "$(@(Select-KeptWindowRecord).Count)"
+    # One more and it fires, so the boundary is pinned from both sides.
+    $g25h4 = New-G25Fixture -Name 'overthreshold' -OpenCount 21 -GarbageBases
+    $ProjectDir = $g25h4.Dir
+    $script:EnvCache = Join-Path $g25h4.Dir '.stride-env-cache'
+    Assert-Eq "25h4: one over the threshold and the sweep fires" "0" `
+        "$(@(Select-KeptWindowRecord).Count)"
+} else {
+    Write-Host "  SKIP: 25h2: needs git" -ForegroundColor Yellow
+}
+
+# --- 25h5: the three control keys are excluded, UNPROVEN included ---
+# The claim-side cap used to omit TASK_BASE_REF_UNPROVEN where bash and the
+# other site both exclude it. W2103 fixes that by construction in the selector -
+# and "by construction" is worth nothing unasserted.
+if ($g25Git) {
+    $g25h5 = New-G25Fixture -Name 'controlkeys' -OpenCount 0
+    $ProjectDir = $g25h5.Dir
+    $script:EnvCache = Join-Path $g25h5.Dir '.stride-env-cache'
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_101='$($g25h5.Head)'",
+        "TASK_BASE_REF_TRUSTED='1'",
+        "TASK_BASE_REF_OWNER='101'",
+        "TASK_BASE_REF_UNPROVEN='1'")
+    $g25h5Kept = @(Select-KeptWindowRecord)
+    Assert-Eq "25h5: the real window record is kept" "1" `
+        "$(@($g25h5Kept | Where-Object { $_ -like 'TASK_BASE_REF_101=*' }).Count)"
+    foreach ($ctl in @('TRUSTED', 'OWNER', 'UNPROVEN')) {
+        Assert-Eq "25h5: the TASK_BASE_REF_$ctl control key is never treated as a window" "0" `
+            "$(@($g25h5Kept | Where-Object { $_ -like "TASK_BASE_REF_$ctl=*" }).Count)"
+    }
+} else {
+    Write-Host "  SKIP: 25h5: needs git" -ForegroundColor Yellow
 }
 
 # --- 25j (D273): the narrowing verdict is REPLAYED, not recomputed ---
@@ -6881,10 +6947,22 @@ if ($g25Git) {
     # is the whole point of persisting it.
     Assert-Eq "25j (D273): a recorded 'no' replays as WIDE, never re-derived" "False" `
         "$(Invoke-ReplayNarrowingDecision -Narrowed 'no' -TaskId '42')"
-    # Only an ABSENT verdict falls through to a live check. With no open window
-    # on record that is False, which also proves the fall-through really runs.
-    Assert-Eq "25j (D273): only an ABSENT verdict falls through to a live check" "False" `
+    # Only an ABSENT verdict falls through to a live check - and the fixture
+    # must make that check answer TRUE, or the assertion passes whether the
+    # fall-through runs or is replaced by a bare `return $false`. Seed a real
+    # open window with a fresh stamp so a live check genuinely says "narrow".
+    $g25jNow = [string][int64][math]::Floor(([DateTime]::UtcNow - (New-Object DateTime 1970,1,1,0,0,0,([DateTimeKind]::Utc))).TotalSeconds)
+    $g25jHead = (& git -C $g25j.Dir rev-parse HEAD 2>$null | Out-String).Trim()
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_ID='42'",
+        "TASK_BASE_REF_77='$g25jHead'",
+        "TASK_BASE_AT_77='$g25jNow'")
+    Assert-Eq "25j (D273): an ABSENT verdict falls through to a live check that really runs" "True" `
         "$(Invoke-ReplayNarrowingDecision -Narrowed '' -TaskId '42')"
+    # ...and a RECORDED verdict does not consult that live state at all, which
+    # is the whole point of persisting it: same cache, opposite answer.
+    Assert-Eq "25j (D273): a recorded 'no' ignores the live open window entirely" "False" `
+        "$(Invoke-ReplayNarrowingDecision -Narrowed 'no' -TaskId '42')"
 
     # The resolver prefers the PER-TASK RECORD over the state file, because the
     # state file holds one task and is truncated on every write - an interleaved

@@ -3625,28 +3625,43 @@ function Invoke-FinalizeAfterDoing {
 #     plainly rather than letting "writes the result before the PUT" above read
 #     as end-to-end parity — that over-claim is the exact shape this comment
 #     keeps having to correct.
-#   * The D236/D255/D273 nested-task narrowing ORCHESTRATION —
-#     attributed_commit_ranges, compute_owned_set, owned_set_to_range,
-#     record_task_owned/_narrowed, record_task_head_ref, another_open_window_exists,
-#     replay_narrowing_decision. The ENGINE is range-capable: the -OwnRanges
-#     parameter and Expand-OwnRanges are ported faithfully, so adding the
-#     orchestration later is a call-site change PLUS the record_task_* writers.
-#     (W2101) THE RECORD LAYER NOW EXISTS: Get-TaskRecordKey, the five key
-#     builders, Read-TaskRecord, the per-family readers and the four writers
-#     (Set-TaskOwnedRecord / _Narrowed / _HeadRef / _BaseAt) are ported and
-#     covered by test Group 22. What is still missing is the ORCHESTRATION that
-#     decides WHEN to call them, so the writers have no production call site and
-#     every -OwnRanges call site here still passes ''. Adding one is a decision
-#     about whether the value is trusted, not a mechanical wiring change.
-#     Cost, stated plainly: on this host an OUTER task's snapshot still contains
-#     commits its NESTED tasks made. That is an over-report. It is never an
-#     under-report and never another task's diff.
+#   * (W2102) THE NARROWING ORCHESTRATION IS NOW PORTED, and this entry moved
+#     out of NOT PORTED rather than being deleted, so the history of the claim
+#     stays readable. Get-AttributedCommitRange mirrors attributed_commit_ranges
+#     (D236 windows, the D244 purity heuristic and the D256 fixpoint over it),
+#     Get-OwnedCommitSet and Convert-OwnedSetToRange mirror compute_owned_set
+#     and owned_set_to_range, Test-AnotherOpenWindowExists mirrors
+#     another_open_window_exists with its D273 age horizon, and the four
+#     Set-Task*Record writers now have production call sites in
+#     Invoke-FinalizeAfterDoing. The D273 claim stamp is written inline in
+#     Invoke-FinalizeBeforeDoing, as bash writes it. Covered by test Group 24;
+#     test 22r records the call-site inventory and the provenance of each value.
+#     The over-report this entry used to describe - an OUTER task's snapshot
+#     containing its NESTED tasks' commits - is closed on this host.
 #   * The self-heal RE-capture. Invoke-SelfHealChangedFilesUpload builds a
 #     snapshot only when none is on disk (a completion killed inside the
 #     after_doing budget). It never re-captures over an existing one, because
 #     Write-DiffUploadState records no base= or narrowed= line for it to replay
 #     — and re-deriving those at retry time is the exact divergence D273 added
 #     persistence to prevent. Bash re-captures because bash persists them.
+#     (W2102) replay_narrowing_decision and resolve_capture_narrowing stay
+#     unported for that reason: there is nothing to replay FROM, so porting the
+#     replay alone would have to re-derive the verdict, which is the divergence.
+#   * (W2102) The D268/D274 window EVICTION policy —
+#     select_kept_window_records, dead_open_window_ids, and the
+#     STRIDE_OPEN_WINDOW_SWEEP_AT horizon. This side still caps kept windows by
+#     COUNT (Select-Object -Last 19/20), which is the shape D274 deleted from
+#     bash outright because no count can distinguish a live enclosing outer from
+#     an abandoned claim. W2103 owns the replacement. Cost until then: a
+#     long-lived outer window can be evicted by count while still open, which
+#     costs its narrowing and over-reports.
+#   * (W2102) One DELIBERATE DIVERGENCE in the retention re-emit. Bash carries
+#     head/owned across a rewrite as raw lines out of select_kept_window_records;
+#     Get-CarriedWindowRecordLine carries all four families through
+#     Read-TaskRecord + ConvertTo-ShSingleQuoted instead, because that selector
+#     is not ported and because D280's rule is that no raw line enters a
+#     rewrite. A malformed head/owned value is therefore DROPPED here and KEPT
+#     by bash. Fail-closed direction, and it self-heals on the next window.
 # Keep this list honest and specific. Every blanket parity claim this comment
 # has ever made was false within one release.
 function Invoke-FinalizeBeforeDoing {

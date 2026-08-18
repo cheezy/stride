@@ -3686,6 +3686,17 @@ function Invoke-FinalizeAfterDoing {
 #     (W2102) replay_narrowing_decision and resolve_capture_narrowing stay
 #     unported for that reason: there is nothing to replay FROM, so porting the
 #     replay alone would have to re-derive the verdict, which is the divergence.
+#     (W2102) The self-heal now computes ATTRIBUTED RANGES - that part needs no
+#     persisted state - but deliberately does NOT apply the D255 owned-set
+#     override or the D271 open-window gate that bash applies at the same point.
+#     Those two decide whether to NARROW, and deciding that at retry time is
+#     precisely what D273 added persistence to prevent: the retry's view of
+#     which windows are open is not the capture's view, so a live re-derivation
+#     can narrow a window whose verdict was never computed. Bash may apply them
+#     there because it replays a persisted verdict alongside; this port cannot,
+#     so it takes the wide path. The direction is over-report, the accepted
+#     failure. Implementing the gate without the replay would be a DIFFERENT
+#     divergence, and a less safe one, than leaving it out.
 #   * (W2102) The D268/D274 window EVICTION policy —
 #     select_kept_window_records, dead_open_window_ids, and the
 #     STRIDE_OPEN_WINDOW_SWEEP_AT horizon. This side still caps kept windows by
@@ -3946,7 +3957,7 @@ function Invoke-SelfHealChangedFilesUpload {
             # commits: the exact over-report this task closes everywhere else.
             $healBase = Resolve-SnapshotBaseTrust -Base $sel.Base
             $healRanges = ''
-            try { $healRanges = Get-AttributedCommitRange -OwnBase $healBase -SelfTaskId $TaskId }
+            try { $healRanges = Get-AttributedCommitRange -OwnBase $healBase -SelfTaskId $taskId }
             catch { $healRanges = '' }
             try { $healSnapshot = Build-ChangedFilesSnapshot -Base $healBase -OwnRanges $healRanges }
             catch { $healSnapshot = '[]' }

@@ -6409,12 +6409,27 @@ if ($g24Git) {
     # elapsed test time rather than on the comparison it exists to pin - which
     # is a flake, and a flake on a boundary row is worse than no row at all
     # because it teaches the reader to ignore it.
-    $g24dNowB = [int64][math]::Floor(([DateTime]::UtcNow - $g24dEpochStart).TotalSeconds)
-    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
-        "TASK_BASE_REF_77='$g24dHead'",
-        "TASK_BASE_AT_77='$([string]($g24dNowB - 14400))'")
-    Assert-Eq "24d2: EXACTLY at the horizon is live (strict -gt, as bash)" "True" `
-        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+    # A SETTLE LOOP, because an exact-boundary assertion against a LIVE clock
+    # cannot be made deterministic by shrinking the window. The fixture's
+    # floor() and the predicate's own floor() are independent reads, so whenever
+    # a whole-second boundary falls between them the age becomes 14401 and the
+    # row fails for a reason that has nothing to do with the comparison. My
+    # first de-flake shrank that window from seconds to milliseconds and left
+    # the flake in place; this removes it.
+    #
+    # The loop is a real discriminator, not a tolerance: with the strict -gt an
+    # attempt succeeds unless a second ticked mid-attempt, so five attempts
+    # effectively always pass; with -ge, age == horizon is DEAD on EVERY
+    # attempt, so all five fail and the row fails. The mutation stays caught.
+    $g24dAtHorizon = $false
+    for ($g24dTry = 0; $g24dTry -lt 5 -and -not $g24dAtHorizon; $g24dTry++) {
+        $g24dNowB = [int64][math]::Floor(([DateTime]::UtcNow - $g24dEpochStart).TotalSeconds)
+        Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+            "TASK_BASE_REF_77='$g24dHead'",
+            "TASK_BASE_AT_77='$([string]($g24dNowB - 14400))'")
+        $g24dAtHorizon = [bool](Test-AnotherOpenWindowExists -SelfTaskId '42')
+    }
+    Assert-Eq "24d2: EXACTLY at the horizon is live (strict -gt, as bash)" "True" "$g24dAtHorizon"
 
     # A stamp WIDER than ten digits falls back rather than being trusted. bash
     # bounds the width because a value past 2^63 wraps and makes a dead record

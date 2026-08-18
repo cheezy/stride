@@ -5305,30 +5305,67 @@ TASK_NARROWED_77='yes'
         Assert-Contains "22p: and $($p.Key) survives with its VALUE intact" `
             $p.Line "$($g22SeqCache -join "`n")"
     }
-    # NO ORPHAN: a partner whose base did NOT survive must go with it. Partners
-    # are derived from the surviving base lines, so this holds by construction -
-    # asserted anyway, because the construction is what a future edit would
-    # break, and an orphaned head record is a half-bounded window.
-    Assert-Eq "22p: a partner whose base did not survive leaves no orphan line" "0" `
-        "$(@($g22SeqCache | Where-Object { $_ -match '^TASK_(HEAD_REF|OWNED|BASE_AT|NARROWED)_' -and $_ -notmatch '_77=' }).Count)"
+    # NO ORPHAN: every partner record must have a surviving base record for the
+    # SAME id. Partners are derived from the base lines that survived, so this
+    # holds by construction - asserted anyway, because the construction is what
+    # a future edit would break, and an orphaned head record is a half-bounded
+    # window. Checked by id rather than by hard-coding 77: the claiming task
+    # legitimately gains its own TASK_BASE_AT_ stamp, which is not an orphan.
+    $g22BaseIds = @($g22SeqCache |
+        Where-Object { $_ -match '^TASK_BASE_REF_([0-9]+)=' } |
+        ForEach-Object { if ($_ -match '^TASK_BASE_REF_([0-9]+)=') { $Matches[1] } })
+    $g22Orphans = @($g22SeqCache |
+        Where-Object { $_ -match '^TASK_(?:HEAD_REF|OWNED|BASE_AT|NARROWED)_([0-9]+)=' } |
+        Where-Object {
+            $null = $_ -match '^TASK_(?:HEAD_REF|OWNED|BASE_AT|NARROWED)_([0-9]+)='
+            $g22BaseIds -notcontains $Matches[1]
+        })
+    Assert-Eq "22p: every surviving partner record still has its base - no orphans" "0" `
+        "$($g22Orphans.Count)"
 }
 
-# --- 22r: the tripwire on constraint A ---
-# DELIBERATE TRIPWIRE, not a permanent property. The record writers have no
-# production call site, which is what makes "server input cannot reach a record"
-# structurally true rather than argued. When G413 adds one, UPDATE this test and
-# record where that call's value comes from — do not simply delete it.
+# --- 22r: the record writers' call-site INVENTORY ---
+# W2101 shipped this as a tripwire on "no production call site", with the
+# instruction to UPDATE it rather than delete it when G413 added one. W2102 did,
+# so it is now an inventory: a per-writer expected count, and a recorded
+# provenance for every call's VALUE. What it defends has not changed - the
+# original point was that server input must not reach a record - but the way it
+# defends it has. A count of zero could only say "nobody calls these"; the
+# inventory says "these are the callers, and here is where each value comes
+# from", so an UNREVIEWED new call site, in particular one whose value comes off
+# the API response, breaks the test.
+#
+# PROVENANCE, all locally derived, none server-supplied:
+#   Set-TaskOwnedRecord    1 - Invoke-FinalizeAfterDoing. Value is
+#                              Get-OwnedCommitSet over a locally observed HEAD
+#                              delta, i.e. git rev-list output.
+#   Set-TaskNarrowedRecord 2 - Invoke-FinalizeAfterDoing, both. Values are the
+#                              literal 'no' (the pre-capture safe default) and
+#                              the locally computed verdict.
+#   Set-TaskHeadRefRecord  1 - Invoke-FinalizeAfterDoing, no -Head argument, so
+#                              the value is git rev-parse HEAD.
+#   Set-TaskBaseAtRecord   0 - the claim stamp is written INLINE into
+#                              Invoke-FinalizeBeforeDoing's line array, as bash
+#                              also does. Calling the writer there would re-read
+#                              and rewrite the file mid-construction of the very
+#                              array about to be written. Asserted at 0 so its
+#                              continued lack of a caller is a recorded fact
+#                              rather than an unnoticed one.
 # COMMENT LINES DO NOT COUNT. The parity note names these writers in prose, and
 # a raw occurrence count reads that as four call sites — which is how this
 # tripwire first fired on its own documentation. Skip comment lines, then
 # subtract the one definition each.
 $g22CodeLines = @(Get-Content -Path $HookScript | Where-Object { $_.TrimStart() -notlike '#*' })
-$g22CallSites = 0
-foreach ($w in @('Set-TaskOwnedRecord', 'Set-TaskNarrowedRecord', 'Set-TaskHeadRefRecord', 'Set-TaskBaseAtRecord')) {
-    $hits = @($g22CodeLines | Where-Object { $_ -match [regex]::Escape($w) }).Count
-    $g22CallSites += ($hits - 1)
+foreach ($w in @(
+    @{ Name = 'Set-TaskOwnedRecord';    Expect = 1 },
+    @{ Name = 'Set-TaskNarrowedRecord'; Expect = 2 },
+    @{ Name = 'Set-TaskHeadRefRecord';  Expect = 1 },
+    @{ Name = 'Set-TaskBaseAtRecord';   Expect = 0 }
+)) {
+    $hits = @($g22CodeLines | Where-Object { $_ -match [regex]::Escape($w.Name) }).Count
+    Assert-Eq "22r: $($w.Name) has exactly $($w.Expect) production call site(s)" `
+        "$($w.Expect)" "$($hits - 1)"
 }
-Assert-Eq "22r: the record writers still have no production call site (tripwire)" "0" "$g22CallSites"
 
 }
 

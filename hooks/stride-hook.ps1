@@ -54,6 +54,15 @@ $script:StrideNoOwnCommits = '__stride_no_own_commits__'
 # does too, but for the opposite reason (a truncated list would mis-subtract).
 $script:StrideOwnedOverflow = 'OVERFLOW'
 
+# (W2102/D255) The after_doing loop delta, and the once-per-completion guards
+# around recording it. Declared here because Set-StrictMode makes reading an
+# unset variable an error.
+$script:SnapOwnedH0 = ''
+$script:SnapOwnedH1 = ''
+$script:SnapOwnedLoopRan = $false
+$script:SnapOwnedRecorded = $false
+$script:SnapOwnedSet = ''
+
 # (D226) Atomic env-cache write, mirroring the bash twin's write_env_cache.
 # Every truncating write goes through here so no reader can observe a partial
 # cache. The temp is staged in .stride/ — already hard-excluded from capture
@@ -3472,12 +3481,46 @@ function Invoke-FinalizeAfterDoing {
         }
     } catch { }
 
+    # (W2102/D255) Record what THIS task's own after_doing loop authored - once
+    # per completion, and only when the section actually ran (the empty-section
+    # plugin-mode path never sets the flag, so it records nothing and stays
+    # byte-identical). '' is recorded DELIBERATELY: "ran and authored nothing"
+    # is a fact, distinct from no-record. Written BEFORE the capture so the
+    # before_review self-heal on this same completion reads the fresh record,
+    # and gated on SnapOwnedRecorded so the early pre-loop call can never
+    # consume a stale record from a previous completion of this id.
+    if ($script:SnapOwnedLoopRan -and -not $script:SnapOwnedRecorded -and $taskId) {
+        $script:SnapOwnedSet = Get-OwnedCommitSet -H0 $script:SnapOwnedH0 -H1 $script:SnapOwnedH1
+        $null = Set-TaskOwnedRecord -TaskId $taskId -Value $script:SnapOwnedSet
+        $script:SnapOwnedRecorded = $true
+    }
+    # (W2102/D273) Stamp the SAFE default BEFORE the capture runs, not just the
+    # real verdict after it - the same write-before-capture guarantee the owned
+    # record takes above, and for the same reason. Without it a completion
+    # killed inside the capture (exactly what the self-heal exists for) can
+    # leave a PREVIOUS window's `yes` on record for the retry to replay,
+    # narrowing a window whose verdict was never computed.
+    $narrowed = 'no'
+    if ($taskId) { $null = Set-TaskNarrowedRecord -TaskId $taskId -Value $narrowed }
+
     $snapshot = '[]'
     if (-not $script:SnapBaseRefused) {
+        # (W2102 C3) Still ''. The writers land in this commit so their records
+        # become observable; CONSUMING them changes what a snapshot contains and
+        # is deliberately held for the next commit, so a change in capture
+        # output can only be attributed to that one.
         try { $snapshot = Build-ChangedFilesSnapshot -Base $script:SnapBaseResolved -OwnRanges '' }
         catch { $snapshot = '[]' }
     }
     Write-ChangedFilesSnapshot -Json $snapshot
+
+    # (W2102/D236) Stamp where THIS task's commits stop, so an outer task
+    # completing later can subtract this window. Written AFTER the capture so
+    # it records the HEAD the snapshot was actually taken against.
+    if ($taskId) { $null = Set-TaskHeadRefRecord -TaskId $taskId }
+    # (W2102/D273) Stamp the verdict this capture reached, next to the head it
+    # was taken against and BEFORE any PUT is attempted.
+    if ($taskId) { $null = Set-TaskNarrowedRecord -TaskId $taskId -Value $narrowed }
 
     $apiBase = Resolve-StrideApiUrl
     $token = Resolve-StrideApiToken
@@ -3673,6 +3716,29 @@ function Invoke-FinalizeBeforeDoing {
             $newLines = $newLines +
                 ("TASK_BASE_REF_OWNER=" + (ConvertTo-ShSingleQuoted -Value $owner)) +
                 ("$ownerKey=" + (ConvertTo-ShSingleQuoted -Value $baseRef))
+            # (W2102/D273) Stamp this window's OPEN TIME next to the base it
+            # dates, from the same validated owner id. Test-AnotherOpenWindow-
+            # Exists ages a record out by this stamp rather than by the base
+            # commit's committer time, because committer time measures when the
+            # repo last moved, not when the claim happened - a task claiming on
+            # an already-old HEAD would read as abandoned from its first nested
+            # completion onward, silently disabling the narrowing in the common
+            # case. An unstampable clock leaves NO line, which the predicate
+            # reads as dead: the safe direction.
+            #
+            # Written INLINE rather than through Set-TaskBaseAtRecord, mirroring
+            # bash, which also emits it inline here. The writer re-reads and
+            # rewrites the cache file, and this block is mid-construction of the
+            # very array about to be written - calling it here would write the
+            # file twice and race its own output.
+            $atKey = Get-TaskBaseAtKey -TaskId $owner
+            if ($atKey) {
+                $epochStart = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)
+                $atNow = [string][int64][math]::Floor(([DateTime]::UtcNow - $epochStart).TotalSeconds)
+                if ($atNow -match '^[0-9]+\z') {
+                    $newLines = $newLines + ("$atKey=" + (ConvertTo-ShSingleQuoted -Value $atNow))
+                }
+            }
         } else {
             # (D226) Marks a base written without a provable owner, so a later
             # completion can tell it apart from a pre-fix cache. Mirrors the
@@ -3925,6 +3991,17 @@ function Invoke-StrideSection {
 
     Set-Location $ProjectDir
 
+    # (W2102/D255) Anchor the owned-commit delta: HEAD BEFORE the first section
+    # command runs. after_doing only - after_goal reuses this function and must
+    # stay inert.
+    if ($HookName -eq 'after_doing') {
+        $script:SnapOwnedH0 = ''
+        try {
+            $h0 = (& git -C $ProjectDir rev-parse HEAD 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $h0) { $script:SnapOwnedH0 = ([string]$h0).Trim() }
+        } catch { $script:SnapOwnedH0 = '' }
+    }
+
     # Early per-file diff snapshot upload (W1093 parity, ported in W1095) —
     # the after_doing section runs the full quality gate, and the 600s hook
     # timeout can kill this process mid-loop, silently losing the diff
@@ -4121,6 +4198,19 @@ function Invoke-StrideSection {
         }
 
         $secCmdIndex++
+    }
+
+    # (W2102/D255) Close the owned-commit delta. Gated on H0 being set, so a
+    # section that never started records nothing and the retry begins a fresh
+    # window. An unresolvable HEAD (no commits yet) also records nothing.
+    if ($HookName -eq 'after_doing' -and $script:SnapOwnedH0) {
+        try {
+            $h1 = (& git -C $ProjectDir rev-parse HEAD 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $h1) {
+                $script:SnapOwnedH1 = ([string]$h1).Trim()
+                $script:SnapOwnedLoopRan = $true
+            }
+        } catch { }
     }
 
     # Per-file diff snapshot PUT — no-op outside after_doing (gates on the

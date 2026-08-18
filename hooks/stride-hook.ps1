@@ -62,6 +62,9 @@ $script:SnapOwnedH1 = ''
 $script:SnapOwnedLoopRan = $false
 $script:SnapOwnedRecorded = $false
 $script:SnapOwnedSet = ''
+# (W2102) The attributed ranges, computed once with the base so the pre-loop and
+# post-loop captures classify identically - the ordering bash uses.
+$script:SnapOwnRanges = ''
 
 # (D226) Atomic env-cache write, mirroring the bash twin's write_env_cache.
 # Every truncating write goes through here so no reader can observe a partial
@@ -133,7 +136,7 @@ function Write-EnvCache {
 # on this side could read or write them and the later G413 children had nowhere
 # to persist a verdict.
 #
-# THIS LAYER HAS NO PRODUCTION CALL SITE. That is deliberate, not unfinished:
+# (W2102) THIS LAYER NOW HAS PRODUCTION CALL SITES - four of them, inventoried by test 22r. It shipped in W2101 with none, which is what the rest of this header describes:
 # deciding WHEN to write a record is the orchestration (attributed_commit_ranges,
 # compute_owned_set, another_open_window_exists, replay_narrowing_decision),
 # which is explicitly out of scope. Writing a record at a moment bash does not
@@ -2032,12 +2035,14 @@ function Get-HookEnvFromPayload {
             # re-opens the hole it closes.
             # (D273) TASK_NARROWED and TASK_BASE_AT are fenced here for parity
             # with the bash twin, where an unfenced server-supplied verdict or
-            # claim stamp could steer the self-heal into under-reporting. This
-            # port implements none of the window-narrowing subsystem, so
-            # nothing here READS those families and the keys are inert either
-            # way — they are fenced so the two scripts declare the SAME
-            # client-owned namespace rather than leaving a gap for whenever the
-            # subsystem is ported. TASK_OWNED is added for the same reason and
+            # claim stamp could steer the self-heal into under-reporting.
+            # (W2102) THIS FENCE IS NOW LOAD-BEARING, not a parity gesture.
+            # When it was written this port read none of these families and the
+            # keys were inert either way. The narrowing engine now READS them -
+            # Test-AnotherOpenWindowExists takes window heads from the process
+            # environment, which is exactly what this fence keeps a server
+            # response out of - so a gap here would let a forged head or stamp
+            # steer attribution rather than sit unused. TASK_OWNED is added for the same reason and
             # in the same breath: the bash twin has fenced it since D255, this
             # side never did, and a parity claim that skipped it would be
             # false the moment anyone relied on it.
@@ -2049,9 +2054,10 @@ function Get-HookEnvFromPayload {
             # A forged head ref defines where a task's window closes, so it
             # steers commit attribution — and it is durable, because a record
             # forged for a task OTHER than the completing one is never
-            # repaired. Fenced here for parity even though this port
-            # implements none of the window-attribution subsystem, so the two
-            # scripts declare the same client-owned namespace.
+            # repaired. (W2102) Fenced for parity when written, and now for
+            # its own sake: the attribution engine reads head records to bound
+            # every window it classifies, so an unfenced one would decide which
+            # commits this task is credited with.
             if ($key -eq 'HOOK_NAME' -or $key -like 'TASK_BASE_REF*' -or $key -like 'TASK_HEAD_REF*' -or $key -like 'TASK_OWNED*' -or $key -like 'TASK_NARROWED*' -or $key -like 'TASK_BASE_AT*' -or $key -like 'STRIDE_*') { continue }
             $envMap[$key] = [string]$prop.Value
         }
@@ -2624,8 +2630,21 @@ function Test-AnotherOpenWindowExists {
     if ($SelfTaskId) { $selfKey = Get-TaskBaseRefKey -TaskId $SelfTaskId }
     # No usable clock means the age check cannot run, and D271's rule is that a
     # validation failure vouches for nothing.
+    # THE SAME EPOCH EXPRESSION THE WRITER USES, and that is the whole point.
+    # `Get-Date -UFormat %s` computes seconds from LOCAL time on Windows
+    # PowerShell 5.1 - the shipping host - while pwsh 7 returns true UTC. The
+    # stamp is written from UtcNow, so the two disagreed by the host's offset:
+    # west of UTC every fresh window yields a NEGATIVE age and is dropped by the
+    # guard below, east of +4h every fresh window exceeds the horizon. Either
+    # way this predicate answers "no open window" unconditionally and the D255
+    # narrowing never engages - the gate silently inert exactly where it was
+    # ported to run. A fixture deriving both sides from the same call cannot see
+    # it, which is why 24d2 below compares the reader's clock to the WRITER's.
     $now = 0
-    try { $now = [int64][Math]::Floor((Get-Date -UFormat %s)) } catch { return $false }
+    try {
+        $epochStart = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)
+        $now = [int64][math]::Floor(([DateTime]::UtcNow - $epochStart).TotalSeconds)
+    } catch { return $false }
     if ($now -le 0) { return $false }
     $maxAge = [int64](Get-OpenWindowMaxAgeSecs)
 
@@ -3468,6 +3487,19 @@ function Invoke-FinalizeAfterDoing {
             $script:SnapBaseRefused = $false
             $script:SnapBaseResolved = Resolve-SnapshotBaseTrust -Base $sel.Base
         }
+        # (W2102) Compute the attributed ranges ONCE, here, alongside the base -
+        # bash does the same inside its SNAP_BASE_RESOLVED_DONE block, so BOTH
+        # the pre-loop and post-loop captures use the PRE-LOOP classification.
+        # Computing them per call instead would classify the second capture
+        # against post-loop HEAD and against a window that closed during
+        # after_doing. The outcome happens not to differ today, but this task's
+        # point is mirroring the reference, and it also pays for a second full
+        # classification per completion.
+        $script:SnapOwnRanges = ''
+        if (-not $script:SnapBaseRefused) {
+            try { $script:SnapOwnRanges = Get-AttributedCommitRange -OwnBase $script:SnapBaseResolved -SelfTaskId $taskId }
+            catch { $script:SnapOwnRanges = '' }
+        }
         $script:SnapBaseResolvedDone = $true
     }
     # Sweep any capture temp orphaned by a previous run's hard kill. The
@@ -3516,12 +3548,9 @@ function Invoke-FinalizeAfterDoing {
 
     $snapshot = '[]'
     if (-not $script:SnapBaseRefused) {
-        # (W2102/D236+D244+D256) The attributed ranges for THIS task: every
-        # other recorded window subtracted, but only where subtracting it is
-        # provably safe.
-        $capRanges = ''
-        try { $capRanges = Get-AttributedCommitRange -OwnBase $script:SnapBaseResolved -SelfTaskId $taskId }
-        catch { $capRanges = '' }
+        # (W2102/D236+D244+D256) The attributed ranges for THIS task, computed
+        # once above with the base and reused by both captures, as bash does.
+        $capRanges = $script:SnapOwnRanges
         # (D255/D271) When this completion's own loop authored commits, its
         # committed contribution is exactly that delta plus the working tree,
         # and commits in base..H0 - an outer task's mid-window work, or this
@@ -3544,7 +3573,17 @@ function Invoke-FinalizeAfterDoing {
                 if (Test-AnotherOpenWindowExists -SelfTaskId $taskId) {
                     $capRanges = $ownedRange
                     $narrowed = 'yes'
-                } elseif ($capRanges -and $capRanges -ne $script:StrideNoOwnCommits) {
+                } elseif ($capRanges) {
+                    # No sentinel exclusion here, matching bash exactly.
+                    # Expand-OwnRanges SKIPS a sentinel line, so appending a
+                    # real range to it expands to just that range - which is
+                    # bash's behaviour. Excluding the sentinel instead would
+                    # emit an EMPTY snapshot where bash emits the loop's own
+                    # commits: the one direction this design forbids, a
+                    # narrower snapshot. Effectively unreachable (the sentinel
+                    # needs every commit covered, and the loop's own commits are
+                    # the newest so no other window's head can cover them) - but
+                    # "unreachable" is not a reason to diverge from the twin.
                     $capRanges = $capRanges.TrimEnd("`n") + "`n" + $ownedRange
                 }
             }
@@ -3888,7 +3927,18 @@ function Invoke-SelfHealChangedFilesUpload {
         $sel = Resolve-TaskSnapshotBase -TaskId $taskId
         $healSnapshot = '[]'
         if (-not $sel.Refused) {
-            try { $healSnapshot = Build-ChangedFilesSnapshot -Base (Resolve-SnapshotBaseTrust -Base $sel.Base) -OwnRanges '' }
+            # (W2102) Attribute here too. bash's equivalent states that
+            # attribution belongs to EVERY non-refused path, not just the
+            # base-selection branch, and unlike the narrowing REPLAY this needs
+            # no persisted state - the engine takes only a base and a task id.
+            # Passing '' here left the one path that can still build a snapshot
+            # (before_review, nothing on disk) absorbing nested children's
+            # commits: the exact over-report this task closes everywhere else.
+            $healBase = Resolve-SnapshotBaseTrust -Base $sel.Base
+            $healRanges = ''
+            try { $healRanges = Get-AttributedCommitRange -OwnBase $healBase -SelfTaskId $TaskId }
+            catch { $healRanges = '' }
+            try { $healSnapshot = Build-ChangedFilesSnapshot -Base $healBase -OwnRanges $healRanges }
             catch { $healSnapshot = '[]' }
         }
         Write-ChangedFilesSnapshot -Json $healSnapshot

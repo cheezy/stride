@@ -6204,9 +6204,19 @@ if ($g24Git) {
     $g24aAll = @(& git -C $g24aDir rev-list HEAD 2>$null | Where-Object { $_ })
     $g24aHead = $g24aAll[0]
     $g24aRoot = $g24aAll[$g24aAll.Count - 1]
+    # These two guards are belt-and-braces: git resolves '..sha' and 'a..a' to an
+    # empty rev-list anyway, so deleting them still passes. Assert them against
+    # an endpoint git would REJECT rather than resolve, so the guard is what
+    # produces the answer rather than git's tolerance.
     Assert-Eq "24a: missing endpoints yield the empty record" "" (Get-OwnedCommitSet -H0 '' -H1 $g24aHead)
+    Assert-Eq "24a: a missing H1 yields the empty record even for a valid H0" "" `
+        (Get-OwnedCommitSet -H0 $g24aHead -H1 '')
     Assert-Eq "24a: identical endpoints yield the empty record, not a SHA" "" `
         (Get-OwnedCommitSet -H0 $g24aHead -H1 $g24aHead)
+    # An UNRESOLVABLE endpoint must degrade to the empty record rather than
+    # throwing or emitting git's error text as if it were a SHA list.
+    Assert-Eq "24a: an unresolvable endpoint yields the empty record" "" `
+        (Get-OwnedCommitSet -H0 'deadbeefcafedeadbeefcafedeadbeefcafedead' -H1 $g24aHead)
     $g24aSet = Get-OwnedCommitSet -H0 $g24aRoot -H1 $g24aHead
     Assert-Eq "24a: a normal delta returns every commit in the span" "3" `
         "$(@($g24aSet -split ' ' | Where-Object { $_ }).Count)"
@@ -6230,6 +6240,12 @@ if ($g24Git) {
     $g24bSet = Get-OwnedCommitSet -H0 $g24bAll[$g24bAll.Count - 1] -H1 $g24bAll[0]
     Assert-Eq "24a2: 21 commits yields the OVERFLOW sentinel" "OVERFLOW" $g24bSet
     Assert-Eq "24a2: and never a truncated SHA list" "False" "$($g24bSet -match '[0-9a-f]{40}')"
+    # EXACTLY 20 is under the cap and must return the list. Without this row,
+    # flipping the cap from -gt 20 to -ge 20 passes the whole suite - the
+    # boundary is the only thing that distinguishes the two.
+    $g24bAt20 = Get-OwnedCommitSet -H0 $g24bAll[20] -H1 $g24bAll[0]
+    Assert-Eq "24a2: exactly 20 commits is UNDER the cap and returns the list" "20" `
+        "$(@($g24bAt20 -split ' ' | Where-Object { $_ }).Count)"
 } else {
     Write-Host "  SKIP: 24a2: the overflow case needs git" -ForegroundColor Yellow
 }
@@ -6280,7 +6296,18 @@ if ($g24Git) {
     $ProjectDir = $g24dDir
     $script:EnvCache = Join-Path $g24dDir '.stride-env-cache'
     $g24dHead = (& git -C $g24dDir rev-parse HEAD 2>$null | Out-String).Trim()
-    $g24dNow = [string][int64][Math]::Floor((Get-Date -UFormat %s))
+    # THE WRITER'S EPOCH EXPRESSION, deliberately - not Get-Date -UFormat %s.
+    # Two reasons, and the second is the one that matters. (a) -UFormat rounds
+    # UP, so a stamp built with it lands a second in the FUTURE relative to the
+    # reader and is correctly dropped by the negative-age guard, making the
+    # fixture flaky. (b) More importantly, a fixture that builds the stamp with
+    # the same expression the reader uses can never detect the two disagreeing -
+    # which is exactly the bug a security review found here: the reader used
+    # -UFormat %s (LOCAL time on Windows PowerShell 5.1, the shipping host)
+    # against a stamp written from UtcNow, so the whole gate was silently inert
+    # off-UTC. Building the stamp the way the WRITER does compares the two.
+    $g24dEpochStart = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)
+    $g24dNow = [string][int64][math]::Floor(([DateTime]::UtcNow - $g24dEpochStart).TotalSeconds)
     $g24dOldStamp = [string]([int64]$g24dNow - 99999)
 
     # A window with a HEAD partner is CLOSED and vouches for nothing.
@@ -6347,6 +6374,77 @@ if ($g24Git) {
         "TASK_BASE_AT_10_0='$g24dNow'")
     Assert-Eq "24d: a record under a non-integer id vouches for nothing" "False" `
         "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+    # 24d2: the reader's clock and the WRITER's stamp must agree. The stamp is
+    # built exactly as Invoke-FinalizeBeforeDoing builds it, and a window
+    # stamped "now" must read LIVE. If the two expressions ever diverge again -
+    # a local-vs-UTC mismatch being the reproduced case - this fails, where a
+    # fixture sharing the reader's expression would stay green.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dHead'",
+        "TASK_BASE_AT_77='$g24dNow'")
+    Assert-Eq "24d2: a window stamped by the WRITER's clock reads live to the reader" "True" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+    # And one second inside the horizon is still live, so the comparison is not
+    # merely passing on a coincidence of rounding.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dHead'",
+        "TASK_BASE_AT_77='$([string]([int64]$g24dNow - 14399))'")
+    Assert-Eq "24d2: one second inside the horizon is live" "True" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dHead'",
+        "TASK_BASE_AT_77='$([string]([int64]$g24dNow - 14401))'")
+    Assert-Eq "24d2: one second outside the horizon is dead" "False" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+    # EXACTLY AT the horizon is LIVE - bash uses a strict -gt, and without this
+    # row flipping the comparison to -ge passes the whole suite. sh 23z17 pins
+    # the same boundary.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dHead'",
+        "TASK_BASE_AT_77='$([string]([int64]$g24dNow - 14400))'")
+    Assert-Eq "24d2: EXACTLY at the horizon is live (strict -gt, as bash)" "True" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+
+    # A stamp WIDER than ten digits falls back rather than being trusted. bash
+    # bounds the width because a value past 2^63 wraps and makes a dead record
+    # read LIVE - the under-report direction. PowerShell does not wrap the same
+    # way, but the two executors must skip the SAME records or a shared
+    # checkout narrows on one host and not the other.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dHead'",
+        "TASK_BASE_AT_77='99999999999'")
+    Assert-Eq "24d2: an 11-digit stamp is refused, not trusted" "False" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+
+    # A base that resolves but is NOT an ancestor of HEAD vouches for nothing.
+    # Without this row, deleting the merge-base --is-ancestor call passes the
+    # whole suite. Built on a divergent branch so the commit is real and
+    # resolvable yet unreachable from HEAD.
+    $null = & git -C $g24dDir checkout -q -b g24-side 2>$null
+    Set-Content -Path (Join-Path $g24dDir 'side.txt') -Value 'side' -Encoding UTF8
+    $null = & git -C $g24dDir add -A 2>$null
+    $null = & git -C $g24dDir commit -q -m 'side' 2>$null
+    $g24dSide = (& git -C $g24dDir rev-parse HEAD 2>$null | Out-String).Trim()
+    $null = & git -C $g24dDir checkout -q - 2>$null
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dSide'",
+        "TASK_BASE_AT_77='$g24dNow'")
+    Assert-Eq "24d2: a resolvable base that is NOT an ancestor of HEAD vouches for nothing" "False" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+
+    # POSITIVE CONTROL for the whole of 24d. Every negative assertion above is
+    # satisfied by this predicate returning False for ANY reason - an empty
+    # head SHA, an unreadable cache, a failed clock read and a genuine correct
+    # verdict are indistinguishable without it. Assert the fixture is sane and
+    # that the same cache shape the negatives use still reads LIVE when it
+    # should, so a wholesale False cannot masquerade as seven passes.
+    Assert-Eq "24d2: CONTROL - the fixture's head SHA is a real 40-char object" "True" `
+        "$($g24dHead -match '^[0-9a-f]{40}\z')"
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dHead'",
+        "TASK_BASE_AT_77='$g24dNow'")
+    Assert-Eq "24d2: CONTROL - the same fixture shape still reads LIVE" "True" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
 } else {
     Write-Host "  SKIP: 24d: the open-window gate needs git" -ForegroundColor Yellow
 }
@@ -6377,10 +6475,15 @@ if ($g24Git) {
         "TASK_BASE_REF_77='$($g24eAll[3])'")
     [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $g24eAll[1], 'Process')
     $g24eOne = Get-AttributedCommitRange -OwnBase $g24eBase -SelfTaskId '42'
-    Assert-Eq "24e: a nested closed window is subtracted, leaving the surrounding runs" "True" `
-        "$($g24eOne -ne '' -and $g24eOne -ne $script:StrideNoOwnCommits)"
-    Assert-Eq "24e: and the nested window's own commits are NOT in the output" "False" `
-        "$($g24eOne -match [regex]::Escape($g24eAll[2]))"
+    # ASSERT THE EXACT RANGE LIST. The first version of this case asserted that
+    # an interior commit was absent from the output, which holds under EVERY
+    # mutation: a covered commit is never a run boundary, and an uncovered one
+    # here is interior to the run, so the SHA appears in neither outcome. The
+    # window spans two commits with no owned record, so its residual is 2, it
+    # reads AMBIGUOUS, nothing is subtracted, and the whole span is one run.
+    # Pinning the exact output is what makes the classification observable.
+    Assert-Eq "24e: an AMBIGUOUS window subtracts nothing - one run over the whole span" `
+        ($g24eAll[3] + '^ ' + $g24eAll[0] + "`n") $g24eOne
 
     # A task ALL of whose commits were made by nested windows yields the
     # SENTINEL, not '' - it must produce an EMPTY snapshot rather than falling
@@ -6432,8 +6535,12 @@ if ($g24Git) {
         "TASK_OWNED_77='$($g24eAll[2])'")
     [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $g24eAll[1], 'Process')
     $g24eOwned = Get-AttributedCommitRange -OwnBase $g24eBase -SelfTaskId '42'
-    Assert-Eq "24e (D255): an owned record's exact SHAs are subtracted" "False" `
-        "$($g24eOwned -match [regex]::Escape($g24eAll[2]))"
+    # The owned record names c2 exactly, so c2 is subtracted and the walk splits
+    # into TWO runs around it. Asserting the exact split is what pins D255
+    # supersession: the earlier "c2 is absent from the output" form passed with
+    # and without the owned record, because c2 is a run INTERIOR either way.
+    Assert-Eq "24e (D255): an owned record's SHAs are subtracted, splitting the run" `
+        ($g24eAll[3] + '^ ' + $g24eAll[3] + "`n" + $g24eAll[1] + '^ ' + $g24eAll[0] + "`n") $g24eOwned
     [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $null, 'Process')
     # (D256) THE SUBSET DIRECTION, isolated. The sibling case above does not
     # discriminate it - both operand orders make both siblings ambiguous - so

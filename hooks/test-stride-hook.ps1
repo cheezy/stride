@@ -2652,6 +2652,15 @@ echo "claimed"
     # stripped TASK_BASE_REF_UNPROVEN, which the bash side has stripped since
     # D226 — a divergence the deny-list shape hid.
     #
+    # (W2102) The seeded records are QUOTED, which is the shape every writer in
+    # this version emits. It matters here because W2102's retention re-emit
+    # reads partners through Read-TaskRecord's strict ^KEY='[^']*'\z check
+    # rather than copying their lines: a legacy BARE partner record is not a
+    # record to that reader and is dropped. That degrades toward absence and
+    # self-heals on the next window - the same fail-closed trade D280's shape
+    # gate makes - but a bare fixture would be testing a pre-D280 cache shape
+    # rather than this one.
+    #
     # The seeded cache carries one record from each of the five per-task
     # families, all of which must survive: stripping TASK_BASE_AT_ or
     # TASK_NARROWED_ would reopen the defects D273 closed on the bash side, and
@@ -2670,11 +2679,11 @@ TASK_BASE_REF=deadbeef
 TASK_BASE_REF_TRUSTED=1
 TASK_BASE_REF_OWNER=41
 TASK_BASE_REF_UNPROVEN=1
-TASK_BASE_REF_77=aaaa111
-TASK_HEAD_REF_77=bbbb222
-TASK_OWNED_77=cccc333
-TASK_BASE_AT_77=1786846260
-TASK_NARROWED_77=yes
+TASK_BASE_REF_77='aaaa111'
+TASK_HEAD_REF_77='bbbb222'
+TASK_OWNED_77='cccc333'
+TASK_BASE_AT_77='1786846260'
+TASK_NARROWED_77='yes'
 "@ -Encoding UTF8
     $claimK = @{
         tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
@@ -5234,19 +5243,16 @@ if ($g22Bash) {
 # branch and pins all five families surviving. This covers the PARSEABLE branch,
 # which is the normal path and the one that was untested, across TWO claims.
 #
-# READ THE ASSERTIONS BELOW AS A PIN ON A KNOWN DIVERGENCE, NOT AS THE DESIRED
-# BEHAVIOUR. On the parseable branch this port carries only TASK_BASE_REF_<id>
-# across a claim, so the outer task's other four records do NOT survive, while
-# the bash twin re-emits its window families through read_task_record +
-# sq_escape and keeps them. stride-hook.ps1 documents this openly at the
-# parseable/unparseable branch comment; it is latent today because 22r pins that
-# the writers have NO production call site, so nothing writes a record this
-# branch could drop. It stops being latent when G413 lands the D236/D255/D273
-# orchestration, and closing it then means porting bash's re-emit shape — NOT
-# widening the preservation filter, which would promote a forged continuation
-# into a first-class record. WHEN THAT LANDS, THIS TEST MUST FLIP: the four
-# not_survive assertions below become survive assertions. It is written to fail
-# loudly at that moment rather than to bless the gap.
+# THE RE-EMIT LANDED IN W2102, AND THIS TEST FLIPPED WITH IT. It was written in
+# W2101 to pin the gap by value and to fail loudly the moment someone closed it,
+# which is exactly what happened: wiring Get-CarriedWindowRecordLine turned the
+# four not-survive assertions red in the same commit that made them wrong.
+#
+# What carries them is the RE-EMIT shape - Read-TaskRecord + ConvertTo-
+# ShSingleQuoted, per surviving base record - never a raw-line copy and never a
+# widened preservation filter. That distinction is the whole point: reading
+# through the strict record shape means a forged continuation is not a record
+# and is dropped, where a widened filter would carry it through untouched.
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Write-Host "  SKIP: 22p: two sequential claims need git" -ForegroundColor Yellow
 } else {
@@ -5286,11 +5292,25 @@ TASK_NARROWED_77='yes'
     # Identity belongs to the NEWEST claim — the window moved on.
     Assert-Contains "22p: identity is the most recent claim's" "TASK_ID='99'" "$($g22SeqCache -join "`n")"
 
-    # The divergence, pinned by value so it cannot rot silently. See the header.
-    foreach ($k in @('TASK_HEAD_REF_77', 'TASK_OWNED_77', 'TASK_BASE_AT_77', 'TASK_NARROWED_77')) {
-        Assert-Eq "22p: KNOWN GAP (G413/D236/D255/D273) — $k does NOT survive the parseable branch" "0" `
-            "$(@($g22SeqCache | Where-Object { $_ -like "$k=*" }).Count)"
+    # The four partner families now survive, pinned BY VALUE - a count alone
+    # would pass on a record that was carried across but mangled in transit.
+    foreach ($p in @(
+        @{ Key = 'TASK_HEAD_REF_77';  Line = "TASK_HEAD_REF_77='bbbb222'" },
+        @{ Key = 'TASK_OWNED_77';     Line = "TASK_OWNED_77='cccc333'" },
+        @{ Key = 'TASK_BASE_AT_77';   Line = "TASK_BASE_AT_77='1786846260'" },
+        @{ Key = 'TASK_NARROWED_77';  Line = "TASK_NARROWED_77='yes'" }
+    )) {
+        Assert-Eq "22p: $($p.Key) survives two sequential claims" "1" `
+            "$(@($g22SeqCache | Where-Object { $_ -like "$($p.Key)=*" }).Count)"
+        Assert-Contains "22p: and $($p.Key) survives with its VALUE intact" `
+            $p.Line "$($g22SeqCache -join "`n")"
     }
+    # NO ORPHAN: a partner whose base did NOT survive must go with it. Partners
+    # are derived from the surviving base lines, so this holds by construction -
+    # asserted anyway, because the construction is what a future edit would
+    # break, and an orphaned head record is a half-bounded window.
+    Assert-Eq "22p: a partner whose base did not survive leaves no orphan line" "0" `
+        "$(@($g22SeqCache | Where-Object { $_ -match '^TASK_(HEAD_REF|OWNED|BASE_AT|NARROWED)_' -and $_ -notmatch '_77=' }).Count)"
 }
 
 # --- 22r: the tripwire on constraint A ---

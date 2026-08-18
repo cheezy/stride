@@ -621,6 +621,63 @@ function Set-TaskBaseAtRecord {
     return (Set-TaskRecord -Key $key -Value $value)
 }
 
+# (W2102) Carry a surviving base record's PARTNER records across a cache
+# rewrite, by RE-EMITTING them rather than copying their lines.
+#
+# Both cache rewrites keep only TASK_BASE_REF_<id> and drop the other four
+# families, so every head/owned/base_at/narrowed record written by the
+# attribution engine would die at the very next claim. The bash twin already
+# re-emits two of these families for the same reason (its "RE-EMIT it rather
+# than copying the matched line" block), and this port owes the same to all
+# four now that it writes them.
+#
+# RE-EMIT, NEVER COPY THE RAW LINE, and never widen the caller's filter
+# instead. Reading through Read-TaskRecord means the strict full-line
+# ^KEY='[^']*'\z shape must hold, so a forged continuation is not a record and
+# is dropped; re-quoting through ConvertTo-ShSingleQuoted means what lands is
+# this executor's own escaping rather than bytes of unknown provenance. Widening
+# the filter would carry the forgery through untouched, which is the exact
+# failure D280's loader work exists to prevent.
+#
+# NO ORPHAN, for free: partners are derived from the base lines that SURVIVED,
+# so a partner can never outlive its base. That is bash's kept-window gate
+# obtained without porting the window selector, and it does not touch the
+# Select-Object count cap - replacing that cap is W2103's task, and doing it
+# here would confound attribution of any regression this commit causes.
+#
+# DELIBERATE DIVERGENCE from bash, stated rather than discovered: bash carries
+# head/owned as raw lines out of its window selector, while this port carries
+# all four through the reader. A malformed head/owned value is therefore
+# dropped here and kept there. Fail-closed direction, and it is recorded in the
+# parity note.
+function Get-CarriedWindowRecordLine {
+    param([string[]]$BaseRecordLine, [string]$ExcludeTaskId)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($line in @($BaseRecordLine)) {
+        if ($line -notmatch '^TASK_BASE_REF_([A-Za-z0-9_]+)=') { continue }
+        $id = $Matches[1]
+        if ($id -match '^(TRUSTED|OWNER|UNPROVEN)\z') { continue }
+        # A claim clears its OWN stale verdict, as bash does; the partners of
+        # every other surviving window are carried.
+        if ($ExcludeTaskId -and $id -eq $ExcludeTaskId) { continue }
+        foreach ($k in @(
+            (Get-TaskHeadRefKey  -TaskId $id),
+            (Get-TaskOwnedKey    -TaskId $id),
+            (Get-TaskBaseAtKey   -TaskId $id),
+            (Get-TaskNarrowedKey -TaskId $id)
+        )) {
+            # '' is Get-TaskRecordKey's digits-only refusal - the D269 guard.
+            # Skipping here routes through that guard rather than around it.
+            if (-not $k) { continue }
+            $r = Read-TaskRecord -Key $k
+            if (-not $r.Found) { continue }
+            $out.Add($k + '=' + (ConvertTo-ShSingleQuoted -Value $r.Value)) | Out-Null
+        }
+    }
+    return $out.ToArray()
+}
+
+
 # (D118) Canonical API-response snapshot. When present, after_goal detection,
 # env forwarding, and the claim env-cache refresh prefer it over the harness-
 # truncatable tool_response.stdout. Best-effort fast path only — the reliability
@@ -1554,10 +1611,15 @@ if ($HookName -eq 'before_doing') {
                 "TASK_STATUS=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.status))
                 "TASK_COMPLEXITY=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.complexity))
                 "TASK_PRIORITY=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.priority))
-            ) + $keptBaseRecords
+            ) + $keptBaseRecords +
+                (Get-CarriedWindowRecordLine -BaseRecordLine $keptBaseRecords -ExcludeTaskId ([string]$taskJson.id))
             # $keptBaseRecords are raw lines already on disk, carried across the
             # truncation verbatim — never re-escaped, or each claim would add
             # another layer of quoting to a record it merely preserves.
+            # (W2102) Their PARTNER records are re-emitted alongside them, so
+            # the attribution engine's head/owned/base_at/narrowed records
+            # survive a nested claim instead of dying at the next one.
+            # -ExcludeTaskId drops THIS claim's own stale verdict, as bash does.
             Write-EnvCache -Lines $cacheLines | Out-Null
         } elseif (Test-Path $EnvCache) {
             # (W1086/D142) No parseable response and no usable persisted
@@ -3568,7 +3630,18 @@ function Invoke-FinalizeBeforeDoing {
                 $_ -notmatch '^TASK_BASE_REF_TRUSTED=' -and
                 $_ -notmatch '^TASK_BASE_REF_OWNER=' -and
                 $_ -notmatch '^TASK_BASE_REF_UNPROVEN=' -and
-                $_ -notmatch '^TASK_BASE_REF_[A-Za-z0-9_]+='
+                $_ -notmatch '^TASK_BASE_REF_[A-Za-z0-9_]+=' -and
+                # (W2102) The four partner families are excluded here because
+                # Get-CarriedWindowRecordLine below RE-EMITS them. Leaving them
+                # in $preserved as well would write each record twice - the
+                # passthrough copy and the re-emitted one - and a duplicate
+                # record is not harmless: last-match-wins means the two copies
+                # must agree forever, and the passthrough copy is exactly the
+                # raw line the re-emit exists to avoid trusting.
+                $_ -notmatch '^TASK_HEAD_REF_[A-Za-z0-9_]+=' -and
+                $_ -notmatch '^TASK_OWNED_[A-Za-z0-9_]+=' -and
+                $_ -notmatch '^TASK_BASE_AT_[A-Za-z0-9_]+=' -and
+                $_ -notmatch '^TASK_NARROWED_[A-Za-z0-9_]+='
             })
             $records = @($existing | Where-Object {
                 $_ -match '^TASK_BASE_REF_[A-Za-z0-9_]+=' -and
@@ -3588,7 +3661,12 @@ function Invoke-FinalizeBeforeDoing {
         # counter-example, and a rule with one exception stops being checkable.
         # $preserved and $records are raw lines already on disk — passed through
         # verbatim, never re-escaped.
+        # (W2102) Partner records for every surviving window, re-emitted. Self's
+        # base is already dropped via $ownerKey, so self's partners drop with it
+        # automatically. On the unproven path ($ownerKey empty) self's verdict
+        # survives - the deliberate trade bash documents at the same point.
         $newLines = $preserved + $records +
+            (Get-CarriedWindowRecordLine -BaseRecordLine $records) +
             ("TASK_BASE_REF=" + (ConvertTo-ShSingleQuoted -Value $baseRef)) +
             ("TASK_BASE_REF_TRUSTED=" + (ConvertTo-ShSingleQuoted -Value '1'))
         if ($ownerKey) {

@@ -6271,6 +6271,197 @@ Assert-Eq "24c: a non-numeric override falls back, never disables" "14400" (Get-
 Assert-Eq "24c: an 11-digit override falls back on WIDTH, matching bash" "14400" (Get-OpenWindowMaxAgeSecs)
 [System.Environment]::SetEnvironmentVariable('STRIDE_OPEN_WINDOW_MAX_AGE_SECS', $g24cOld, 'Process')
 
+# --- 24d: Test-AnotherOpenWindowExists, the D271/D273 gate ---
+# Every validation failure must take the WIDE path (answer "no open window"),
+# because vouching for a record this predicate cannot age is the one direction
+# D271 forbids.
+if ($g24Git) {
+    $g24dDir = New-G24Repo -Name 'openwin' -Commits 2
+    $ProjectDir = $g24dDir
+    $script:EnvCache = Join-Path $g24dDir '.stride-env-cache'
+    $g24dHead = (& git -C $g24dDir rev-parse HEAD 2>$null | Out-String).Trim()
+    $g24dNow = [string][int64][Math]::Floor((Get-Date -UFormat %s))
+    $g24dOldStamp = [string]([int64]$g24dNow - 99999)
+
+    # A window with a HEAD partner is CLOSED and vouches for nothing.
+    #
+    # THE HEAD GOES IN THE ENV, NOT THE FILE, and that is the point rather than
+    # a fixture quirk: this predicate reads bases from the file and heads from
+    # the ENV, exactly as bash splits them. In a real run the bulk loader puts
+    # the cache into the environment first. A fixture that seeded the head only
+    # on disk would find every window open and pass the OPEN cases vacuously.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dHead'",
+        "TASK_BASE_AT_77='$g24dNow'")
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $g24dHead, 'Process')
+    Assert-Eq "24d: a CLOSED window (head present) does not count as open" "False" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $null, 'Process')
+
+    # Open, fresh stamp, resolvable ancestor base -> counts.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dHead'",
+        "TASK_BASE_AT_77='$g24dNow'")
+    Assert-Eq "24d: an OPEN window with a fresh stamp counts" "True" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+
+    # SELF is excluded - a task's own window never vouches for itself.
+    Assert-Eq "24d: the completing task's OWN window is excluded as self" "False" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '77')"
+
+    # A MISSING stamp reads DEAD, deliberately: every window opened by a hook
+    # carrying this change is stamped, so an unstamped record was written by an
+    # older version and is by construction from an earlier session.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @("TASK_BASE_REF_77='$g24dHead'")
+    Assert-Eq "24d: a window with NO stamp reads dead" "False" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+
+    # Aged past the horizon -> dead. Exactly AT the horizon -> live (strict -gt).
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dHead'",
+        "TASK_BASE_AT_77='$g24dOldStamp'")
+    Assert-Eq "24d: a window aged past the horizon reads dead" "False" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+
+    # A stamp AHEAD of the clock is a NEGATIVE age, which trivially passes a
+    # -gt test - so a future-stamped window would vouch as live forever, the
+    # exact record this check exists to retire. Reachable without tampering.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='$g24dHead'",
+        "TASK_BASE_AT_77='$([string]([int64]$g24dNow + 99999))'")
+    Assert-Eq "24d: a stamp AHEAD of the clock reads dead, not live" "False" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+
+    # A base that does not resolve vouches for nothing.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_77='deadbeefcafedeadbeefcafedeadbeefcafedead'",
+        "TASK_BASE_AT_77='$g24dNow'")
+    Assert-Eq "24d: an unresolvable base vouches for nothing" "False" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+
+    # A NON-INTEGER id is refused by the D269 guard at the key builder, so its
+    # record cannot vouch either - the engine routes THROUGH that guard rather
+    # than around it.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_10_0='$g24dHead'",
+        "TASK_BASE_AT_10_0='$g24dNow'")
+    Assert-Eq "24d: a record under a non-integer id vouches for nothing" "False" `
+        "$(Test-AnotherOpenWindowExists -SelfTaskId '42')"
+} else {
+    Write-Host "  SKIP: 24d: the open-window gate needs git" -ForegroundColor Yellow
+}
+
+# --- 24e: Get-AttributedCommitRange, the D236/D244/D256 classifier ---
+if ($g24Git) {
+    $g24eDir = New-G24Repo -Name 'attrib' -Commits 4
+    $ProjectDir = $g24eDir
+    $script:EnvCache = Join-Path $g24eDir '.stride-env-cache'
+    $g24eAll = @(& git -C $g24eDir rev-list HEAD 2>$null | Where-Object { $_ })
+    # newest .. oldest: [0]=c4 [1]=c3 [2]=c2 [3]=c1 [4]=seed
+    $g24eBase = $g24eAll[4]
+
+    Assert-Eq "24e: an empty base yields no ranges" "" (Get-AttributedCommitRange -OwnBase '' -SelfTaskId '42')
+    # No windows recorded at all -> '' (the caller keeps its ordinary path).
+    # This must NOT be the no-own-commits sentinel: collapsing the two is the
+    # D236 outer-absorbs-its-children bug.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @("TASK_ID='42'")
+    $g24eNone = Get-AttributedCommitRange -OwnBase $g24eBase -SelfTaskId '42'
+    Assert-Eq "24e: no recorded windows yields '' and NOT the sentinel" "True" `
+        "$($g24eNone -eq '')"
+
+    # One nested CLOSED window covering c2..c3, inside this task's base..HEAD.
+    # Its span is subtracted; the surrounding commits survive as runs.
+    # Heads via the ENV, per the documented read asymmetry (see 24d).
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_ID='42'",
+        "TASK_BASE_REF_77='$($g24eAll[3])'")
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $g24eAll[1], 'Process')
+    $g24eOne = Get-AttributedCommitRange -OwnBase $g24eBase -SelfTaskId '42'
+    Assert-Eq "24e: a nested closed window is subtracted, leaving the surrounding runs" "True" `
+        "$($g24eOne -ne '' -and $g24eOne -ne $script:StrideNoOwnCommits)"
+    Assert-Eq "24e: and the nested window's own commits are NOT in the output" "False" `
+        "$($g24eOne -match [regex]::Escape($g24eAll[2]))"
+
+    # A task ALL of whose commits were made by nested windows yields the
+    # SENTINEL, not '' - it must produce an EMPTY snapshot rather than falling
+    # back to the base and absorbing its children's work.
+    # The window must classify PURE for its span to be subtracted, so it spans
+    # ONE commit (residual 1). A four-commit window with no owned record has
+    # residual 4, reads AMBIGUOUS, and correctly contributes nothing - bash
+    # behaves identically, and expecting a sentinel there was a fixture error,
+    # not a port defect.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_ID='42'",
+        "TASK_BASE_REF_77='$($g24eAll[1])'")
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $g24eAll[0], 'Process')
+    Assert-Eq "24e: a task whose commits are ALL nested yields the SENTINEL, not ''" `
+        $script:StrideNoOwnCommits (Get-AttributedCommitRange -OwnBase $g24eAll[1] -SelfTaskId '42')
+
+    # (D256) TWO CONCURRENTLY OPEN SIBLINGS both read AMBIGUOUS and neither is
+    # subtracted. This is the single most valuable case in the mirror: D244
+    # computed each residual against every other window's full span, which let
+    # two windows mutually "cover" the commits they merely shared - both
+    # misclassified PURE and the union subtracted the outer's own commit,
+    # losing work from its author's snapshot. Mutual coverage is evidence of
+    # AMBIGUITY, not purity: a commit has one owner.
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_ID='42'",
+        "TASK_BASE_REF_77='$($g24eAll[4])'",
+        "TASK_BASE_REF_88='$($g24eAll[4])'")
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $g24eAll[1], 'Process')
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_88', $g24eAll[1], 'Process')
+    $g24eSib = Get-AttributedCommitRange -OwnBase $g24eBase -SelfTaskId '42'
+    Assert-Eq "24e (D256): two overlapping sibling windows do NOT both subtract" "True" `
+        "$($g24eSib -ne $script:StrideNoOwnCommits)"
+    # Assert the OVER-REPORT positively, not just the absence of a sentinel.
+    # Both siblings are ambiguous, so nothing is covered and the outer's run
+    # starts at its FIRST commit. A weaker "not the sentinel" check passes even
+    # when the siblings wrongly subtract, because one later commit still
+    # survives to form a run - which is how the residual-default mutant
+    # (defaulting to 0 instead of the full set size, i.e. failing toward
+    # subtracting a span) slipped through the first version of this case.
+    Assert-Eq "24e (D256): and the outer keeps its own earliest commit - over-report" "True" `
+        "$($g24eSib -match [regex]::Escape($g24eAll[3]))"
+
+    # (D255) A window whose task recorded a NON-EMPTY owned set names its
+    # commits exactly and supersedes the purity heuristic for that window.
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_88', $null, 'Process')
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_ID='42'",
+        "TASK_BASE_REF_77='$($g24eAll[3])'",
+        "TASK_OWNED_77='$($g24eAll[2])'")
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $g24eAll[1], 'Process')
+    $g24eOwned = Get-AttributedCommitRange -OwnBase $g24eBase -SelfTaskId '42'
+    Assert-Eq "24e (D255): an owned record's exact SHAs are subtracted" "False" `
+        "$($g24eOwned -match [regex]::Escape($g24eAll[2]))"
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $null, 'Process')
+    # (D256) THE SUBSET DIRECTION, isolated. The sibling case above does not
+    # discriminate it - both operand orders make both siblings ambiguous - so
+    # this builds the geometry where the direction changes the answer:
+    #   window A spans {c4}          -> residual 1 -> PURE, joins the pool
+    #   window B spans {c3, c4}      -> pool A IS a subset of B, so cov={c4},
+    #                                   residual 1 -> PURE, and c3 is subtracted
+    # With the operands reversed, B-subset-of-A is false, cov is empty, B reads
+    # AMBIGUOUS, and c3 survives into the outer's ranges. Asserting c3's absence
+    # is therefore a direct test of the direction, and it caught the reversed
+    # mutant that the sibling case let through.
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_88', $g24eAll[0], 'Process')
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $g24eAll[0], 'Process')
+    Set-Content -Path $script:EnvCache -Encoding UTF8 -Value @(
+        "TASK_ID='42'",
+        "TASK_BASE_REF_77='$($g24eAll[1])'",
+        "TASK_BASE_REF_88='$($g24eAll[2])'")
+    $g24eNest = Get-AttributedCommitRange -OwnBase $g24eBase -SelfTaskId '42'
+    Assert-Eq "24e (D256): a pure window NESTED in a larger one makes the larger pure too" "False" `
+        "$($g24eNest -match [regex]::Escape($g24eAll[1]))"
+    Assert-Eq "24e (D256): and the outer's own earlier commits still survive" "True" `
+        "$($g24eNest -match [regex]::Escape($g24eAll[3]))"
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_77', $null, 'Process')
+    [System.Environment]::SetEnvironmentVariable('TASK_HEAD_REF_88', $null, 'Process')
+} else {
+    Write-Host "  SKIP: 24e: the classifier cases need git" -ForegroundColor Yellow
+}
+
 $ProjectDir = $g24SavedProjectDir
 
 }

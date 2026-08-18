@@ -2787,11 +2787,22 @@ function Get-AttributedCommitRange {
             $cov = New-Object System.Collections.Generic.HashSet[string]
             foreach ($s in $e.Lines) { if ($ownedCovered.Contains($s)) { $null = $cov.Add($s) } }
             foreach ($p in $pool) {
-                # Pool set SUBSET-OF this set. Two ways to get this wrong, both
-                # silent: reversing the operands tests the opposite relation,
-                # and omitting the Count guard lets an EMPTY pool set cover
-                # everything (IsSubsetOf on empty is true) — every residual
-                # collapses to 0, everything reads PURE, and D244 reopens.
+                # Pool set SUBSET-OF this set. Reversing the operands tests
+                # the opposite relation and is silent: 24e's nested case is the
+                # one that catches it, because the sibling geometry gives the
+                # same answer either way.
+                #
+                # The Count guard is UNREACHABLE as written, and kept anyway.
+                # Phase B skips any window whose rev-list is empty, so no set
+                # in the pool can be empty and no test can reach this branch -
+                # mutation-checked: removing the guard changes nothing today.
+                # It is kept because IsSubsetOf on an empty set returns TRUE,
+                # so if Phase B's filter is ever relaxed, an empty pool set
+                # would cover every window, every residual would collapse to 0,
+                # everything would read PURE and D244 would reopen. The two
+                # belong together: relax that filter and this guard is what
+                # stops it becoming a defect. bash carries the same pair for
+                # the same reason.
                 if ($p.Set.Count -gt 0 -and $p.Set.IsSubsetOf($e.Set)) {
                     foreach ($s in $p.Lines) { $null = $cov.Add($s) }
                 }
@@ -3505,11 +3516,40 @@ function Invoke-FinalizeAfterDoing {
 
     $snapshot = '[]'
     if (-not $script:SnapBaseRefused) {
-        # (W2102 C3) Still ''. The writers land in this commit so their records
-        # become observable; CONSUMING them changes what a snapshot contains and
-        # is deliberately held for the next commit, so a change in capture
-        # output can only be attributed to that one.
-        try { $snapshot = Build-ChangedFilesSnapshot -Base $script:SnapBaseResolved -OwnRanges '' }
+        # (W2102/D236+D244+D256) The attributed ranges for THIS task: every
+        # other recorded window subtracted, but only where subtracting it is
+        # provably safe.
+        $capRanges = ''
+        try { $capRanges = Get-AttributedCommitRange -OwnBase $script:SnapBaseResolved -SelfTaskId $taskId }
+        catch { $capRanges = '' }
+        # (D255/D271) When this completion's own loop authored commits, its
+        # committed contribution is exactly that delta plus the working tree,
+        # and commits in base..H0 - an outer task's mid-window work, or this
+        # task's own pre-hook manual commits - fall out. That trade is safe ONLY
+        # while some OTHER window is still open, because a nested task's dropped
+        # commits fall back into the enclosing task's later snapshot: the
+        # documented over-report.
+        #
+        # An OUTERMOST task has no absorber, and the same narrowing silently
+        # UNDER-reported its own manual mid-task commits. So with no other open
+        # window the owned range is UNIONED with the attributed ranges instead
+        # of replacing them: the ranges were computed before the loop ran, so
+        # the loop's own commits are in none of them and are no longer
+        # uncommitted by capture time - replacing would trade losing the manual
+        # commits for losing the sweep's.
+        if ($script:SnapOwnedRecorded -and $script:SnapOwnedSet -and
+            $script:SnapOwnedSet -ne $script:StrideOwnedOverflow) {
+            $ownedRange = Convert-OwnedSetToRange -Set $script:SnapOwnedSet
+            if ($ownedRange) {
+                if (Test-AnotherOpenWindowExists -SelfTaskId $taskId) {
+                    $capRanges = $ownedRange
+                    $narrowed = 'yes'
+                } elseif ($capRanges -and $capRanges -ne $script:StrideNoOwnCommits) {
+                    $capRanges = $capRanges.TrimEnd("`n") + "`n" + $ownedRange
+                }
+            }
+        }
+        try { $snapshot = Build-ChangedFilesSnapshot -Base $script:SnapBaseResolved -OwnRanges $capRanges }
         catch { $snapshot = '[]' }
     }
     Write-ChangedFilesSnapshot -Json $snapshot

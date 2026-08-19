@@ -487,6 +487,47 @@ self_test() {
     pass=$((pass + 1))
   fi
 
+  # --- the dot segments pass a charset test but are not port directories, and
+  # --- ".." walked the scan out of the ports parent entirely.
+  sed 's|"dir": "alpha"|"dir": ".."|' "$tmp/k.md" > "$tmp/dd.md"
+  out="$(st_run "$tmp/dd.md" "$tmp/k")"; rc=$?
+  st_assert "a dir of .. is refused as a traversal" 2 "$rc" "directory traversal rather than a port directory" "$out"
+  sed 's|"dir": "alpha"|"dir": "."|' "$tmp/k.md" > "$tmp/dot.md"
+  out="$(st_run "$tmp/dot.md" "$tmp/k")"; rc=$?
+  st_assert "a dir of . is refused as a traversal" 2 "$rc" "directory traversal rather than a port directory" "$out"
+
+  # --- an entry id reaches grep as a pattern, so it must carry no regex
+  # --- metacharacters. A crafted one resolved a lookup to a DIFFERENT entry.
+  sed 's|"id": "rule-one"|"id": "a\\\\.c"|' "$tmp/k.md" > "$tmp/rid.md"
+  out="$(st_run "$tmp/rid.md" "$tmp/k")"; rc=$?
+  st_assert "an entry id outside the anchor charset is refused" 2 "$rc" "outside the anchor charset" "$out"
+
+  # --- a filename containing the old sed delimiter silently dropped its anchor
+  mkdir -p "$tmp/pipe/alpha" "$tmp/pipe/beta"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/pipe/alpha/ok.md"
+  printf '<!-- canon:ghost-rule v1 -->\n' > "$tmp/pipe/alpha/a|b.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/pipe/beta/b.md"
+  out="$(st_run "$tmp/k.md" "$tmp/pipe")"; rc=$?
+  st_assert "an anchor in a filename containing a pipe is still seen" 1 "$rc" 'no rule "ghost-rule"' "$out"
+
+  # --- an unreadable subtree must make the ANCHOR pass unverifiable too, not
+  # --- only the property pass: a short file list hides UNEXPECTED anchors.
+  if [ "$(id -u)" -ne 0 ]; then
+    mkdir -p "$tmp/aperm/alpha/locked" "$tmp/aperm/beta"
+    printf '<!-- canon:rule-one v1 -->\n' > "$tmp/aperm/alpha/a.md"
+    printf '<!-- canon:rule-one v1 -->\n' > "$tmp/aperm/beta/b.md"
+    printf '<!-- canon:ghost v1 -->\n' > "$tmp/aperm/alpha/locked/hidden.md"
+    chmod 000 "$tmp/aperm/alpha/locked"
+    out="$(st_run "$tmp/k.md" "$tmp/aperm" 2>/dev/null)"; rc=$?
+    chmod 755 "$tmp/aperm/alpha/locked"
+    st_assert "an unreadable subtree makes the anchor pass UNVERIFIABLE" 1 "$rc" "refusing to judge anchors on a partial file list" "$out"
+    st_refute "a partially-enumerated port is never reported clean" "verdict: clean" \
+      "$(echo "$out" | sed -n '/^alpha$/,/^$/p')"
+  else
+    echo "ok: unreadable-anchor-tree case skipped (running as root)"
+    pass=$((pass + 1)); pass=$((pass + 1))
+  fi
+
   # --- CLI surface
   out="$(bash "$SELF" --help 2>&1)"; rc=$?
   st_assert "--help exits 0 and documents the flags" 0 "$rc" "ports-parent" "$out"
@@ -705,6 +746,11 @@ function classify(   i, j, n, pid, eid, alen) {
       if (pid == "") fail("registry port " i " has no id")
       if (V["ports." i ".dir"] !~ /^[A-Za-z0-9._-]+$/)
         fail("registry port \"" pid "\" has dir \"" V["ports." i ".dir"] "\" which is not a single path segment matching ^[A-Za-z0-9._-]+$")
+      # "." and ".." consist entirely of allowed characters, so the charset
+      # test above admits them -- and ".." walks the scan out of the ports
+      # parent entirely. Neither names a port, so both are refused here.
+      if (V["ports." i ".dir"] == "." || V["ports." i ".dir"] == "..")
+        fail("registry port \"" pid "\" has dir \"" V["ports." i ".dir"] "\", which is a directory traversal rather than a port directory")
       PORTID[i] = pid
       printf "PORT\t%d\t%s\t%s\t%s\t%s\n", i, safe(pid, "port id"), \
         safe(V["ports." i ".family"], "port family"), safe(V["ports." i ".dir"], "port dir"), \
@@ -717,6 +763,13 @@ function classify(   i, j, n, pid, eid, alen) {
   if ("id" in V) {
     if (blocknum == 1) fail("first json block carries an id but no canon_schema_version; the registry must come first")
     eid = V["id"]
+    # An id is interpolated into grep patterns and must not carry regex
+    # metacharacters. This is the same charset the anchor scanner matches, so
+    # an id outside it could never appear in a real anchor anyway -- a crafted
+    # one resolved a lookup to a DIFFERENT entry's applies_to row and produced
+    # a clean verdict over ports that owed the rule.
+    if (eid !~ /^[A-Za-z0-9][A-Za-z0-9_-]*$/)
+      fail("entry id \"" eid "\" is outside the anchor charset ^[A-Za-z0-9][A-Za-z0-9_-]*$; an id that cannot appear in an anchor is meaningless to the canon")
     for (i = 1; i <= NKEYS; i++)
       if (!(KEY[i] in V) && !(KEY[i] ".__len" in V))
         fail("entry \"" eid "\" is missing required key \"" KEY[i] "\"")
@@ -863,14 +916,33 @@ port_md_files() {
 # port's own tree, so counting it would report that port compliant without a
 # single port-side adoption.
 scan_anchors() {
-  local dir="$1" f rel
-  port_md_files "$dir" | while IFS= read -r f; do
+  local dir="$1" f rel files
+  # Capture the enumeration first and propagate its failure. Piping find into a
+  # while loop discarded its exit status, so an unreadable subtree produced a
+  # short list that read as a complete one -- and the UNEXPECTED sweep, which
+  # only fires on anchors it actually sees, returned a clean verdict. MISSING
+  # fails safe under a short list; UNEXPECTED does not.
+  files="$(port_md_files "$dir")" || return 1
+  for f in $files; do
     [ "$f" = "$EXCLUDE_CANON" ] && continue
-    grep -EIno '<!--[[:space:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:space:]]+v[0-9]+[[:space:]]*-->' "$f" 2>/dev/null \
-      | while IFS= read -r hit; do
-          rel="${f#$dir/}"
-          echo "$hit" | sed -E "s|^([0-9]+):<!--[[:space:]]*canon:([A-Za-z0-9_-]+)[[:space:]]+v([0-9]+)[[:space:]]*-->|\2\t\3\t$rel:\1|"
-        done
+    rel="${f#$dir/}"
+    # The path goes to awk as a -v VARIABLE, never into a pattern or a
+    # replacement. Interpolating it into a sed s|...| expression meant a
+    # filename containing the delimiter terminated the substitution and the
+    # anchor vanished from the sweep entirely -- silently, and an "&" would
+    # have expanded to the whole match. awk -v cannot be reparsed that way.
+    grep -EIno '<!--[[:space:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:space:]]+v[0-9]+[[:space:]]*-->' "$f" \
+      | awk -v rel="$rel" '
+          {
+            if (match($0, /^[0-9]+:/) == 0) next
+            ln = substr($0, 1, RLENGTH - 1)
+            rest = substr($0, RLENGTH + 1)
+            if (match(rest, /canon:[A-Za-z0-9][A-Za-z0-9_-]*[ \t]+v[0-9]+/) == 0) next
+            m = substr(rest, RSTART, RLENGTH)
+            sub(/^canon:/, "", m)
+            split(m, part, /[ \t]+v/)
+            printf "%s\t%s\t%s:%s\n", part[1], part[2], rel, ln
+          }'
   done
 }
 
@@ -982,7 +1054,7 @@ for pline in $PORT_LINES; do
   # -- but this value becomes a filesystem path, so it is checked again here
   # rather than trusted across the record boundary.
   case "$pdir" in
-    *[!A-Za-z0-9._-]*|"")
+    *[!A-Za-z0-9._-]*|""|.|..)
       echo "GATE ERROR: port \"$pid\" resolved to dir \"$pdir\", which is not a single path segment" >&2
       GATE_FAULT=1
       echo ""
@@ -1010,7 +1082,23 @@ for pline in $PORT_LINES; do
     continue
   fi
 
-  FOUND="$(scan_anchors "$ptree")"
+  if ! FOUND="$(scan_anchors "$ptree")"; then
+    # The tree could not be fully enumerated, so the anchors we did see are not
+    # the anchors that are there. Every anchor cell for this port is
+    # UNVERIFIABLE rather than judged on a partial list.
+    for eline in $ENTRY_LINES; do
+      eid="$(field "$eline" 3)"
+      arow="$(echo "$RECORDS" | grep "^APPLY	$eid	$pidx	")"
+      [ "$(field "$arow" 5)" = "required" ] || continue
+      record UNVERIFIABLE "  " \
+        "$eid -- could not fully enumerate $ptree; refusing to judge anchors on a partial file list" \
+        "$pid: make $ptree readable so the anchor scan can run"
+    done
+    echo "  verdict: NOT FULLY EXAMINED"
+    DIRTY_PORTS="$DIRTY_PORTS $pid"
+    echo ""
+    continue
+  fi
 
   for eline in $ENTRY_LINES; do
     eid="$(field "$eline" 3)"
@@ -1141,7 +1229,12 @@ for cat in $CATALOGS; do
     CAT_ABSENT=$((CAT_ABSENT + 1))
     continue
   fi
-  CFOUND="$(scan_anchors "$ctree")"
+  if ! CFOUND="$(scan_anchors "$ctree")"; then
+    record UNVERIFIABLE "  " \
+      "catalog $cat -- could not fully enumerate $ctree; refusing to judge anchors on a partial file list" \
+      "catalog $cat: make $ctree readable so the anchor scan can run" catalog
+    continue
+  fi
   for eline in $ENTRY_LINES; do
     eid="$(field "$eline" 3)"
     ever="$(field "$eline" 4)"

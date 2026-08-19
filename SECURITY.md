@@ -148,7 +148,10 @@ above).
 The PowerShell variants (`stride-hook.ps1`, `stride-skill-gate.ps1`) implement
 the **same** model with no security-relevant drift: same lifecycle dispatch,
 same two-source token resolution, same single `changed_files` upload (via
-`Invoke-WebRequest`), same marker-based skill gate. On native Windows the `.sh`
+`Invoke-WebRequest` — though on **Windows PowerShell 5.1** that PUT does not
+currently issue at all, because `-SkipHttpErrorCheck` is a PowerShell 7.0+
+parameter and binding fails before the request; see **D277**), same
+marker-based skill gate. On native Windows the `.sh`
 entrypoint delegates to the `.ps1` script so behavior is consistent everywhere.
 
 ## Reporting

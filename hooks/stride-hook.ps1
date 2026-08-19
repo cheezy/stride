@@ -3994,12 +3994,18 @@ function Invoke-FinalizeAfterDoing {
 #     whole cache, filters one key and REWRITES the file, with no lock - and
 #     W2102 gave it production call sites that span the whole after_doing gate,
 #     so a claim landing between the read and the rename is now lost wholesale.
-#     bash is not exposed: its record writers APPEND. The dominant outcome is
-#     safe (the reverted cache still carries the previous window's OWNER or
-#     _UNPROVEN, so the base is refused and an empty snapshot is uploaded), but
-#     the residue is a cache whose identity lines name the PREVIOUS task.
-#     Closing it moves the two implementations closer together, not further
-#     apart, which is why it is a defect rather than an accepted divergence.
+#     (W2106) THIS ENTRY USED TO SAY "bash is not exposed: its record writers
+#     APPEND". That is FALSE and is corrected rather than deleted. All four
+#     bash record writers (stride-hook.sh:1362, :1436, :1894, :2597) pipe
+#     `grep -v "^KEY="` into write_env_cache, which is mktemp -> cat -> mv -f
+#     (:1238-1262) - the same unlocked read-filter-rewrite. The only genuine
+#     `>> "$ENV_CACHE"` is the awk-failure fallback at :3686. So D282 is a
+#     SHARED exposure, not a ps1-only one, and the claim that closing it moves
+#     the implementations closer together was resting on a difference that does
+#     not exist. The dominant outcome is still safe (the reverted cache carries
+#     the previous window's OWNER or _UNPROVEN, so the base is refused and an
+#     empty snapshot is uploaded), and the residue is still a cache whose
+#     identity lines name the PREVIOUS task - on both executors.
 #   * (W2102) One DELIBERATE DIVERGENCE in the retention re-emit. Bash carries
 #     head/owned across a rewrite as raw lines out of select_kept_window_records;
 #     Get-CarriedWindowRecordLine carries all four families through
@@ -4011,10 +4017,14 @@ function Invoke-FinalizeAfterDoing {
 #     finished rather than merely long. The capture, attribution, eviction and
 #     replay machinery is ported and covered. Three things are NOT, and none
 #     of them can be closed from this host:
-#       - THE UPLOAD ON 5.1 (D277, first bullet above). A native-Windows run
-#         now WRITES a snapshot and still cannot PUT one. This is the single
-#         most consequential gap and the reason "Windows parity" must not be
-#         claimed unqualified.
+#       - THE 7-ONLY -SkipHttpErrorCheck, at BOTH Invoke-WebRequest call sites
+#         (D277): :3651 in Invoke-ChangedFilesUpload and :4931 in
+#         Invoke-AfterGoalDetectionViaApi. The first means a native-Windows run
+#         now WRITES a snapshot and still cannot PUT one. The SECOND is easy to
+#         miss and was: that call sits under `catch { return }`, so on 5.1 the
+#         D119 after_goal detection guarantee degrades to a SILENT no-op on
+#         every run. Two consequences, one parameter, and the reason "Windows
+#         parity" must not be claimed unqualified.
 #       - RUNTIME VERIFICATION ON A REAL 5.1 HOST (D237). Every check that
 #         exists here is STATIC: scripts/check-ps1-compat.sh reads syntax and
 #         cmdlet names, and the ps1 suite runs on pwsh 7. Neither executes this

@@ -394,6 +394,13 @@ The gaps below were each confirmed by execution, not assumed:
   `ForEach-Object -Parallel`, `Get-Content -AsByteStream` and
   `ConvertFrom-Json -AsHashtable` all pass silently: the cmdlet rule checks
   that a cmdlet *name* resolves, never which parameters it accepts.
+  This repo has **two live instances**, named here rather than left as a
+  hypothetical class (W2106): `Invoke-WebRequest -SkipHttpErrorCheck` at
+  `hooks/stride-hook.ps1:3651` and `:4931`, filed as **D277**. The first
+  means the `changed_files` PUT never issues on 5.1; the second sits under a
+  `catch { return }`, so D119 after_goal detection degrades to a silent no-op.
+  Both were found by reading, not by this gate — which is the measure of the
+  blind spot.
 - **The .NET API surface is invisible.** A 3-argument
   `[System.IO.File]::Move(src, dst, overwrite)` — an overload .NET Framework
   does not have — is flagged by neither rule. Related and more important:

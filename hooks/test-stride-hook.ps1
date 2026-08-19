@@ -145,11 +145,31 @@ function Assert-Exit {
 }
 
 # --- Helper: run stride-hook.ps1 with input and capture output ---
+# THE CHILD DOES NOT INHERIT THIS PROCESS'S TASK STATE unless a case asks for
+# it. Every variable of the TEST process used to be copied into the hook child,
+# and Group 22's unit cases set TASK_BASE_REF_42='abc123' and TASK_BASE_REF_77
+# in this process and never clear them. Get-TaskBaseRefFor reads the ENVIRONMENT
+# rather than the cache, so any later case that drives a real hook and expects a
+# base to be ABSENT was reading a pollutant instead - and 22s's first draft
+# passed under the very tail-cap mutation it exists to catch, because the
+# inherited 'abc123' stopped the refusal firing, failed to resolve, and fell
+# back to HEAD~1 to produce a plausible snapshot.
+#
+# Stripped as a CLASS rather than per case: a per-case clear only removes the
+# instance someone already noticed, and this one went unnoticed until a mutation
+# run disagreed with a hand-built repro. Audited at the time of writing, only
+# 22s was actually weakened - but "only one case is wrong today" is not a
+# property that survives the next case anyone adds. -InheritTaskEnv is the
+# opt-out for a case that genuinely means to pass task state through the
+# environment; no case needs it today.
+$script:StrideChildEnvStrip = '^(TASK_(ID|IDENTIFIER|BASE_REF|HEAD_REF|OWNED|NARROWED|BASE_AT)(_[A-Za-z0-9_]+)?)\z'
+
 function Invoke-HookScript {
     param(
         [string]$InputJson,
         [string]$Phase,
-        [string]$ProjectDir
+        [string]$ProjectDir,
+        [switch]$InheritTaskEnv
     )
     $tempInput = [System.IO.Path]::GetTempFileName()
     $tempOutput = [System.IO.Path]::GetTempFileName()
@@ -179,6 +199,17 @@ function Invoke-HookScript {
         $psi.CreateNoWindow = $true
         foreach ($kv in $envBlock.GetEnumerator()) {
             $psi.Environment[$kv.Key] = $kv.Value
+        }
+        # REMOVED FROM $psi.Environment, not merely omitted from what is added
+        # to it. ProcessStartInfo.Environment comes PRE-SEEDED with this
+        # process's variables, so filtering the block above strips nothing - the
+        # first version of this guard did exactly that and 9k2 failed on the
+        # first run, which is the whole reason 9k2 exists rather than being
+        # taken on trust.
+        if (-not $InheritTaskEnv) {
+            foreach ($key in @($psi.Environment.Keys)) {
+                if ("$key" -cmatch $script:StrideChildEnvStrip) { $null = $psi.Environment.Remove($key) }
+            }
         }
         if ($ProjectDir) {
             $psi.Environment['CLAUDE_PROJECT_DIR'] = $ProjectDir
@@ -2571,6 +2602,103 @@ echo "br_ran"
     $cacheK2 = @(Get-Content -Path (Join-Path $shProjK '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
     Assert-Eq "9k (D273): and the durable record is written on the refusal path too" "1" `
         "$(@($cacheK2 | Where-Object { $_ -eq "TASK_NARROWED_99='no'" }).Count)"
+}
+
+# 9k2 (harness): the child does NOT inherit this process's task state.
+# Invoke-HookScript's strip is a harness guard, so nothing else in the suite can
+# fail when it breaks - and a harness guard that fails silently is worse than
+# none, because it makes every case depending on it look green. This is the
+# direct pin: 9k's refusal fires only while task 99 has no base of its OWN, and
+# Get-TaskBaseRefFor reads the ENVIRONMENT rather than the cache, so a leaked
+# TASK_BASE_REF_99 in this process is enough to stop it. With the strip in place
+# the refusal still fires; without it, it does not.
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: 9k2: needs git" -ForegroundColor Yellow
+} else {
+    # RESET FIRST. 9k's own run left a '[]' snapshot and an http_code=000 state
+    # on disk, and with a snapshot present the self-heal takes the ordinary
+    # retry path and never resolves a base at all - so the refusal it looks for
+    # could not fire for a reason having nothing to do with the guard. Draft one
+    # of this case failed exactly that way, which is the same class of mistake
+    # as the fixture drift 9k's own control now covers.
+    function Reset-9k2Fixture {
+        Remove-Item -Force (Join-Path $shProjK '.stride-changed-files.json') -ErrorAction SilentlyContinue
+        Set-Content -Path (Join-Path $shProjK '.stride-diff-upload-state') `
+            -Value "task_id=99`nhttp_code=500`nnarrowed=yes" -Encoding UTF8
+    }
+    [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_99', 'abc123', 'Process')
+    try {
+        Reset-9k2Fixture
+        $r = Invoke-HookScript -InputJson $shUnreachableJson -Phase 'post' -ProjectDir $shProjK
+        Assert-Contains "9k2 (harness): a leaked TASK_BASE_REF_99 does not reach the hook child" `
+            "REFUSING the changed_files diff for task 99" $r.Stderr
+        # And the opt-out really opts in, so the switch is not decorative - and
+        # this leg doubles as the proof that the leg above is not passing for
+        # some reason other than the strip.
+        Reset-9k2Fixture
+        $r = Invoke-HookScript -InputJson $shUnreachableJson -Phase 'post' -ProjectDir $shProjK -InheritTaskEnv
+        Assert-NotContains "9k2 (harness): -InheritTaskEnv passes it through, as documented" `
+            "REFUSING the changed_files diff for task 99" $r.Stderr
+    } finally {
+        [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_99', $null, 'Process')
+    }
+}
+
+# 9n (W2103/D142): the PERSISTED base wins over re-resolving, which is bash's
+# ordering and which decides the refusal.
+# bash's self-heal takes _state_base when the state file names THIS task and
+# only otherwise calls select_task_snapshot_base, so the refusal is reachable
+# only when no base is on record. This port re-resolved unconditionally, which
+# re-judges against origin refs the after_doing section's own `git push` may
+# have moved: a correct base then looks stale and recomputes to HEAD, i.e. an
+# EMPTY snapshot (D142). It also meant a refusal could coexist with a persisted
+# base on disk - a state bash cannot reach - and the two executors share this
+# file.
+#
+# The geometry: no per-task base in the cache and a FOREIGN owner on the shared
+# one, so the selector would refuse; a persisted base for this task on the state
+# line, so it must not.
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: 9n: the persisted-base preference needs git" -ForegroundColor Yellow
+} else {
+    $shProjN = Join-Path $TmpDir 'sh-persisted-base'
+    New-Item -ItemType Directory -Path $shProjN -Force | Out-Null
+    & git -C $shProjN init -q 2>$null | Out-Null
+    & git -C $shProjN config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $shProjN config user.name 'Test' 2>$null | Out-Null
+    & git -C $shProjN config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $shProjN '.gitignore') `
+        -Value "/.stride.md`n/.stride-env-cache`n/.stride-changed-files.json`n/.stride-diff-upload-state" -Encoding UTF8
+    Set-Content -Path (Join-Path $shProjN 'seed.txt') -Value 'seed' -Encoding UTF8
+    & git -C $shProjN add -A 2>$null | Out-Null
+    & git -C $shProjN commit -q -m 'seed' 2>$null | Out-Null
+    $shBaseN = (& git -C $shProjN rev-parse HEAD 2>$null | Out-String).Trim()
+    Set-Content -Path (Join-Path $shProjN 'persisted-work.txt') -Value 'work' -Encoding UTF8
+    & git -C $shProjN add -A 2>$null | Out-Null
+    & git -C $shProjN commit -q -m 'work' 2>$null | Out-Null
+    $shHeadN = (& git -C $shProjN rev-parse HEAD 2>$null | Out-String).Trim()
+    Set-Content -Path (Join-Path $shProjN '.stride.md') -Value @'
+## before_review
+```bash
+echo "br_ran"
+```
+'@ -Encoding UTF8
+    Set-Content -Path (Join-Path $shProjN '.stride-env-cache') -Encoding UTF8 -Value @(
+        "TASK_ID='99'",
+        "TASK_BASE_REF='$shHeadN'",
+        "TASK_BASE_REF_OWNER='88'")
+    Set-Content -Path (Join-Path $shProjN '.stride-diff-upload-state') `
+        -Value "task_id=99`nhttp_code=500`nbase=$shBaseN" -Encoding UTF8
+    Remove-Item -Force (Join-Path $shProjN '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    $r = Invoke-HookScript -InputJson $shUnreachableJson -Phase 'post' -ProjectDir $shProjN
+    Assert-Exit "9n: before_review over a persisted base exits 0" 0 $r.ExitCode
+    Assert-NotContains "9n (D226): the persisted base is this task's own, so nothing is refused" `
+        "REFUSING the changed_files diff for task 99" $r.Stderr
+    $snapN = Get-Content -Raw -Path (Join-Path $shProjN '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    Assert-Contains "9n (D142): the retry captures from the PERSISTED base" 'persisted-work.txt' "$snapN"
+    $stateN = @(Get-Content -Path (Join-Path $shProjN '.stride-diff-upload-state') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "9n: and the record survives its own truncating write" "1" `
+        "$(@($stateN | Where-Object { $_ -eq "base=$shBaseN" }).Count)"
 }
 
 # 9l (W2103/D273): the replay's POSITIVE direction, and its only production
@@ -5727,17 +5855,17 @@ echo "claimed"
 echo "ran"
 ```
 '@ -Encoding UTF8
-    # THE OUTER TASK ID IS 4242, NOT 42, AND THE ENV IS CLEARED FIRST. This case
-    # caught the harness contaminating itself: Invoke-HookScript copies the TEST
-    # process environment into the hook child, and Group 22's unit cases leave
-    # TASK_BASE_REF_42='abc123' set. With the anchor evicted, the child then
-    # read that inherited value instead of refusing, Build-ChangedFilesSnapshot
-    # could not resolve 'abc123' and fell back to HEAD~1 - which produces a
-    # non-empty snapshot naming the outer's file. Both payoff assertions below
-    # passed under the very mutation they exist to catch. An unused id plus an
-    # explicit clear makes the cache the only source, which is what this case
-    # claims to be testing.
-    [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_4242', $null, 'Process')
+    # THE OUTER TASK ID IS 4242, NOT 42. This case is what caught the harness
+    # contaminating itself: Invoke-HookScript used to copy the TEST process
+    # environment wholesale into the hook child, and Group 22's unit cases leave
+    # TASK_BASE_REF_42='abc123' set. With the anchor evicted the child read that
+    # inherited value instead of refusing, could not resolve 'abc123', fell back
+    # to HEAD~1 and produced a plausible non-empty snapshot - so both payoff
+    # assertions below passed under the very mutation they exist to catch. The
+    # class is now stripped in Invoke-HookScript (see $script:StrideChildEnvStrip,
+    # pinned by 9k2); an id nothing else touches is kept on top of that, because
+    # isolation a case owns itself does not depend on a guard elsewhere staying
+    # correct.
     # The outer (4242) first, i.e. oldest, then 22 open children - the measured
     # geometry, one past the 20 that lost it.
     $g22sLines = New-Object System.Collections.Generic.List[string]

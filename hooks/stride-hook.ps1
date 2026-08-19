@@ -4206,13 +4206,12 @@ function Invoke-SelfHealChangedFilesUpload {
     # verdict to derive, so both are seeded from what the file already held.
     # THE WRITE AT THE END TRUNCATES, so seeding with '' would not "leave the
     # record alone" - it would DELETE the base the primary capture persisted,
-    # on the one path that never computes a replacement. Inert on this side
-    # today (nothing here consumes base= as a revision) but not inert across
-    # executors: bash's self-heal PREFERS the persisted base over re-resolving,
-    # precisely because re-resolving after the section's own `git push` can make
-    # a correct base look stale and recompute to HEAD - an EMPTY snapshot
-    # (D142). A shared checkout must not lose that record just because the ps1
-    # ran the retry.
+    # on the one path that never computes a replacement. It is consumed as well
+    # as carried: the build path below PREFERS it over re-resolving, which is
+    # bash's ordering and is there because re-resolving after the section's own
+    # `git push` can make a correct base look stale and recompute to HEAD - an
+    # EMPTY snapshot (D142). Both executors share this file, so losing the
+    # record on a ps1 retry would hand a later bash retry the same emptying.
     $healBase = $stateBase
     $healNarrowed = $stateNarrowed
     if (-not (Test-Path -LiteralPath $snapshotPath -PathType Leaf)) {
@@ -4229,7 +4228,25 @@ function Invoke-SelfHealChangedFilesUpload {
         }
         if (-not $inRepo) { return }
 
-        $sel = Resolve-TaskSnapshotBase -TaskId $taskId
+        # (W2103) BASH'S ORDERING, adopted rather than approximated: the base
+        # THIS task persisted wins over re-resolving. Re-resolving here re-judges
+        # against origin refs the after_doing section's own `git push` may have
+        # moved, so a correct base can look stale and recompute to HEAD - an
+        # EMPTY snapshot (D142). It also decides the refusal: a persisted base is
+        # this task's own by construction (the read is gated on task_id), so
+        # D226's foreign-owner guard has nothing to protect against on that
+        # branch, and the refusal is reachable only where bash reaches it -
+        # when no base is on record at all. That is what makes $healBase
+        # correct on the refusal branch WITHOUT an explicit clear: it can only
+        # be '' there, because a non-empty $stateBase would have taken the other
+        # branch. The trust guard is deliberately NOT re-run on the persisted
+        # base, exactly as bash does not re-run it.
+        $healRefused = $false
+        if (-not $stateBase) {
+            $sel = Resolve-TaskSnapshotBase -TaskId $taskId
+            $healRefused = [bool]$sel.Refused
+            if (-not $healRefused) { $healBase = Resolve-SnapshotBaseTrust -Base $sel.Base }
+        }
         $healSnapshot = '[]'
         # (W2103/D273) The verdict this retry actually APPLIED - hoisted OUT of
         # the non-refused branch. bash initialises _retry_narrowed=no outside
@@ -4240,14 +4257,7 @@ function Invoke-SelfHealChangedFilesUpload {
         # is '[]', which is narrowed by nothing. The two carriers could then
         # disagree with each other AND with the upload.
         $healApplied = 'no'
-        if ($sel.Refused) {
-            # A refusal uploads '[]'. Claiming a base for it would describe a
-            # snapshot that was never measured from one, so the carried value is
-            # dropped here rather than written - bash's _snap_base is "" on the
-            # same branch, for the same reason.
-            $healBase = ''
-        }
-        if (-not $sel.Refused) {
+        if (-not $healRefused) {
             # (W2102) Attribute here too. bash's equivalent states that
             # attribution belongs to EVERY non-refused path, not just the
             # base-selection branch, and unlike the narrowing REPLAY this needs
@@ -4255,7 +4265,8 @@ function Invoke-SelfHealChangedFilesUpload {
             # Passing '' here left the one path that can still build a snapshot
             # (before_review, nothing on disk) absorbing nested children's
             # commits: the exact over-report this task closes everywhere else.
-            $healBase = Resolve-SnapshotBaseTrust -Base $sel.Base
+            # $healBase is already resolved above: the persisted base verbatim,
+            # or the trust-guarded selection when nothing was persisted.
             $healRanges = ''
             try { $healRanges = Get-AttributedCommitRange -OwnBase $healBase -SelfTaskId $taskId }
             catch { $healRanges = '' }

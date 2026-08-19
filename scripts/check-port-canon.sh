@@ -549,6 +549,41 @@ planted.md"
   st_assert "a filename cannot forge an anchor record" 1 "$rc" "MISSING: rule-one v1" "$out"
   st_refute "a forged path never yields an ok cell" "ok: rule-one v1 at zz.md" "$out"
 
+  # --- awkward but REPRESENTABLE names must still be scanned, not refused:
+  # --- the refusal is about tabs and newlines, not about odd characters.
+  mkdir -p "$tmp/odd/alpha" "$tmp/odd/beta"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/odd/alpha/-e.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/odd/beta/a b\$(id)[1]*.md"
+  out="$(st_run "$tmp/k.md" "$tmp/odd")"; rc=$?
+  st_assert "odd but representable filenames are scanned, not refused" 0 "$rc" "ok: rule-one v1 at -e.md" "$out"
+
+  # --- the enumeration is ONE walk. The previous guard compared two separate
+  # --- find walks, so removing a file between them cancelled the difference
+  # --- and let a newline-named file through -- a TOCTOU on a mutable tree.
+  mkdir -p "$tmp/race/alpha" "$tmp/race/beta"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/race/beta/b.md"
+  printf 'x\n' > "$tmp/race/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/racesecret.md"
+  printf 'x\n' > "$tmp/race/alpha/z
+../racesecret.md"
+  race_false=0
+  for _i in 1 2 3 4 5 6 7 8; do
+    ( for _j in 1 2 3 4 5 6 7 8 9 10; do
+        printf 'x\n' > "$tmp/race/alpha/churn.md" 2>/dev/null
+        rm -f "$tmp/race/alpha/churn.md" 2>/dev/null
+      done ) &
+    if (cd "$tmp" && bash "$SELF" --canon "$tmp/k.md" --ports-parent "$tmp/race" 2>/dev/null) \
+       | grep -q 'ok: rule-one v1 at racesecret.md'; then
+      race_false=$((race_false + 1))
+    fi
+    wait
+  done
+  if [ "$race_false" -eq 0 ]; then
+    pass=$((pass + 1)); echo "ok: a mutating tree cannot slip a newline-named file past the guard"
+  else
+    fail=$((fail + 1)); echo "SELF-TEST FAILED: a mutating tree slipped a newline-named file past the guard ($race_false/8 runs read outside the tree)"
+  fi
+
   # --- CLI surface
   out="$(bash "$SELF" --help 2>&1)"; rc=$?
   st_assert "--help exits 0 and documents the flags" 0 "$rc" "ports-parent" "$out"
@@ -912,37 +947,26 @@ property_impl_version() {
 # exclusion is load-bearing rather than cosmetic: stride-opencode carries
 # 36 MB of node_modules holding 9 .md files that belong to its dependencies,
 # not to the port.
-port_md_files() {
-  # stderr is deliberately NOT discarded and the exit status is deliberately
-  # NOT swallowed. An enumeration that comes back empty because find failed --
-  # an unreadable subtree, a directory replaced mid-run, a non-conforming find
-  # on another platform -- must not be mistaken for a clean tree. The property
-  # check below turns that difference into UNVERIFIABLE rather than "verified",
-  # which is the same refusal the header documents for exit 2: a run that
-  # proved nothing must never read as a pass.
-  # A newline-delimited file list cannot represent a filename containing a
-  # newline: the name splits into two words, the tail becomes a bare relative
-  # path, and grep resolves it against the process CWD -- reading a file
-  # outside the scanned tree and attributing it to this port, while the port's
-  # real file is never opened. Detect it by comparing a NUL-counted
-  # enumeration against a line-counted one and refuse the tree, which routes it
-  # to the existing UNVERIFIABLE branch. Refuse, never guess, exactly as the
-  # canon parser does with a separator it cannot represent.
-  if [ "$(find "$1" -type f -name '*.md' \
-            -not -path '*/.git/*' -not -path '*/node_modules/*' \
-            -not -path '*/deps/*' -not -path '*/_build/*' -print0 2>/dev/null \
-          | tr -dc '\0' | wc -c)" \
-     -ne "$(find "$1" -type f -name '*.md' \
-            -not -path '*/.git/*' -not -path '*/node_modules/*' \
-            -not -path '*/deps/*' -not -path '*/_build/*' 2>/dev/null | wc -l)" ]; then
-    echo "GATE ERROR: a markdown filename under $1 contains a newline; this checker cannot enumerate that tree safely" >&2
-    return 1
-  fi
+port_md_files_nul() {
+  # ONE walk, NUL-delimited, with find's exit status appended as a final
+  # record. Three things follow, and each closes a defect this script has
+  # already had:
+  #
+  #  * NUL is the only delimiter a filename cannot contain, so a name holding
+  #    a newline is carried intact instead of splitting into two words whose
+  #    tail grep resolves against the process CWD -- reading outside the tree.
+  #  * One walk cannot disagree with itself. The previous guard compared a
+  #    NUL-counted walk against a line-counted one, so deleting an unrelated
+  #    file between them made the counts coincide and let a newline-named file
+  #    through: a time-of-check/time-of-use race on a mutable tree.
+  #  * find's status survives, so an unreadable subtree still routes to
+  #    UNVERIFIABLE rather than reading as a clean short list.
   find "$1" -type f -name '*.md' \
     -not -path '*/.git/*' \
     -not -path '*/node_modules/*' \
     -not -path '*/deps/*' \
-    -not -path '*/_build/*'
+    -not -path '*/_build/*' -print0
+  printf '%s\0' "$?"
 }
 
 # Every anchor comment in a directory, as "id<TAB>version<TAB>relpath:line".
@@ -954,17 +978,47 @@ port_md_files() {
 # the definition site for all five anchors and it lives inside the "stride"
 # port's own tree, so counting it would report that port compliant without a
 # single port-side adoption.
+# Returns 0 with the anchor stream on stdout; 1 when the tree could not be
+# judged, for either of two distinct reasons that both mean "refuse":
+#
+#   * find failed -- an unreadable subtree yields a SHORT list, and a short
+#     list is fatal specifically for the UNEXPECTED sweep, which can only fire
+#     on anchors it actually sees. MISSING fails safe under a short list;
+#     UNEXPECTED does not.
+#   * a path cannot be represented in this stream. Records are newline
+#     separated and tab delimited, so a path containing either would forge a
+#     record -- the same class safe() refuses on the canon side. NUL-walking
+#     carries such a name intact this far, which is what makes the refusal
+#     honest rather than a silent skip.
+#
+# Process substitution keeps the loop in the CURRENT shell: a pipeline would
+# run it in a subshell and discard both flags. The final record is find's exit
+# status, held back one iteration rather than pattern-matched, so no file can
+# impersonate the sentinel by being named like one.
 scan_anchors() {
-  local dir="$1" f rel files
-  # Capture the enumeration first and propagate its failure. Piping find into a
-  # while loop discarded its exit status, so an unreadable subtree produced a
-  # short list that read as a complete one -- and the UNEXPECTED sweep, which
-  # only fires on anchors it actually sees, returned a clean verdict. MISSING
-  # fails safe under a short list; UNEXPECTED does not.
-  files="$(port_md_files "$dir")" || return 1
-  for f in $files; do
-    [ "$f" = "$EXCLUDE_CANON" ] && continue
-    rel="${f#$dir/}"
+  local dir="$1" f prev="" have_prev=0 st="" unrepresentable=0
+  while IFS= read -r -d '' f; do
+    if [ "$have_prev" -eq 1 ]; then
+      case "${prev#$dir/}" in
+        *$'\t'*|*$'\n'*)
+          echo "GATE ERROR: a path under $dir contains a tab or newline and cannot be reported safely" >&2
+          unrepresentable=1 ;;
+        *)
+          [ "$prev" = "$EXCLUDE_CANON" ] || emit_anchors "$prev" "$dir" ;;
+      esac
+    fi
+    prev="$f"; have_prev=1
+  done < <(port_md_files_nul "$dir")
+  st="$prev"
+  [ "$st" = 0 ] || return 1
+  [ "$unrepresentable" -eq 0 ] || return 1
+  return 0
+}
+
+# Emit every anchor in one file as "id<TAB>version<TAB>relpath:line".
+emit_anchors() {
+  local f="$1" dir="$2" rel
+  rel="${f#$dir/}"
     # The path is handed to awk through the ENVIRONMENT, not through -v.
     # POSIX requires awk to apply escape processing to a -v assignment, so the
     # two ordinary characters \ and n in a filename became a REAL newline in
@@ -974,14 +1028,6 @@ scan_anchors() {
     # the same record-forgery class safe() guards on the canon side, so the
     # same refusal applies here: a path that still carries a separator is
     # dropped rather than emitted.
-    # $'\t' / $'\n' rather than $(printf ...): command substitution strips
-    # trailing newlines, so $(printf '\n') is the EMPTY string and the pattern
-    # *""* matches every path -- which silently skipped every file.
-    case "$rel" in
-      *$'\t'*|*$'\n'*)
-        echo "GATE ERROR: skipping $f -- its path carries a tab or newline and cannot be reported safely" >&2
-        continue ;;
-    esac
     grep -EIno '<!--[[:space:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:space:]]+v[0-9]+[[:space:]]*-->' "$f" \
       | rel="$rel" awk '
           {
@@ -994,7 +1040,6 @@ scan_anchors() {
             split(m, part, /[ \t]+v/)
             printf "%s\t%s\t%s:%s\n", part[1], part[2], ENVIRON["rel"], ln
           }'
-  done
 }
 
 recs() { echo "$RECORDS" | grep "^$1	"; }
@@ -1174,18 +1219,22 @@ for pline in $PORT_LINES; do
           "scripts/check-port-canon.sh: implement the $eid property check at v$ever (this is a checker change, not a port change)"
         continue
       fi
-      if ! pfiles="$(port_md_files "$ptree")"; then
+      nfiles=0; hits=""; pst=""; pprev=""; phave=0
+      while IFS= read -r -d '' pf; do
+        if [ "$phave" -eq 1 ]; then
+          nfiles=$((nfiles + 1))
+          d="$(fence_defect "$pprev")"
+          [ -n "$d" ] && hits="$hits ${pprev#$ptree/}($d)"
+        fi
+        pprev="$pf"; phave=1
+      done < <(port_md_files_nul "$ptree")
+      pst="$pprev"
+      if [ "$pst" != 0 ]; then
         record UNVERIFIABLE "  " \
           "$eid -- could not enumerate the markdown under $ptree; refusing to report a check that did not run" \
           "$pid: make $ptree readable so the $eid property check can run"
         continue
       fi
-      nfiles=0; hits=""
-      for f in $pfiles; do
-        nfiles=$((nfiles + 1))
-        d="$(fence_defect "$f")"
-        [ -n "$d" ] && hits="$hits ${f#$ptree/}($d)"
-      done
       if [ -n "$hits" ]; then
         record DEFECT "  " "$eid --$hits" \
           "$pid: fix the $eid violations listed in the body above"

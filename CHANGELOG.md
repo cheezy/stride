@@ -23,6 +23,15 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.69.0] - 2026-08-19
+
+### Added
+
+- **The four canon rule anchors, adopted in this port.** `docs/port-canon.md` defines a per-rule anchor comment that lets `scripts/check-port-canon.sh` tell "this port carries the rule" apart from "nobody has checked", and this repo carried all four rules in substance while still reporting MISSING on every one of them — the anchor contract simply postdated the rules. Each anchor — an HTML comment of the form `<!-- canon:<rule-id> v1 -->` — now sits directly beside this repo's own statement of its rule, never restating it: `verdict-note` beside the Verdict-note rule in `agents/task-reviewer.md`, and `decision-matrix-authority`, `row-precedence` and `reason-code-vocabulary` beside the Step 3 decision matrix, its row-precedence ordering, and the `reason_code` vocabulary table in `skills/stride-workflow/SKILL.md`. Anchors mark presence; the per-port voicing is untouched.
+  - **One anchor per rule per port directory, and the tool will not catch a violation.** The checker's lookup takes `head -1`, so a second anchor for the same rule id is silently ignored rather than flagged — the mirrored decision matrix in `skills/stride-subagent-workflow/SKILL.md` therefore gets no anchor of its own, as the canon's `row-precedence` check hint requires. This is a hand-discipline rule, not an enforced one.
+  - **`docs/port-canon.md` itself stays unanchored**, because the checker excludes the definition site on purpose: anchoring it would let a port look compliant on the strength of the file that defines compliance.
+  - `scripts/check-port-canon.sh` now reports `ok` on all four rows for port `stride` (previously all four MISSING), moving the fleet tally from `ok 8, missing 44` to `ok 12, missing 40`. Comment-only insertions in prose; no behaviour change, and `--self-test` still passes 100/100.
+
 ## [1.68.0] - 2026-08-19
 
 ### Fixed

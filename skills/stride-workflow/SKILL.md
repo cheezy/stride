@@ -284,6 +284,7 @@ The `hooks.json` PostToolUse handler automatically executes `.stride.md` `## bef
 | Defect type | Skip | YES | Skip (unless large) | YES | YES |
 | Complexity absent or unrecognised | Skip | YES | YES | YES | YES |
 
+<!-- canon:decision-matrix-authority v1 -->
 **This matrix is the SOLE decision point for every column it carries** —
 Decompose, Explore, Plan, Review and Isolate. **Nothing anywhere may state a
 second, separately-satisfiable condition for any of them**; where another file,
@@ -294,6 +295,7 @@ defect D221, and this rule is its fix. `stride-subagent-workflow` carries a
 mirror of this table for the subagent columns: it must agree row for row, and
 **where it diverges, this matrix is authoritative.**
 
+<!-- canon:row-precedence v1 -->
 **Row precedence — more than one row can match, so read them in this order.**
 A `medium` defect matches both `medium (any)` and `Defect type`; without an
 order that is the same two-rules-one-task ambiguity D221 was about, moved inside
@@ -746,6 +748,7 @@ Each element of `workflow_steps` is an object with these keys:
 | `reason` | string | When `dispatched=false` | Short explanation of why the step was skipped |
 | `reason_code` | enum | Optional, when `dispatched=false` | Machine-readable skip category (D239). Supplied **alongside** `reason`, never instead of it — the code is what the compliance dashboard aggregates, the prose is what a human reads. A code outside the list below is rejected with a `422`; omitting the key entirely is always valid |
 
+<!-- canon:reason-code-vocabulary v1 -->
 **Picking a `reason_code`:**
 
 | Code | Use when |

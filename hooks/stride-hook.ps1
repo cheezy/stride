@@ -723,15 +723,16 @@ function Get-DeadOpenWindowId {
     }
     $open = @($bases | Where-Object { -not $heads.Contains($_.Id) })
     if ($open.Count -eq 0) { return $dead }
+    # STRICTLY greater, and no git below it - the threshold test comes FIRST so
+    # that is literally true, not merely true of git processes. At or under the
+    # threshold this proves nothing dead and touches nothing.
+    if ($open.Count -le $SweepAt) { return $dead }
     # NO GIT, NO EVIDENCE. Without this guard `& git` raises a terminating
     # CommandNotFoundException under $ErrorActionPreference = 'Stop', the claim
     # rewrite's catch sets its kept list to @(), and every surviving window
     # record is erased from the rebuilt cache - the exact opposite of this
     # function's own fail-safe contract. bash degrades with `|| return 0`.
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $dead }
-    # STRICTLY greater, and no git below it. At or under the threshold this
-    # proves nothing dead and touches nothing.
-    if ($open.Count -le $SweepAt) { return $dead }
     $null = & git -C $ProjectDir rev-parse --verify --quiet HEAD 2>$null
     if ($LASTEXITCODE -ne 0) { return $dead }
     foreach ($w in $open) {
@@ -844,10 +845,15 @@ function Select-KeptWindowRecord {
 # exactly when it is needed. A per-task record survives that, because a
 # completion only rewrites the line it owns.
 #
-# Lifetime is bounded without any eviction change: reads happen between a
-# capture and that same completion's before_review, and the next claim rebuilds
-# the cache from Select-KeptWindowRecord, which emits only the base family and
-# therefore drops this one wholesale.
+# Lifetime is bounded by the WINDOW, not by the next claim. Reads happen between
+# a capture and that same completion's before_review; across a claim the record
+# is re-emitted by Get-CarriedWindowRecordLine for as long as its base window
+# survives eviction, and a re-claim of the SAME task clears that task's own
+# stale verdict through -ExcludeTaskId. (An earlier version of this paragraph
+# said the claim drops every verdict wholesale because the selector emits only
+# the base family. That was true of the selector alone and false of both call
+# sites, which pair it with the re-emit - and on this task, a comment asserting
+# something the code does not do is the defect being reviewed, not a footnote.)
 function Resolve-CaptureNarrowing {
     param([string]$TaskId, [string]$StateValue)
     if ($TaskId) {
@@ -4307,10 +4313,19 @@ function Invoke-SelfHealChangedFilesUpload {
             try { $healSnapshot = Build-ChangedFilesSnapshot -Base $healBase -OwnRanges $healRanges }
             catch { $healSnapshot = '[]' }
         }
-        # BOTH carriers, as bash does, and on EVERY build path including the
-        # refusal: the state file below, and the durable per-task record here.
-        # Leaving the record stale would let a later reader prefer a verdict
-        # that no longer describes any capture.
+        # BOTH VERDICT carriers, as bash does, and on EVERY build path including
+        # the refusal: the state file below, and the durable per-task record
+        # here. Leaving the record stale would let a later reader prefer a
+        # verdict that no longer describes any capture.
+        #
+        # Not all THREE things bash writes on the refusal branch: it also
+        # appends `refused_base=yes` (stride-hook.sh:2410 and :2756), which this
+        # port has never written. Deliberately unported and recorded here and in
+        # the parity note rather than left for the next reader to re-derive:
+        # nothing in either executor or either suite reads it, so it is a
+        # diagnostic breadcrumb for a human reading the state file, and adding a
+        # write at two sites is not this task's scope. Whoever ports it should
+        # do both sites at once - one stamped and one not is worse than neither.
         $healNarrowed = $healApplied
         if ($taskId) { $null = Set-TaskNarrowedRecord -TaskId $taskId -Value $healApplied }
         Write-ChangedFilesSnapshot -Json $healSnapshot

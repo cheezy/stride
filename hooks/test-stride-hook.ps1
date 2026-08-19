@@ -64,6 +64,17 @@ if ($inheritedNames.Count -gt 0) {
         Write-Host 'These hook-read variables are INHERITED and may change what the assertions measure:'
         $inheritedNames | ForEach-Object { Write-Host "  $_" }
         Write-Host 'Results are NOT hermetic. Unset STRIDE_TEST_KEEP_ENV to neutralise them.'
+        # NARROWER THAN IT USED TO BE, and saying so beats letting the list
+        # above overstate its own reach: the TASK_ID/TASK_IDENTIFIER and
+        # record-family names are stripped from every hook CHILD regardless of
+        # this setting (see $script:StrideChildEnvStrip), so for child-process
+        # cases they cannot reach the code under test either way. This mode now
+        # affects only the in-process cases - Groups 22, 24 and 25, which
+        # dot-source hook functions into THIS process - and the non-TASK_ names
+        # such as CLAUDE_PROJECT_DIR, HOOK_NAME and GOAL_*.
+        Write-Host 'NOTE: TASK_ID/TASK_IDENTIFIER and the five record families are stripped from'
+        Write-Host 'hook children regardless of this setting; KEEP_ENV affects only the in-process'
+        Write-Host 'cases and the non-TASK_ variables.'
     } else {
         Write-Host 'NOTE: neutralising inherited hook variables so the suite asserts the'
         Write-Host 'behaviour under test rather than your environment (D235):'
@@ -162,6 +173,17 @@ function Assert-Exit {
 # property that survives the next case anyone adds. -InheritTaskEnv is the
 # opt-out for a case that genuinely means to pass task state through the
 # environment; no case needs it today.
+# MATCHED CASE-INSENSITIVELY, on the rule the production loader states for this
+# exact key namespace (stride-hook.ps1:2046): case-sensitivity is safe on an
+# ALLOW-list, because it can only admit less; on a GATE it admits less GATING,
+# which is the opposite. Windows environment variables are case-insensitive and
+# Windows is the shipping host, so a variable stored as Task_Base_Ref_42 IS
+# TASK_BASE_REF_42 to the child - and a case-sensitive strip would let it
+# through, reopening the very class this guard closes. The rule is FOLLOWED
+# rather than tested: macOS env names really are case-sensitive, so a mixed-case
+# leg in 9k2 would prove nothing on the host this suite is developed on. The
+# pattern is fully anchored over seven specific names, so insensitivity costs no
+# false positives.
 $script:StrideChildEnvStrip = '^(TASK_(ID|IDENTIFIER|BASE_REF|HEAD_REF|OWNED|NARROWED|BASE_AT)(_[A-Za-z0-9_]+)?)\z'
 
 function Invoke-HookScript {
@@ -208,7 +230,7 @@ function Invoke-HookScript {
         # taken on trust.
         if (-not $InheritTaskEnv) {
             foreach ($key in @($psi.Environment.Keys)) {
-                if ("$key" -cmatch $script:StrideChildEnvStrip) { $null = $psi.Environment.Remove($key) }
+                if ("$key" -match $script:StrideChildEnvStrip) { $null = $psi.Environment.Remove($key) }
             }
         }
         if ($ProjectDir) {
@@ -2644,8 +2666,8 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     }
 }
 
-# 9n (W2103/D142): the PERSISTED base wins over re-resolving, which is bash's
-# ordering and which decides the refusal.
+# 9n (W2103/D142): the PERSISTED base wins over re-resolving, AND the trust
+# guard is deliberately not re-run on it.
 # bash's self-heal takes _state_base when the state file names THIS task and
 # only otherwise calls select_task_snapshot_base, so the refusal is reachable
 # only when no base is on record. This port re-resolved unconditionally, which
@@ -2655,9 +2677,17 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 # base on disk - a state bash cannot reach - and the two executors share this
 # file.
 #
-# The geometry: no per-task base in the cache and a FOREIGN owner on the shared
-# one, so the selector would refuse; a persisted base for this task on the state
-# line, so it must not.
+# THE FIXTURE HAS AN ORIGIN, and that is the whole point of its shape. Without
+# one, Resolve-SnapshotBaseTrust returns its argument unchanged at the
+# no-remote-head branch, so it is a NO-OP in every ps1 test - and adding it back
+# onto the persisted branch, which is precisely the D142 emptying this round's
+# change exists to prevent, left all 901 assertions green. No fixture in this
+# file had ever created a remote. This one does, so the guard is live and the
+# decision to skip it is observable.
+#
+# Geometry: origin/main is at B, HEAD is at C, and the persisted base is A -
+# older than the branch point. Skipping the guard keeps A, so B's file is in the
+# diff. Applying it recomputes A to the branch point B, and B's file vanishes.
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Write-Host "  SKIP: 9n: the persisted-base preference needs git" -ForegroundColor Yellow
 } else {
@@ -2671,18 +2701,43 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         -Value "/.stride.md`n/.stride-env-cache`n/.stride-changed-files.json`n/.stride-diff-upload-state" -Encoding UTF8
     Set-Content -Path (Join-Path $shProjN 'seed.txt') -Value 'seed' -Encoding UTF8
     & git -C $shProjN add -A 2>$null | Out-Null
-    & git -C $shProjN commit -q -m 'seed' 2>$null | Out-Null
+    & git -C $shProjN commit -q -m 'A seed' 2>$null | Out-Null
     $shBaseN = (& git -C $shProjN rev-parse HEAD 2>$null | Out-String).Trim()
-    Set-Content -Path (Join-Path $shProjN 'persisted-work.txt') -Value 'work' -Encoding UTF8
+    # B: pushed, so it becomes the branch point the trust guard would snap to.
+    Set-Content -Path (Join-Path $shProjN 'pre-branchpoint.txt') -Value 'pushed work' -Encoding UTF8
     & git -C $shProjN add -A 2>$null | Out-Null
-    & git -C $shProjN commit -q -m 'work' 2>$null | Out-Null
+    & git -C $shProjN commit -q -m 'B pushed' 2>$null | Out-Null
+    # The remote is built by pushing rather than by cloning: `git clone -b` and
+    # `git init -b` both need a git new enough to name the initial branch, and
+    # the branch name is the one thing this fixture cannot afford to have vary.
+    $shOriginN = Join-Path $TmpDir 'sh-persisted-base-origin.git'
+    & git init --bare -q $shOriginN 2>$null | Out-Null
+    & git -C $shProjN remote add origin $shOriginN 2>$null | Out-Null
+    & git -C $shProjN push -q origin HEAD:refs/heads/main 2>$null | Out-Null
+    & git -C $shProjN fetch -q origin 2>$null | Out-Null
+    # C: local only, so merge-base(HEAD, origin/main) is B.
+    Set-Content -Path (Join-Path $shProjN 'persisted-work.txt') -Value 'local work' -Encoding UTF8
+    & git -C $shProjN add -A 2>$null | Out-Null
+    & git -C $shProjN commit -q -m 'C local' 2>$null | Out-Null
     $shHeadN = (& git -C $shProjN rev-parse HEAD 2>$null | Out-String).Trim()
+    # CONTROL: the fixture only means anything if the remote really resolves and
+    # the branch point really is B. A fixture that quietly stopped having an
+    # origin would make the guard a no-op again and every assertion below would
+    # pass over the thing it exists to catch - the drift 9k's own control covers.
+    $shRemoteN = (& git -C $shProjN rev-parse --verify --quiet 'origin/main' 2>$null | Out-String).Trim()
+    $shBpN = (& git -C $shProjN merge-base HEAD 'origin/main' 2>$null | Out-String).Trim()
+    Assert-Eq "9n: CONTROL - origin/main resolves, so the trust guard is LIVE here" "True" `
+        "$([bool]$shRemoteN)"
+    Assert-Eq "9n: CONTROL - and the branch point is B, not the persisted base A" "False" `
+        "$($shBpN -eq $shBaseN)"
     Set-Content -Path (Join-Path $shProjN '.stride.md') -Value @'
 ## before_review
 ```bash
 echo "br_ran"
 ```
 '@ -Encoding UTF8
+    # No per-task base, and a FOREIGN owner on the shared one, so the selector
+    # would refuse. No TASK_BASE_REF_TRUSTED, so the guard is not short-circuited.
     Set-Content -Path (Join-Path $shProjN '.stride-env-cache') -Encoding UTF8 -Value @(
         "TASK_ID='99'",
         "TASK_BASE_REF='$shHeadN'",
@@ -2696,6 +2751,8 @@ echo "br_ran"
         "REFUSING the changed_files diff for task 99" $r.Stderr
     $snapN = Get-Content -Raw -Path (Join-Path $shProjN '.stride-changed-files.json') -ErrorAction SilentlyContinue
     Assert-Contains "9n (D142): the retry captures from the PERSISTED base" 'persisted-work.txt' "$snapN"
+    Assert-Contains "9n (D142): the trust guard is NOT re-run on it - B's file survives" `
+        'pre-branchpoint.txt' "$snapN"
     $stateN = @(Get-Content -Path (Join-Path $shProjN '.stride-diff-upload-state') -Encoding UTF8 -ErrorAction SilentlyContinue)
     Assert-Eq "9n: and the record survives its own truncating write" "1" `
         "$(@($stateN | Where-Object { $_ -eq "base=$shBaseN" }).Count)"
@@ -6647,6 +6704,13 @@ Assert-Eq "23f: Write-EnvCache still has exactly 6 call sites (tripwire on new w
 #       COVERED ELSEWHERE at test-stride-hook.ps1:2037-2079.
 #   sh 23z15c  non-integer id refusal
 #       COVERED ELSEWHERE by 22b, 22c and :2791-2849.
+#   `refused_base=yes` on the refusal path  (sh 2410, 2756)
+#       DELIBERATELY UNPORTED. bash appends it after the truncating state write
+#       at BOTH sites; Write-DiffUploadState has no equivalent and never has.
+#       Nothing in either executor or either suite reads it - it is a
+#       breadcrumb for a human reading the state file - so this is a diagnostic
+#       gap, not a behavioural one. Recorded here rather than left to be
+#       re-derived; whoever ports it should do both sites at once.
 #   sh 23v2 sub-blocks k=3..k=8  D272 ratchet
 #       DEFERRED. The k=2 sub-block below pins that this port REPRODUCES the
 #       ratchet rather than silently "fixing" it, which is the property that

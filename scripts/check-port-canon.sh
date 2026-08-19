@@ -528,6 +528,27 @@ self_test() {
     pass=$((pass + 1)); pass=$((pass + 1))
   fi
 
+  # --- the filename channel. A newline-delimited file list cannot represent a
+  # --- filename containing a newline: the tail became a CWD-relative path and
+  # --- the gate read a file outside the scanned tree, attributing it to a port.
+  mkdir -p "$tmp/nlfn/alpha" "$tmp/nlfn/beta" "$tmp/nlcwd"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nlfn/beta/b.md"
+  printf '<!-- canon:ghost-from-cwd v1 -->\n' > "$tmp/nlcwd/planted.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nlfn/alpha/a
+planted.md"
+  out="$(cd "$tmp/nlcwd" && bash "$SELF" --canon "$tmp/k.md" --ports-parent "$tmp/nlfn" 2>/dev/null)"; rc=$?
+  st_assert "a newline-named file makes the tree UNVERIFIABLE" 1 "$rc" "refusing to judge anchors on a partial file list" "$out"
+  st_refute "no file outside the ports parent is attributed to a port" "ghost-from-cwd" "$out"
+
+  # --- awk -v applies POSIX escape processing to its assignment, so a literal
+  # --- backslash-n in a filename became a real newline and forged a record.
+  mkdir -p "$tmp/forge/alpha" "$tmp/forge/beta"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/forge/beta/b.md"
+  printf '<!-- canon:other v1 -->\n' > "$tmp/forge/alpha/q\\nrule-one\\t1\\tzz.md"
+  out="$(st_run "$tmp/k.md" "$tmp/forge")"; rc=$?
+  st_assert "a filename cannot forge an anchor record" 1 "$rc" "MISSING: rule-one v1" "$out"
+  st_refute "a forged path never yields an ok cell" "ok: rule-one v1 at zz.md" "$out"
+
   # --- CLI surface
   out="$(bash "$SELF" --help 2>&1)"; rc=$?
   st_assert "--help exits 0 and documents the flags" 0 "$rc" "ports-parent" "$out"
@@ -899,6 +920,24 @@ port_md_files() {
   # check below turns that difference into UNVERIFIABLE rather than "verified",
   # which is the same refusal the header documents for exit 2: a run that
   # proved nothing must never read as a pass.
+  # A newline-delimited file list cannot represent a filename containing a
+  # newline: the name splits into two words, the tail becomes a bare relative
+  # path, and grep resolves it against the process CWD -- reading a file
+  # outside the scanned tree and attributing it to this port, while the port's
+  # real file is never opened. Detect it by comparing a NUL-counted
+  # enumeration against a line-counted one and refuse the tree, which routes it
+  # to the existing UNVERIFIABLE branch. Refuse, never guess, exactly as the
+  # canon parser does with a separator it cannot represent.
+  if [ "$(find "$1" -type f -name '*.md' \
+            -not -path '*/.git/*' -not -path '*/node_modules/*' \
+            -not -path '*/deps/*' -not -path '*/_build/*' -print0 2>/dev/null \
+          | tr -dc '\0' | wc -c)" \
+     -ne "$(find "$1" -type f -name '*.md' \
+            -not -path '*/.git/*' -not -path '*/node_modules/*' \
+            -not -path '*/deps/*' -not -path '*/_build/*' 2>/dev/null | wc -l)" ]; then
+    echo "GATE ERROR: a markdown filename under $1 contains a newline; this checker cannot enumerate that tree safely" >&2
+    return 1
+  fi
   find "$1" -type f -name '*.md' \
     -not -path '*/.git/*' \
     -not -path '*/node_modules/*' \
@@ -926,13 +965,25 @@ scan_anchors() {
   for f in $files; do
     [ "$f" = "$EXCLUDE_CANON" ] && continue
     rel="${f#$dir/}"
-    # The path goes to awk as a -v VARIABLE, never into a pattern or a
-    # replacement. Interpolating it into a sed s|...| expression meant a
-    # filename containing the delimiter terminated the substitution and the
-    # anchor vanished from the sweep entirely -- silently, and an "&" would
-    # have expanded to the whole match. awk -v cannot be reparsed that way.
+    # The path is handed to awk through the ENVIRONMENT, not through -v.
+    # POSIX requires awk to apply escape processing to a -v assignment, so the
+    # two ordinary characters \ and n in a filename became a REAL newline in
+    # rel and split one FOUND record into two -- letting a filename forge an
+    # id, a version and a path, and produce a clean verdict for a rule the port
+    # does not carry. ENVIRON is the one channel awk leaves literal. This is
+    # the same record-forgery class safe() guards on the canon side, so the
+    # same refusal applies here: a path that still carries a separator is
+    # dropped rather than emitted.
+    # $'\t' / $'\n' rather than $(printf ...): command substitution strips
+    # trailing newlines, so $(printf '\n') is the EMPTY string and the pattern
+    # *""* matches every path -- which silently skipped every file.
+    case "$rel" in
+      *$'\t'*|*$'\n'*)
+        echo "GATE ERROR: skipping $f -- its path carries a tab or newline and cannot be reported safely" >&2
+        continue ;;
+    esac
     grep -EIno '<!--[[:space:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:space:]]+v[0-9]+[[:space:]]*-->' "$f" \
-      | awk -v rel="$rel" '
+      | rel="$rel" awk '
           {
             if (match($0, /^[0-9]+:/) == 0) next
             ln = substr($0, 1, RLENGTH - 1)
@@ -941,7 +992,7 @@ scan_anchors() {
             m = substr(rest, RSTART, RLENGTH)
             sub(/^canon:/, "", m)
             split(m, part, /[ \t]+v/)
-            printf "%s\t%s\t%s:%s\n", part[1], part[2], rel, ln
+            printf "%s\t%s\t%s:%s\n", part[1], part[2], ENVIRON["rel"], ln
           }'
   done
 }

@@ -6717,17 +6717,21 @@ Assert-Eq "23f: Write-EnvCache still has exactly 6 call sites (tripwire on new w
 #       breadcrumb for a human reading the state file - so this is a diagnostic
 #       gap, not a behavioural one. Recorded here rather than left to be
 #       re-derived; whoever ports it should do both sites at once.
-#   sh 23v2 sub-blocks k=3..k=8  D272 ratchet
-#       NO LONGER OMITTED for k=2, k=3 and the empty-window edge - W2104
-#       mirrored them in Group 26, driven end to end. k=4..k=8 remain omitted:
-#       they are the same shape at greater depth, and k=3 is the TERMINAL one
-#       (every outer commit inside some childless window, so the snapshot is
-#       empty), which is the property worth pinning.
-#       W2102 recorded this as deferred "because the k=2 sub-block below pins
-#       that this port REPRODUCES the ratchet" - and no such sub-block existed,
-#       nor any other D272 assertion in this suite. The deferral was defensible;
-#       the thing it rested on was not. Corrected rather than deleted, so the
-#       next reader sees that the claim was checked.
+#   sh 23v2  D272 ratchet
+#       NO LONGER OMITTED. All SIX sub-blocks are mirrored in Group 26: k=2
+#       (sh :8276 -> 26a), the terminal k=3 (:8300 -> 26b), the empty-window
+#       edge (:8326 -> 26c), the real-commit-child edge (:8345 -> 26e), the
+#       depth-3 grandchild (:8371 -> 26f) and the uncommitted-WIP
+#       observability case (:8399 -> 26g).
+#       TWO FALSE CLAIMS PRECEDED THIS ONE, and both are recorded rather than
+#       quietly replaced. W2102 deferred these "because the k=2 sub-block below
+#       pins that this port REPRODUCES the ratchet", and no k=2 sub-block
+#       existed - nor any other D272 assertion in this suite. W2104's first
+#       correction then said the remainder was "k=4..k=8 ... the same shape at
+#       greater depth"; sh 23v2 has no k=4..k=8, and the three that were still
+#       unmirrored were distinct victim and observability classes, two of which
+#       this task's own testing_strategy named. A ledger that describes away
+#       what it omits is worse than one that omits loudly.
 Write-Host ""
 Write-Host "=== Test Group 24: W2102 window classification engine ==="
 
@@ -7771,6 +7775,13 @@ $ProjectDir = $g25SavedProjectDir
 # instructs; a change that widens or narrows the cascade is then noticed rather
 # than discovered.
 #
+# ALL SIX OF sh 23v2's SUB-BLOCKS ARE MIRRORED HERE: k=2 (26a), the terminal
+# k=3 (26b), the empty-window edge (26c), the real-commit-child edge (26e), the
+# depth-3 grandchild (26f) and the uncommitted-WIP observability case (26g).
+# The group also carries the two D271 end-to-end cases the ratchet work needed
+# alongside it: sh 23z6's 22-nested-completion union (26h) and sh 23z7's
+# stale-record gate (26i).
+#
 # MEASURED HERE TOO, AND THE NUMBERS DO NOT TRANSFER. Applying the declined fix
 # to this port - a present-and-empty owned record on a nonempty window skips the
 # window - fails exactly FOUR assertions, all of them 26a's and 26b's, i.e. the
@@ -7899,10 +7910,20 @@ if (-not $g26Git) {
     Invoke-D272Complete -Dir $g26b -TaskId '100'
     Assert-Eq "26b (D272): at k=3 the outer completes with an EMPTY snapshot - the no-own-commits shape, terminally" `
         "" (Get-D272Paths -Dir $g26b)
-    # THE CONTROL THAT MAKES THE EMPTY ASSERTION MEAN SOMETHING. '' also comes
-    # back from a fixture that never committed, from a repo that failed to
-    # initialise, and from an unwritten snapshot file - so the empty result is
-    # only evidence of the ratchet if the work demonstrably EXISTS in history.
+    # THE CONTROLS THAT MAKE THE EMPTY ASSERTION MEAN SOMETHING. '' comes back
+    # from an unwritten file, a fixture that never committed, a repo that failed
+    # to initialise, AND from a '[]' the capture wrote for reasons that are not
+    # the ratchet at all - a refused base, or the capture's own catch. Reading
+    # through Get-D272Paths cannot tell any of those apart, so each is excluded
+    # positively: the file EXISTS and its content is exactly '[]', the verdict
+    # on record is 'no' (a refusal or a thrown capture does not narrow), and the
+    # three commits really are in history.
+    $g26bRaw = (Get-Content -Raw -Path (Join-Path $g26b '.stride-changed-files.json') -ErrorAction SilentlyContinue)
+    Assert-Eq "26b (D272): CONTROL - the snapshot file exists and holds exactly '[]', not nothing at all" `
+        "[]" "$("$g26bRaw".Trim())"
+    $g26bCache = @(Get-Content -Path (Join-Path $g26b '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "26b (D272): CONTROL - and the outer did NOT narrow, so no refusal or thrown capture is masquerading as the sentinel" "1" `
+        "$(@($g26bCache | Where-Object { $_ -eq "TASK_NARROWED_100='no'" }).Count)"
     $g26bLog = @(& git -C $g26b log --format='%s' 2>$null | Where-Object { $_ -like 'outer_mid*' })
     Assert-Eq "26b (D272): while its three commits really are in history - the empty snapshot is not 'authored nothing'" `
         "3" "$($g26bLog.Count)"
@@ -7910,10 +7931,16 @@ if (-not $g26Git) {
 
 # --- 26c (D272, sh 23v2 edge): an EMPTY window has nothing to steal ---
 # The ratchet needs an outer commit inside each window, not merely a childless
-# child per window: the empty rev-list expansion is skipped before
-# classification, so the outer keeps everything. Without this, 26a and 26b would
-# be equally satisfied by an implementation that let ANY childless completion
-# subtract, which is a strictly larger and worse cascade than the one D272 pins.
+# child per window.
+#
+# WHAT THIS ACTUALLY DISCRIMINATES, corrected: the first version of this comment
+# claimed it caught an implementation that let ANY childless completion
+# subtract - and it does not, because such an implementation still subtracts
+# nothing from a window containing nothing. What the case really pins is the
+# BASE-EXCLUSIVE rev-list expansion: make it inclusive and the child's window
+# covers outer_only, so the child steals it and the outer loses it. Naming the
+# wrong mutation is the same defect as an assertion that cannot fail - it tells
+# the next reader the case guards something it does not.
 if (-not $g26Git) {
     Write-Host "  SKIP: 26c: the empty-window edge needs git" -ForegroundColor Yellow
 } else {
@@ -7923,9 +7950,13 @@ if (-not $g26Git) {
     Invoke-D272Claim -Dir $g26c -TaskId '200'
     # No outer commit lands inside 200's window, so it has nothing to swallow.
     Invoke-D272Complete -Dir $g26c -TaskId '200'
+    Assert-Eq "26c (D272): a childless child with an EMPTY window uploads nothing" `
+        "" (Get-D272Paths -Dir $g26c)
     Invoke-D272Complete -Dir $g26c -TaskId '100'
-    Assert-Contains "26c (D272): a childless child whose window is EMPTY steals nothing" `
-        'outer_only.txt' (Get-D272Paths -Dir $g26c)
+    # EXACT, as bash asserts it: Assert-Contains would also pass a snapshot that
+    # kept outer_only AND over-reported something else.
+    Assert-Eq "26c (D272): ...and the outer keeps its own commit" `
+        "outer_only.txt" (Get-D272Paths -Dir $g26c)
 }
 
 # --- 26d (D271): the OUTERMOST task UNIONS rather than replaces ---
@@ -7968,6 +7999,172 @@ if (-not $g26Git) {
     # attributing at all.
     Assert-Eq "26d (D271): CONTROL - and still does not absorb the nested task's commit" "0" `
         "$(@(@($g26dPaths -split ',') | Where-Object { $_ -eq 'nested_work.txt' }).Count)"
+}
+
+# Mirror of sh d226_fixture: after_doing does NOT commit, so ownership falls
+# back to the D244 heuristic. The hand-committing family - which is where
+# uncommitted work at completion is the norm, and therefore where 26g's
+# observability point lives.
+function New-D226Repo {
+    param([string]$Name)
+    $d = New-D272Repo -Name $Name
+    Set-Content -Path (Join-Path $d '.stride.md') -Encoding UTF8 -Value @'
+## before_doing
+```bash
+true
+```
+
+## after_doing
+```bash
+true
+```
+'@
+    return $d
+}
+
+# --- 26e (D272, sh 23v2 real-commit-child edge): one committing child BREAKS the chain ---
+# The ratchet needs an UNBROKEN run of childless windows. A child that commits
+# through after_doing records a non-empty owned set, which supersedes the purity
+# heuristic for its window; the next childless window then holds two commits
+# nothing owned covers, reads AMBIGUOUS, and subtracts nothing - so the outer
+# keeps both mid-window commits. This is the bound on the cascade, and without
+# it 26a/26b would leave a reader thinking any sequence of completions ratchets.
+if (-not $g26Git) {
+    Write-Host "  SKIP: 26e: the real-commit-child edge needs git" -ForegroundColor Yellow
+} else {
+    $g26e = New-D272Repo -Name 'real-commit-child'
+    foreach ($id in @('100', '200', '300')) { Invoke-D272Claim -Dir $g26e -TaskId $id }
+    Add-D272Commit -Dir $g26e -File 'outer_mid1.txt'
+    # Uncommitted at 300's completion, so ITS after_doing commits and it records
+    # a real owned set - the thing that breaks the chain.
+    Set-Content -Path (Join-Path $g26e 'child3.txt') -Value 'c3' -Encoding UTF8
+    Invoke-D272Complete -Dir $g26e -TaskId '300'
+    Assert-Eq "26e (D272): a child that COMMITS through after_doing captures only its own delta" `
+        "child3.txt" (Get-D272Paths -Dir $g26e)
+    Add-D272Commit -Dir $g26e -File 'outer_mid2.txt'
+    Invoke-D272Complete -Dir $g26e -TaskId '200'
+    Add-D272Commit -Dir $g26e -File 'outer_after.txt'
+    Invoke-D272Complete -Dir $g26e -TaskId '100'
+    Assert-Eq "26e (D272): with a real-commit child in the chain the outer keeps every commit it authored" `
+        "outer_after.txt,outer_mid1.txt,outer_mid2.txt" (Get-D272Paths -Dir $g26e)
+}
+
+# --- 26f (D272, sh 23v2 depth-3): the victim is decided by DEPTH, not by being outermost ---
+# testing_strategy.edge_cases[0] - "a childless grandchild taking the middle
+# task's commit while the outermost stays intact". The write-up describes the
+# outermost task as the victim; it is actually whichever ENCLOSING task
+# committed inside the childless window, at any depth. The middle task's loss is
+# silently PARTIAL - a non-empty snapshot, no sentinel, nothing for a reviewer
+# to notice - which is the worse observability case of the two.
+if (-not $g26Git) {
+    Write-Host "  SKIP: 26f: the depth-3 grandchild needs git" -ForegroundColor Yellow
+} else {
+    $g26f = New-D272Repo -Name 'depth3'
+    Invoke-D272Claim -Dir $g26f -TaskId '100'
+    Add-D272Commit -Dir $g26f -File 'top_own1.txt'
+    Invoke-D272Claim -Dir $g26f -TaskId '200'
+    Add-D272Commit -Dir $g26f -File 'mid_own1.txt'
+    Invoke-D272Claim -Dir $g26f -TaskId '300'
+    Add-D272Commit -Dir $g26f -File 'mid_own2.txt'
+    Invoke-D272Complete -Dir $g26f -TaskId '300'
+    Assert-Eq "26f (D272): a childless GRANDCHILD uploads the MIDDLE task's commit" `
+        "mid_own2.txt" (Get-D272Paths -Dir $g26f)
+    Invoke-D272Complete -Dir $g26f -TaskId '200'
+    Assert-Eq "26f (D272): so the middle task authored two commits and reports one - silently partial, no sentinel" `
+        "mid_own1.txt" (Get-D272Paths -Dir $g26f)
+    Add-D272Commit -Dir $g26f -File 'top_own2.txt'
+    Invoke-D272Complete -Dir $g26f -TaskId '100'
+    Assert-Eq "26f (D272): while the OUTERMOST task is untouched - depth decides the victim" `
+        "top_own1.txt,top_own2.txt" (Get-D272Paths -Dir $g26f)
+}
+
+# --- 26g (D272, sh 23v2 observability): the EMPTY snapshot is not the signature ---
+# testing_strategy.edge_cases[1] - "uncommitted work at completion masking the
+# terminal empty-snapshot shape". 26b's empty snapshot is the one visible
+# symptom of the terminal loss, and it appears ONLY when the victim's tree is
+# clean at completion. With any uncommitted work the same loss uploads an
+# ordinary-looking snapshot carrying just the WIP, and nothing distinguishes it
+# from a correct capture. Pinned in the hand-committing family, where
+# uncommitted work at completion is the norm rather than the exception.
+if (-not $g26Git) {
+    Write-Host "  SKIP: 26g: the observability case needs git" -ForegroundColor Yellow
+} else {
+    $g26g = New-D226Repo -Name 'wip-masks-loss'
+    Invoke-D272Claim -Dir $g26g -TaskId '100'
+    Invoke-D272Claim -Dir $g26g -TaskId '200'
+    Add-D272Commit -Dir $g26g -File 'outer_mid1.txt'
+    Invoke-D272Complete -Dir $g26g -TaskId '200'
+    Assert-Eq "26g (D272): the childless child steals the outer's only commit in the fallback family too" `
+        "outer_mid1.txt" (Get-D272Paths -Dir $g26g)
+    Set-Content -Path (Join-Path $g26g 'outer_wip.txt') -Value 'wip' -Encoding UTF8
+    Invoke-D272Complete -Dir $g26g -TaskId '100'
+    Assert-Eq "26g (D272): with uncommitted work the terminal shape reports the WIP and HIDES the stolen commit - no empty snapshot to notice" `
+        "outer_wip.txt" (Get-D272Paths -Dir $g26g)
+}
+
+# --- 26h (D271, sh 23z6): the observed worst case, 22 nested completions ---
+# testing_strategy.integration_tests[0] - "a 22-child outer task's snapshot
+# still contains its real deliverable after all children complete". Pre-D271 the
+# outer's snapshot was ONLY the junk its after_doing swept, with the entire real
+# deliverable missing. The outermost gate keeps the deliverable, and the EXACT
+# match also guards the other direction: no nested file may leak into the
+# outer's snapshot through the 22 closed windows.
+#
+# NOT the same case as W2103's 22s, which its own comment attributes to that
+# task: 22s drives 22 OPEN windows through a claim to prove the anchor survives
+# eviction. This drives 22 CLOSED windows through completions to prove the union
+# survives them.
+if (-not $g26Git) {
+    Write-Host "  SKIP: 26h: the 22-child integration case needs git" -ForegroundColor Yellow
+} else {
+    $g26h = New-D272Repo -Name 'union-22-nested'
+    Invoke-D272Claim -Dir $g26h -TaskId '100'
+    Add-D272Commit -Dir $g26h -File 'outer_deliverable.txt'
+    for ($i = 1; $i -le 22; $i++) {
+        Invoke-D272Claim -Dir $g26h -TaskId "$(200 + $i)"
+        Set-Content -Path (Join-Path $g26h "nested_$i.txt") -Value "n$i" -Encoding UTF8
+        Invoke-D272Complete -Dir $g26h -TaskId "$(200 + $i)"
+    }
+    Set-Content -Path (Join-Path $g26h 'junk.txt') -Value 'junk' -Encoding UTF8
+    Invoke-D272Complete -Dir $g26h -TaskId '100'
+    Assert-Eq "26h (D271): after 22 nested completions the outer reports its deliverable plus the sweep, never only the swept residue" `
+        "junk.txt,outer_deliverable.txt" (Get-D272Paths -Dir $g26h)
+}
+
+# --- 26i (D271, sh 23z7): a STALE open-window record must not flip the gate ---
+# security_considerations[1] - "the open-window candidate validation must reject
+# a stale or garbage cache line rather than letting it re-enable narrowing".
+# A dead open-window record (an abandoned claim's leftover, a rebase-orphaned or
+# corrupt SHA) has no completion coming to absorb anything, so treating it as a
+# live absorber would resurrect the D271 under-report through one junk cache
+# line. 24d pins the predicate as a unit; this pins that a real completion still
+# reports both changes with the junk line present - and pins it on the
+# CANDIDATE VALIDATION specifically, not on the age branch that would otherwise
+# reject the same line for a different reason.
+if (-not $g26Git) {
+    Write-Host "  SKIP: 26i: the stale-record case needs git" -ForegroundColor Yellow
+} else {
+    $g26i = New-D272Repo -Name 'stale-open-record'
+    Invoke-D272Claim -Dir $g26i -TaskId '100'
+    # STAMPED FRESH, and that is the whole difficulty of this fixture. An
+    # UNSTAMPED record reads dead on the AGE branch, so an unstamped junk line
+    # is rejected before the candidate validation is ever consulted - the first
+    # version of this case was written that way and passed with the resolvable +
+    # ancestor checks deleted, i.e. it pinned the branch its own comment did not
+    # name. The stamp is built with the WRITER's expression (stride-hook.ps1:633)
+    # rather than a convenient equivalent, for the reason W2102 filed: a fixture
+    # sharing the READER's expression is self-consistent by construction and can
+    # never see the two disagree.
+    $g26iEpoch = New-Object DateTime(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+    $g26iNow = [string][int64][math]::Floor(([DateTime]::UtcNow - $g26iEpoch).TotalSeconds)
+    Add-Content -Path (Join-Path $g26i '.stride-env-cache') -Encoding UTF8 -Value @(
+        "TASK_BASE_REF_999='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'",
+        "TASK_BASE_AT_999='$g26iNow'")
+    Add-D272Commit -Dir $g26i -File 'manual.txt'
+    Add-Content -Path (Join-Path $g26i 'tracked.txt') -Value 'dirty' -Encoding UTF8
+    Invoke-D272Complete -Dir $g26i -TaskId '100'
+    Assert-Eq "26i (D271): a stale open-window record never re-narrows an outermost task's snapshot" `
+        "manual.txt,tracked.txt" (Get-D272Paths -Dir $g26i)
 }
 
 # ============================================================

@@ -15,6 +15,118 @@
 #                 because the canon's entry version is ahead of the checker
 #   ok            the cell is clean
 #
+# ROUND 5 -- independent security audit (W2108), recorded here because a
+# checker's credibility rests on what has been tried against it, and that
+# history is invisible from the code alone.
+#
+# Two auditors read this file independently: one given a value-flow map of the
+# script, one given nothing but the file and the canon. Neither was told what
+# the other found, and neither was told the two candidates the exploration
+# phase had flagged -- both of which were REFUTED before the audit ran (the
+# property loop's missing tab/newline guard is unreachable because
+# scan_anchors refuses first; a duplicate entry id makes $astatus multi-line,
+# which matches no clean branch and therefore fails toward being checked).
+#
+# They converged on one root shape, which is the finding of this round:
+#
+#   find SUCCEEDING was read as "the tree was examined". Every read failure
+#   BELOW find collapsed into the same empty output that a clean file
+#   produces -- an unreadable file, a grep error, a grep -I binary skip, a
+#   symlinked .md, a symlinked port directory, an empty walk.
+#
+# Rounds 1-4 closed exactly this class twice, at the directory granularity
+# (find's exit status) and at the path-representability granularity (the NUL
+# walk plus the tab/newline refusal). The FILE granularity was never closed,
+# so seven distinct false greens remained, each reproduced before and after:
+#
+#   1. chmod 000 on a file holding a real D217 violation flipped exit 1 to
+#      exit 0, reporting "property verified across 1 markdown files" -- a
+#      count that included the file nobody opened.
+#   2. An unreadable .md hid an UNEXPECTED anchor; the port reported clean.
+#   3. A single NUL byte did the same, silently: grep -I skips and exits 1,
+#      which is byte-identical to "no anchors here", with no stderr at all.
+#   4. A port checked out as a symlink passed [ -d ] and was not descended by
+#      find's default -P: "verified across 0 markdown files", exit 0, over a
+#      tree full of violations.
+#   5. A symlinked .md is not -type f, so it left the walk in silence.
+#   6. A port whose rows were all not_applicable/deferred recorded NOTHING
+#      when its tree could not be enumerated -- record() is the only writer of
+#      STATUS -- so the run printed "NOT FULLY EXAMINED" and "repos needing
+#      work: <port>" and still exited 0.
+#   7. A json fence with one trailing space, or written with tildes, opened an
+#      ordinary fence: the rule entry inside it ceased to exist for this
+#      checker while rendering normally for every human, taking its MISSING
+#      cells with it.
+#
+# An eighth, found while planning and fixed with them: the registry's
+# exists:false and a row's status are two statements about one port, and the
+# report layer read only the first -- deferring every rule without reading a
+# row, so a half-applied canon edit exited 0 over a port owing everything.
+#
+# Review of those fixes then found three more instances of the SAME root
+# shape, in the round-5 lines themselves -- which is the fourth time in five
+# rounds that a fix left a sibling path open, and the reason they are recorded
+# here rather than quietly folded in:
+#
+#   a. grep's -I heuristic was left at the ambient locale while the two guards
+#      above it pinned LC_ALL=C. The NUL byte-count test closed only the NUL
+#      branch; under a multibyte locale, and under a non-GNU grep, "binary"
+#      is a wider set than "contains a NUL" and the surplus folded back into
+#      "no anchors here". Now pinned.
+#   b. A symlinked SUBDIRECTORY does not match -name '*.md', so filtering by
+#      name inside find left it in exactly the silence the file-level fix had
+#      just closed. find now prints every symlink and the shell decides.
+#   c. The property loop is a SECOND, independent find, and it handed paths
+#      straight to fence_defect, which follows a link. That was safe only
+#      because scan_anchors refuses first -- making a read-outside-the-tree
+#      guarantee depend on call ordering across two enumerations, the same
+#      time-of-check/time-of-use shape this walker was already defeated by
+#      once. The guard is now applied where the value is used.
+#
+#      It was first written to refuse EVERY symlink and annotated here as
+#      "unreachable today". Both were wrong, and review caught them: the
+#      branch is reached whenever a port under a property rule holds an
+#      ordinary symlink, and refusing every symlink made the two passes
+#      disagree about one tree -- an ordinary link.txt became UNVERIFIABLE
+#      over a genuinely clean port. A false RED rather than a false green, so
+#      no pitfall was broken and the fleet stayed invariant, which is exactly
+#      why nothing caught it: the round's own new self-test for a harmless
+#      symlink ran the ANCHOR canon, so the property loop never executed. It
+#      now carries scan_anchors' exemption, and the symlink cases run under
+#      both canons.
+#
+#      That correction then overshot in the other direction, and a third
+#      review round caught it: gating only the REFUSAL let the exempt symlink
+#      fall through to code that READS it. fence_defect follows a link, so
+#      link.txt -> /outside/anything was read and its content attributed to
+#      this port -- a read outside the port tree, which is the property the
+#      NUL walk exists to protect -- and it counted into nfiles, so a port
+#      with no real markdown at all walked past the empty-walk refusal and
+#      reported "property verified across 1 markdown files". It survived the
+#      round that introduced it because that round's fixture linked to an
+#      in-tree file that resolves. No symlink is read here now: refused if it
+#      is a directory or *.md, ignored otherwise, which is what scan_anchors
+#      does with its bare ':'.
+#
+#      Three rounds of review, three different defects, all in the symlink
+#      handling added by ONE fix. That is the strongest evidence in this
+#      file's history for the rule it keeps relearning: a guard and its
+#      sibling must agree about the whole tree, not about the case the
+#      fixture happened to build.
+#
+# The suite grew from 72 cases to 100. No existing case was modified, and the
+# fleet result is byte-identical before and after (exit 1; ok 4, missing 44,
+# defect 4) -- the changes only ever move a cell toward refusal.
+#
+# Two findings were recorded and deliberately NOT fixed, because both are
+# judgement calls about intent rather than defects: head -1 collapses multiple
+# anchors for one id (the informed auditor called it a suppressed STALE tier,
+# the blind auditor independently judged it defensible), and the canon
+# self-exclusion is an exact path string, so an aliased --ports-parent or a
+# vendored copy of the canon inside a port would credit that port with every
+# anchor. Both are filed rather than patched under time pressure: this file
+# has twice had a fix introduce the next round's defect.
+#
 # Anchors are searched per port DIRECTORY, never at a fixed path: ports keep
 # these rules in structurally different places, and a fixed-path search finds
 # nothing in three of the nine and reports false MISSING.
@@ -584,6 +696,233 @@ planted.md"
     fail=$((fail + 1)); echo "SELF-TEST FAILED: a mutating tree slipped a newline-named file past the guard ($race_false/8 runs read outside the tree)"
   fi
 
+  # --- ROUND 5 (W2108). One root shape behind all of these: find SUCCEEDING
+  # --- was read as "the tree was examined", so every read failure BELOW find
+  # --- -- an unreadable file, a grep error, a binary skip, a symlink, an
+  # --- empty walk -- collapsed into the same empty output a clean file
+  # --- produces. Rounds 1-4 closed that at the directory granularity (find's
+  # --- exit status) and at the path-representability granularity (the NUL
+  # --- walk). The file granularity was the layer left open.
+
+  # --- a port owing NOTHING still owes an UNEXPECTED sweep, so an
+  # --- unenumerable tree must refuse even when no entry is required. The
+  # --- per-required-entry filter recorded nothing at all, and record() is the
+  # --- only writer of STATUS: the run printed NOT FULLY EXAMINED and exited 0.
+  if [ "$(id -u)" -ne 0 ]; then
+    st_canon "$tmp/na.md" 1 not_applicable
+    mkdir -p "$tmp/nax/alpha" "$tmp/nax/beta/locked"
+    printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nax/alpha/a.md"
+    printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nax/beta/locked/hidden.md"
+    chmod 000 "$tmp/nax/beta/locked"
+    out="$(st_run "$tmp/na.md" "$tmp/nax" 2>/dev/null)"; rc=$?
+    chmod 755 "$tmp/nax/beta/locked"
+    st_assert "an unenumerable port with no required rule still fails the gate" 1 "$rc" \
+      "refusing to judge any cell on a partial file list" "$out"
+    st_refute "an unenumerable port never exits clean for want of a required rule" "^clean repos:.*beta" "$out"
+  else
+    echo "ok: all-not_applicable unenumerable case skipped (running as root)"
+    pass=$((pass + 1)); pass=$((pass + 1))
+  fi
+
+  # --- an unreadable FILE is not a clean file. fence_defect returned empty --
+  # --- its "clean" value -- for a file it never opened, and the caller still
+  # --- counted it into "property verified across N markdown files".
+  if [ "$(id -u)" -ne 0 ]; then
+    st_canon "$tmp/pu.md" 1 required 1 property fence-nesting
+    mkdir -p "$tmp/pu/alpha" "$tmp/pu/beta"
+    printf 'clean\n' > "$tmp/pu/beta/b.md"
+    printf '# t\n\n%smarkdown\n## s\n\n%sjson\n{}\n%s\n\n%s\n' "$f3" "$f3" "$f3" "$f3" > "$tmp/pu/alpha/bad.md"
+    chmod 000 "$tmp/pu/alpha/bad.md"
+    out="$(st_run "$tmp/pu.md" "$tmp/pu" 2>/dev/null)"; rc=$?
+    chmod 644 "$tmp/pu/alpha/bad.md"
+    st_assert "an unreadable file is never counted as property verified" 1 "$rc" "UNVERIFIABLE" "$out"
+    st_refute "an unreadable file never yields a property-verified cell" "ok: fence-nesting" \
+      "$(echo "$out" | sed -n '/^alpha$/,/^$/p')"
+
+    # --- the anchor pass, same granularity: grep exits 1 for "no match" AND
+    # --- for a file it cannot read, so a NOT-owed anchor hid behind a chmod.
+    mkdir -p "$tmp/au/alpha" "$tmp/au/beta"
+    printf '<!-- canon:rule-one v1 -->\n' > "$tmp/au/alpha/a.md"
+    printf '<!-- canon:rule-one v1 -->\n' > "$tmp/au/beta/b.md"
+    printf '<!-- canon:ghost-rule v1 -->\n' > "$tmp/au/alpha/secret.md"
+    chmod 000 "$tmp/au/alpha/secret.md"
+    out="$(st_run "$tmp/k.md" "$tmp/au" 2>/dev/null)"; rc=$?
+    chmod 644 "$tmp/au/alpha/secret.md"
+    st_assert "an unreadable file makes the anchor pass UNVERIFIABLE" 1 "$rc" "partial file list" "$out"
+    st_refute "an unreadable file never leaves a port reported clean" "clean repos:.*alpha" "$out"
+  else
+    echo "ok: unreadable-file cases skipped (running as root)"
+    pass=$((pass + 1)); pass=$((pass + 1)); pass=$((pass + 1)); pass=$((pass + 1))
+  fi
+
+  # --- grep -I skips a file it judges binary and exits 1: byte-identical, to
+  # --- the caller, to "this file holds no anchors". No stderr line either.
+  mkdir -p "$tmp/bin/alpha" "$tmp/bin/beta"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/bin/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/bin/beta/b.md"
+  printf 'x\000x\n<!-- canon:ghost-rule v1 -->\n' > "$tmp/bin/alpha/binary.md"
+  out="$(st_run "$tmp/k.md" "$tmp/bin" 2>/dev/null)"; rc=$?
+  st_assert "a NUL-bearing .md is refused, not read as anchor-free" 1 "$rc" "partial file list" "$out"
+  st_refute "a NUL-bearing .md never leaves a port reported clean" "clean repos:.*alpha" "$out"
+
+  # --- a port checked out as a SYMLINK passed [ -d ] but was not descended by
+  # --- find's default -P, so the walk was empty and the property cell passed.
+  mkdir -p "$tmp/slreal" "$tmp/sl/beta"
+  printf '# t\n\n%smarkdown\n## s\n\n%sjson\n{}\n%s\n\n%s\n' "$f3" "$f3" "$f3" "$f3" > "$tmp/slreal/bad.md"
+  printf 'clean\n' > "$tmp/sl/beta/b.md"
+  ln -s "$tmp/slreal" "$tmp/sl/alpha"
+  out="$(st_run "$tmp/pg.md" "$tmp/sl")"; rc=$?
+  st_assert "a symlinked port directory is still descended" 1 "$rc" "DEFECT: fence-nesting" "$out"
+  st_refute "a symlinked port directory never passes on an empty walk" "across 0 markdown files" "$out"
+
+  # --- a symlinked .md is not -type f, so it left the walk in silence; to a
+  # --- reader it is markdown in the port. Refused rather than followed: the
+  # --- target can resolve outside the tree.
+  mkdir -p "$tmp/slf/alpha" "$tmp/slf/beta"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/slf/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/slf/beta/b.md"
+  printf '<!-- canon:ghost-rule v1 -->\n' > "$tmp/slf/alpha/note.txt"
+  ln -s note.txt "$tmp/slf/alpha/linked.md"
+  out="$(st_run "$tmp/k.md" "$tmp/slf" 2>/dev/null)"; rc=$?
+  st_assert "a symlinked .md is refused, never silently skipped" 1 "$rc" "partial file list" "$out"
+  st_refute "a symlinked .md never leaves a port reported clean" "clean repos:.*alpha" "$out"
+
+  # --- a symlinked SUBDIRECTORY is the same gap one level down: -H resolves
+  # --- only the start point, and a link met during descent is not descended.
+  # --- It does not match -name '*.md', so filtering by name in find left it
+  # --- in exactly the silence the file-level fix had just closed.
+  mkdir -p "$tmp/sld/alpha" "$tmp/sld/beta" "$tmp/sldout"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/sld/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/sld/beta/b.md"
+  printf '<!-- canon:ghost-rule v1 -->\n' > "$tmp/sldout/hidden.md"
+  ln -s "$tmp/sldout" "$tmp/sld/alpha/docs"
+  out="$(st_run "$tmp/k.md" "$tmp/sld" 2>/dev/null)"; rc=$?
+  st_assert "a symlinked subdirectory is refused, never silently skipped" 1 "$rc" "partial file list" "$out"
+  st_refute "a symlinked subdirectory never leaves a port reported clean" "clean repos:.*alpha" "$out"
+
+  # --- a symlink that is neither a directory nor markdown hides nothing, so
+  # --- the refusal must not fire on it: an over-broad guard would report
+  # --- every port with an ordinary symlink as unexaminable.
+  mkdir -p "$tmp/slh/alpha" "$tmp/slh/beta"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/slh/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/slh/beta/b.md"
+  printf 'x\n' > "$tmp/slh/alpha/notes.txt"
+  ln -s notes.txt "$tmp/slh/alpha/link.txt"
+  out="$(st_run "$tmp/k.md" "$tmp/slh")"; rc=$?
+  st_assert "a harmless non-markdown symlink does not make a port unexaminable" 0 "$rc" "ok: rule-one v1" "$out"
+
+  # --- EVERY symlink case above must run under the PROPERTY canon too. The
+  # --- property loop is a separate walk with its own guard, and running these
+  # --- only under the anchor canon is precisely what let the two passes
+  # --- disagree about one tree: the property loop refused every symlink and
+  # --- turned an ordinary link.txt into UNVERIFIABLE over a clean port, with
+  # --- the suite green because no case ever reached that branch.
+  mkdir -p "$tmp/slhp/alpha" "$tmp/slhp/beta"
+  printf 'clean\n' > "$tmp/slhp/alpha/a.md"
+  printf 'clean\n' > "$tmp/slhp/beta/b.md"
+  printf 'x\n' > "$tmp/slhp/alpha/notes.txt"
+  ln -s notes.txt "$tmp/slhp/alpha/link.txt"
+  out="$(st_run "$tmp/pg.md" "$tmp/slhp")"; rc=$?
+  st_assert "a harmless symlink is exempt in the property pass too" 0 "$rc" "ok: fence-nesting" "$out"
+  st_refute "a harmless symlink never yields a refusal in the property pass" "refusing to follow symlinked markdown" "$out"
+
+  # --- the exempt symlink must be IGNORED, never read. Gating only the
+  # --- refusal let it fall through to fence_defect, which follows the link:
+  # --- a link to a file OUTSIDE the port tree was read and attributed to the
+  # --- port, and it counted into nfiles, walking past the empty-walk refusal.
+  # --- The fixture that missed it linked to an in-tree file that resolves.
+  mkdir -p "$tmp/slout/alpha" "$tmp/slout/beta" "$tmp/slelsewhere"
+  printf '# t\n\n%smarkdown\n## s\n\n%sjson\n{}\n%s\n\n%s\n' "$f3" "$f3" "$f3" "$f3" > "$tmp/slelsewhere/planted.txt"
+  printf 'clean\n' > "$tmp/slout/beta/b.md"
+  ln -s "$tmp/slelsewhere/planted.txt" "$tmp/slout/alpha/link.txt"
+  out="$(st_run "$tmp/pg.md" "$tmp/slout" 2>/dev/null)"; rc=$?
+  st_refute "a symlink out of the tree is never read by the property pass" "planted.txt" "$out"
+  st_refute "an exempt symlink never counts toward the enumerated file total" "across 1 markdown files" \
+    "$(echo "$out" | sed -n '/^alpha$/,/^$/p')"
+  st_assert "a port whose only entry is an exempt symlink is unverifiable, not verified" 1 "$rc" \
+    "refusing to report a property verified over an empty walk" "$out"
+
+  # --- a DANGLING exempt symlink must be treated identically: scan_anchors
+  # --- ignores it, so the property pass must too, or the two passes disagree
+  # --- about one tree again -- fence_defect's [ -r ] would have called it
+  # --- unreadable and refused the port.
+  mkdir -p "$tmp/sldang/alpha" "$tmp/sldang/beta"
+  printf 'clean\n' > "$tmp/sldang/alpha/a.md"
+  printf 'clean\n' > "$tmp/sldang/beta/b.md"
+  ln -s "$tmp/nonexistent-target" "$tmp/sldang/alpha/dangling.txt"
+  out="$(st_run "$tmp/pg.md" "$tmp/sldang" 2>/dev/null)"; rc=$?
+  st_assert "a dangling exempt symlink is ignored by both passes alike" 0 "$rc" "ok: fence-nesting" "$out"
+
+  mkdir -p "$tmp/slp/alpha" "$tmp/slp/beta"
+  printf 'clean\n' > "$tmp/slp/alpha/a.md"
+  printf 'clean\n' > "$tmp/slp/beta/b.md"
+  printf 'clean\n' > "$tmp/slp/alpha/real.txt"
+  ln -s real.txt "$tmp/slp/alpha/linked.md"
+  out="$(st_run "$tmp/pg.md" "$tmp/slp" 2>/dev/null)"; rc=$?
+  st_assert "a symlinked .md is refused in the property pass" 1 "$rc" "UNVERIFIABLE" "$out"
+  st_refute "a symlinked .md never yields a property-verified cell" "ok: fence-nesting" \
+    "$(echo "$out" | sed -n '/^alpha$/,/^$/p')"
+
+  # --- "verified across 0 markdown files" was still a pass. Disclosing the
+  # --- empty enumeration is not the same as refusing to conclude from it.
+  mkdir -p "$tmp/mt/alpha" "$tmp/mt/beta"
+  printf 'clean\n' > "$tmp/mt/beta/b.md"
+  out="$(st_run "$tmp/pg.md" "$tmp/mt")"; rc=$?
+  st_assert "an empty enumeration is unverifiable, not verified" 1 "$rc" \
+    "refusing to report a property verified over an empty walk" "$out"
+  st_refute "an empty port directory never yields a property-verified cell" "across 0 markdown files" "$out"
+
+  # --- the registry's exists:false and a row's status are two statements about
+  # --- one port. The report layer read only the first and deferred EVERY rule
+  # --- without looking at a row, so a half-applied canon edit exited 0 over a
+  # --- port owing every rule.
+  {
+    echo "# canon"; echo "${f3}json"
+    echo '{ "canon_schema_version": 1,'
+    echo '  "ports": ['
+    echo '    {"id": "alpha", "family": "f", "dir": "alpha", "exists": true, "note": ""},'
+    echo '    {"id": "ghost", "family": "f", "dir": "ghost", "exists": false, "note": "n"}'
+    echo '  ] }'; echo "${f3}"; echo "### r"; echo "<!-- canon:rule-one v1 -->"; echo "${f3}json"
+    echo '{ "id": "rule-one", "version": 1, "status": "active", "superseded_by": null,'
+    echo '  "provenance": "quoted", "defects": ["D1"], "check": "anchor", "check_hint": "h",'
+    echo '  "applies_to": ['
+    echo '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
+    echo '    {"port": "ghost", "status": "required", "variant": "", "reason": "r"} ] }'
+    echo "${f3}"
+  } > "$tmp/xf.md"
+  mkdir -p "$tmp/xf/alpha"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/xf/alpha/a.md"
+  out="$(st_run "$tmp/xf.md" "$tmp/xf")"; rc=$?
+  st_assert "a port the registry says is absent cannot be required to carry a rule" 2 "$rc" \
+    "can only defer a rule, never owe it" "$out"
+
+  # --- a byte-exact "json" info-string test dropped a block that renders as
+  # --- json to every human: the rule entry inside it ceased to exist for the
+  # --- checker, taking its MISSING cells with it.
+  sed 's|^'"$f3"'json$|'"$f3"'json |' "$tmp/k.md" > "$tmp/ws.md"
+  out="$(st_run "$tmp/ws.md" "$tmp/m")"; rc=$?
+  st_assert "a json fence with a trailing space is still parsed" 1 "$rc" "MISSING: rule-one v1" "$out"
+
+  # --- the backstop for every OTHER way a block can go unclassified: the
+  # --- canon's own anchor definition lines are counted against the entries
+  # --- that reached the parser. A tilde fence is invisible to the backtick
+  # --- walker entirely, so no info-string fix can catch it.
+  cp "$tmp/k.md" "$tmp/tl.md"
+  {
+    echo "### r2"
+    echo "<!-- canon:rule-two v1 -->"
+    echo "~~~json"
+    echo '{ "id": "rule-two", "version": 1, "status": "active", "superseded_by": null,'
+    echo '  "provenance": "quoted", "defects": ["D1"], "check": "anchor", "check_hint": "h",'
+    echo '  "applies_to": ['
+    echo '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
+    echo '    {"port": "beta", "status": "required", "variant": "", "reason": "r"} ] }'
+    echo "~~~"
+  } >> "$tmp/tl.md"
+  out="$(st_run "$tmp/tl.md" "$tmp/m" 2>&1)"; rc=$?
+  st_assert "an entry that never reached the parser is caught by the anchor count" 2 "$rc" \
+    "did not reach this parser" "$out"
+
   # --- CLI surface
   out="$(bash "$SELF" --help 2>&1)"; rc=$?
   st_assert "--help exits 0 and documents the flags" 0 "$rc" "ports-parent" "$out"
@@ -772,7 +1111,18 @@ BEGIN { infence = 0; injson = 0; blocknum = 0; nports = 0; nentries = 0 }
     while (substr(rest, 1, 1) == "`") { rest = substr(rest, 2); run++ }
     if (infence == 0) {
       infence = 1; fencelen = run
-      if (rest == "json") { injson = 1; blocknum++; blockline = NR; blob = "" }
+      # The info string is compared after trailing whitespace and CR are
+      # trimmed. A byte-exact "json" test made ```json-with-a-trailing-space,
+      # and every line of a CRLF-checked-out canon, open an ORDINARY fence:
+      # the block was never classified, so the rule entry inside it simply did
+      # not exist for this checker while rendering normally for every human
+      # and every markdown renderer. Its cells were never emitted, so a fleet
+      # carrying no anchor for that rule reported clean. Halting on a
+      # malformed block is the documented disposition; silently dropping one
+      # is the opposite of it.
+      info = rest
+      sub(/[ \t\r]+$/, "", info)
+      if (info == "json") { injson = 1; blocknum++; blockline = NR; blob = "" }
       next
     } else if (run >= fencelen && rest ~ /^[ \t]*$/) {
       if (injson) { classify() ; injson = 0 }
@@ -781,6 +1131,24 @@ BEGIN { infence = 0; injson = 0; blocknum = 0; nports = 0; nentries = 0 }
     }
   }
   if (injson) blob = blob $0 "\n"
+  # Count the canon's own anchor DEFINITION lines, outside any fence. The
+  # canon states the invariant in prose -- one anchor comment per entry -- and
+  # the END block below now enforces it. This is the backstop for every way a
+  # block can go unclassified rather than halt: a tilde fence (this walker
+  # only tracks backticks), an unrecognised info string, or any future
+  # variation. A vanished entry is invisible by construction -- no cells, no
+  # MISSING rows, nothing to notice -- so it needs a check that counts what
+  # the DOCUMENT says rather than what the parser happened to consume.
+  #
+  # Two consequences, both deliberate and neither obvious. It compares COUNTS,
+  # not identities, so two errors that cancel leave it silent: a canon that
+  # loses one entry to a tilde fence WHILE carrying one stray anchor-shaped
+  # line elsewhere yields ndefs == nentries and passes. And in the other
+  # direction, any anchor-shaped line the canon's prose ever quotes -- an
+  # example in "Changing this file", say -- is now a hard exit 2. The second
+  # is the safe failure and the first is the residual gap; closing it means
+  # matching definition ids against parsed entry ids rather than counting.
+  if (infence == 0 && $0 ~ /<!--[ \t]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[ \t]+v[0-9]+[ \t]*-->/) ndefs++
 }
 
 # --- classify a block by its own discriminator, never by position ----------
@@ -808,6 +1176,7 @@ function classify(   i, j, n, pid, eid, alen) {
       if (V["ports." i ".dir"] == "." || V["ports." i ".dir"] == "..")
         fail("registry port \"" pid "\" has dir \"" V["ports." i ".dir"] "\", which is a directory traversal rather than a port directory")
       PORTID[i] = pid
+      PORTEXISTS[i] = V["ports." i ".exists"]
       printf "PORT\t%d\t%s\t%s\t%s\t%s\n", i, safe(pid, "port id"), \
         safe(V["ports." i ".family"], "port family"), safe(V["ports." i ".dir"], "port dir"), \
         safe(V["ports." i ".exists"], "port exists")
@@ -852,6 +1221,18 @@ function classify(   i, j, n, pid, eid, alen) {
         fail("entry \"" eid "\" row \"" PORTID[i] "\" has status \"" j "\" outside the closed vocabulary required|not_applicable|deferred")
       if (!(V["applies_to." i ".variant"] in VARIANT))
         fail("entry \"" eid "\" row \"" PORTID[i] "\" has variant \"" V["applies_to." i ".variant"] "\" outside the canon's declared vocabulary")
+      # The registry's "exists" and the row's status are two statements about
+      # the same port, and the report layer trusted only the first: a port with
+      # exists:false took the "not scaffolded" branch, which records EVERY
+      # entry as deferred without reading a single row. A canon edit that
+      # flipped rows to required but left exists:false -- the half-applied
+      # shape the canon's own "Changing this file" section warns about --
+      # therefore reported "nothing owed yet" and exited 0 over a port owing
+      # every rule and never examined. Every other canon inconsistency here
+      # halts; this one resolved toward green, so it halts too.
+      if (PORTEXISTS[i] == "false" && j != "deferred")
+        fail("entry \"" eid "\" row \"" PORTID[i] "\" has status \"" j "\" but the registry says that port does not exist; " \
+             "a port that is not scaffolded can only defer a rule, never owe it")
       printf "APPLY\t%s\t%d\t%s\t%s\t%s\n", safe(eid, "entry id"), i, safe(PORTID[i], "port id"), \
         j, safe(V["applies_to." i ".variant"], "variant")
     }
@@ -865,6 +1246,11 @@ END {
   if (infence == 1) fail("unclosed fence at end of canon")
   if (nports == 0) fail("no registry block found in the canon")
   if (nentries == 0) fail("no rule entries found in the canon")
+  if (ndefs != nentries)
+    fail("the canon carries " ndefs " anchor definition line(s) but " nentries \
+         " parsed rule entr(y/ies); a block the document defines did not reach this parser " \
+         "(an unrecognised info string or a tilde fence will do it), and an entry that " \
+         "silently vanishes produces no cells and no findings")
 }
 AWKPROG
 }
@@ -884,7 +1270,14 @@ RECORDS="$(awk "$(parse_awk_prog)" "$CANON")" || {
 fence_defect() {
   local file="$1" line stripped rest run fchar
   local open=0 open_len=0 open_line=0 open_char="" lineno=0
-  [ -r "$file" ] || return 0
+  # An empty return means CLEAN, so "I could not open this file" must not use
+  # it. It did: an unreadable file returned 0 with no output, the caller
+  # counted it into nfiles, found no hits, and printed "property verified
+  # across N markdown files" -- naming a count that included a file nobody
+  # read. chmod 000 on a file holding a real D217 violation flipped exit 1 to
+  # exit 0. Prior rounds closed this at the DIRECTORY granularity, via find's
+  # exit status; this is the same defect one level down.
+  [ -r "$file" ] || { printf 'unreadable'; return 0; }
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
     stripped="${line#"${line%%[![:space:]]*}"}"
@@ -961,7 +1354,22 @@ port_md_files_nul() {
   #    through: a time-of-check/time-of-use race on a mutable tree.
   #  * find's status survives, so an unreadable subtree still routes to
   #    UNVERIFIABLE rather than reading as a clean short list.
-  find "$1" -type f -name '*.md' \
+  #  * -H resolves the START POINT only. Without it a port checked out as a
+  #    symlink (a worktree, a convenience alias) was stat'd as a directory by
+  #    the [ -d ] gate, then not descended by find's default -P: the walk
+  #    returned nothing, find exited 0, and the property check reported
+  #    "verified across 0 markdown files" over a tree full of violations.
+  #  * -type l is enumerated alongside -type f so a SYMLINKED .md cannot leave
+  #    the walk silently. To find, a symlink is not a regular file; to every
+  #    reader and renderer it is markdown in the port's tree. scan_anchors
+  #    refuses the port when it sees one rather than following it, which keeps
+  #    the read-outside-the-tree property this walk was built to protect.
+  #    A symlinked DIRECTORY needs the same treatment and does not match
+  #    -name '*.md', so it would leave the walk in the same silence: -H
+  #    resolves the start point only, and a link met during descent is not
+  #    descended. Every symlink is therefore printed and the shell decides;
+  #    filtering here by name would reintroduce the gap one level down.
+  find -H "$1" \( \( -type f -name '*.md' \) -o -type l \) \
     -not -path '*/.git/*' \
     -not -path '*/node_modules/*' \
     -not -path '*/deps/*' \
@@ -996,7 +1404,7 @@ port_md_files_nul() {
 # status, held back one iteration rather than pattern-matched, so no file can
 # impersonate the sentinel by being named like one.
 scan_anchors() {
-  local dir="$1" f prev="" have_prev=0 st="" unrepresentable=0
+  local dir="$1" f prev="" have_prev=0 st="" unrepresentable=0 unreadable=0 linked=0
   while IFS= read -r -d '' f; do
     if [ "$have_prev" -eq 1 ]; then
       case "${prev#$dir/}" in
@@ -1004,7 +1412,22 @@ scan_anchors() {
           echo "GATE ERROR: a path under $dir contains a tab or newline and cannot be reported safely" >&2
           unrepresentable=1 ;;
         *)
-          [ "$prev" = "$EXCLUDE_CANON" ] || emit_anchors "$prev" "$dir" ;;
+          if [ -L "$prev" ] && [ ! -d "$prev" ] && [ "${prev%.md}" = "$prev" ]; then
+            # A symlink that is neither a directory nor named *.md carries no
+            # markdown into this port and hides nothing; ignoring it keeps the
+            # refusal aimed at what can actually conceal an anchor.
+            :
+          elif [ -L "$prev" ]; then
+            # Refused, never followed: the target can resolve outside the port
+            # tree, and reading it would attribute another tree's content to
+            # this port. Refusing is also what makes it visible -- silently
+            # skipping it is how a not-owed anchor in a symlinked .md kept a
+            # port clean.
+            echo "GATE ERROR: ${prev#$dir/} under $dir is a symbolic link; this checker does not follow symlinked markdown" >&2
+            linked=1
+          elif [ "$prev" != "$EXCLUDE_CANON" ]; then
+            emit_anchors "$prev" "$dir" || unreadable=1
+          fi ;;
       esac
     fi
     prev="$f"; have_prev=1
@@ -1012,13 +1435,34 @@ scan_anchors() {
   st="$prev"
   [ "$st" = 0 ] || return 1
   [ "$unrepresentable" -eq 0 ] || return 1
+  # A file the anchor pass could not read makes this list short by exactly the
+  # anchors nobody can see, which is the condition the UNEXPECTED sweep cannot
+  # survive. Same refusal as an unreadable subtree, one granularity down.
+  [ "$unreadable" -eq 0 ] || return 1
+  [ "$linked" -eq 0 ] || return 1
   return 0
 }
 
 # Emit every anchor in one file as "id<TAB>version<TAB>relpath:line".
+# Returns 1 when the file could not be scanned, so the caller can refuse the
+# port instead of judging it on a list that is short by exactly the files that
+# failed. grep exits 1 both for "no match" and for a file its -I heuristic
+# classifies as binary, and exits 2 on a read error -- three outcomes the
+# caller previously received as one empty stream. A short anchor list is fatal
+# for the UNEXPECTED sweep specifically: it can only fire on anchors it sees,
+# so a NOT-owed anchor sitting in an unreadable or NUL-bearing .md made the
+# port report clean.
 emit_anchors() {
-  local f="$1" dir="$2" rel
+  local f="$1" dir="$2" rel out gst nbytes ntext
   rel="${f#$dir/}"
+  [ -r "$f" ] || return 1
+  # Detect the binary case explicitly rather than letting -I fold it into
+  # "no match". Comparing the byte count with and without NULs is decided by
+  # the file's own content, not by grep's heuristic, so the refusal does not
+  # move when the heuristic does.
+  nbytes="$(LC_ALL=C wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
+  ntext="$(LC_ALL=C tr -d '\000' < "$f" 2>/dev/null | LC_ALL=C wc -c | tr -d '[:space:]')"
+  [ "$nbytes" = "$ntext" ] || return 1
     # The path is handed to awk through the ENVIRONMENT, not through -v.
     # POSIX requires awk to apply escape processing to a -v assignment, so the
     # two ordinary characters \ and n in a filename became a REAL newline in
@@ -1028,7 +1472,28 @@ emit_anchors() {
     # the same record-forgery class safe() guards on the canon side, so the
     # same refusal applies here: a path that still carries a separator is
     # dropped rather than emitted.
-    grep -EIno '<!--[[:space:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:space:]]+v[0-9]+[[:space:]]*-->' "$f" \
+    # grep's status is captured rather than discarded: 0 match, 1 no match,
+    # >1 a real error. Only the first two are a scan that happened.
+    # LC_ALL=C pins the -I heuristic to a byte-oriented locale, where the ONLY
+    # thing that makes grep call a file binary is a NUL -- which the byte-count
+    # test above has already refused. Without it, "binary" also covers invalid
+    # multibyte sequences under the ambient locale, and the two would not be
+    # the same set: a NUL-free .md could still be skipped and exit 1, folding
+    # back into "no anchors here".
+    #
+    # This pins the LOCALE axis only, and does not pin the IMPLEMENTATION:
+    # a grep whose binary heuristic is broader than "contains a NUL" can still
+    # skip a NUL-free file and exit 1, and LC_ALL=C does not stop it. Measured
+    # under review: /usr/bin/grep scans a lone-0xFF file correctly with and
+    # without the prefix, while ugrep skips it under both. The script runs
+    # non-interactively, where grep is /usr/bin/grep, so the exposure is a
+    # machine whose PATH puts a broader-heuristic grep first. Closing that
+    # axis properly means not relying on -I at all -- deferred rather than
+    # done here, because it is a change to how every file is read.
+    out="$(LC_ALL=C grep -EIno '<!--[[:space:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:space:]]+v[0-9]+[[:space:]]*-->' "$f")"
+    gst=$?
+    [ "$gst" -le 1 ] || return 1
+    printf '%s\n' "$out" \
       | rel="$rel" awk '
           {
             if (match($0, /^[0-9]+:/) == 0) next
@@ -1165,6 +1630,13 @@ for pline in $PORT_LINES; do
     if [ "$pexists" = "false" ]; then
       # Registered, deliberately not scaffolded. Reported once and counted once
       # per rule it is excused from, so the tally reconciles with the row.
+      # Note that reconciliation holds for THIS branch only: the unenumerable
+      # branch below now emits one port-level UNVERIFIABLE that corresponds to
+      # no canon row, so for a port with required rows the UNVERIFIABLE count
+      # exceeds the rows the canon states. That is the price of the refusal
+      # being owed by the port rather than by any cell, and it is stated here
+      # so the next reader does not treat cells-equal-rows as a global
+      # invariant and "fix" the refusal back out.
       echo "  deferred: not scaffolded on disk ($pdir); all rules deferred until it is"
       for eline in $ENTRY_LINES; do record deferred "  " ""; done
       echo "  verdict: deferred -- nothing owed yet"
@@ -1182,6 +1654,18 @@ for pline in $PORT_LINES; do
     # The tree could not be fully enumerated, so the anchors we did see are not
     # the anchors that are there. Every anchor cell for this port is
     # UNVERIFIABLE rather than judged on a partial list.
+    # One port-level refusal FIRST, owed by the port rather than by any cell.
+    # The per-entry loop below records only "required" rows, and a port whose
+    # rows are all not_applicable/deferred therefore recorded nothing at all:
+    # record() is the only writer of STATUS, so the run printed "verdict: NOT
+    # FULLY EXAMINED" and "repos needing work: <port>" and still exited 0.
+    # The filter was wrong on its own terms -- a short list is fatal for the
+    # UNEXPECTED sweep, and a not_applicable row is precisely the row whose
+    # ONLY possible finding is UNEXPECTED, so the suppression bit hardest
+    # exactly where the refusal matters most.
+    record UNVERIFIABLE "  " \
+      "$pid -- could not fully enumerate $ptree; refusing to judge any cell on a partial file list" \
+      "$pid: make $ptree readable so the anchor scan can run"
     for eline in $ENTRY_LINES; do
       eid="$(field "$eline" 3)"
       arow="$(echo "$RECORDS" | grep "^APPLY	$eid	$pidx	")"
@@ -1219,20 +1703,79 @@ for pline in $PORT_LINES; do
           "scripts/check-port-canon.sh: implement the $eid property check at v$ever (this is a checker change, not a port change)"
         continue
       fi
-      nfiles=0; hits=""; pst=""; pprev=""; phave=0
+      nfiles=0; hits=""; pst=""; pprev=""; phave=0; punread=""; plinked=""
       while IFS= read -r -d '' pf; do
         if [ "$phave" -eq 1 ]; then
+          # This walk is a SECOND, independent find; scan_anchors having
+          # refused a symlink says nothing about what this one returns, and
+          # fence_defect follows a link it is handed. Relying on the earlier
+          # refusal would make the read-outside-the-tree guarantee a property
+          # of call ordering across two enumerations -- the exact time-of-
+          # check/time-of-use shape this walker has already been defeated by
+          # once. The guard is applied where the value is used instead.
+          # No symlink is ever READ here, whatever it is. Two dispositions,
+          # and the fall-through is not one of them: a directory or *.md link
+          # is REFUSED (it can hide markdown), any other link is IGNORED
+          # entirely (it carries none) -- exactly what scan_anchors does with
+          # its bare ':'.
+          #
+          # Gating the refusal but letting the exempt case fall through was a
+          # read-outside-the-tree hole, introduced in this same round by the
+          # fix for the opposite defect: the exempt link was counted into
+          # nfiles and handed to fence_defect, whose `done < "$file"` follows
+          # it. link.txt -> /outside/anything was read and attributed to this
+          # port, and a port with NO real markdown but one ordinary symlink
+          # got nfiles=1, walking straight past the empty-walk refusal below
+          # and printing "property verified across 1 markdown files".
+          #
+          # It survived the round that added it because the fixture linked to
+          # an in-tree file that resolves. The lesson is the one this file
+          # keeps relearning: the guard and its sibling must agree about the
+          # WHOLE tree, not about the case the fixture happened to build.
+          if [ -L "$pprev" ]; then
+            if [ -d "$pprev" ] || [ "${pprev%.md}" != "$pprev" ]; then
+              plinked="$plinked ${pprev#$ptree/}"
+            fi
+            pprev="$pf"; phave=1; continue
+          fi
           nfiles=$((nfiles + 1))
           d="$(fence_defect "$pprev")"
-          [ -n "$d" ] && hits="$hits ${pprev#$ptree/}($d)"
+          if [ "$d" = unreadable ]; then
+            punread="$punread ${pprev#$ptree/}"
+          elif [ -n "$d" ]; then
+            hits="$hits ${pprev#$ptree/}($d)"
+          fi
         fi
         pprev="$pf"; phave=1
       done < <(port_md_files_nul "$ptree")
       pst="$pprev"
+      if [ -n "$plinked" ]; then
+        record UNVERIFIABLE "  " \
+          "$eid -- refusing to follow symlinked markdown:$plinked; its target can resolve outside $ptree" \
+          "$pid: replace the symlink(s)$plinked with real files, or remove them from the port tree"
+        continue
+      fi
+      if [ -n "$punread" ]; then
+        record UNVERIFIABLE "  " \
+          "$eid -- could not read$punread; refusing to report a property verified over files that were never opened" \
+          "$pid: make$punread readable so the $eid property check can run"
+        continue
+      fi
       if [ "$pst" != 0 ]; then
         record UNVERIFIABLE "  " \
           "$eid -- could not enumerate the markdown under $ptree; refusing to report a check that did not run" \
           "$pid: make $ptree readable so the $eid property check can run"
+        continue
+      fi
+      if [ "$nfiles" -eq 0 ]; then
+        # A pass produced by an empty walk is not a pass. Printing the count
+        # (the previous fix here) told the reader the enumeration was empty
+        # but still recorded ok, so the cell stayed green and the exit code
+        # stayed 0 -- which is what a symlinked or unpopulated port checkout
+        # produced over a tree full of violations.
+        record UNVERIFIABLE "  " \
+          "$eid -- no markdown was enumerated under $ptree; refusing to report a property verified over an empty walk" \
+          "$pid: check that $ptree is a populated checkout; the $eid property check had nothing to walk"
         continue
       fi
       if [ -n "$hits" ]; then

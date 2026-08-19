@@ -7782,14 +7782,23 @@ $ProjectDir = $g25SavedProjectDir
 # alongside it: sh 23z6's 22-nested-completion union (26h) and sh 23z7's
 # stale-record gate (26i).
 #
-# MEASURED HERE TOO, AND THE NUMBERS DO NOT TRANSFER. Applying the declined fix
-# to this port - a present-and-empty owned record on a nonempty window skips the
-# window - fails exactly FOUR assertions, all of them 26a's and 26b's, i.e. the
-# branch doing its job. bash's run failed THIRTEEN: the same four plus nine
-# pre-existing pins (its 23j, 23n, 23o, 23p at both levels, 23q, 23v) that this
-# suite does not yet mirror. So the cheaper-looking number here is evidence of
-# THINNER COVERAGE, not of a cheaper trade, and it must not be read as a reason
-# to revisit a decision the bash side made against the fuller evidence.
+# MEASURED HERE TOO, AND THE COMPARISON IS NOT APPLES TO APPLES. Applying the
+# declined fix to this port - a present-and-empty owned record on a nonempty
+# window skips the window - fails EIGHT assertions: 26a x2, 26b x3 (including
+# its '[]' control), 26f x2 and 26g. All eight are this group doing its job.
+# bash's run failed THIRTEEN, but its thirteen decompose differently: FOUR
+# ratchet assertions plus NINE pre-existing pins in the D236/D255 fallback
+# world (its 23j, 23n, 23o, 23p at both levels, 23q, 23v) that this suite does
+# not mirror at all. So this port already pins MORE of the ratchet family than
+# bash does, and still pins NONE of the collateral - which is where the real
+# coverage gap sits. Neither number is a reason to revisit a decision the bash
+# side made against evidence this suite cannot yet reproduce.
+#
+# THIS SENTENCE WAS WRONG ONCE, and is corrected rather than overwritten: it
+# claimed FOUR failures "all of them 26a's and 26b's", a figure measured before
+# 26e/26f/26g and 26b's controls existed and never re-measured after. A stale
+# measurement presented as current is the same defect as the ledger claims
+# below - an assertion about the suite that the suite does not support.
 #
 # THIS GROUP EXISTS BECAUSE THE PARITY NOTE CLAIMED IT ALREADY DID. W2102's
 # Group 24 banner recorded sh 23v2's k=3..k=8 sub-blocks as deferred "because
@@ -7910,20 +7919,24 @@ if (-not $g26Git) {
     Invoke-D272Complete -Dir $g26b -TaskId '100'
     Assert-Eq "26b (D272): at k=3 the outer completes with an EMPTY snapshot - the no-own-commits shape, terminally" `
         "" (Get-D272Paths -Dir $g26b)
-    # THE CONTROLS THAT MAKE THE EMPTY ASSERTION MEAN SOMETHING. '' comes back
-    # from an unwritten file, a fixture that never committed, a repo that failed
-    # to initialise, AND from a '[]' the capture wrote for reasons that are not
-    # the ratchet at all - a refused base, or the capture's own catch. Reading
-    # through Get-D272Paths cannot tell any of those apart, so each is excluded
-    # positively: the file EXISTS and its content is exactly '[]', the verdict
-    # on record is 'no' (a refusal or a thrown capture does not narrow), and the
-    # three commits really are in history.
+    # WHAT THESE CONTROLS DO AND DO NOT EXCLUDE, stated exactly. Get-D272Paths
+    # renders '' for an unwritten or missing file as well as for a real empty
+    # snapshot, so the raw-content assertion separates those two - and that is
+    # ALL it separates. It does NOT distinguish a refused base or a thrown
+    # capture: both write exactly '[]' too (stride-hook.ps1:3831/:3874), and both
+    # also leave the verdict at 'no', because 'no' is the PRE-CAPTURE default
+    # written before the refusal guard. An earlier version of this comment
+    # claimed the pair excluded those masquerades and it did not - naming the
+    # wrong guarantee is the same defect as an assertion that cannot fail, and
+    # it is recorded here rather than quietly reworded.
+    #
+    # THE REAL EXCLUSION IS ALREADY ABOVE, and it is stronger: 200's completion
+    # in this same repo returned outer_mid3.txt, which is only possible if base
+    # resolution and the capture path both work here. A refusal or a throwing
+    # capture would have shown up there first.
     $g26bRaw = (Get-Content -Raw -Path (Join-Path $g26b '.stride-changed-files.json') -ErrorAction SilentlyContinue)
     Assert-Eq "26b (D272): CONTROL - the snapshot file exists and holds exactly '[]', not nothing at all" `
         "[]" "$("$g26bRaw".Trim())"
-    $g26bCache = @(Get-Content -Path (Join-Path $g26b '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
-    Assert-Eq "26b (D272): CONTROL - and the outer did NOT narrow, so no refusal or thrown capture is masquerading as the sentinel" "1" `
-        "$(@($g26bCache | Where-Object { $_ -eq "TASK_NARROWED_100='no'" }).Count)"
     $g26bLog = @(& git -C $g26b log --format='%s' 2>$null | Where-Object { $_ -like 'outer_mid*' })
     Assert-Eq "26b (D272): while its three commits really are in history - the empty snapshot is not 'authored nothing'" `
         "3" "$($g26bLog.Count)"
@@ -8008,6 +8021,16 @@ if (-not $g26Git) {
 function New-D226Repo {
     param([string]$Name)
     $d = New-D272Repo -Name $Name
+    # bash's d226_fixture deliberately does NOT ignore .stride/, where only
+    # d255_fixture does - and Invoke-FinalizeAfterDoing writes its capture sweep
+    # under that directory. Inheriting the d255 ignore list would hide from this
+    # family an artifact the bash twin surfaces as a snapshot path, so the line
+    # is removed rather than carried along by accident.
+    Set-Content -Path (Join-Path $d '.gitignore') -Encoding UTF8 -Value @(
+        '/.stride.md', '/.stride-env-cache', '/.stride-changed-files.json',
+        '/.stride-diff-upload-state', '/.stride-dirty-baseline')
+    & git -C $d add -A 2>$null | Out-Null
+    & git -C $d commit -q -m 'd226 gitignore' 2>$null | Out-Null
     Set-Content -Path (Join-Path $d '.stride.md') -Encoding UTF8 -Value @'
 ## before_doing
 ```bash
@@ -8100,6 +8123,16 @@ if (-not $g26Git) {
     Invoke-D272Complete -Dir $g26g -TaskId '100'
     Assert-Eq "26g (D272): with uncommitted work the terminal shape reports the WIP and HIDES the stolen commit - no empty snapshot to notice" `
         "outer_wip.txt" (Get-D272Paths -Dir $g26g)
+    # CONTROL: nothing above proves the FALLBACK family is in effect. Under the
+    # d255 family this script produces the same two results - the tree is clean
+    # at 200's completion either way, and at 100's the after_doing commit would
+    # make the D271 union arm fire and still yield outer_wip.txt. So if
+    # New-D226Repo's .stride.md overwrite ever stopped taking effect, every
+    # assertion here would keep passing while the comment above became false.
+    # The WIP staying uncommitted is true only where after_doing does not commit.
+    $g26gLog = @(& git -C $g26g log --format='%s' 2>$null | Where-Object { $_ -eq 'stride-auto' })
+    Assert-Eq "26g (D272): CONTROL - after_doing committed nothing, so this really is the fallback family" "0" `
+        "$($g26gLog.Count)"
 }
 
 # --- 26h (D271, sh 23z6): the observed worst case, 22 nested completions ---

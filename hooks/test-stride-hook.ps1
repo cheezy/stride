@@ -6718,9 +6718,16 @@ Assert-Eq "23f: Write-EnvCache still has exactly 6 call sites (tripwire on new w
 #       gap, not a behavioural one. Recorded here rather than left to be
 #       re-derived; whoever ports it should do both sites at once.
 #   sh 23v2 sub-blocks k=3..k=8  D272 ratchet
-#       DEFERRED. The k=2 sub-block below pins that this port REPRODUCES the
-#       ratchet rather than silently "fixing" it, which is the property that
-#       matters; the remaining sub-blocks are the same shape at other depths.
+#       NO LONGER OMITTED for k=2, k=3 and the empty-window edge - W2104
+#       mirrored them in Group 26, driven end to end. k=4..k=8 remain omitted:
+#       they are the same shape at greater depth, and k=3 is the TERMINAL one
+#       (every outer commit inside some childless window, so the snapshot is
+#       empty), which is the property worth pinning.
+#       W2102 recorded this as deferred "because the k=2 sub-block below pins
+#       that this port REPRODUCES the ratchet" - and no such sub-block existed,
+#       nor any other D272 assertion in this suite. The deferral was defensible;
+#       the thing it rested on was not. Corrected rather than deleted, so the
+#       next reader sees that the claim was checked.
 Write-Host ""
 Write-Host "=== Test Group 24: W2102 window classification engine ==="
 
@@ -7740,6 +7747,227 @@ if ($g25Git) {
 
 $ProjectDir = $g25SavedProjectDir
 
+}
+
+# ============================================================
+# Test Group 26: W2104 — D272's zero-commit ratchet, pinned not fixed
+# ============================================================
+# Mirrors sh 23v2 (test-stride-hook.sh:8241). Driven END TO END through real
+# claim and completion cycles, because the ratchet is a property of what a
+# sequence of completions does to each other's snapshots and no unit call can
+# express it.
+#
+# WHAT IS BEING PINNED, AND WHY IT IS NOT A FIX. Each childless completion's
+# window holds only the OUTER task's mid-window commit, reads residual 1,
+# classifies PURE and is subtracted - and that covered span re-grounds the NEXT
+# childless window's residual back to 1. So k childless children strip k of the
+# outer's commits, one per window, and at k = the outer's commit count the outer
+# completes with an EMPTY snapshot while its work sits in git history,
+# indistinguishable from the sentinel that legitimately means "authored
+# nothing". The bash side MEASURED the candidate fix rather than arguing it -
+# 665 to 652 passed, 13 failed, four of them the ratchet assertions doing their
+# job and NINE pre-existing pins it breaks on the way - and DECLINED the trade.
+# So this port reproduces the behaviour and pins it, exactly as the task
+# instructs; a change that widens or narrows the cascade is then noticed rather
+# than discovered.
+#
+# MEASURED HERE TOO, AND THE NUMBERS DO NOT TRANSFER. Applying the declined fix
+# to this port - a present-and-empty owned record on a nonempty window skips the
+# window - fails exactly FOUR assertions, all of them 26a's and 26b's, i.e. the
+# branch doing its job. bash's run failed THIRTEEN: the same four plus nine
+# pre-existing pins (its 23j, 23n, 23o, 23p at both levels, 23q, 23v) that this
+# suite does not yet mirror. So the cheaper-looking number here is evidence of
+# THINNER COVERAGE, not of a cheaper trade, and it must not be read as a reason
+# to revisit a decision the bash side made against the fuller evidence.
+#
+# THIS GROUP EXISTS BECAUSE THE PARITY NOTE CLAIMED IT ALREADY DID. W2102's
+# Group 24 banner recorded sh 23v2's k=3..k=8 sub-blocks as deferred "because
+# the k=2 sub-block below pins that this port REPRODUCES the ratchet" - and
+# there was no k=2 sub-block, nor any other D272 assertion anywhere in this
+# suite. The deferral was real; the thing it rested on was not.
+Write-Host ""
+Write-Host "=== Test Group 26: W2104 D272 ratchet ==="
+
+$g26Git = Get-Command git -ErrorAction SilentlyContinue
+
+# Mirror of sh d255_fixture: after_doing COMMITS, so ownership is
+# hook-mediated and every completion records an owned set.
+function New-D272Repo {
+    param([string]$Name)
+    $d = Join-Path $TmpDir "g26-$Name"
+    Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Path $d -Force | Out-Null
+    & git -C $d init -q 2>$null | Out-Null
+    & git -C $d config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $d config user.name 'Test' 2>$null | Out-Null
+    & git -C $d config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $d '.gitignore') -Encoding UTF8 -Value @(
+        '/.stride.md', '/.stride-env-cache', '/.stride-changed-files.json',
+        '/.stride-diff-upload-state', '/.stride-dirty-baseline', '/.stride/')
+    Set-Content -Path (Join-Path $d '.stride.md') -Encoding UTF8 -Value @'
+## before_doing
+```bash
+true
+```
+
+## after_doing
+```bash
+git add -A > /dev/null && git commit -q -m stride-auto || true
+```
+'@
+    Set-Content -Path (Join-Path $d 'tracked.txt') -Value 'v1' -Encoding UTF8
+    & git -C $d add -A 2>$null | Out-Null
+    & git -C $d commit -q -m 'v1' 2>$null | Out-Null
+    return $d
+}
+
+function Invoke-D272Claim {
+    param([string]$Dir, [string]$TaskId)
+    $json = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = ('{"data":{"id":' + $TaskId + ',"identifier":"W' + $TaskId + '","title":"t","status":"in_progress","complexity":"small","priority":"high"}}'); stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $null = Invoke-HookScript -InputJson $json -Phase 'pre' -ProjectDir $Dir
+    $null = Invoke-HookScript -InputJson $json -Phase 'post' -ProjectDir $Dir
+}
+
+# Port 1 refuses instantly, so only the ON-DISK snapshot is under test - the
+# ps1 equivalent of bash's curl stub, which the same assertions read through.
+function Invoke-D272Complete {
+    param([string]$Dir, [string]$TaskId)
+    $json = @{ tool_input = @{ command = "curl -X PATCH http://127.0.0.1:1/api/tasks/$TaskId/complete -H `"Authorization: Bearer tok`"" } } | ConvertTo-Json -Compress
+    $null = Invoke-HookScript -InputJson $json -Phase 'pre' -ProjectDir $Dir
+}
+
+function Get-D272Paths {
+    param([string]$Dir)
+    $p = Join-Path $Dir '.stride-changed-files.json'
+    if (-not (Test-Path $p)) { return '' }
+    $raw = Get-Content -Raw -Path $p -ErrorAction SilentlyContinue
+    if (-not $raw) { return '' }
+    $entries = @($raw | ConvertFrom-Json)
+    if ($entries.Count -eq 0) { return '' }
+    return ((@($entries | ForEach-Object { $_.path }) | Sort-Object) -join ',')
+}
+
+function Add-D272Commit {
+    param([string]$Dir, [string]$File)
+    Set-Content -Path (Join-Path $Dir $File) -Value $File -Encoding UTF8
+    & git -C $Dir add -A 2>$null | Out-Null
+    & git -C $Dir commit -q -m $File 2>$null | Out-Null
+}
+
+# --- 26a (D272, sh 23v2 k=2): the single steal GENERALISES, it does not saturate ---
+if (-not $g26Git) {
+    Write-Host "  SKIP: 26a: the ratchet needs git" -ForegroundColor Yellow
+} else {
+    $g26a = New-D272Repo -Name 'k2'
+    Invoke-D272Claim -Dir $g26a -TaskId '100'
+    Invoke-D272Claim -Dir $g26a -TaskId '200'
+    Invoke-D272Claim -Dir $g26a -TaskId '300'
+    Add-D272Commit -Dir $g26a -File 'outer_mid1.txt'
+    Invoke-D272Complete -Dir $g26a -TaskId '300'
+    $g26aCache = Get-Content -Raw -Path (Join-Path $g26a '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "26a (D272): the first childless child records the EMPTY owned set" `
+        "TASK_OWNED_300=''" "$g26aCache"
+    Assert-Eq "26a (D272): and its window swallows the outer's first commit - the k=1 steal" `
+        "outer_mid1.txt" (Get-D272Paths -Dir $g26a)
+    Add-D272Commit -Dir $g26a -File 'outer_mid2.txt'
+    Invoke-D272Complete -Dir $g26a -TaskId '200'
+    Assert-Eq "26a (D272): the SECOND childless window steals the second outer commit - the covered span re-grounded its residual to 1" `
+        "outer_mid2.txt" (Get-D272Paths -Dir $g26a)
+    Add-D272Commit -Dir $g26a -File 'outer_after.txt'
+    Invoke-D272Complete -Dir $g26a -TaskId '100'
+    Assert-Eq "26a (D272): the outer authored three commits and keeps only the one made after the last window closed" `
+        "outer_after.txt" (Get-D272Paths -Dir $g26a)
+}
+
+# --- 26b (D272, sh 23v2 k=3): the TERMINAL shape - an empty snapshot over real work ---
+if (-not $g26Git) {
+    Write-Host "  SKIP: 26b: the terminal ratchet needs git" -ForegroundColor Yellow
+} else {
+    $g26b = New-D272Repo -Name 'k3'
+    foreach ($id in @('100', '200', '300', '400')) { Invoke-D272Claim -Dir $g26b -TaskId $id }
+    Add-D272Commit -Dir $g26b -File 'outer_mid1.txt'
+    Invoke-D272Complete -Dir $g26b -TaskId '400'
+    Add-D272Commit -Dir $g26b -File 'outer_mid2.txt'
+    Invoke-D272Complete -Dir $g26b -TaskId '300'
+    Add-D272Commit -Dir $g26b -File 'outer_mid3.txt'
+    Invoke-D272Complete -Dir $g26b -TaskId '200'
+    Assert-Eq "26b (D272): each of the three childless children uploaded one of the outer's commits" `
+        "outer_mid3.txt" (Get-D272Paths -Dir $g26b)
+    Invoke-D272Complete -Dir $g26b -TaskId '100'
+    Assert-Eq "26b (D272): at k=3 the outer completes with an EMPTY snapshot - the no-own-commits shape, terminally" `
+        "" (Get-D272Paths -Dir $g26b)
+    # THE CONTROL THAT MAKES THE EMPTY ASSERTION MEAN SOMETHING. '' also comes
+    # back from a fixture that never committed, from a repo that failed to
+    # initialise, and from an unwritten snapshot file - so the empty result is
+    # only evidence of the ratchet if the work demonstrably EXISTS in history.
+    $g26bLog = @(& git -C $g26b log --format='%s' 2>$null | Where-Object { $_ -like 'outer_mid*' })
+    Assert-Eq "26b (D272): while its three commits really are in history - the empty snapshot is not 'authored nothing'" `
+        "3" "$($g26bLog.Count)"
+}
+
+# --- 26c (D272, sh 23v2 edge): an EMPTY window has nothing to steal ---
+# The ratchet needs an outer commit inside each window, not merely a childless
+# child per window: the empty rev-list expansion is skipped before
+# classification, so the outer keeps everything. Without this, 26a and 26b would
+# be equally satisfied by an implementation that let ANY childless completion
+# subtract, which is a strictly larger and worse cascade than the one D272 pins.
+if (-not $g26Git) {
+    Write-Host "  SKIP: 26c: the empty-window edge needs git" -ForegroundColor Yellow
+} else {
+    $g26c = New-D272Repo -Name 'empty-window'
+    Invoke-D272Claim -Dir $g26c -TaskId '100'
+    Add-D272Commit -Dir $g26c -File 'outer_only.txt'
+    Invoke-D272Claim -Dir $g26c -TaskId '200'
+    # No outer commit lands inside 200's window, so it has nothing to swallow.
+    Invoke-D272Complete -Dir $g26c -TaskId '200'
+    Invoke-D272Complete -Dir $g26c -TaskId '100'
+    Assert-Contains "26c (D272): a childless child whose window is EMPTY steals nothing" `
+        'outer_only.txt' (Get-D272Paths -Dir $g26c)
+}
+
+# --- 26d (D271): the OUTERMOST task UNIONS rather than replaces ---
+# The production branch has existed since W2102 and nothing drove it. When this
+# completion's own loop authored commits, the owned range normally REPLACES the
+# attributed ranges - safe only while some OTHER window is still open, because a
+# nested task's dropped commits fall back into the enclosing task's later
+# snapshot. An OUTERMOST task has no absorber, so the same narrowing silently
+# under-reports its own manual mid-task commits; D271 unions instead.
+#
+# The geometry has to be exact or the branch is not reached at all: a CLOSED
+# nested window (so the attributed ranges are non-empty), NO other open window
+# (so the gate takes the union arm), and manual outer commits on both sides of
+# the nested window (so replacing is observably lossy). With no nested window
+# the attributed ranges are empty and the whole question is moot - which is why
+# a simpler fixture would have passed either way.
+if (-not $g26Git) {
+    Write-Host "  SKIP: 26d: the outermost union needs git" -ForegroundColor Yellow
+} else {
+    $g26d = New-D272Repo -Name 'outermost-union'
+    Invoke-D272Claim -Dir $g26d -TaskId '100'
+    Add-D272Commit -Dir $g26d -File 'outer_manual1.txt'
+    Invoke-D272Claim -Dir $g26d -TaskId '200'
+    Set-Content -Path (Join-Path $g26d 'nested_work.txt') -Value 'nested' -Encoding UTF8
+    Invoke-D272Complete -Dir $g26d -TaskId '200'
+    Add-D272Commit -Dir $g26d -File 'outer_manual2.txt'
+    # Uncommitted at completion time, so 100's own after_doing commit exists and
+    # the owned set is non-empty - without that the gate is never consulted.
+    Set-Content -Path (Join-Path $g26d 'outer_loop.txt') -Value 'loop' -Encoding UTF8
+    Invoke-D272Complete -Dir $g26d -TaskId '100'
+    $g26dPaths = Get-D272Paths -Dir $g26d
+    Assert-Contains "26d (D271): the outermost task keeps the loop's own commit" `
+        'outer_loop.txt' $g26dPaths
+    Assert-Contains "26d (D271): AND its manual commit from before the nested window" `
+        'outer_manual1.txt' $g26dPaths
+    Assert-Contains "26d (D271): AND the one from after it - replacing would lose both" `
+        'outer_manual2.txt' $g26dPaths
+    # CONTROL: the union must not also drag in the nested task's work, which
+    # would make the three assertions above satisfiable by simply not
+    # attributing at all.
+    Assert-Eq "26d (D271): CONTROL - and still does not absorb the nested task's commit" "0" `
+        "$(@(@($g26dPaths -split ',') | Where-Object { $_ -eq 'nested_work.txt' }).Count)"
 }
 
 # ============================================================

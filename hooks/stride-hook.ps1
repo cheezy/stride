@@ -4217,6 +4217,15 @@ function Invoke-SelfHealChangedFilesUpload {
 
         $sel = Resolve-TaskSnapshotBase -TaskId $taskId
         $healSnapshot = '[]'
+        # (W2103/D273) The verdict this retry actually APPLIED - hoisted OUT of
+        # the non-refused branch. bash initialises _retry_narrowed=no outside
+        # every branch and writes BOTH carriers unconditionally, so a refusal
+        # records 'no'. Leaving the initialiser inside made the refusal path
+        # carry the REPLAYED value into the state write while never touching the
+        # per-task record at all - a record claiming 'yes' over a snapshot that
+        # is '[]', which is narrowed by nothing. The two carriers could then
+        # disagree with each other AND with the upload.
+        $healApplied = 'no'
         if (-not $sel.Refused) {
             # (W2102) Attribute here too. bash's equivalent states that
             # attribution belongs to EVERY non-refused path, not just the
@@ -4256,7 +4265,6 @@ function Invoke-SelfHealChangedFilesUpload {
             # the record false about the snapshot the server now holds - and the
             # next reader would replay that falsehood. bash draws the same
             # distinction at the same point.
-            $healApplied = 'no'
             if ($healOwnedSet -and $healOwnedSet -ne $script:StrideOwnedOverflow) {
                 $healOwnedRange = Convert-OwnedSetToRange -Set $healOwnedSet
                 if ($healOwnedRange -and (Invoke-ReplayNarrowingDecision -Narrowed $healNarrowed -TaskId $taskId)) {
@@ -4264,14 +4272,15 @@ function Invoke-SelfHealChangedFilesUpload {
                     $healApplied = 'yes'
                 }
             }
-            $healNarrowed = $healApplied
-            # BOTH carriers, as bash does: the state file below, and the durable
-            # per-task record here. Leaving the record stale would let a later
-            # reader prefer a verdict that no longer describes any capture.
-            if ($taskId) { $null = Set-TaskNarrowedRecord -TaskId $taskId -Value $healApplied }
             try { $healSnapshot = Build-ChangedFilesSnapshot -Base $healBase -OwnRanges $healRanges }
             catch { $healSnapshot = '[]' }
         }
+        # BOTH carriers, as bash does, and on EVERY build path including the
+        # refusal: the state file below, and the durable per-task record here.
+        # Leaving the record stale would let a later reader prefer a verdict
+        # that no longer describes any capture.
+        $healNarrowed = $healApplied
+        if ($taskId) { $null = Set-TaskNarrowedRecord -TaskId $taskId -Value $healApplied }
         Write-ChangedFilesSnapshot -Json $healSnapshot
     }
 

@@ -2429,6 +2429,139 @@ if (-not (Test-Path (Join-Path $shProjI '.stride-changed-files.json'))) {
     $script:FAIL++
 }
 
+# 9j (W2103/D273): THE FOREIGN-VERDICT GATE, end to end.
+# The state file holds ONE task and is truncated on every write, so an
+# interleaved completion leaves ANOTHER task's narrowed= line behind. The
+# self-heal must not replay it: a foreign 'yes' narrows THIS task's snapshot to
+# a commit range that was never computed for it, and the review under-reports.
+#
+# THIS EXISTS BECAUSE THE FIX HAD NOTHING THAT COULD FALSIFY IT. The gate at
+# `if ($stateTask -ne $taskId) { $stateNarrowed = '' }` shipped with no
+# assertion anywhere in the suite - deleting the line left every case green,
+# which is the third consecutive round in which a correct change was unpinned.
+# Group 25's cases exercise the resolver and the replay as units and never call
+# Invoke-SelfHealChangedFilesUpload, so only an integration case can reach it.
+#
+# The geometry is chosen so the two answers DIVERGE OBSERVABLY. With the gate,
+# the foreign verdict is dropped, nothing is on record for this task, and the
+# replay falls through to a live check that finds no other open window - so
+# nothing is narrowed and the wide snapshot still carries a.txt. Without it,
+# the foreign 'yes' is replayed, the owned set resolves to b's commit alone,
+# and a.txt disappears from the diff the reviewer would have seen.
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: 9j: the foreign-verdict gate needs git" -ForegroundColor Yellow
+} else {
+    $shProjJ = Join-Path $TmpDir 'sh-foreign-verdict'
+    New-Item -ItemType Directory -Path $shProjJ -Force | Out-Null
+    & git -C $shProjJ init -q 2>$null | Out-Null
+    & git -C $shProjJ config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $shProjJ config user.name 'Test' 2>$null | Out-Null
+    & git -C $shProjJ config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $shProjJ '.gitignore') `
+        -Value "/.stride.md`n/.stride-env-cache`n/.stride-changed-files.json`n/.stride-diff-upload-state" -Encoding UTF8
+    Set-Content -Path (Join-Path $shProjJ 'seed.txt') -Value 'seed' -Encoding UTF8
+    & git -C $shProjJ add -A 2>$null | Out-Null
+    & git -C $shProjJ commit -q -m 'seed' 2>$null | Out-Null
+    $shBaseJ = (& git -C $shProjJ rev-parse HEAD 2>$null | Out-String).Trim()
+    Set-Content -Path (Join-Path $shProjJ 'a.txt') -Value 'a' -Encoding UTF8
+    & git -C $shProjJ add -A 2>$null | Out-Null
+    & git -C $shProjJ commit -q -m 'a' 2>$null | Out-Null
+    Set-Content -Path (Join-Path $shProjJ 'b.txt') -Value 'b' -Encoding UTF8
+    & git -C $shProjJ add -A 2>$null | Out-Null
+    & git -C $shProjJ commit -q -m 'b' 2>$null | Out-Null
+    $shOwnedJ = (& git -C $shProjJ rev-parse HEAD 2>$null | Out-String).Trim()
+    Set-Content -Path (Join-Path $shProjJ '.stride.md') -Value @'
+## before_review
+```bash
+echo "br_ran"
+```
+'@ -Encoding UTF8
+    # The owned set names b's commit ONLY, so a replayed 'yes' is observable as
+    # a.txt vanishing rather than as a bare flag change.
+    Set-Content -Path (Join-Path $shProjJ '.stride-env-cache') -Encoding UTF8 -Value @(
+        "TASK_ID='99'",
+        "TASK_BASE_REF_99='$shBaseJ'",
+        "TASK_OWNED_99='$shOwnedJ'")
+    # task_id=88, NOT 99: another task's completion landed in the gap. No
+    # snapshot on disk, so the self-heal takes the build path where the replay
+    # lives; a recorded non-2xx is what makes it retry at all.
+    Set-Content -Path (Join-Path $shProjJ '.stride-diff-upload-state') `
+        -Value "task_id=88`nhttp_code=500`nnarrowed=yes" -Encoding UTF8
+    Remove-Item -Force (Join-Path $shProjJ '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    $r = Invoke-HookScript -InputJson $shUnreachableJson -Phase 'post' -ProjectDir $shProjJ
+    Assert-Exit "9j: before_review over a foreign verdict exits 0" 0 $r.ExitCode
+    $stateJ = @(Get-Content -Path (Join-Path $shProjJ '.stride-diff-upload-state') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "9j (D273): a foreign narrowed=yes is NOT replayed into the state file" "0" `
+        "$(@($stateJ | Where-Object { $_ -eq 'narrowed=yes' }).Count)"
+    Assert-Eq "9j (D273): the state records the verdict actually applied" "1" `
+        "$(@($stateJ | Where-Object { $_ -eq 'narrowed=no' }).Count)"
+    $cacheJ = @(Get-Content -Path (Join-Path $shProjJ '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "9j (D273): and the durable per-task record agrees with it" "1" `
+        "$(@($cacheJ | Where-Object { $_ -eq "TASK_NARROWED_99='no'" }).Count)"
+    # The behaviour, not just the flag: replaying the foreign verdict would
+    # narrow the upload to b's commit and drop a.txt from the review.
+    $snapJ = Get-Content -Raw -Path (Join-Path $shProjJ '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    Assert-Contains "9j (D273): the snapshot is NOT narrowed by a verdict that was never this task's" `
+        'a.txt' "$snapJ"
+}
+
+# 9k (W2103/D273): a REFUSED base records the verdict it applied, not the one
+# it replayed.
+# bash initialises _retry_narrowed=no outside every branch and writes BOTH
+# carriers unconditionally. This port initialised it INSIDE the non-refused
+# branch, so a refusal carried the replayed value into the state file and never
+# touched the per-task record at all - a record claiming 'yes' over a snapshot
+# that is '[]', which is narrowed by nothing. The two carriers could then
+# disagree with each other AND with the upload.
+#
+# Own task id on the state line this time, so the D226 refusal is the ONLY thing
+# under test here and the 9j gate is not doing the work.
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: 9k: the refusal path needs git" -ForegroundColor Yellow
+} else {
+    $shProjK = Join-Path $TmpDir 'sh-refused-verdict'
+    New-Item -ItemType Directory -Path $shProjK -Force | Out-Null
+    & git -C $shProjK init -q 2>$null | Out-Null
+    & git -C $shProjK config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $shProjK config user.name 'Test' 2>$null | Out-Null
+    & git -C $shProjK config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $shProjK 'seed.txt') -Value 'seed' -Encoding UTF8
+    & git -C $shProjK add -A 2>$null | Out-Null
+    & git -C $shProjK commit -q -m 'seed' 2>$null | Out-Null
+    $shHeadK = (& git -C $shProjK rev-parse HEAD 2>$null | Out-String).Trim()
+    Set-Content -Path (Join-Path $shProjK '.stride.md') -Value @'
+## before_review
+```bash
+echo "br_ran"
+```
+'@ -Encoding UTF8
+    # No per-task base, and the SHARED base is stamped as another task's - the
+    # D226 foreign-owner refusal.
+    Set-Content -Path (Join-Path $shProjK '.stride-env-cache') -Encoding UTF8 -Value @(
+        "TASK_ID='99'",
+        "TASK_BASE_REF='$shHeadK'",
+        "TASK_BASE_REF_OWNER='88'")
+    Set-Content -Path (Join-Path $shProjK '.stride-diff-upload-state') `
+        -Value "task_id=99`nhttp_code=500`nnarrowed=yes" -Encoding UTF8
+    Remove-Item -Force (Join-Path $shProjK '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    $r = Invoke-HookScript -InputJson $shUnreachableJson -Phase 'post' -ProjectDir $shProjK
+    Assert-Exit "9k: before_review over a refused base exits 0" 0 $r.ExitCode
+    $snapK = Get-Content -Raw -Path (Join-Path $shProjK '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    # GEOMETRY CONTROL, not a verdict assertion: it proves the fixture really
+    # took the refusal path, which is what makes the three below mean anything.
+    # It does not move under any mutation of the verdict logic, and is not
+    # meant to.
+    Assert-Contains "9k (D226): the refusal uploads an empty snapshot" '[]' "$snapK"
+    $stateK = @(Get-Content -Path (Join-Path $shProjK '.stride-diff-upload-state') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "9k (D273): the refusal records 'no', not the replayed 'yes'" "1" `
+        "$(@($stateK | Where-Object { $_ -eq 'narrowed=no' }).Count)"
+    Assert-Eq "9k (D273): so no stale 'yes' survives the retry's own write" "0" `
+        "$(@($stateK | Where-Object { $_ -eq 'narrowed=yes' }).Count)"
+    $cacheK2 = @(Get-Content -Path (Join-Path $shProjK '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "9k (D273): and the durable record is written on the refusal path too" "1" `
+        "$(@($cacheK2 | Where-Object { $_ -eq "TASK_NARROWED_99='no'" }).Count)"
+}
+
 # ============================================================
 # Test Group 10: claim-time TASK_BASE_REF refresh + persisted-output
 # fallback (W1087, mirrors test-stride-hook.sh Test Group 14 test-for-test)
@@ -5324,6 +5457,64 @@ TASK_NARROWED_77='yes'
         "$($g22Orphans.Count)"
 }
 
+# --- 22q: the selector's TWO PRODUCTION CALL SITES, end-to-end ---
+# Group 25 drives Select-KeptWindowRecord directly, through AST extraction, and
+# 10k/22p drive the real claim path - but over a ONE-window cache, which
+# survives the new selector and the old tail cap alike. Reverting either call
+# site to `Select-Object -Last 19/20` therefore left the whole suite green: the
+# FUNCTION was pinned and its WIRING was not. That is the same shape as the
+# round-1 finding (a correct function whose production consumer was never
+# reached), and it is why this exists as the end-to-end form of 25d.
+#
+# 23 OPEN windows with LIVE bases, oldest first. Open windows are never capped,
+# so all 23 must survive; a tail cap keeps only the newest 19 or 20 and drops
+# the OLDEST - precisely where a live enclosing outer task sits.
+#
+# WHICH CLAIM REACHES WHICH SITE, measured by mutating each site alone:
+#   parseable   -> BOTH. The claim-response rewrite (which appends no base of
+#                  its own, so it reserves no slot and caps at 20) and then
+#                  Invoke-FinalizeBeforeDoing (which appends the claimant's own
+#                  base, reserves that key, and caps at 19).
+#   unparseable -> the finalize site only; the rewrite branch needs a response
+#                  it can parse.
+# Capping the rewrite site fails the parseable case only; capping the finalize
+# site fails both. The unparseable case is therefore what separates them - with
+# the parseable one alone, a tail cap at either site would look the same.
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: 22q: the selector's call sites need git" -ForegroundColor Yellow
+} else {
+    foreach ($g22q in @(
+        @{ Name = 'parseable';   Stdout = '{"data":{"id":99,"identifier":"W99","title":"Claimant","status":"in_progress","complexity":"small","priority":"high"}}' },
+        @{ Name = 'unparseable'; Stdout = 'Internal Server Error' }
+    )) {
+        $g22qDir = New-GitRepo -Name "g22q-$($g22q.Name)"
+        # Live, resolvable bases: the sweep fires at 23 open windows and must
+        # prove every one of them ALIVE, so nothing here is evicted for being
+        # dead and the only question left is the cap.
+        $g22qHead = (& git -C $g22qDir rev-parse HEAD 2>$null | Out-String).Trim()
+        $g22qLines = New-Object System.Collections.Generic.List[string]
+        $g22qLines.Add("TASK_ID=77") | Out-Null
+        $g22qLines.Add("TASK_IDENTIFIER=W77") | Out-Null
+        # The OUTER task first, i.e. oldest - the position a tail cap drops.
+        $g22qLines.Add("TASK_BASE_REF_77='$g22qHead'") | Out-Null
+        for ($i = 101; $i -le 122; $i++) {
+            $g22qLines.Add("TASK_BASE_REF_$i='$g22qHead'") | Out-Null
+        }
+        Set-Content -Path (Join-Path $g22qDir '.stride-env-cache') -Encoding UTF8 -Value $g22qLines
+        $g22qClaim = @{
+            tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+            tool_response = @{ stdout = $g22q.Stdout; stderr = ''; interrupted = $false }
+        } | ConvertTo-Json -Compress
+        $r = Invoke-HookScript -InputJson $g22qClaim -Phase 'post' -ProjectDir $g22qDir
+        Assert-Exit "22q ($($g22q.Name)): the claim exits 0" 0 $r.ExitCode
+        $g22qCache = @(Get-Content -Path (Join-Path $g22qDir '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+        Assert-Contains "22q ($($g22q.Name)): the OLDEST open window survives the rewrite by value" `
+            "TASK_BASE_REF_77='$g22qHead'" "$($g22qCache -join "`n")"
+        Assert-Eq "22q ($($g22q.Name)): and so do all 22 newer open windows - none capped" "22" `
+            "$(@($g22qCache | Where-Object { $_ -match '^TASK_BASE_REF_1[0-2][0-9]=' }).Count)"
+    }
+}
+
 # --- 22r: the record writers' call-site INVENTORY ---
 # W2101 shipped this as a tripwire on "no production call site", with the
 # instruction to UPDATE it rather than delete it when G413 added one. W2102 did,
@@ -5350,6 +5541,11 @@ TASK_NARROWED_77='yes'
 #                              'yes' whose owned range came back empty uploaded
 #                              WIDE, and recording 'yes' there would make the
 #                              record false about the snapshot the server holds.
+#                              That call sits OUTSIDE the non-refused branch, as
+#                              bash's unconditional pair does: a refused base
+#                              uploads '[]', which is narrowed by nothing, so it
+#                              records 'no' rather than leaving the replayed
+#                              value on the record untouched.
 #   Set-TaskHeadRefRecord  1 - Invoke-FinalizeAfterDoing, no -Head argument, so
 #                              the value is git rev-parse HEAD.
 #   Set-TaskBaseAtRecord   0 - the claim stamp is written INLINE into
@@ -7060,6 +7256,53 @@ if ($g25Git) {
         "$(@($g25kInj2 | Where-Object { $_ -like 'narrowed=*' }).Count)"
     Assert-Eq "25k: and it cannot inject a second base= line" "1" `
         "$(@($g25kInj2 | Where-Object { $_ -like 'base=*' }).Count)"
+
+    # EACH MEMBER OF [\r\n\0] SEPARATELY. Both fixtures above carry a bare LF,
+    # so narrowing the class to [\n] left every assertion green - the same
+    # partly-exercised-guard shape the review kept finding here. CR is not
+    # decorative: Get-Content's StreamReader treats a LONE CR as a line
+    # terminator, so a CR-carrying base lands a second physical line ahead of
+    # the genuine narrowed= and the first-match-wins reader takes the injected
+    # one. NUL does not split lines, but it is refused on the same terms because
+    # what a NUL does to a downstream C-string reader is not this writer's
+    # judgment to make.
+    Write-DiffUploadState -TaskId '42' -HttpCode '200' `
+        -Base "abc123`rnarrowed=yes" -Narrowed 'no'
+    $g25kCr = @(Get-Content -Path (Join-Path $g25k.Dir '.stride-diff-upload-state') -Encoding UTF8)
+    Assert-Eq "25k: a base carrying a CR is refused (lone CR terminates a line)" "0" `
+        "$(@($g25kCr | Where-Object { $_ -like 'base=*' }).Count)"
+    # Counted over EVERY narrowed= line, not just the genuine one: with the CR
+    # written, the genuine 'no' is still present and a count of it alone stays
+    # at 1 while the injected 'yes' sits AHEAD of it and wins the first-match
+    # read. Only the total catches that.
+    Assert-Eq "25k: so the CR injection lands no second narrowed= line at all" "1" `
+        "$(@($g25kCr | Where-Object { $_ -like 'narrowed=*' }).Count)"
+    Write-DiffUploadState -TaskId '42' -HttpCode '200' `
+        -Base "abc123`0narrowed=yes" -Narrowed 'no'
+    $g25kNul = @(Get-Content -Path (Join-Path $g25k.Dir '.stride-diff-upload-state') -Encoding UTF8)
+    Assert-Eq "25k: a base carrying a NUL is refused" "0" `
+        "$(@($g25kNul | Where-Object { $_ -like 'base=*' }).Count)"
+    # A NUL does not terminate a line for Get-Content, so a line count cannot
+    # see this one; what it would do is hand a C-string reader everything up to
+    # the NUL and leave the rest addressable. Assert on the CONTENT instead - no
+    # line anywhere carries the injected verdict.
+    Assert-Eq "25k: and the NUL injection leaves no 'narrowed=yes' text on disk" "0" `
+        "$(@($g25kNul | Where-Object { $_ -match 'narrowed=yes' }).Count)"
+    # The verdict side of each, so neither parameter is pinned by the other's
+    # coverage.
+    Write-DiffUploadState -TaskId '42' -HttpCode '200' -Base 'abc123' -Narrowed "yes`rbase=evil"
+    $g25kCr2 = @(Get-Content -Path (Join-Path $g25k.Dir '.stride-diff-upload-state') -Encoding UTF8)
+    Assert-Eq "25k: a CR-carrying verdict is refused" "0" `
+        "$(@($g25kCr2 | Where-Object { $_ -like 'narrowed=*' }).Count)"
+    Assert-Eq "25k: and injects no second base= line" "1" `
+        "$(@($g25kCr2 | Where-Object { $_ -like 'base=*' }).Count)"
+    Write-DiffUploadState -TaskId '42' -HttpCode '200' -Base 'abc123' -Narrowed "yes`0base=evil"
+    $g25kNul2 = @(Get-Content -Path (Join-Path $g25k.Dir '.stride-diff-upload-state') -Encoding UTF8)
+    Assert-Eq "25k: a NUL-carrying verdict is refused" "0" `
+        "$(@($g25kNul2 | Where-Object { $_ -like 'narrowed=*' }).Count)"
+    # Content, not line count, for the same reason as the base-side NUL case.
+    Assert-Eq "25k: and its injected base= text reaches disk nowhere" "0" `
+        "$(@($g25kNul2 | Where-Object { $_ -match 'base=evil' }).Count)"
 } else {
     Write-Host "  SKIP: 25k: needs git" -ForegroundColor Yellow
 }

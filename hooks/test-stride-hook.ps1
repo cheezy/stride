@@ -7595,6 +7595,16 @@ if ($g25Git) {
     # is the whole point of persisting it: same cache, opposite answer.
     Assert-Eq "25j (D273): a recorded 'no' ignores the live open window entirely" "False" `
         "$(Invoke-ReplayNarrowingDecision -Narrowed 'no' -TaskId '42')"
+    # EXACT, as bash's `case yes)` is exact. PowerShell's -eq is
+    # case-INsensitive, so 'YES' narrowed where bash would have fallen through
+    # to the wide path - and bash states at sh:1846 that a tampered or
+    # truncated value must go wide, because wide over-reports while narrow can
+    # LOSE this task's own work. 'YES' takes neither the equal branch nor the
+    # empty one, so it lands on the explicit `return $false`; with -eq it takes
+    # the equal branch and returns $true instead. That is the whole
+    # discriminator - reverting -ceq to -eq turns exactly this row red.
+    Assert-Eq "25j (D273): a MIXED-CASE verdict does not narrow - bash's case is exact" "False" `
+        "$(Invoke-ReplayNarrowingDecision -Narrowed 'YES' -TaskId '42')"
 
     # The resolver prefers the PER-TASK RECORD over the state file, because the
     # state file holds one task and is truncated on every write - an interleaved
@@ -7710,11 +7720,14 @@ if ($g25Git) {
     # value turns bash's `case yes)` into a miss. Windows PowerShell 5.1, the
     # shipping host, writes both with Set-Content -Encoding UTF8.
     #
-    # INERT ON THIS HOST AND KEPT ANYWAY: pwsh 7 writes no BOM and LF endings,
-    # so both spellings are byte-identical here and no mutation of the writer
-    # can turn this red on macOS. It is live on 5.1, which is where the claim
-    # matters, and stating that is better than leaving the cross-executor
-    # rationale in the writer resting on nothing at all.
+    # LIVE ON EVERY HOST, contrary to what an earlier version of this comment
+    # claimed: spelling the encoder UTF8Encoding($true) or the separators `r`n
+    # turns these red on pwsh 7 too. The ONE mutation macOS cannot see is a
+    # revert to Set-Content, which is BOM-free and LF here and neither on 5.1 -
+    # and even that is caught on any Windows host. Calling the whole assertion
+    # inert talked a working guard down into a dead one, which on this task is
+    # the same error as an assertion that cannot fail: both leave a reader
+    # believing something about the coverage that is not so.
     Write-DiffUploadState -TaskId '42' -HttpCode '200' -Base 'abc123' -Narrowed 'yes'
     $g25kBytes = [System.IO.File]::ReadAllBytes((Join-Path $g25k.Dir '.stride-diff-upload-state'))
     $g25kHasBom = ($g25kBytes.Length -ge 3 -and $g25kBytes[0] -eq 0xEF -and $g25kBytes[1] -eq 0xBB -and $g25kBytes[2] -eq 0xBF)

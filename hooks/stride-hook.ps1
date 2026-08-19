@@ -710,11 +710,19 @@ function Get-DeadOpenWindowId {
     $heads = New-Object System.Collections.Generic.HashSet[string]
     foreach ($line in $lines) {
         if ($line -match '^TASK_BASE_REF_([A-Za-z0-9_]+)=') {
+            # Captured IMMEDIATELY, as the sibling Select-KeptWindowRecord does.
+            # Reading $Matches[1] after the sentinel match below works only
+            # because a FAILED -match leaves the previous match's $Matches
+            # intact and the success branch continues - so inserting any regex
+            # operation between the two, or a check that does not continue,
+            # would silently mis-assign every window id. Not a defect today;
+            # it is one waiting for an edit.
+            $id = $Matches[1]
             $key = $line.Substring(0, $line.IndexOf('='))
             if ($key -match '^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)\z') { continue }
             if ($ReserveKey -and $key -eq $ReserveKey) { continue }
             $bases.Add([pscustomobject]@{
-                Id = $Matches[1]
+                Id = $id
                 Value = (ConvertFrom-ShSingleQuoted -Value $line.Substring($line.IndexOf('=') + 1))
             }) | Out-Null
         } elseif ($line -match '^TASK_HEAD_REF_([A-Za-z0-9_]+)=') {
@@ -875,7 +883,16 @@ function Resolve-CaptureNarrowing {
 # nothing was recorded at all.
 function Invoke-ReplayNarrowingDecision {
     param([string]$Narrowed, [string]$TaskId)
-    if ($Narrowed -eq 'yes') { return $true }
+    # -ceq, not -eq: PowerShell's -eq is case-INsensitive, and bash's `case
+    # yes)` is exact. bash states the rule at stride-hook.sh:1846 - only the
+    # exact literal narrows, and a truncated write, a hand-edited line or a
+    # tampered file falls through to the WIDE path, which over-reports but can
+    # never lose this task's own work. A case-insensitive compare takes the
+    # other direction on exactly those inputs. Not the round-6 harness rule in
+    # reverse: that one widened a gate over Windows environment variable NAMES,
+    # which really are case-insensitive; this compares a VALUE read out of a
+    # file, where no platform argument applies.
+    if ($Narrowed -ceq 'yes') { return $true }
     if ($Narrowed -eq '') { return [bool](Test-AnotherOpenWindowExists -SelfTaskId $TaskId) }
     return $false
 }
@@ -3688,11 +3705,13 @@ function Write-DiffUploadState {
         # LATER BASH RETRY on a shared checkout; with Set-Content that claim was
         # false on the only host where it matters.
         #
-        # UNTESTABLE FROM HERE, and said rather than quietly relied upon: pwsh 7
-        # writes no BOM and LF line endings, so on the development host the two
-        # spellings are byte-identical and no assertion can discriminate. Test
-        # 25k2 asserts the bytes anyway - inert here, live on 5.1 - which is the
-        # same trade as the case-insensitive strip in the suite harness.
+        # 25k2 ASSERTS THE BYTES, and it is a live assertion, not a gesture:
+        # spelling the encoder UTF8Encoding($true) or the separators `r`n turns
+        # it red on pwsh 7 as readily as on 5.1. What it cannot discriminate on
+        # macOS is the ONE mutation of reverting to Set-Content, which is
+        # BOM-free and LF here and neither on 5.1 - and it catches even that on
+        # any Windows host. An earlier version of this comment called the whole
+        # assertion inert, which talked a working guard down into a dead one.
         [System.IO.File]::WriteAllText(
             (Join-Path $ProjectDir '.stride-diff-upload-state'),
             $lines + "`n",
@@ -3943,14 +3962,14 @@ function Invoke-FinalizeAfterDoing {
 #     containing its NESTED tasks' commits - is closed on this host.
 #   * The self-heal RE-capture. Invoke-SelfHealChangedFilesUpload builds a
 #     snapshot only when none is on disk (a completion killed inside the
-#     after_doing budget). It never re-captures over an existing one, because
-#     (W2103) Write-DiffUploadState NOW records base= and narrowed=, so the replay is possible and is used; what stays unported is the RE-capture over an existing snapshot
-#     — and re-deriving those at retry time is the exact divergence D273 added
-#     persistence to prevent. Bash re-captures because bash persists them.
-#     (W2103) That reason is now gone: base= and narrowed= are persisted, so the
-#     replay has something to replay from and both functions are ported. The
-#     self-heal still builds only when nothing is on disk - it does not
-#     RE-capture over an existing snapshot - which remains the honest subset.
+#     after_doing budget) and never re-captures over one that is already
+#     there, where bash re-captures unconditionally. A snapshot on disk IS
+#     the primary capture's answer; rebuilding it would re-derive against
+#     retry-time state, which is the divergence D273 added persistence to
+#     prevent. This is the honest remaining subset.
+#     (W2103) The reason this bullet USED to give - that there was nothing to
+#     replay from, because no base= or narrowed= was persisted - is gone:
+#     both are written now, and the replay is ported and used.
 #     (W2103) The self-heal now applies the D255 owned-set override too, gated
 #     on the REPLAYED verdict rather than a live re-derivation - which is what
 #     W2102 could not do and recorded as blocked. Bash applies it at the same

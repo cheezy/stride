@@ -6717,6 +6717,17 @@ Assert-Eq "23f: Write-EnvCache still has exactly 6 call sites (tripwire on new w
 #       breadcrumb for a human reading the state file - so this is a diagnostic
 #       gap, not a behavioural one. Recorded here rather than left to be
 #       re-derived; whoever ports it should do both sites at once.
+#   sh 23j, 23n, 23o, 23p (both levels), 23q, 23v  D236/D255 fallback world
+#       NOT MIRRORED, and recorded here because the Group 26 banner names these
+#       same cases while the ledger did not - two records of what this suite
+#       covers should not disagree. They are the collateral the D272 trade
+#       breaks: measured, the declined fix costs bash nine assertions across
+#       them and this suite zero, because none has a counterpart. That gap is
+#       the honest reason the ps1 measurement cannot stand in for bash's.
+#   sh 23z4, sh 23z5  D271 end-to-end (swept untracked stray; empty owned set)
+#       NOT MIRRORED. 23z3's payoff is covered incidentally by 26i, which has
+#       the same geometry - incidentally, not deliberately, which is why it is
+#       recorded rather than claimed.
 #   sh 23v2  D272 ratchet
 #       NO LONGER OMITTED. All SIX sub-blocks are mirrored in Group 26: k=2
 #       (sh :8276 -> 26a), the terminal k=3 (:8300 -> 26b), the empty-window
@@ -7782,23 +7793,40 @@ $ProjectDir = $g25SavedProjectDir
 # alongside it: sh 23z6's 22-nested-completion union (26h) and sh 23z7's
 # stale-record gate (26i).
 #
-# MEASURED HERE TOO, AND THE COMPARISON IS NOT APPLES TO APPLES. Applying the
-# declined fix to this port - a present-and-empty owned record on a nonempty
-# window skips the window - fails EIGHT assertions: 26a x2, 26b x3 (including
-# its '[]' control), 26f x2 and 26g. All eight are this group doing its job.
-# bash's run failed THIRTEEN, but its thirteen decompose differently: FOUR
-# ratchet assertions plus NINE pre-existing pins in the D236/D255 fallback
-# world (its 23j, 23n, 23o, 23p at both levels, 23q, 23v) that this suite does
-# not mirror at all. So this port already pins MORE of the ratchet family than
-# bash does, and still pins NONE of the collateral - which is where the real
-# coverage gap sits. Neither number is a reason to revisit a decision the bash
-# side made against evidence this suite cannot yet reproduce.
+# MEASURED ON BOTH SIDES, against both finished suites, because every recorded
+# figure here has turned out to be stale at least once. Applying the declined
+# fix - a present-and-empty owned record on a nonempty window skips the window:
 #
-# THIS SENTENCE WAS WRONG ONCE, and is corrected rather than overwritten: it
-# claimed FOUR failures "all of them 26a's and 26b's", a figure measured before
-# 26e/26f/26g and 26b's controls existed and never re-measured after. A stale
-# measurement presented as current is the same defect as the ledger claims
-# below - an assertion about the suite that the suite does not support.
+#   this port   8 failures, all ratchet family: 26a x2, 26b x3 (including its
+#               '[]' control), 26f x2, 26g. No collateral: 0.
+#   bash        16 failures: SEVEN ratchet (23v2's k=2 x2, k=3 x2, depth-3 x2,
+#               WIP x1) plus NINE collateral pins in the D236/D255 fallback
+#               world - 23j, 23n x3, 23o, 23p x2, 23q, 23v.
+#
+# bash was measured by copying BOTH bash files to a scratch directory, applying
+# the same mutation there and running the suite, with an unmutated baseline run
+# to separate the three failures that are artifacts of running outside the repo
+# (28a's skill-budget check and 29a/29b's ps1 gate, none of which the mutation
+# touches). stride-hook.sh itself was never modified.
+#
+# LIKE FOR LIKE THAT IS 8 vs 7 ON THE RATCHET AND 0 vs 9 ON THE COLLATERAL. The
+# one extra here is 26b's '[]' control, which bash has no counterpart for. So
+# the ratchet family is now pinned marginally more tightly on this side, and
+# the collateral - which is most of why the trade was declined - is pinned not
+# at all. That is the real coverage gap, and neither number is a reason to
+# revisit a decision the bash side made against evidence this suite cannot yet
+# reproduce.
+#
+# TWO STALE FIGURES WERE CORRECTED TO GET HERE, both recorded rather than
+# overwritten. This paragraph first claimed FOUR failures "all of them 26a's
+# and 26b's" - measured before 26e/26f/26g and 26b's controls existed and never
+# re-measured. Correcting that, it then compared the re-measured eight against
+# bash's FOUR taken from bash's own write-up - which is stale in exactly the
+# same way, being k=2 plus k=3 alone, from before 23v2 grew its remaining four
+# sub-blocks. bash's recorded "665 to 652 passed, 13 failed" describes that
+# earlier state too; today the same mutation costs it 16. Importing another
+# document's un-re-measured number while fixing your own is the same defect
+# twice, one level apart.
 #
 # THIS GROUP EXISTS BECAUSE THE PARITY NOTE CLAIMED IT ALREADY DID. W2102's
 # Group 24 banner recorded sh 23v2's k=3..k=8 sub-blocks as deferred "because
@@ -7930,10 +7958,17 @@ if (-not $g26Git) {
     # wrong guarantee is the same defect as an assertion that cannot fail, and
     # it is recorded here rather than quietly reworded.
     #
-    # THE REAL EXCLUSION IS ALREADY ABOVE, and it is stronger: 200's completion
-    # in this same repo returned outer_mid3.txt, which is only possible if base
-    # resolution and the capture path both work here. A refusal or a throwing
-    # capture would have shown up there first.
+    # THE REFUSAL IS EXCLUDED DIRECTLY, not by inference. An earlier version of
+    # this comment argued that 200's completion returning outer_mid3.txt proved
+    # base resolution works "in this repo" - but a refused base is PER TASK, not
+    # per repo, and the canonical way task 100 acquires one is eviction of its
+    # own TASK_BASE_REF_100 anchor: the D268/D274 shape W2103 fixed and 22s
+    # pins. 200's success cannot speak for 100. So 100's anchor is asserted to
+    # still stand, borrowing 22s's control. The thrown-capture masquerade
+    # remains UNEXCLUDED and is named rather than argued away.
+    $g26bCache = @(Get-Content -Path (Join-Path $g26b '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "26b (D272): CONTROL - the outer's own base anchor still stands, so the empty snapshot is not a refusal" "1" `
+        "$(@($g26bCache | Where-Object { $_ -match "^TASK_BASE_REF_100='[0-9a-f]+'\z" }).Count)"
     $g26bRaw = (Get-Content -Raw -Path (Join-Path $g26b '.stride-changed-files.json') -ErrorAction SilentlyContinue)
     Assert-Eq "26b (D272): CONTROL - the snapshot file exists and holds exactly '[]', not nothing at all" `
         "[]" "$("$g26bRaw".Trim())"
@@ -8022,10 +8057,21 @@ function New-D226Repo {
     param([string]$Name)
     $d = New-D272Repo -Name $Name
     # bash's d226_fixture deliberately does NOT ignore .stride/, where only
-    # d255_fixture does - and Invoke-FinalizeAfterDoing writes its capture sweep
-    # under that directory. Inheriting the d255 ignore list would hide from this
-    # family an artifact the bash twin surfaces as a snapshot path, so the line
-    # is removed rather than carried along by accident.
+    # d255_fixture does, so the line is dropped to mirror it.
+    #
+    # WHAT THAT ACTUALLY BUYS, corrected: an earlier version of this comment
+    # said the line "would hide an artifact the bash twin surfaces as a snapshot
+    # path". It surfaces no such path - BOTH hooks hard-exclude ^\.stride/ from
+    # the capture on purpose (stride-hook.sh:231, stride-hook.ps1:3367/:3590,
+    # whose stated reason is that these artifacts must never appear in a task's
+    # changed_files even in repos that forgot to ignore them), and sh 23v2's own
+    # WIP assertion expects exactly outer_wip.txt. The rationale inverted the
+    # fact it cited. What dropping the line really does is leave .stride/
+    # untracked and unignored, so 26g now DEPENDS on that hard-exclude: delete
+    # the rule and 26g's two path assertions fail, where under the inherited
+    # d255 list they would still pass. Add-D272Commit's `git add -A` then also
+    # commits the hook's .stride/ artifacts - the case stride-hook.ps1:3790
+    # names - which is harmless for the same reason.
     Set-Content -Path (Join-Path $d '.gitignore') -Encoding UTF8 -Value @(
         '/.stride.md', '/.stride-env-cache', '/.stride-changed-files.json',
         '/.stride-diff-upload-state', '/.stride-dirty-baseline')

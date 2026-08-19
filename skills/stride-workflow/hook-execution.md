@@ -73,14 +73,14 @@ The three sources are mutually exclusive in effect — the `## after_goal` secti
 
 Hook authors writing `## after_goal` blocks should therefore reference `$GOAL_*` directly, trusting that the values match the goal that just finished:
 
-```bash
+````markdown
 ## after_goal
 
 ```bash
 echo "Goal $GOAL_IDENTIFIER ($GOAL_TITLE) finished"
 ./scripts/notify-team.sh "$GOAL_IDENTIFIER" "$GOAL_TITLE" "$GOAL_DESCRIPTION"
 ```
-```
+````
 
 ## Blocking Behavior, Timeout, and Result Capture
 

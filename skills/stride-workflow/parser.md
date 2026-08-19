@@ -99,13 +99,13 @@ The `## after_goal` hook fires when the final remaining task inside a goal compl
 
 Example declaration:
 
-```markdown
+````markdown
 ## after_goal
 
 ```bash
 echo "Goal $GOAL_IDENTIFIER ($GOAL_TITLE) finished"
 ./scripts/notify-team.sh "$GOAL_IDENTIFIER" "$GOAL_TITLE"
 ```
-```
+````
 
 If `## after_goal` is omitted, the agent reports a clean no-op result (`exit_code: 0`, empty `output`) back to the server — the goal-completion lifecycle still runs end-to-end.

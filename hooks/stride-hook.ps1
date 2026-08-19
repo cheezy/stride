@@ -4007,6 +4007,23 @@ function Invoke-FinalizeAfterDoing {
 #     is not ported and because D280's rule is that no raw line enters a
 #     rewrite. A malformed head/owned value is therefore DROPPED here and KEPT
 #     by bash. Fail-closed direction, and it self-heals on the next window.
+#   * (W2106) WHAT IS LEFT, at the close of G413, so this list can be read as
+#     finished rather than merely long. The capture, attribution, eviction and
+#     replay machinery is ported and covered. Three things are NOT, and none
+#     of them can be closed from this host:
+#       - THE UPLOAD ON 5.1 (D277, first bullet above). A native-Windows run
+#         now WRITES a snapshot and still cannot PUT one. This is the single
+#         most consequential gap and the reason "Windows parity" must not be
+#         claimed unqualified.
+#       - RUNTIME VERIFICATION ON A REAL 5.1 HOST (D237). Every check that
+#         exists here is STATIC: scripts/check-ps1-compat.sh reads syntax and
+#         cmdlet names, and the ps1 suite runs on pwsh 7. Neither executes this
+#         file under powershell.exe. The verified blind spots are listed in
+#         README.md under "What this gate cannot see" - D277 was found by
+#         reading, not by a red gate, which is the proof that reading is what
+#         has been doing this job.
+#       - refused_base=yes, unported at both write sites (see the parity note
+#         in test-stride-hook.ps1's Group 24 ledger). Diagnostic only.
 # Keep this list honest and specific. Every blanket parity claim this comment
 # has ever made was false within one release.
 function Invoke-FinalizeBeforeDoing {

@@ -33,10 +33,36 @@ registry, and **every block after it is one rule entry**. There are no optional
 keys and no per-entry special cases — a consumer that needs an `if` for a
 particular rule id has found a defect in this file, not in itself.
 
+**Positional extraction is guarded, not trusted.** Every block is
+self-identifying — the registry by its `canon_schema_version` key, every entry by
+its `id` key — and **a consumer MUST validate that discriminator rather than
+relying on position alone.** Correspondingly, **no `json`-tagged fence may appear
+in this file except the registry and the entries**: an illustrative JSON example
+inside an entry's prose would silently become a phantom rule and shift the index
+of every block after it. Illustrate with a table, prose, or a fence tagged as
+something other than `json`. The two halves cover each other — the prohibition
+keeps the file honest, the discriminator check means a consumer survives it being
+broken.
+
 **`applies_to` is normative, not observational.** It records what a port *must*
 carry, never what it currently *does* carry. A port failing an entry is what the
 drift check exists to report; it is never grounds for editing that port's status
 to `not_applicable` to make the report green.
+
+**Closed vocabularies.** A canon that requires ports to close their vocabularies
+must close its own. Entry `status` is `active` | `superseded`; `provenance` is
+`quoted` | `synthesized-from-shipped-fixes`; `check` is `anchor` | `property`;
+port `status` is `required` | `not_applicable` | `deferred`. **`variant` is
+closed at `""` (no divergence), `four-section-keys`, `five-section-keys`, and
+`lib-matrix`** — adding a value means adding it here, in the same edit, with the
+entry's Substance explaining it.
+
+**`variant` is a property of a rule in a port, not of the port.** The same port
+legitimately carries different `variant` values on different entries, because it
+answers "how does *this rule* land differently here" — `stride-copilot-lite` is
+`four-section-keys` on `verdict-note` and `lib-matrix` on `row-precedence`, and
+both are correct. **Do not read a port's structure out of one entry's `variant`,
+and do not try to make them agree across entries.**
 
 ### The anchor
 
@@ -95,11 +121,22 @@ would make "not yet built" indistinguishable from "never considered".
     {"id": "stride-gemini",       "family": "gemini",   "dir": "stride-gemini",       "exists": true,  "note": "Full port."},
     {"id": "stride-lite",         "family": "claude",   "dir": "stride-lite",         "exists": true,  "note": "Lite variant; carries its decision matrix in lib/select_workflow_branch.md, not skills/."},
     {"id": "stride-opencode",     "family": "opencode", "dir": "stride-opencode",     "exists": true,  "note": "Full port."},
-    {"id": "stride-pi",           "family": "pi",       "dir": "stride-pi",           "exists": true,  "note": "Full port with no agents/ directory; reviewer duties run as a self-review checklist in skills/stride-workflow/SKILL.md."},
+    {"id": "stride-pi",           "family": "pi",       "dir": "stride-pi",           "exists": true,  "note": "Full port. Its reviewer agent is nested at extensions/subagent-dispatch/agents/stride-task-reviewer.md, not at a top-level agents/ directory; skills/stride-workflow/SKILL.md carries only a fallback self-review checklist for when custom agents are unavailable."},
     {"id": "stride-opencode-lite","family": "opencode", "dir": "stride-opencode-lite","exists": false, "note": "Not scaffolded; G403 has not shipped. Deferred on every entry until it does."}
   ]
 }
 ```
+
+**The first drift run is red in every anchor cell, and that is expected.** No
+port carries any anchor for any rule today — the anchor contract is introduced by
+this file, so it necessarily postdates every port. With five entries against
+eight existing ports, **all forty non-deferred cells report MISSING on the first
+run**, including entries whose rule every port already carries in substance
+(`verdict-note` is the clearest case: D240 ported it fleet-wide, and it will
+still report MISSING everywhere until the anchors are placed). Read the first
+report as a work list, not as a verdict on the fleet or on the checker. **The
+correct response is to place anchors, never to edit `applies_to` to make the
+report green** — which this file forbids twice, and means both times.
 
 **Anchors are checked per port directory, not per file.** Ports keep these rules
 in structurally different places — full ports in `skills/stride-workflow/` and
@@ -142,8 +179,11 @@ section verdicts.
 section verdicts the port's prompts enumerate — not a difference in the rule.
 The lite variants have no `behaviour_test_matrix` anywhere in their trees, so
 their reviewers list four section keys; the rule binds all four identically.
-`stride-pi` does carry `behaviour_test_matrix`, in a self-review checklist rather
-than a reviewer agent, because it ships no `agents/` directory.
+`stride-pi` is also `four-section-keys`: its reviewer agent enumerates four
+section tiles and carries no `behaviour_test_matrix` key, even though the port's
+fallback self-review checklist mentions the field. That divergence from the
+source's five is real and is recorded here rather than smoothed over — see the
+`reason` on its row for where the rule actually lives in that port.
 
 ```json
 {
@@ -163,7 +203,7 @@ than a reviewer agent, because it ships no `agents/` directory.
     {"port": "stride-gemini",       "status": "required",       "variant": "five-section-keys",             "reason": ""},
     {"port": "stride-lite",         "status": "required",       "variant": "four-section-keys",             "reason": "No behaviour_test_matrix anywhere in the tree, so the reviewer enumerates four section verdicts."},
     {"port": "stride-opencode",     "status": "required",       "variant": "five-section-keys",             "reason": ""},
-    {"port": "stride-pi",           "status": "required",       "variant": "five-section-keys-self-review", "reason": "No agents/ directory; the section verdicts live in a Step 5 self-review checklist in skills/stride-workflow/SKILL.md."},
+    {"port": "stride-pi",           "status": "required",       "variant": "four-section-keys",             "reason": "Reviewer agent is nested at extensions/subagent-dispatch/agents/stride-task-reviewer.md, not a top-level agents/; it enumerates four section tiles and carries no behaviour_test_matrix key."},
     {"port": "stride-opencode-lite","status": "deferred",       "variant": "",                              "reason": "Repository not scaffolded; G403 has not shipped."}
   ]
 }
@@ -270,12 +310,15 @@ statement of the precedence order. The subagent-workflow mirror does not carry a
 second anchor; one anchor per port directory.
 
 **Applicability.** Required everywhere. **This entry is expected to report
-MISSING for every port on the drift check's first run** — grepping each port
-directory for the precedence rule returns zero matches today, in all eight
-existing ports. That is not a reason to soften it: the rule IS enforced
-canonically in the source, and the ports are what drifted. It is also the
-evidence that the drift check can go red, which a report that came back green
-across the board on day one would not have provided.
+MISSING for every port on the drift check's first run.** Be precise about why,
+because the two halves of that sentence rest on different facts: the **rule** is
+present in exactly one of the nine ports — `stride`, the source, which carries
+the `Complexity absent or unrecognised` row and the precedence list that this
+entry quotes — and absent from the other seven that exist. The **anchor** is
+present in none of them, `stride` included. `check: "anchor"` tests the anchor,
+so every existing port reports MISSING on the first run, and `stride` reports
+MISSING while carrying the rule. That is not a reason to soften the entry: the
+rule IS enforced canonically in the source, and the ports are what drifted.
 
 **Delivery note.** D253 would hand-port this rule to ten tables across five port
 repositories — each port's Step 3 matrix plus its subagent-workflow mirror. It is
@@ -384,6 +427,12 @@ fence of the *same* width as the block it sits in terminates that block early,
 so the remainder of the file renders as prose and the agent reading it silently
 loses the rest of the instruction.
 
+**The rule is about both fence characters, not just backticks.** CommonMark
+treats backtick and tilde fences alike, and **a closer must use the same
+character as its opener — so a backtick fence never closes a tilde fence.** A
+check that walks only backticks passes the identical defect written with tildes,
+which is why the shipped walker covers both.
+
 Two consequences follow, and both are the point of the rule:
 
 - **Counting or balancing fences cannot detect this.** The defective file that
@@ -397,20 +446,34 @@ Two consequences follow, and both are the point of the rule:
 
 **Provenance.** **Synthesized from shipped fixes — not quoted.** No *normative*
 statement of this rule exists in any port's skill or agent contract; it survives
-only as narrative, in the D217 changelog entry at `stride-lite/CHANGELOG.md`,
-which states the rule directly but binds nothing and is not where a port would
-look for it. The substance above is authored here, derived from that narrative
-and from the two fixes named below. This entry is disclosed
+only as narrative in the D217 changelog entry at `stride-lite/CHANGELOG.md`, and
+as executable logic in that port's `test/smoke.sh`. Neither binds another port,
+and neither is where a maintainer would look. The substance above is authored
+here, derived from that narrative, from the walker's own comments, and from the
+two fixes named below. This entry is disclosed
 as authored rather than presented as a citation, but it is the opposite of
 speculative: it is the rule two independent defects were fixed by applying, in
 two different repositories, which is precisely the D239 standard this canon
 follows.
 
-**Defect trace.** D243 — `stride-copilot-lite` commit `6980f29`, "close the
-runaway fence in the reviewer prompt with a four-backtick wrapper". D217 —
-`stride-lite` commit `2af0ff1`, "agents/task-reviewer.md nests a 3-backtick json
-fence inside a 3-backtick markdown fence", whose changelog entry states the rule
-directly: *a nested fence is legitimate only when the outer one is wider*.
+**Defect trace.** Two defects, and their shipped work took **different shapes** —
+worth stating exactly, because this entry has no normative source to fall back on
+and its citations are its whole evidentiary basis.
+
+- **D243** — `stride-copilot-lite` commit `6980f29`, "close the runaway fence in
+  the reviewer prompt with a four-backtick wrapper". This one *is* a fence
+  widening, and it is the direct instance of the rule.
+- **D217** — `stride-lite` commit `2af0ff1`, "agents/task-reviewer.md nests a
+  3-backtick json fence inside a 3-backtick markdown fence". **This commit
+  contains no fence edit**, and says so in its own message: the widening had
+  already landed incidentally under W2016 (`9055147`). What `2af0ff1` shipped is
+  the **check** — `fence_defect()` in `stride-lite/test/smoke.sh`, a
+  renderer-faithful fence walker, plus the changelog entry that states the rule
+  directly: *a nested fence is legitimate only when the outer one is wider*.
+
+**That walker is the reference implementation of this entry's property check**,
+and it is the artifact to read before writing another one — it is the only one
+in the fleet, and only two of the nine ports have a `test/smoke.sh` at all.
 
 **Port-side anchor.** None. This is a prohibition on file structure, not a rule
 with a host paragraph to sit beside, so there is nowhere in a port for an anchor
@@ -436,7 +499,7 @@ ship a file that trips its own rule.
   "provenance": "synthesized-from-shipped-fixes",
   "defects": ["D243", "D217"],
   "check": "property",
-  "check_hint": "Walk every fenced block in the port's markdown as a renderer would. Report an opener that reaches EOF unclosed, and any fence of the same width as its enclosing block that carries an info string. Do not count or balance fences; both report the D217 shape clean.",
+  "check_hint": "Walk every fenced block in the port's markdown as a renderer would, in BOTH fence characters: a closer must use the same character as its opener, so a backtick fence never closes a tilde fence. Report an opener that reaches EOF unclosed, and any fence of the same width as its enclosing block that carries an info string. Do not count or balance fences; both report the D217 shape clean. Reference implementation: fence_defect() in stride-lite/test/smoke.sh.",
   "applies_to": [
     {"port": "stride",              "status": "required", "variant": "", "reason": ""},
     {"port": "stride-codex",        "status": "required", "variant": "", "reason": ""},
@@ -452,6 +515,29 @@ ship a file that trips its own rule.
 ```
 
 **History.** v1 — authored from the D243 and D217 fixes.
+
+## Discovery — how a maintainer reaches this file
+
+**This is the one mechanism the canon specifies and does not yet install, and it
+is recorded here rather than left to be discovered.** Nothing in the fleet
+currently references this file: no port, no README, no changelog, and none of the
+four source files whose rules it governs. The canon can reach its sources — it
+cites them by path — but no source can reach the canon.
+
+That matters most for the versioning rule below, which requires a version bump
+when a rule's **substance** changes. Substance changes in the source file, not
+here, so without a pointer at the edit site a maintainer editing (say) the Step 3
+matrix in `stride/skills/stride-workflow/SKILL.md` gets no signal that the edit
+crosses port boundaries. The canon keeps saying `v1`, every port keeps its `v1`
+anchor, and the drift check reports green over a fleet that has drifted — **the
+failure looks exactly like success**, which is the one shape a safeguard must not
+have.
+
+**What is owed:** each file cited in an entry's Provenance carries a back-
+reference to this document beside the governed rule, so that editing the rule
+surfaces the obligation. Until that lands, treat the versioning discipline as
+**maintainer-enforced rather than mechanism-enforced**, and say so when handing
+work to someone who has not read this section.
 
 ## Versioning and supersession
 
@@ -470,6 +556,22 @@ Every seed entry is `v1`, `"status": "active"`, `"superseded_by": null`.
   stable forever and are never reused. One consequence to record: once an entry is
   superseded, the count of anchor comments in this file equals the number of
   entries **including superseded ones**, not the number of active rules.
+- **A `check: "property"` entry cannot report STALE, and needs its own answer.**
+  Staleness is detected by comparing a port's anchor version against the entry's,
+  and a property entry has no anchor by design — so bumping `fence-nesting` to
+  `v2` would leave every port reporting compliant against the *old* rule. **A
+  property entry's version therefore binds the check, not the ports:** on a bump,
+  the drift check's own implementation of that property must be updated in the
+  same change, and a check that has not been updated must report the entry
+  UNVERIFIABLE rather than passing it. This is the one place the file's
+  no-per-entry-special-cases promise is genuinely strained; it is stated rather
+  than hidden, and it is `check`, not the rule id, that a consumer switches on.
+- **`canon_schema_version` versions the *format*, not the rules.** Bump it when
+  the shape of the registry or of an entry changes — a key added, removed, or
+  re-typed, or a vocabulary above extended. Rule edits never touch it. **A
+  consumer meeting a `canon_schema_version` it does not know MUST stop and report
+  that, not parse optimistically:** a format it does not understand is exactly
+  the case where a confident green report is worst.
 
 ## Changing this file
 
@@ -485,3 +587,17 @@ Every seed entry is `v1`, `"status": "active"`, `"superseded_by": null`.
 - **State substance, not wording.** If an entry cannot be satisfied except by
   copying its exact text, it has overreached into voicing, which D240 established
   belongs to the port.
+- **Adding or retiring a port touches every entry, not just the registry.** A new
+  port needs a registry row **and** a new `applies_to` element in **every** entry,
+  at the registry's position — that is five edits today, and it grows with the
+  canon. Retiring one is the same edit in reverse. `stride-opencode-lite` is the
+  case this will first bite: when G403 ships, set its registry `exists` to `true`
+  and change its `status` from `deferred` on each entry it then owes — one
+  registry field plus one field per entry, never a row added to only some.
+- **When an entry's anchor has nowhere to sit, say so rather than improvising.**
+  A `check_hint` locates a host paragraph, and for a rule a port has not adopted
+  yet that paragraph does not exist — true today for `row-precedence` in seven
+  ports and `reason-code-vocabulary` in seven. The anchor goes in **only when the
+  port's own voicing of the rule does**, and the two land in the same change. An
+  anchor placed beside nothing makes the drift check report a compliance the port
+  does not have, which is worse than the MISSING it replaced.

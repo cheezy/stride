@@ -184,6 +184,24 @@ function Assert-Exit {
 # leg in 9k2 would prove nothing on the host this suite is developed on. The
 # pattern is fully anchored over seven specific names, so insensitivity costs no
 # false positives.
+# --gate-probe (W2105): report what the gate did, then exit. Group 27 runs THIS
+# script as a child with variables deliberately set, and reads these lines back.
+# The gate has to be observable from outside to be testable at all: the bash
+# twin does the same, and its group exists because the gate was the one thing in
+# that file nothing asserted. Hand-verification does not survive a refactor.
+#
+# AFTER the gate, so the lines report the POST-gate state - which is what
+# distinguishes "reported it" from "actually cleared it", the distinction 27c
+# turns on.
+if ($args -contains '--gate-probe') {
+    foreach ($n in @($script:StrideHookEnvVars + @('TASK_BASE_REF_99'))) {
+        $v = [System.Environment]::GetEnvironmentVariable($n, 'Process')
+        if ($null -eq $v) { $v = '<unset>' }
+        Write-Host "AFTER_GATE:${n}=$v"
+    }
+    exit 0
+}
+
 $script:StrideChildEnvStrip = '^(TASK_(ID|IDENTIFIER|BASE_REF|HEAD_REF|OWNED|NARROWED|BASE_AT)(_[A-Za-z0-9_]+)?)\z'
 
 function Invoke-HookScript {
@@ -1187,8 +1205,11 @@ try {
 }
 
 # 7e (D67): Invoke-ChangedFilesUpload strips the hook's own root artifacts from
-# the snapshot before PUT. The ps1 has no capture step, so this upload-side
-# filter is the equivalent enforcement point. A same-named file in a
+# the snapshot before PUT.
+# (W2105) This used to say "the ps1 has no capture step, so this upload-side
+# filter is the equivalent enforcement point". W2100 built the capture step and
+# Group 21 covers it, so there are now TWO enforcement points and this is the
+# second, not a stand-in for a missing first. A same-named file in a
 # subdirectory is kept; the legitimate change is kept.
 # (W2100) This was a pre-seeded snapshot in a NON-git directory, which tested
 # the upload-side filter because ps1 built no snapshot of its own. Now that it
@@ -2175,9 +2196,16 @@ Assert-Contains "8l: cached copy collapses the newline to a space" "GOAL_TITLE='
 # Test Group 9: early upload + before_review self-heal (W1095,
 # mirrors test-stride-hook.sh Groups 12 and 13)
 # ============================================================
-# The ps1 script has no capture step — the pre-seeded on-disk snapshot is
-# the source of truth — so the bash capture-content assertions translate to
-# upload-ordering and state-file assertions here. Unreachable-URL cases use
+# (W2105) THIS GROUP'S REDUCTION NOTE IS NOW OBSOLETE and is corrected rather
+# than deleted, because acceptance criterion 3 of W2105 exists to force exactly
+# this re-read. It said: "the ps1 script has no capture step - the pre-seeded
+# on-disk snapshot is the source of truth - so the bash capture-content
+# assertions translate to upload-ordering and state-file assertions here."
+# W2100 built the capture step, and Group 21 mirrors sh Group 7's
+# capture-content assertions directly. So sh Groups 12 and 13 are no longer
+# REDUCED into this group: their capture half lives in Group 21 and their
+# upload/self-heal half lives here, which is a split rather than a loss. What
+# remains true is the mechanical part below. Unreachable-URL cases use
 # 127.0.0.1:1 so an attempted PUT deterministically records '000' and warns
 # on stderr; listener cases serve multiple requests because after_doing now
 # PUTs twice (early + refresh).
@@ -8245,6 +8273,294 @@ if (-not $g26Git) {
     Assert-Eq "26i (D271): a stale open-window record never re-narrows an outermost task's snapshot" `
         "manual.txt,tracked.txt" (Get-D272Paths -Dir $g26i)
 }
+
+# ============================================================
+# Test Group 27: W2105 — the hermeticity gate itself (mirrors sh 26 / D235)
+# ============================================================
+# The gate at the top of this file is load-bearing for every assertion below
+# it, and nothing asserted the gate. Its bash twin's group exists for exactly
+# that reason. Each probe runs THIS script as a child with --gate-probe, so the
+# gate's effect is observed from outside rather than reasoned about.
+#
+# EVERY PROBE PINS STRIDE_TEST_KEEP_ENV EXPLICITLY. The flag is itself a
+# suite-read variable the gate cannot neutralise - it IS the switch - so without
+# pinning, a child inherits it, takes the opt-out branch, and these turn red for
+# a developer using the documented escape hatch. 27d is the one case that sets
+# it deliberately.
+Write-Host ""
+Write-Host "=== Test Group 27: W2105 hermeticity gate (D235) ==="
+
+$g27Self = $PSCommandPath
+function Invoke-GateProbe {
+    param([hashtable]$Env = @{})
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'pwsh'
+    $psi.Arguments = "-NoProfile -File `"$g27Self`" --gate-probe"
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    # Start from a CLEAN slate for every name the gate knows about, so a probe
+    # measures what it sets rather than what this process happens to carry.
+    foreach ($n in @($script:StrideHookEnvVars + @('STRIDE_TEST_KEEP_ENV'))) {
+        $null = $psi.Environment.Remove($n)
+    }
+    # The TASK_BASE_REF_* family is open-ended (D226) and the gate sweeps it by
+    # PREFIX, so removing one hard-coded name is not a clean slate: Group 22
+    # leaves TASK_BASE_REF_42 and _77 set in this process, and 27e - the case
+    # asserting a clean environment is SILENT - saw them and failed. Sweep the
+    # same prefix the gate does, for the same reason the gate does.
+    foreach ($n in @($psi.Environment.Keys)) {
+        if ("$n" -like 'TASK_BASE_REF_*') { $null = $psi.Environment.Remove($n) }
+    }
+    foreach ($kv in $Env.GetEnumerator()) { $psi.Environment[$kv.Key] = $kv.Value }
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $out = $proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    return $out
+}
+
+# 27a: it detects an inherited variable and names it.
+$g27a = Invoke-GateProbe -Env @{ STRIDE_HOOK_TIMEOUT_OVERRIDE = '200' }
+Assert-Contains "27a: the gate reports an inherited variable BY NAME" `
+    "STRIDE_HOOK_TIMEOUT_OVERRIDE" $g27a
+
+# 27b: it reports the NAME and never the VALUE. A gate that echoes a bearer
+# token into a CI log is worse than the leak it fixes. BOTH reporting paths are
+# covered - the fixed list and the TASK_BASE_REF_* prefix sweep - because a
+# canary in only one leaves the other free to reintroduce value-printing.
+$g27b = Invoke-GateProbe -Env @{ TASK_ID = 's3cr3t-fixed-list'; TASK_BASE_REF_99 = 's3cr3t-prefix-sweep' }
+Assert-Contains "27b: the gate names a fixed-list variable" "TASK_ID" $g27b
+Assert-Contains "27b: and the dynamic base-ref variable" "TASK_BASE_REF_99" $g27b
+foreach ($g27Canary in @('s3cr3t-fixed-list', 's3cr3t-prefix-sweep')) {
+    # The AFTER_GATE lines print values by design, so only the gate's own
+    # REPORT is under test here - everything before the first AFTER_GATE line.
+    $g27Report = ($g27b -split 'AFTER_GATE:')[0]
+    Assert-Eq "27b: the gate never prints a VALUE ($g27Canary)" "False" `
+        "$($g27Report.Contains($g27Canary))"
+}
+
+# 27c: it actually UNSETS, rather than only reporting. This is the assertion
+# that separates a gate from a notice.
+$g27c = Invoke-GateProbe -Env @{ STRIDE_HOOK_TIMEOUT_OVERRIDE = '200' }
+Assert-Contains "27c: the inherited variable is CLEARED, not just reported" `
+    "AFTER_GATE:STRIDE_HOOK_TIMEOUT_OVERRIDE=<unset>" $g27c
+
+# 27d: the opt-out preserves the value and says the run is not hermetic.
+$g27d = Invoke-GateProbe -Env @{ STRIDE_HOOK_TIMEOUT_OVERRIDE = '200'; STRIDE_TEST_KEEP_ENV = '1' }
+Assert-Contains "27d: STRIDE_TEST_KEEP_ENV=1 preserves the value" `
+    "AFTER_GATE:STRIDE_HOOK_TIMEOUT_OVERRIDE=200" $g27d
+Assert-Contains "27d: and the opt-out warns the run is NOT hermetic" "NOT hermetic" $g27d
+
+# 27e: a clean environment says nothing at all - no noise on the common path.
+$g27e = Invoke-GateProbe
+Assert-Eq "27e: a clean environment produces no gate output" "False" `
+    "$($g27e.Contains('neutralising inherited'))"
+
+# ============================================================
+# Test Group 28: W2105 — hot-path skill byte budgets (mirrors sh 28 / W2079)
+# ============================================================
+# The bash suite's Group 29 banner says "the ps1 twin suite has no Group 29:
+# host-agnostic repo gates live in the bash suite only, as with Group 28."
+# W2105 changes that for Group 28 specifically: the budget check now has a
+# PowerShell counterpart so a Windows-only contributor running only this suite
+# still gets the drift detector. That sentence in the bash banner is now stale
+# for Group 28, and cannot be corrected from here - test-stride-hook.sh is
+# read-only for this task - so it is recorded in CHANGELOG.md instead.
+Write-Host ""
+Write-Host "=== Test Group 28: W2105 hot-path skill byte budgets (W2079) ==="
+
+$g28Script = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'scripts/check-skill-budgets.ps1'
+if (-not (Test-Path -LiteralPath $g28Script)) {
+    Write-Host "  FAIL: 28a: scripts/check-skill-budgets.ps1 is missing" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    $g28Out = (& pwsh -NoProfile -File $g28Script 2>&1 | Out-String)
+    $g28Rc = $LASTEXITCODE
+    Assert-Eq "28a: all hot-path skill files are under budget" "0" "$g28Rc"
+    Assert-Contains "28a: and the check names each budgeted file" "stride-workflow/SKILL.md" $g28Out
+
+    # 28b: THE TWO IMPLEMENTATIONS MUST AGREE, or neither detects drift. The
+    # bash script is the original and stays authoritative; this asserts the
+    # PowerShell one reports the same files, sizes and budgets rather than
+    # merely also exiting 0. A ps1 script with a stale budget table would pass
+    # 28a forever while the gate it mirrors had moved.
+    #
+    # The task's own edge case is the reason this compares BYTES: the two could
+    # disagree on a CRLF or multi-byte file if one decoded text instead of
+    # reading raw bytes. `wc -c` and ReadAllBytes().Length both count bytes.
+    if (Get-Command bash -ErrorAction SilentlyContinue) {
+        $g28Bash = (& bash (Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'scripts/check-skill-budgets.sh') 2>&1 | Out-String)
+        $g28Norm = { param($t) (($t -split "`n") | Where-Object { $_ -like 'ok:*' -or $_ -like 'BUDGET*' } | ForEach-Object { $_.TrimEnd("`r") }) -join "`n" }
+        Assert-Eq "28b: the PowerShell and bash budget checks report byte-identical lines" `
+            (& $g28Norm $g28Bash) (& $g28Norm $g28Out)
+    } else {
+        Write-Host "  SKIP: 28b: cross-check needs bash" -ForegroundColor Yellow
+    }
+}
+
+# ============================================================
+# Test Group 29: W2105 — D220 command routing (mirrors sh 22)
+# ============================================================
+# sh 22 sources the hook and exercises the routing table in isolation. The ps1
+# equivalent extracts the same predicates by AST, as Groups 24 and 25 already
+# do, so the assertions run against the SHIPPED functions rather than copies.
+#
+# ALL FIVE sh 22 CASES ARE MIRRORED. An earlier draft of this banner recorded
+# 22c/22d/22e as unmirrorable "because this port has no heredoc scanning" - it
+# has both Get-StrideHeredocDelim and Remove-StrideHeredocBodies, and the
+# extraction below fails without them. The claim was wrong and is corrected
+# here rather than dropped, because an omission ledger that invents reasons is
+# worse than one that omits loudly.
+Write-Host ""
+Write-Host "=== Test Group 29: W2105 D220 command routing ==="
+
+$g29Ast = [System.Management.Automation.Language.Parser]::ParseFile($HookScript, [ref]$null, [ref]$null)
+$g29Defs = @{}
+foreach ($f in $g29Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+    $g29Defs[$f.Name] = $f.Extent.Text
+}
+# THE DEPENDENCY CLOSURE, RESOLVED RATHER THAN LISTED. Get-StrideRoute calls
+# helpers that call helpers; naming them by hand meant adding one, running,
+# reading the next NOT-RECOGNIZED error and adding that. A hand-list is also
+# exactly the thing that rots the first time the hook grows a helper. Seed with
+# the entry points and pull in any hook function a seeded body names, to a
+# fixpoint.
+$g29Seed = @('Get-StrideRoute', 'Get-TaskIdFromCommand', 'Get-StrideHeredocDelim',
+             'Remove-StrideHeredocBodies')
+$g29Want = New-Object System.Collections.Generic.HashSet[string]
+foreach ($n in $g29Seed) { $null = $g29Want.Add($n) }
+$g29Grew = $true
+while ($g29Grew) {
+    $g29Grew = $false
+    foreach ($n in @($g29Want)) {
+        if (-not $g29Defs.ContainsKey($n)) { continue }
+        foreach ($cand in $g29Defs.Keys) {
+            if ($g29Want.Contains($cand)) { continue }
+            if ($g29Defs[$n] -match ("(?<![A-Za-z0-9-])" + [regex]::Escape($cand) + "(?![A-Za-z0-9-])")) {
+                $null = $g29Want.Add($cand); $g29Grew = $true
+            }
+        }
+    }
+}
+$g29Found = @()
+foreach ($n in @($g29Want)) {
+    if (-not $g29Defs.ContainsKey($n)) { continue }
+    $g29Found += $n
+    . ([scriptblock]::Create($g29Defs[$n]))
+}
+$g29Missing = @($g29Seed | Where-Object { $g29Found -notcontains $_ })
+if ($g29Missing.Count -gt 0) {
+    Write-Host "  FAIL: 29-harness: could not extract: $($g29Missing -join ', ')" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 29-harness: $($g29Found.Count) routing functions extracted from the real hook (closure of $($g29Seed.Count) entry points)" -ForegroundColor Green
+    $script:PASS++
+
+    # 29a: the routing table itself. Each row is a command and the endpoint it
+    # must produce - the ps1 form of sh 22a. Get-StrideRoute returns an OBJECT,
+    # so the Endpoint field is what gets compared; an earlier draft compared the
+    # object itself and every row failed on its rendering.
+    foreach ($g29Row in @(
+        @{ Cmd = 'curl -X POST https://x/api/tasks/claim';             Route = 'claim' },
+        @{ Cmd = 'curl -X PATCH https://x/api/tasks/42/complete';      Route = 'complete' },
+        @{ Cmd = 'curl -X PATCH https://x/api/tasks/42/mark_reviewed'; Route = 'mark_reviewed' },
+        @{ Cmd = 'curl -X GET https://x/api/tasks/next';               Route = '' },
+        @{ Cmd = 'echo not a stride call';                             Route = '' }
+    )) {
+        Assert-Eq "29a (D220): '$($g29Row.Cmd)' routes to '$($g29Row.Route)'" `
+            $g29Row.Route "$((Get-StrideRoute -Phase 'post' -CommandText $g29Row.Cmd).Endpoint)"
+    }
+
+    # 29b: task ids come ONLY from an accepted request URL - the ps1 form of
+    # sh 22b. A digit sequence elsewhere on the command line must not be
+    # scraped, because the id decides which task a diff is PUT to. This is the
+    # guard that stopped the live PUT to task 999999999.
+    Assert-Eq "29b (D220): the id comes from the /complete URL" "42" `
+        "$(Get-TaskIdFromCommand -CommandText 'curl -X PATCH https://x/api/tasks/42/complete')"
+    Assert-Eq "29b (D220): a bare number elsewhere is NOT scraped as an id" "" `
+        "$(Get-TaskIdFromCommand -CommandText 'echo 99 && curl -X POST https://x/api/tasks/claim')"
+    Assert-Eq "29b (D220): and a claim URL carries no id at all" "" `
+        "$(Get-TaskIdFromCommand -CommandText 'curl -X POST https://x/api/tasks/claim')"
+
+    # 29c (sh 22c): heredoc delimiter derivation, row for row against bash's
+    # own table. The delimiter decides where a heredoc BODY ends, and a body
+    # that dequeues early leaks its contents into the routing scan.
+    $g29Delims = @('EOF', "'EOF'", 'E\''F', '"''"', "''", "'A B' rest", 'a\ b rest', '$''xy''', '"a\bc"', ' ;')
+    $g29DelimOut = ''
+    foreach ($w in $g29Delims) {
+        $d = Get-StrideHeredocDelim -Word $w
+        $g29DelimOut += ('{0}/{1}|' -f $d.Delim, [int][bool]$d.Any)
+    }
+    Assert-Eq "29c (D220): heredoc delimiter derivation follows bash" `
+        'EOF/1|EOF/1|E''F/1|''/1|/1|A B/1|a b/1|xy/1|a\bc/1|/0|' $g29DelimOut
+
+    # 29d (sh 22d): an ANSI-C delimiter carrying an escape this port does not
+    # interpret is marked UNSAFE, so the heredoc never terminates rather than
+    # terminating early on a delimiter shorter than bash's.
+    $g29UnsafeOut = ''
+    foreach ($w in @('$''a\nb''', '$''\x41''', '$''a\\''b''', '$''xy''', "'EOF'")) {
+        $g29UnsafeOut += [int][bool](Get-StrideHeredocDelim -Word $w).Unsafe
+    }
+    Assert-Eq "29d (D220): uninterpretable ANSI-C escapes mark the delimiter unsafe" `
+        "11000" $g29UnsafeOut
+
+    # 29e (sh 22e): end to end - the body of an unsafe-delimiter heredoc is
+    # never scanned, so a completion curl inside it routes nowhere.
+    $g29Unsafe = "cat <<`$'a\nb'`ncurl -X PATCH https://x/api/tasks/42/complete`n"
+    Assert-Eq "29e (D220): an unsafe-delimiter body is not scanned" "" `
+        "$((Get-StrideRoute -Phase 'post' -CommandText (Remove-StrideHeredocBodies -CommandText $g29Unsafe)).Endpoint)"
+    # CONTROL: the same curl OUTSIDE any heredoc still routes, so 29e cannot
+    # pass merely because the fixture could never have routed.
+    $g29Safe = "curl -X PATCH https://x/api/tasks/42/complete`n"
+    Assert-Eq "29e (D220): CONTROL - the same curl outside a heredoc does route" "complete" `
+        "$((Get-StrideRoute -Phase 'post' -CommandText (Remove-StrideHeredocBodies -CommandText $g29Safe)).Endpoint)"
+}
+
+# ============================================================
+# W2105 COVERAGE LEDGER: what this suite mirrors, and what it does not
+# ============================================================
+# Acceptance criterion 1 asks for a ps1 counterpart to sh Groups 9, 11, 22, 24,
+# 26 and 28, "or a recorded reason a given group cannot be mirrored". Two of the
+# six needed no new group because they were ALREADY mirrored under a different
+# number - the suites diverge in numbering from sh Group 7 onward, so mirroring
+# by number would have produced duplicates and called it coverage.
+#
+#   sh 9  after_goal routing (W504)          -> ps1 Group 8. Already mirrored,
+#         together with sh 10 (W506). Verified by reading, not by title match.
+#   sh 11 End-to-end PUT round-trip (W835)   -> ps1 Group 7 (7a round-trips the
+#         envelope through a real listener and back out of the snapshot file).
+#   sh 22 D220 command routing               -> ps1 Group 29 (NEW). All five
+#         cases, including the heredoc ones an earlier draft of this ledger
+#         wrongly recorded as unmirrorable.
+#   sh 24 D228 failing after_goal not silent -> ps1 Group 8 (8d1-8d4). Already
+#         mirrored: the JSON context field, the stderr shout, the durable
+#         marker, the success path staying quiet, and the empty-section case.
+#   sh 26 hermeticity gate (D235)            -> ps1 Group 27 (NEW).
+#   sh 28 hot-path skill byte budgets        -> ps1 Group 28 (NEW), invoking
+#         the new scripts/check-skill-budgets.ps1 and cross-checking it against
+#         the bash script line for line.
+#
+# STILL BASH-ONLY, with the reason:
+#   sh 29 W2099 ps1 5.1 static gate. Deliberate: the gate analyses hooks/*.ps1
+#         from outside, and a ps1 suite gating itself would certify its own
+#         host. The bash banner's claim that Group 28 is bash-only "as with
+#         Group 29" is now stale for 28 and cannot be corrected from here -
+#         test-stride-hook.sh is read-only for this task - so it is recorded in
+#         CHANGELOG.md instead.
+#   The D236/D255 fallback-world cases (sh 23j, 23n, 23o, 23p, 23q, 23v) and
+#         sh 23z4/23z5 remain unmirrored; those are recorded in Group 24's own
+#         omission list, which is where a reader looking for attribution
+#         coverage will be.
+#
+# THE DIFFERENTIAL, RECORDED SO IT IS A NUMBER RATHER THAN AN IMPRESSION
+# (acceptance criterion 4). Assertion CALL SITES, counted by grep at W2105:
+#   ps1  750   sh  594
+# The ps1 suite is not a subset: it carries the whole D226/D255/D256/D268/D271/
+# D272/D273/D274/D280 port coverage AND the groups above, while the bash suite
+# keeps the host-agnostic repo gates. Executed assertions differ from call
+# sites because both suites loop over tables; the executed totals at W2105 are
+# ps1 957 and sh 787, printed by each suite's own summary line.
 
 # ============================================================
 # Summary

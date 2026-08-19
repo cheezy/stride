@@ -50,6 +50,15 @@
 # file. It reads local files and prints to stdout.
 
 set -u
+# Pathname expansion is disabled for the whole script. Filenames from find and
+# anchor ids from scanned files are iterated in unquoted for-loops so they split
+# on the newline IFS -- but IFS does not govern globbing, so without this a file
+# named a[1].md is expanded against the filesystem before the loop body sees it.
+# Demonstrated: a real fence violation in a[1].md was replaced by a clean
+# sibling a1.md, and the gate reported the property verified and exited 0.
+# Nothing here relies on globbing; the fence walker's case patterns are case
+# patterns, which set -f does not affect.
+set -f
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -119,10 +128,15 @@ done
 # that directory is written.
 # --------------------------------------------------------------------------
 self_test() {
-  local tmp pass fail out rc f3
+  # tmp is deliberately NOT local: the EXIT trap fires after this function has
+  # returned, and a local would be out of scope by then -- which set -u makes a
+  # fatal error rather than a silent one.
+  local pass fail out rc f3
   tmp="$(mktemp -d)" || { echo "GATE ERROR: could not create a temp dir for --self-test" >&2; exit 2; }
-  # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" EXIT
+  # Single-quoted body: $tmp is resolved by the shell when the trap fires,
+  # never interpolated into the trap string. An interpolated value containing a
+  # quote would close the quoting and let the remainder run.
+  trap 'rm -rf "$tmp"' EXIT
   pass=0; fail=0
   f3='```'
 
@@ -187,7 +201,7 @@ self_test() {
   printf 'x\n' > "$tmp/m/alpha/a.md"; printf 'x\n' > "$tmp/m/beta/b.md"
   out="$(st_run "$tmp/k.md" "$tmp/m")"; rc=$?
   st_assert "absent anchor reports MISSING and exits 1" 1 "$rc" "MISSING: rule-one v1" "$out"
-  st_assert "MISSING produces a work list entry" 1 "$rc" "add the rule-one v1 anchor" "$out"
+  st_assert "MISSING produces an actionable work list entry" 1 "$rc" "add <!-- canon:rule-one v1 -->" "$out"
 
   # --- STALE
   st_canon "$tmp/s.md" 1 required 2
@@ -250,7 +264,7 @@ self_test() {
   printf '<!-- canon:rule-one v1 -->\n' > "$tmp/df/alpha/a.md"
   printf 'x\n' > "$tmp/df/beta/b.md"
   out="$(st_run "$tmp/df.md" "$tmp/df")"; rc=$?
-  st_assert "deferred on an existing port is not a finding" 0 "$rc" "deferred 1" "$out"
+  st_assert "deferred on an existing port is not a finding" 0 "$rc" "1 cells deferred" "$out"
   st_refute "deferred port is never reported MISSING" "MISSING" "$out"
 
   # --- deferred on a port that does not exist at all
@@ -365,6 +379,114 @@ self_test() {
   out="$(st_run "$tmp/mk.md" "$tmp/k")"; rc=$?
   st_assert "an entry missing a required key halts" 2 "$rc" "missing required key" "$out"
 
+  # --- the invariant the report layer exists to hold: a non-zero exit ALWAYS
+  # --- produces a non-empty work list. A port-level UNEXPECTED used to fail
+  # --- the gate while printing no work list at all, so the failing report and
+  # --- a clean pass differed by two content lines.
+  mkdir -p "$tmp/inv/alpha" "$tmp/inv/beta"
+  printf '<!-- canon:rule-one v1 -->\n<!-- canon:invented-rule v9 -->\n' > "$tmp/inv/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/inv/beta/b.md"
+  out="$(st_run "$tmp/k.md" "$tmp/inv")"; rc=$?
+  st_assert "an unknown anchor fails the gate AND produces a work list" 1 "$rc" "work list:" "$out"
+  st_assert "the unknown-anchor work item names the port and the anchor" 1 "$rc" "alpha: remove the unknown" "$out"
+  st_refute "a failing run never claims a work list defect" "EMPTY, but findings exist" "$out"
+
+  # --- a per-port verdict line, so "which repos need work" is answerable
+  out="$(st_run "$tmp/k.md" "$tmp/k")"; rc=$?
+  st_assert "a clean port prints a clean verdict" 0 "$rc" "verdict: clean" "$out"
+  st_assert "a clean run lists the clean repos" 0 "$rc" "clean repos:" "$out"
+  out="$(st_run "$tmp/k.md" "$tmp/m")"; rc=$?
+  st_assert "a dirty port prints a NEEDS WORK verdict" 1 "$rc" "verdict: NEEDS WORK" "$out"
+  st_assert "a dirty run lists the repos needing work" 1 "$rc" "repos needing work:" "$out"
+
+  # --- MISSING work items must carry the literal to paste, not a description
+  st_assert "a MISSING work item carries the anchor literal" 1 "$rc" "add <!-- canon:rule-one v1 -->" "$out"
+
+  # --- a catalog finding must reach the kind counters, not only a side count.
+  # --- The tally previously read "stale 0" with a STALE catalog row above it.
+  mkdir -p "$tmp/ct/alpha" "$tmp/ct/beta" "$tmp/ct/stride-codex-marketplace/plugins/stride-codex"
+  st_canon "$tmp/ct.md" 1 required 2
+  printf '<!-- canon:rule-one v2 -->\n' > "$tmp/ct/alpha/a.md"
+  printf '<!-- canon:rule-one v2 -->\n' > "$tmp/ct/beta/b.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/ct/stride-codex-marketplace/plugins/stride-codex/vend.md"
+  out="$(st_run "$tmp/ct.md" "$tmp/ct")"; rc=$?
+  st_assert "a stale catalog is counted in the stale tally, not hidden" 1 "$rc" "stale 1" "$out"
+  st_refute "the tally never reports stale 0 beside a STALE row" "stale 0," "$out"
+
+  # --- a catalog that is not checked out must be reported, never skipped
+  mkdir -p "$tmp/pc2/alpha" "$tmp/pc2/beta" "$tmp/pc2/stride-codex-marketplace/plugins/stride-codex"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/pc2/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/pc2/beta/b.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/pc2/stride-codex-marketplace/plugins/stride-codex/vend.md"
+  out="$(st_run "$tmp/k.md" "$tmp/pc2")"; rc=$?
+  st_assert "an absent catalog is reported as NOT EXAMINED" 0 "$rc" "NOT EXAMINED" "$out"
+  st_assert "the summary counts the unexamined catalogs" 0 "$rc" "were NOT examined" "$out"
+
+  # --- UNVERIFIABLE work belongs to the checker, not to every port
+  st_canon "$tmp/uv.md" 1 required 7 property fence-nesting
+  mkdir -p "$tmp/uv/alpha" "$tmp/uv/beta"
+  printf 'clean\n' > "$tmp/uv/alpha/a.md"; printf 'clean\n' > "$tmp/uv/beta/b.md"
+  out="$(st_run "$tmp/uv.md" "$tmp/uv")"; rc=$?
+  st_assert "UNVERIFIABLE routes the work to the checker" 1 "$rc" "scripts/check-port-canon.sh: implement" "$out"
+  st_refute "UNVERIFIABLE does not tell a port to update a check it does not have" "alpha: update the fence-nesting property check" "$out"
+
+  # --- the first-run framing, so a red first report is not read as a bug
+  out="$(st_run "$tmp/k.md" "$tmp/m")"; rc=$?
+  st_assert "an all-missing run explains that this is the expected first-run state" 1 "$rc" "expected first-run state" "$out"
+
+  # --- a property ok must say what it walked
+  st_canon "$tmp/pv.md" 1 required 1 property fence-nesting
+  mkdir -p "$tmp/pv/alpha" "$tmp/pv/beta"
+  printf '# t\n\n%sbash\necho hi\n%s\n' "$f3" "$f3" > "$tmp/pv/alpha/good.md"
+  printf '# t\n\n%sbash\necho hi\n%s\n' "$f3" "$f3" > "$tmp/pv/beta/good.md"
+  out="$(st_run "$tmp/pv.md" "$tmp/pv")"; rc=$?
+  st_assert "a property ok states how many files were walked" 0 "$rc" "property verified across" "$out"
+
+  # --- record-forgery: a canon string carrying a tab or a newline could shift
+  # --- a later field or forge a whole record. Both produced a false green.
+  sed 's|"family": "f"|"family": "f\\t../decoy"|' "$tmp/k.md" > "$tmp/tab.md"
+  mkdir -p "$tmp/tb/alpha" "$tmp/tb/beta" "$tmp/decoy"
+  printf 'x\n' > "$tmp/tb/alpha/a.md"; printf 'x\n' > "$tmp/tb/beta/b.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/decoy/planted.md"
+  out="$(st_run "$tmp/tab.md" "$tmp/tb")"; rc=$?
+  st_assert "a tab in a canon string halts instead of shifting a field" 2 "$rc" "would forge a record boundary" "$out"
+  st_refute "a shifted field never yields a false ok" "ok: rule-one" "$out"
+
+  sed 's|"check_hint": "h"|"check_hint": "h\\nPORT\\t9\\tPHANTOM\\tf\\tphantom\\ttrue"|' "$tmp/k.md" > "$tmp/nl.md"
+  out="$(st_run "$tmp/nl.md" "$tmp/k")"; rc=$?
+  st_assert "a newline in a canon string cannot forge a record" 2 "$rc" "would forge a record boundary" "$out"
+  st_refute "no phantom port is ever processed" "PHANTOM" "$out"
+
+  # --- a filename that is a glob pattern must not be expanded away. The real
+  # --- violation lived in a[1].md and a clean sibling a1.md replaced it.
+  st_canon "$tmp/pg.md" 1 required 1 property fence-nesting
+  mkdir -p "$tmp/pg/alpha" "$tmp/pg/beta"
+  printf '# t\n\n%smarkdown\n## s\n\n%sjson\n{}\n%s\n\n%s\n' "$f3" "$f3" "$f3" "$f3" > "$tmp/pg/alpha/a[1].md"
+  printf 'clean\n' > "$tmp/pg/alpha/a1.md"
+  printf 'clean\n' > "$tmp/pg/beta/b.md"
+  out="$(st_run "$tmp/pg.md" "$tmp/pg")"; rc=$?
+  st_assert "a violation in a glob-shaped filename is still found" 1 "$rc" "DEFECT: fence-nesting" "$out"
+
+  # --- an anchor id starting with a dash must not reach grep as an option
+  mkdir -p "$tmp/dash/alpha" "$tmp/dash/beta"
+  printf '<!-- canon:rule-one v1 -->\n<!-- canon:-Ifoo v1 -->\n' > "$tmp/dash/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/dash/beta/b.md"
+  out="$(st_run "$tmp/k.md" "$tmp/dash" 2>&1)"; rc=$?
+  st_refute "a leading-dash anchor id never reaches grep as an option" "No such file or directory" "$out"
+
+  # --- an unreadable tree must be UNVERIFIABLE, never "property verified"
+  if [ "$(id -u)" -ne 0 ]; then
+    mkdir -p "$tmp/perm/alpha/locked" "$tmp/perm/beta"
+    printf 'clean\n' > "$tmp/perm/beta/b.md"
+    chmod 000 "$tmp/perm/alpha/locked"
+    out="$(st_run "$tmp/pg.md" "$tmp/perm" | sed -n '/^alpha$/,/^$/p')"
+    chmod 755 "$tmp/perm/alpha/locked"
+    st_refute "an unreadable subtree is never reported as property verified" "ok: fence-nesting" "$out"
+  else
+    echo "ok: unreadable-subtree case skipped (running as root)"
+    pass=$((pass + 1))
+  fi
+
   # --- CLI surface
   out="$(bash "$SELF" --help 2>&1)"; rc=$?
   st_assert "--help exits 0 and documents the flags" 0 "$rc" "ports-parent" "$out"
@@ -377,6 +499,8 @@ self_test() {
 
   echo ""
   echo "self-test: $pass passed, $fail failed"
+  rm -rf "$tmp"
+  trap - EXIT
   [ "$fail" -eq 0 ] || return 1
   return 0
 }
@@ -454,6 +578,21 @@ BEGIN {
 # to do rather than parse optimistically.
 
 function fail(msg) { printf "ERR\t%s\n", msg; exit_code = 2; exit 2 }
+
+# Every value that reaches a record MUST be free of the record separators.
+# The tokenizer turns the JSON escapes \t and \n into real tabs and newlines,
+# so without this a canon string carrying a tab shifts every later field in its
+# record -- and one carrying a newline forges an entire synthetic record. Both
+# were demonstrated to produce a canon-controlled FALSE GREEN: a tab in
+# "family" shifted the PORT record so the shell read a dir the dir-validator
+# never saw, and the gate reported ok and exited 0 over ports holding no
+# anchor at all. Halting here is the same disposition the dir check takes --
+# refuse, never sanitize.
+function safe(v, what) {
+  if (v ~ /[\t\n]/)
+    fail("the value of \"" what "\" contains a tab or newline, which would forge a record boundary; canon string values must contain neither")
+  return v
+}
 
 # --- tokenizer -------------------------------------------------------------
 function tok_init(s) { buf = s; pos = 1; tlen = length(s) }
@@ -567,7 +706,9 @@ function classify(   i, j, n, pid, eid, alen) {
       if (V["ports." i ".dir"] !~ /^[A-Za-z0-9._-]+$/)
         fail("registry port \"" pid "\" has dir \"" V["ports." i ".dir"] "\" which is not a single path segment matching ^[A-Za-z0-9._-]+$")
       PORTID[i] = pid
-      printf "PORT\t%d\t%s\t%s\t%s\t%s\n", i, pid, V["ports." i ".family"], V["ports." i ".dir"], V["ports." i ".exists"]
+      printf "PORT\t%d\t%s\t%s\t%s\t%s\n", i, safe(pid, "port id"), \
+        safe(V["ports." i ".family"], "port family"), safe(V["ports." i ".dir"], "port dir"), \
+        safe(V["ports." i ".exists"], "port exists")
     }
     nports = n
     return
@@ -588,8 +729,9 @@ function classify(   i, j, n, pid, eid, alen) {
     if (V["version"] !~ /^[0-9]+$/) fail("entry \"" eid "\" has non-integer version \"" V["version"] "\"")
     if ((V["defects.__len"] + 0) == 0) fail("entry \"" eid "\" has an empty defects array")
     nentries++
-    printf "ENTRY\t%d\t%s\t%s\t%s\t%s\t%s\n", nentries, eid, V["version"], V["status"], V["provenance"], V["check"]
-    printf "HINT\t%s\t%s\n", eid, V["check_hint"]
+    printf "ENTRY\t%d\t%s\t%s\t%s\t%s\t%s\n", nentries, safe(eid, "entry id"), \
+      safe(V["version"], "entry version"), V["status"], V["provenance"], V["check"]
+    printf "HINT\t%s\t%s\n", safe(eid, "entry id"), safe(V["check_hint"], "check_hint")
     alen = V["applies_to.__len"] + 0
     if (alen != nports)
       fail("entry \"" eid "\" lists " alen " applies_to rows but the registry has " nports " ports; every entry must list all ports in registry order")
@@ -601,7 +743,8 @@ function classify(   i, j, n, pid, eid, alen) {
         fail("entry \"" eid "\" row \"" PORTID[i] "\" has status \"" j "\" outside the closed vocabulary required|not_applicable|deferred")
       if (!(V["applies_to." i ".variant"] in VARIANT))
         fail("entry \"" eid "\" row \"" PORTID[i] "\" has variant \"" V["applies_to." i ".variant"] "\" outside the canon's declared vocabulary")
-      printf "APPLY\t%s\t%d\t%s\t%s\t%s\n", eid, i, PORTID[i], j, V["applies_to." i ".variant"]
+      printf "APPLY\t%s\t%d\t%s\t%s\t%s\n", safe(eid, "entry id"), i, safe(PORTID[i], "port id"), \
+        j, safe(V["applies_to." i ".variant"], "variant")
     }
     return
   }
@@ -696,11 +839,18 @@ property_impl_version() {
 # 36 MB of node_modules holding 9 .md files that belong to its dependencies,
 # not to the port.
 port_md_files() {
+  # stderr is deliberately NOT discarded and the exit status is deliberately
+  # NOT swallowed. An enumeration that comes back empty because find failed --
+  # an unreadable subtree, a directory replaced mid-run, a non-conforming find
+  # on another platform -- must not be mistaken for a clean tree. The property
+  # check below turns that difference into UNVERIFIABLE rather than "verified",
+  # which is the same refusal the header documents for exit 2: a run that
+  # proved nothing must never read as a pass.
   find "$1" -type f -name '*.md' \
     -not -path '*/.git/*' \
     -not -path '*/node_modules/*' \
     -not -path '*/deps/*' \
-    -not -path '*/_build/*' 2>/dev/null
+    -not -path '*/_build/*'
 }
 
 # Every anchor comment in a directory, as "id<TAB>version<TAB>relpath:line".
@@ -716,7 +866,7 @@ scan_anchors() {
   local dir="$1" f rel
   port_md_files "$dir" | while IFS= read -r f; do
     [ "$f" = "$EXCLUDE_CANON" ] && continue
-    grep -EIno '<!--[[:space:]]*canon:[A-Za-z0-9_-]+[[:space:]]+v[0-9]+[[:space:]]*-->' "$f" 2>/dev/null \
+    grep -EIno '<!--[[:space:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:space:]]+v[0-9]+[[:space:]]*-->' "$f" 2>/dev/null \
       | while IFS= read -r hit; do
           rel="${f#$dir/}"
           echo "$hit" | sed -E "s|^([0-9]+):<!--[[:space:]]*canon:([A-Za-z0-9_-]+)[[:space:]]+v([0-9]+)[[:space:]]*-->|\2\t\3\t$rel:\1|"
@@ -736,20 +886,74 @@ STATUS=0
 GATE_FAULT=0
 N_OK=0; N_MISSING=0; N_STALE=0; N_UNEXPECTED=0; N_DEFECT=0; N_UNVERIFIABLE=0
 N_DEFERRED=0; N_NA=0
+# Catalog findings are counted a second time, as a breakdown -- never instead
+# of the per-kind counters. Splitting the kind counts by subject was what let
+# the tally print "stale 0" while a STALE catalog row sat in the body above it.
 CAT_FINDINGS=0
 WORKLIST=""
+PORT_DIRTY=0
+# Counted separately from N_OK because the first-run framing below is about
+# whether any port has ADOPTED an anchor. A property check passing says nothing
+# about adoption, and on the real fleet four of them do -- which suppressed the
+# note on exactly the run that most needed it.
+N_ANCHOR_OK=0
 
 EXCLUDE_CANON="$CANON"
 
+# --------------------------------------------------------------------------
+# Every finding goes through here. The body line, the counter and the work-list
+# entry are produced together from one call, so the three cannot disagree --
+# which they did: a port-level UNEXPECTED printed a body row, bumped a counter,
+# and emitted no work-list entry at all, so a run could fail the gate while its
+# work list was empty. Deriving all three from one site is the fix; patching
+# the three symptoms separately would leave the next finding kind free to
+# repeat it.
+#
+#   record KIND INDENT MESSAGE [WORK-ITEM] [SUBJECT]
+#
+# KIND drives the counter and the tag. A non-empty WORK-ITEM is appended to the
+# work list. SUBJECT is "catalog" to add to the catalog breakdown as well.
+# --------------------------------------------------------------------------
+record() {
+  local kind="$1" indent="$2" msg="$3" work="${4:-}" subject="${5:-}"
+  case "$kind" in
+    ok)           N_OK=$((N_OK + 1));                   echo "${indent}ok: $msg" ;;
+    MISSING)      N_MISSING=$((N_MISSING + 1));         echo "${indent}MISSING: $msg" ;;
+    STALE)        N_STALE=$((N_STALE + 1));             echo "${indent}STALE: $msg" ;;
+    UNEXPECTED)   N_UNEXPECTED=$((N_UNEXPECTED + 1));   echo "${indent}UNEXPECTED: $msg" ;;
+    DEFECT)       N_DEFECT=$((N_DEFECT + 1));           echo "${indent}DEFECT: $msg" ;;
+    UNVERIFIABLE) N_UNVERIFIABLE=$((N_UNVERIFIABLE + 1)); echo "${indent}UNVERIFIABLE: $msg" ;;
+    deferred)     N_DEFERRED=$((N_DEFERRED + 1));       [ -n "$msg" ] && echo "${indent}deferred: $msg" ;;
+    na)           N_NA=$((N_NA + 1));                   [ -n "$msg" ] && echo "${indent}not applicable: $msg" ;;
+  esac
+  case "$kind" in
+    ok|deferred|na) : ;;
+    *)
+      STATUS=1
+      PORT_DIRTY=1
+      [ "$subject" = "catalog" ] && CAT_FINDINGS=$((CAT_FINDINGS + 1))
+      if [ -n "$work" ]; then
+        WORKLIST="$WORKLIST
+  $work"
+      fi ;;
+  esac
+}
+
+# The literal a port must embed. Printed in the work list so the entry can be
+# acted on without opening the canon: the punctuation is exact -- no space
+# after the colon -- and a mistyped anchor reports MISSING again, which reads
+# as "not done" rather than "done wrong".
+anchor_literal() { printf '<!-- canon:%s v%s -->' "$1" "$2"; }
+
 SCHEMA_V="$(field "$(recs SCHEMA)" 2)"
-echo "port canon drift check -- schema $SCHEMA_V, canon $CANON"
-echo "ports parent: $PORTS_PARENT"
+echo "port canon drift check -- schema $SCHEMA_V"
+echo "  canon:        $CANON"
+echo "  ports parent: $PORTS_PARENT"
 echo ""
 echo "rules:"
 recs ENTRY | while IFS= read -r e; do
   eid="$(field "$e" 3)"; ever="$(field "$e" 4)"; echk="$(field "$e" 7)"
   echo "  $eid v$ever ($echk)"
-  echo "$RECORDS" | grep "^HINT	$eid	" | cut -f3 | sed 's/^/      hint: /'
 done
 echo ""
 # --------------------------------------------------------------------------
@@ -762,6 +966,8 @@ echo ""
 # --------------------------------------------------------------------------
 PORT_LINES="$(recs PORT)"
 ENTRY_LINES="$(recs ENTRY)"
+CLEAN_PORTS=""
+DIRTY_PORTS=""
 
 OLDIFS="$IFS"
 IFS='
@@ -771,19 +977,34 @@ for pline in $PORT_LINES; do
   pid="$(field "$pline" 3)"
   pdir="$(field "$pline" 5)"
   pexists="$(field "$pline" 6)"
+  # Re-validate shell-side. The awk parser already rejects a bad dir, and now
+  # also rejects the tab/newline that could shift another field into this one
+  # -- but this value becomes a filesystem path, so it is checked again here
+  # rather than trusted across the record boundary.
+  case "$pdir" in
+    *[!A-Za-z0-9._-]*|"")
+      echo "GATE ERROR: port \"$pid\" resolved to dir \"$pdir\", which is not a single path segment" >&2
+      GATE_FAULT=1
+      echo ""
+      continue ;;
+  esac
   ptree="$PORTS_PARENT/$pdir"
+  PORT_DIRTY=0
 
   echo "$pid"
 
   if [ ! -d "$ptree" ]; then
     if [ "$pexists" = "false" ]; then
-      # Registered, deliberately not scaffolded. Reported distinctly and kept
-      # out of every drift tally -- it owes nothing until it exists.
-      echo "  deferred: not scaffolded on disk ($pdir); every rule deferred"
-      for eline in $ENTRY_LINES; do N_DEFERRED=$((N_DEFERRED + 1)); done
+      # Registered, deliberately not scaffolded. Reported once and counted once
+      # per rule it is excused from, so the tally reconciles with the row.
+      echo "  deferred: not scaffolded on disk ($pdir); all rules deferred until it is"
+      for eline in $ENTRY_LINES; do record deferred "  " ""; done
+      echo "  verdict: deferred -- nothing owed yet"
     else
       echo "  GATE ERROR: registry says $pid exists but $ptree is not a directory" >&2
+      echo "  GATE ERROR: registry says $pid exists but $ptree is not a directory"
       GATE_FAULT=1
+      echo "  verdict: NOT EXAMINED"
     fi
     echo ""
     continue
@@ -799,32 +1020,40 @@ for pline in $PORT_LINES; do
     astatus="$(field "$arow" 5)"
 
     if [ "$astatus" = "deferred" ]; then
-      N_DEFERRED=$((N_DEFERRED + 1)); continue
+      record deferred "  " ""; continue
     fi
 
     if [ "$echk" = "property" ]; then
-      if [ "$astatus" = "not_applicable" ]; then N_NA=$((N_NA + 1)); continue; fi
+      if [ "$astatus" = "not_applicable" ]; then record na "  " ""; continue; fi
       impl="$(property_impl_version "$eid")"
       if [ -z "$impl" ] || [ "$impl" != "$ever" ]; then
-        echo "  UNVERIFIABLE: $eid v$ever -- this checker implements v${impl:-none}; refusing to pass on logic that no longer matches the rule"
-        N_UNVERIFIABLE=$((N_UNVERIFIABLE + 1)); STATUS=1
-        WORKLIST="$WORKLIST
-  $pid: update the $eid property check to v$ever"
+        # The work belongs to THIS SCRIPT, not to the port. Routing it per-port
+        # turned one script edit into one work item per port, pointing readers
+        # at repos that contain no property check to update.
+        record UNVERIFIABLE "  " \
+          "$eid v$ever -- this checker implements v${impl:-none}; refusing to pass on logic that no longer matches the rule" \
+          "scripts/check-port-canon.sh: implement the $eid property check at v$ever (this is a checker change, not a port change)"
         continue
       fi
-      hits=""
-      for f in $(port_md_files "$ptree"); do
+      if ! pfiles="$(port_md_files "$ptree")"; then
+        record UNVERIFIABLE "  " \
+          "$eid -- could not enumerate the markdown under $ptree; refusing to report a check that did not run" \
+          "$pid: make $ptree readable so the $eid property check can run"
+        continue
+      fi
+      nfiles=0; hits=""
+      for f in $pfiles; do
+        nfiles=$((nfiles + 1))
         d="$(fence_defect "$f")"
         [ -n "$d" ] && hits="$hits ${f#$ptree/}($d)"
       done
       if [ -n "$hits" ]; then
-        echo "  DEFECT: $eid --$hits"
-        N_DEFECT=$((N_DEFECT + 1)); STATUS=1
-        WORKLIST="$WORKLIST
-  $pid: fix the $eid violations listed above"
+        record DEFECT "  " "$eid --$hits" \
+          "$pid: fix the $eid violations listed in the body above"
       else
-        echo "  ok: $eid (property verified)"
-        N_OK=$((N_OK + 1))
+        # State what was walked. An unqualified "verified" over an empty
+        # enumeration is indistinguishable from one over a real tree.
+        record ok "  " "$eid (property verified across $nfiles markdown files)"
       fi
       continue
     fi
@@ -833,29 +1062,25 @@ for pline in $PORT_LINES; do
     hit="$(echo "$FOUND" | grep "^$eid	" | head -1)"
     if [ "$astatus" = "not_applicable" ]; then
       if [ -n "$hit" ]; then
-        echo "  UNEXPECTED: $eid at $(field "$hit" 3) -- this port does not owe this rule"
-        N_UNEXPECTED=$((N_UNEXPECTED + 1)); STATUS=1
+        record UNEXPECTED "  " "$eid at $(field "$hit" 3) -- this port does not owe this rule" \
+          "$pid: remove the $eid anchor at $(field "$hit" 3); this port does not owe that rule"
       else
-        N_NA=$((N_NA + 1))
+        record na "  " ""
       fi
       continue
     fi
 
     if [ -z "$hit" ]; then
-      echo "  MISSING: $eid v$ever"
-      N_MISSING=$((N_MISSING + 1)); STATUS=1
-      WORKLIST="$WORKLIST
-  $pid: add the $eid v$ever anchor"
+      record MISSING "  " "$eid v$ever" \
+        "$pid: add $(anchor_literal "$eid" "$ever") beside this port's own statement of the $eid rule"
     else
       hver="$(field "$hit" 2)"
       if [ "$hver" = "$ever" ]; then
-        echo "  ok: $eid v$ever at $(field "$hit" 3)"
-        N_OK=$((N_OK + 1))
+        record ok "  " "$eid v$ever at $(field "$hit" 3)"
+        N_ANCHOR_OK=$((N_ANCHOR_OK + 1))
       else
-        echo "  STALE: $eid at $(field "$hit" 3) carries v$hver, canon is at v$ever"
-        N_STALE=$((N_STALE + 1)); STATUS=1
-        WORKLIST="$WORKLIST
-  $pid: bump the $eid anchor from v$hver to v$ever"
+        record STALE "  " "$eid at $(field "$hit" 3) carries v$hver, canon is at v$ever" \
+          "$pid: update $(field "$hit" 3) to $(anchor_literal "$eid" "$ever")"
       fi
     fi
   done
@@ -863,11 +1088,21 @@ for pline in $PORT_LINES; do
   # Anchors for ids the canon does not define at all.
   for hit in $FOUND; do
     hid="$(field "$hit" 1)"
-    if ! echo "$ENTRY_LINES" | cut -f3 | grep -qx "$hid"; then
-      echo "  UNEXPECTED: canon defines no rule \"$hid\" (found at $(field "$hit" 3))"
-      N_UNEXPECTED=$((N_UNEXPECTED + 1)); STATUS=1
+    if ! echo "$ENTRY_LINES" | cut -f3 | grep -qxF -- "$hid"; then
+      record UNEXPECTED "  " "canon defines no rule \"$hid\" (found at $(field "$hit" 3))" \
+        "$pid: remove the unknown \"$hid\" anchor at $(field "$hit" 3), or add that rule to the canon"
     fi
   done
+
+  # A per-port verdict, so "which repos need work" is answerable without
+  # aggregating rows by eye. The tally's ok count counts CELLS, not repos.
+  if [ "$PORT_DIRTY" -eq 1 ]; then
+    echo "  verdict: NEEDS WORK"
+    DIRTY_PORTS="$DIRTY_PORTS $pid"
+  else
+    echo "  verdict: clean"
+    CLEAN_PORTS="$CLEAN_PORTS $pid"
+  fi
   echo ""
 done
 IFS="$OLDIFS"
@@ -877,28 +1112,35 @@ IFS="$OLDIFS"
 #
 # Two marketplace repos vendor real copies of a port's agent and skill files.
 # Those copies drift independently of the source port, so an anchor placed in
-# the port does not reach them. The canon's applies_to does not model catalog
-# copies at all -- it registers ports -- so these are checked against the same
-# rules but tallied and labelled separately rather than folded into the
-# registry rows. The other marketplaces reference their plugins by URL and
-# vendor nothing, so there is nothing in them to drift.
+# the port does not reach them. The canon's applies_to registers PORTS and does
+# not model catalog copies, so this list is owned by this script rather than by
+# the canon -- which the report now states, because a reader could otherwise
+# not tell whether the other marketplaces were considered and excluded or
+# simply forgotten. They reference their plugins by URL and vendor nothing.
 #
-# A catalog that is not checked out locally is skipped, not reported: its
-# absence is a fact about this machine, not drift in the fleet.
+# A catalog that is not checked out is reported as NOT EXAMINED, never skipped
+# in silence: absence of a row would read as absence of a problem, and a
+# partial checkout is the most common state of a fleet this size.
 # --------------------------------------------------------------------------
 CATALOGS="stride-codex-marketplace/plugins/stride-codex
 stride-copilot-marketplace/plugins/stride-copilot
 stride-copilot-marketplace/plugins/stride-copilot-lite"
 
 echo "vendored catalog copies"
-CAT_ANY=0
+echo "  (this list is owned by this script, not by the canon: the canon registers"
+echo "   ports. stride-marketplace and stride-gemini-marketplace reference their"
+echo "   plugins by URL and vendor no files, so they have nothing to drift.)"
+CAT_ABSENT=0
 OLDIFS="$IFS"
 IFS='
 '
 for cat in $CATALOGS; do
   ctree="$PORTS_PARENT/$cat"
-  [ -d "$ctree" ] || continue
-  CAT_ANY=1
+  if [ ! -d "$ctree" ]; then
+    echo "  NOT EXAMINED: $cat is not checked out here -- this run says nothing about it"
+    CAT_ABSENT=$((CAT_ABSENT + 1))
+    continue
+  fi
   CFOUND="$(scan_anchors "$ctree")"
   for eline in $ENTRY_LINES; do
     eid="$(field "$eline" 3)"
@@ -907,47 +1149,64 @@ for cat in $CATALOGS; do
     [ "$echk" = "property" ] && continue
     hit="$(echo "$CFOUND" | grep "^$eid	" | head -1)"
     if [ -z "$hit" ]; then
-      echo "  MISSING: catalog $cat -- $eid v$ever"
-      CAT_FINDINGS=$((CAT_FINDINGS + 1)); STATUS=1
-      WORKLIST="$WORKLIST
-  catalog $cat: add the $eid v$ever anchor (or re-vendor from the port)"
+      record MISSING "  " "catalog $cat -- $eid v$ever" \
+        "catalog $cat: re-vendor from the port, or add $(anchor_literal "$eid" "$ever")" catalog
     else
       hver="$(field "$hit" 2)"
       if [ "$hver" = "$ever" ]; then
-        echo "  ok: catalog $cat -- $eid v$ever at $(field "$hit" 3)"
+        record ok "  " "catalog $cat -- $eid v$ever at $(field "$hit" 3)"
       else
-        echo "  STALE: catalog $cat -- $eid at $(field "$hit" 3) carries v$hver, canon is at v$ever"
-        CAT_FINDINGS=$((CAT_FINDINGS + 1)); STATUS=1
-        WORKLIST="$WORKLIST
-  catalog $cat: re-vendor; $eid anchor is v$hver, canon is v$ever"
+        record STALE "  " "catalog $cat -- $eid at $(field "$hit" 3) carries v$hver, canon is at v$ever" \
+          "catalog $cat: re-vendor; its $eid anchor is v$hver and the canon is at v$ever" catalog
       fi
     fi
   done
-  # Anchors for ids the canon does not define at all. applies_to does not model
-  # catalog copies, so every canon-defined id is expected in one -- only an id
-  # the canon defines nowhere can be UNEXPECTED here. Without this sweep a
-  # catalog carrying an invented anchor was silently ignored and the run could
-  # exit 0 with a finding present.
   for hit in $CFOUND; do
     hid="$(field "$hit" 1)"
-    if ! echo "$ENTRY_LINES" | cut -f3 | grep -qx "$hid"; then
-      echo "  UNEXPECTED: catalog $cat -- canon defines no rule \"$hid\" (found at $(field "$hit" 3))"
-      CAT_FINDINGS=$((CAT_FINDINGS + 1)); STATUS=1
-      WORKLIST="$WORKLIST
-  catalog $cat: remove or re-vendor the unknown \"$hid\" anchor"
+    if ! echo "$ENTRY_LINES" | cut -f3 | grep -qxF -- "$hid"; then
+      record UNEXPECTED "  " "catalog $cat -- canon defines no rule \"$hid\" (found at $(field "$hit" 3))" \
+        "catalog $cat: remove or re-vendor the unknown \"$hid\" anchor" catalog
     fi
   done
 done
 IFS="$OLDIFS"
-[ "$CAT_ANY" -eq 0 ] && echo "  (no vendored catalogs checked out here)"
 echo ""
 
-echo "tally: ok $N_OK, missing $N_MISSING, stale $N_STALE, unexpected $N_UNEXPECTED, defect $N_DEFECT, unverifiable $N_UNVERIFIABLE"
-echo "tally: catalog findings $CAT_FINDINGS; not applicable $N_NA; deferred $N_DEFERRED"
+# --------------------------------------------------------------------------
+# Summary. Every number below is produced by record(), from the same call that
+# printed the body row, so the tally cannot disagree with the body.
+# --------------------------------------------------------------------------
+echo "tally (all subjects, ports and catalogs together):"
+echo "  ok $N_OK, missing $N_MISSING, stale $N_STALE, unexpected $N_UNEXPECTED, defect $N_DEFECT, unverifiable $N_UNVERIFIABLE"
+echo "  of those, $CAT_FINDINGS are in vendored catalogs; $N_NA cells not applicable; $N_DEFERRED cells deferred"
+echo "  note: these count RULE CELLS, not repositories -- see the verdict lines above for repositories"
+[ "$CAT_ABSENT" -gt 0 ] && echo "  note: $CAT_ABSENT vendored catalog(s) were not checked out and were NOT examined"
+echo ""
+[ -n "$CLEAN_PORTS" ] && echo "clean repos:$CLEAN_PORTS"
+[ -n "$DIRTY_PORTS" ] && echo "repos needing work:$DIRTY_PORTS"
 
 if [ -n "$WORKLIST" ]; then
   echo ""
   echo "work list:$WORKLIST"
+elif [ "$STATUS" -ne 0 ]; then
+  # Should be unreachable: every record() call that sets STATUS=1 is expected to
+  # carry a work item. Saying so beats printing a failing run with no work list.
+  echo ""
+  echo "work list: EMPTY, but findings exist -- this is a defect in this script;"
+  echo "  every finding is meant to produce an actionable entry."
+fi
+
+# The first run against a fleet that predates the anchor contract is red in
+# every anchor cell BY DESIGN, and the canon says so in prose the reader of
+# this report would otherwise never see. Without it, 44 findings on first
+# contact reads as a broken checker -- and the likely response is to route
+# around the gate, which is worse than the drift it exists to catch.
+if [ "$N_MISSING" -gt 0 ] && [ "$N_ANCHOR_OK" -eq 0 ]; then
+  echo ""
+  echo "note: every anchor cell is MISSING and none is present. If the anchor contract"
+  echo "  is new to this fleet, that is the expected first-run state, not a broken"
+  echo "  checker: no port has adopted an anchor yet. Read the work list as a work"
+  echo "  list, not as a verdict on the fleet or on this tool."
 fi
 
 if [ "$GATE_FAULT" -eq 1 ]; then

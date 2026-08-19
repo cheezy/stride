@@ -57,6 +57,17 @@ not to this repository. The canon lives in `stride/`, which cannot see its
 sibling ports from the inside; a consumer resolving `dir` against the stride repo
 root will find nothing and wrongly report every port missing.
 
+**`dir` is one path segment, and a consumer must enforce that.** It matches
+`^[A-Za-z0-9._-]+$` — no path separator, no `..` segment, no leading `/`. A
+consumer MUST reject an entry whose `dir` violates that shape, and MUST resolve
+it as exactly one level above this repository's root and never deeper. The
+constraint is stated because the instruction above sends a consumer *outside*
+its own repository to find each port: an implementer who resolves `dir` by naive
+string concatenation, against a registry someone later edits, would read paths
+the canon never intended to name. Stating the field's lexical shape closes that
+without costing the no-special-cases promise — it is one check on every entry,
+not a rule per entry.
+
 **On "five ports".** The goal text that commissioned this file says the canon
 covers "the five ports that exist today". That five is the five **non-Claude
 runtime** ports — codex, copilot, gemini, opencode, pi. It does not count the

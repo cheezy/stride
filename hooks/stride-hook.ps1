@@ -3677,8 +3677,26 @@ function Write-DiffUploadState {
         $lines = "task_id=$TaskId`nhttp_code=$HttpCode"
         if ($Base -and $Base -notmatch "[\r\n\0]") { $lines = $lines + "`nbase=$Base" }
         if ($Narrowed -and $Narrowed -notmatch "[\r\n\0]") { $lines = $lines + "`nnarrowed=$Narrowed" }
-        Set-Content -Path (Join-Path $ProjectDir '.stride-diff-upload-state') `
-            -Value $lines -Encoding UTF8
+        # NOT Set-Content -Encoding UTF8, on the same grounds as
+        # Write-ChangedFilesSnapshot above: on Windows PowerShell 5.1 - THE
+        # SHIPPING HOST - that writes a UTF-8 BOM and terminates lines with CRLF.
+        # BOTH break the bash twin, which reads this file with `grep '^task_id='`
+        # and friends: a BOM makes the identity line unmatchable, so bash
+        # discards the whole file including the base= and narrowed= this task
+        # persists, and a CR-suffixed value turns bash's `case yes)` into a
+        # miss. This function's own comments claim the record survives for a
+        # LATER BASH RETRY on a shared checkout; with Set-Content that claim was
+        # false on the only host where it matters.
+        #
+        # UNTESTABLE FROM HERE, and said rather than quietly relied upon: pwsh 7
+        # writes no BOM and LF line endings, so on the development host the two
+        # spellings are byte-identical and no assertion can discriminate. Test
+        # 25k2 asserts the bytes anyway - inert here, live on 5.1 - which is the
+        # same trade as the case-insensitive strip in the suite harness.
+        [System.IO.File]::WriteAllText(
+            (Join-Path $ProjectDir '.stride-diff-upload-state'),
+            $lines + "`n",
+            (New-Object System.Text.UTF8Encoding($false)))
     } catch {
         # Best-effort: a failed state write must never block the hook.
     }

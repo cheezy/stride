@@ -2707,6 +2707,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Set-Content -Path (Join-Path $shProjN 'pre-branchpoint.txt') -Value 'pushed work' -Encoding UTF8
     & git -C $shProjN add -A 2>$null | Out-Null
     & git -C $shProjN commit -q -m 'B pushed' 2>$null | Out-Null
+    $shPushedN = (& git -C $shProjN rev-parse HEAD 2>$null | Out-String).Trim()
     # The remote is built by pushing rather than by cloning: `git clone -b` and
     # `git init -b` both need a git new enough to name the initial branch, and
     # the branch name is the one thing this fixture cannot afford to have vary.
@@ -2728,8 +2729,13 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     $shBpN = (& git -C $shProjN merge-base HEAD 'origin/main' 2>$null | Out-String).Trim()
     Assert-Eq "9n: CONTROL - origin/main resolves, so the trust guard is LIVE here" "True" `
         "$([bool]$shRemoteN)"
-    Assert-Eq "9n: CONTROL - and the branch point is B, not the persisted base A" "False" `
-        "$($shBpN -eq $shBaseN)"
+    # ASSERTED POSITIVELY, against B's own sha. The first version asserted the
+    # NEGATIVE - branch point is not A - which passes when merge-base cannot run
+    # at all and returns '', i.e. over the very drift it names: with the
+    # fixture's push/fetch deleted, CONTROL 1 failed and this one passed. A
+    # control that survives the absence of the thing it controls for is the
+    # shape this task has now found seven times.
+    Assert-Eq "9n: CONTROL - and the branch point is B, the pushed commit" $shPushedN "$shBpN"
     Set-Content -Path (Join-Path $shProjN '.stride.md') -Value @'
 ## before_review
 ```bash
@@ -7697,6 +7703,24 @@ if ($g25Git) {
     # Content, not line count, for the same reason as the base-side NUL case.
     Assert-Eq "25k: and its injected base= text reaches disk nowhere" "0" `
         "$(@($g25kNul2 | Where-Object { $_ -match 'base=evil' }).Count)"
+    # 25k2 (W2103): the state file's BYTES, for the executor that shares it.
+    # bash reads this file with `grep '^task_id='`, so a UTF-8 BOM makes the
+    # identity line unmatchable and bash discards the whole file - including the
+    # base= and narrowed= this task exists to persist - while a CR-suffixed
+    # value turns bash's `case yes)` into a miss. Windows PowerShell 5.1, the
+    # shipping host, writes both with Set-Content -Encoding UTF8.
+    #
+    # INERT ON THIS HOST AND KEPT ANYWAY: pwsh 7 writes no BOM and LF endings,
+    # so both spellings are byte-identical here and no mutation of the writer
+    # can turn this red on macOS. It is live on 5.1, which is where the claim
+    # matters, and stating that is better than leaving the cross-executor
+    # rationale in the writer resting on nothing at all.
+    Write-DiffUploadState -TaskId '42' -HttpCode '200' -Base 'abc123' -Narrowed 'yes'
+    $g25kBytes = [System.IO.File]::ReadAllBytes((Join-Path $g25k.Dir '.stride-diff-upload-state'))
+    $g25kHasBom = ($g25kBytes.Length -ge 3 -and $g25kBytes[0] -eq 0xEF -and $g25kBytes[1] -eq 0xBB -and $g25kBytes[2] -eq 0xBF)
+    Assert-Eq "25k2: the state file carries NO UTF-8 BOM (bash greps ^task_id=)" "False" "$g25kHasBom"
+    Assert-Eq "25k2: and no CR bytes (bash matches the verdict with case yes)" "0" `
+        "$(@($g25kBytes | Where-Object { $_ -eq 0x0D }).Count)"
 } else {
     Write-Host "  SKIP: 25k: needs git" -ForegroundColor Yellow
 }

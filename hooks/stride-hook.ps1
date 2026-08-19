@@ -4132,12 +4132,18 @@ function Invoke-FinalizeBeforeDoing {
 # healthy upload is on record for the current task. Best-effort: never
 # throws, never changes the hook's exit semantics.
 #
-# (W2100) It now BUILDS a snapshot when none is on disk — the case where the
+# (W2100) It BUILDS a snapshot when none is on disk — the case where the
 # after_doing gate was killed before the capture ran. It deliberately does NOT
-# re-capture over an existing snapshot, unlike the bash twin: Write-DiffUploadState
-# records no base= or narrowed= line for this side to replay, and re-deriving a
-# base at retry time without that persistence is the exact divergence D273 added
-# persistence to prevent. Build-if-absent is the honest subset.
+# re-capture over an existing snapshot, unlike the bash twin.
+#
+# (W2103) THE REASON FOR THAT CHANGED, and the old one is corrected here rather
+# than left standing: this header used to say Write-DiffUploadState recorded no
+# base= or narrowed= line to replay from. It does now, and the body below reads
+# narrowed= and replays it. What remains unported is only the RE-capture over an
+# EXISTING snapshot — a snapshot already on disk is the primary capture's answer
+# for a window that has since moved on, and rebuilding it here would re-derive
+# against retry-time state rather than replay a capture-time fact.
+# Build-if-absent stays the honest subset.
 function Invoke-SelfHealChangedFilesUpload {
     if ($HookName -ne 'before_review') { return }
     $snapshotPath = Join-Path $ProjectDir '.stride-changed-files.json'
@@ -4160,13 +4166,23 @@ function Invoke-SelfHealChangedFilesUpload {
                 if ($line -match '^task_id=(.*)$' -and -not $stateTask) { $stateTask = $Matches[1] }
                 if ($line -match '^http_code=(.*)$' -and -not $stateCode) { $stateCode = $Matches[1] }
                 # (W2103/D273) The persisted verdict, the resolver's SECOND
-                # source behind the per-task record.
+                # source behind the per-task record. GATED ON task_id BELOW -
+                # the file holds ONE task and is truncated on every write, so an
+                # interleaved completion leaves ANOTHER task's verdict here.
+                # Replaying that would narrow a window whose verdict was never
+                # computed, or widen one that was. bash gates the same read on
+                # the same terms.
                 if ($line -match '^narrowed=(.*)$' -and -not $stateNarrowed) { $stateNarrowed = $Matches[1] }
             }
         } catch {
             # Unreadable state degrades to "retry".
         }
     }
+    # Only a record for THIS task may speak for this capture. Dropping a
+    # foreign verdict leaves $stateNarrowed empty, which Resolve-CaptureNarrowing
+    # reports as "no verdict on record" and the replay turns into a live check -
+    # the documented fall-through, and the safe answer.
+    if ($stateTask -ne $taskId) { $stateNarrowed = '' }
     if ($stateTask -eq $taskId -and $stateCode -match '^2') { return }
 
     $apiBase = Resolve-StrideApiUrl
@@ -4233,12 +4249,26 @@ function Invoke-SelfHealChangedFilesUpload {
             $healOwnedSet = ''
             $healOwnedRec = Get-TaskOwnedRecord -TaskId $taskId
             if ($healOwnedRec.Found) { $healOwnedSet = $healOwnedRec.Value }
+            # The verdict PERSISTED below is the one actually APPLIED, not the
+            # one replayed. Default 'no'; 'yes' only once the owned range really
+            # resolved AND the replay said narrow. A replayed 'yes' whose range
+            # comes back empty uploads WIDE, so recording 'yes' there would make
+            # the record false about the snapshot the server now holds - and the
+            # next reader would replay that falsehood. bash draws the same
+            # distinction at the same point.
+            $healApplied = 'no'
             if ($healOwnedSet -and $healOwnedSet -ne $script:StrideOwnedOverflow) {
                 $healOwnedRange = Convert-OwnedSetToRange -Set $healOwnedSet
                 if ($healOwnedRange -and (Invoke-ReplayNarrowingDecision -Narrowed $healNarrowed -TaskId $taskId)) {
                     $healRanges = $healOwnedRange
+                    $healApplied = 'yes'
                 }
             }
+            $healNarrowed = $healApplied
+            # BOTH carriers, as bash does: the state file below, and the durable
+            # per-task record here. Leaving the record stale would let a later
+            # reader prefer a verdict that no longer describes any capture.
+            if ($taskId) { $null = Set-TaskNarrowedRecord -TaskId $taskId -Value $healApplied }
             try { $healSnapshot = Build-ChangedFilesSnapshot -Base $healBase -OwnRanges $healRanges }
             catch { $healSnapshot = '[]' }
         }

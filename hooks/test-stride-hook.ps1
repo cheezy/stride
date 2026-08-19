@@ -5339,9 +5339,17 @@ TASK_NARROWED_77='yes'
 #   Set-TaskOwnedRecord    1 - Invoke-FinalizeAfterDoing. Value is
 #                              Get-OwnedCommitSet over a locally observed HEAD
 #                              delta, i.e. git rev-list output.
-#   Set-TaskNarrowedRecord 2 - Invoke-FinalizeAfterDoing, both. Values are the
-#                              literal 'no' (the pre-capture safe default) and
-#                              the locally computed verdict.
+#   Set-TaskNarrowedRecord 3 - two in Invoke-FinalizeAfterDoing (the literal
+#                              'no' pre-capture default, and the locally
+#                              computed verdict after it) and, since W2103, one
+#                              in Invoke-SelfHealChangedFilesUpload writing the
+#                              verdict the RETRY actually applied. All three
+#                              values are locally derived; none is server-fed.
+#                              The retry's value is deliberately the APPLIED
+#                              verdict rather than the replayed one - a replayed
+#                              'yes' whose owned range came back empty uploaded
+#                              WIDE, and recording 'yes' there would make the
+#                              record false about the snapshot the server holds.
 #   Set-TaskHeadRefRecord  1 - Invoke-FinalizeAfterDoing, no -Head argument, so
 #                              the value is git rev-parse HEAD.
 #   Set-TaskBaseAtRecord   0 - the claim stamp is written INLINE into
@@ -5358,7 +5366,7 @@ TASK_NARROWED_77='yes'
 $g22CodeLines = @(Get-Content -Path $HookScript | Where-Object { $_.TrimStart() -notlike '#*' })
 foreach ($w in @(
     @{ Name = 'Set-TaskOwnedRecord';    Expect = 1 },
-    @{ Name = 'Set-TaskNarrowedRecord'; Expect = 2 },
+    @{ Name = 'Set-TaskNarrowedRecord'; Expect = 3 },
     @{ Name = 'Set-TaskHeadRefRecord';  Expect = 1 },
     @{ Name = 'Set-TaskBaseAtRecord';   Expect = 0 }
 )) {
@@ -6644,7 +6652,7 @@ $g25Git = Get-Command git -ErrorAction SilentlyContinue
 
 # Build a repo and seed a cache with N open windows (base, no head partner).
 function New-G25Fixture {
-    param([string]$Name, [int]$OpenCount, [switch]$GarbageBases, [switch]$RealButUnreachable)
+    param([string]$Name, [int]$OpenCount, [switch]$GarbageBases)
     $d = Join-Path $TmpDir "g25-$Name"
     Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path $d -Force | Out-Null
@@ -6658,14 +6666,14 @@ function New-G25Fixture {
     $head = (& git -C $d rev-parse HEAD 2>$null | Out-String).Trim()
     $lines = New-Object System.Collections.Generic.List[string]
     for ($i = 1; $i -le $OpenCount; $i++) {
-        if ($GarbageBases) {
-            # SHA-shaped but resolves to nothing - the only signal the sweep acts on.
-            $v = ('{0:d40}' -f 0).Substring(0, 40 - "$i".Length) + "$i"
-        } elseif ($RealButUnreachable) {
-            $v = $head
-        } else {
-            $v = $head
-        }
+        # SHA-shaped but resolving to nothing is the ONLY signal the sweep acts
+        # on, so that is the only variation this fixture needs. (An earlier
+        # version carried a -RealButUnreachable switch whose branch was
+        # byte-identical to the default and which no caller passed - a fixture
+        # shape that looked like it distinguished something and distinguished
+        # nothing, which is the same defect this group's review kept finding in
+        # the assertions.)
+        $v = if ($GarbageBases) { ('{0:d40}' -f 0).Substring(0, 40 - "$i".Length) + "$i" } else { $head }
         $lines.Add("TASK_BASE_REF_$((100 + $i))='$v'") | Out-Null
     }
     Set-Content -Path (Join-Path $d '.stride-env-cache') -Value $lines -Encoding UTF8
@@ -6930,6 +6938,34 @@ if ($g25Git) {
     Write-Host "  SKIP: 25h5: needs git" -ForegroundColor Yellow
 }
 
+# --- 25i2: the NO-OPEN-WINDOW branch of the downward walk ---
+# Every other Group 25 fixture seeds at least one open window, so the branch
+# taken when there is NO anchor - the limit becomes the whole list - was
+# asserted nowhere, and mutating it silently dropped the NEWEST closed window.
+# That is the ordinary steady state for a single sequential agent, not a corner:
+# a cache of nothing but completed windows. The code's own comment names this as
+# the off-by-one hazard, which is precisely why it needed a fixture.
+if ($g25Git) {
+    $g25i2 = New-G25Fixture -Name 'allclosed' -OpenCount 0
+    $ProjectDir = $g25i2.Dir
+    $script:EnvCache = Join-Path $g25i2.Dir '.stride-env-cache'
+    $g25i2Lines = New-Object System.Collections.Generic.List[string]
+    for ($i = 1; $i -le 25; $i++) { $g25i2Lines.Add("TASK_BASE_REF_$((700 + $i))='$($g25i2.Head)'") | Out-Null }
+    for ($i = 1; $i -le 25; $i++) { $g25i2Lines.Add("TASK_HEAD_REF_$((700 + $i))='$($g25i2.Head)'") | Out-Null }
+    Set-Content -Path $script:EnvCache -Value $g25i2Lines -Encoding UTF8
+    $g25i2Kept = @(Select-KeptWindowRecord)
+    Assert-Eq "25i2: with NO open window, the newest 20 closed windows are kept" "20" "$($g25i2Kept.Count)"
+    # The NEWEST must survive - that is the one a mis-set limit drops.
+    Assert-Eq "25i2: and the NEWEST closed window survives" "1" `
+        "$(@($g25i2Kept | Where-Object { $_ -like 'TASK_BASE_REF_725=*' }).Count)"
+    Assert-Eq "25i2: while the oldest five are evicted" "0" `
+        "$(@($g25i2Kept | Where-Object { $_ -like 'TASK_BASE_REF_705=*' }).Count)"
+    Assert-Eq "25i2: with the boundary exact - 706 survives" "1" `
+        "$(@($g25i2Kept | Where-Object { $_ -like 'TASK_BASE_REF_706=*' }).Count)"
+} else {
+    Write-Host "  SKIP: 25i2: needs git" -ForegroundColor Yellow
+}
+
 # --- 25j (D273): the narrowing verdict is REPLAYED, not recomputed ---
 # A verdict reached at capture time is a FACT ABOUT THAT CAPTURE. Re-deriving it
 # at retry time asks a different question, because the retry's view of which
@@ -7001,6 +7037,29 @@ if ($g25Git) {
     $g25kBare = @(Get-Content -Path (Join-Path $g25k.Dir '.stride-diff-upload-state') -Encoding UTF8)
     Assert-Eq "25k (D273): an absent verdict writes NO narrowed= line, not an empty one" "0" `
         "$(@($g25kBare | Where-Object { $_ -like 'narrowed=*' }).Count)"
+
+    # THE SHAPE REFUSAL, which had no assertion at all until the review found
+    # it - the same unfalsifiable-control problem this round fixed four times
+    # over in Group 25. The file is newline-delimited and its reader is
+    # FIRST-MATCH-WINS, so a base carrying an embedded LF writes an extra
+    # physical line and an injected narrowed= sits AHEAD of the genuine one and
+    # wins. Deleting the -notmatch condition left the whole suite green.
+    Write-DiffUploadState -TaskId '42' -HttpCode '200' `
+        -Base "abc123`nnarrowed=yes" -Narrowed 'no'
+    $g25kInj = @(Get-Content -Path (Join-Path $g25k.Dir '.stride-diff-upload-state') -Encoding UTF8)
+    Assert-Eq "25k: a base carrying a newline is REFUSED, not written" "0" `
+        "$(@($g25kInj | Where-Object { $_ -like 'base=*' }).Count)"
+    Assert-Eq "25k: so no injected narrowed= line can precede the genuine one" "1" `
+        "$(@($g25kInj | Where-Object { $_ -like 'narrowed=*' }).Count)"
+    Assert-Eq "25k: and the genuine verdict is the one that survives" "1" `
+        "$(@($g25kInj | Where-Object { $_ -eq 'narrowed=no' }).Count)"
+    # A verdict carrying a newline is refused on the same terms.
+    Write-DiffUploadState -TaskId '42' -HttpCode '200' -Base 'abc123' -Narrowed "yes`nbase=evil"
+    $g25kInj2 = @(Get-Content -Path (Join-Path $g25k.Dir '.stride-diff-upload-state') -Encoding UTF8)
+    Assert-Eq "25k: a verdict carrying a newline is refused too" "0" `
+        "$(@($g25kInj2 | Where-Object { $_ -like 'narrowed=*' }).Count)"
+    Assert-Eq "25k: and it cannot inject a second base= line" "1" `
+        "$(@($g25kInj2 | Where-Object { $_ -like 'base=*' }).Count)"
 } else {
     Write-Host "  SKIP: 25k: needs git" -ForegroundColor Yellow
 }

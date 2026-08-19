@@ -8321,23 +8321,29 @@ function Invoke-GateProbe {
 }
 
 # 27a: it detects an inherited variable and names it.
+# SCOPED TO THE GATE'S OWN REPORT, not to the whole child output. The probe
+# prints AFTER_GATE:<NAME>=... for every name it knows, so those names are in
+# the output whatever the gate did - asserting against the whole thing passed
+# with the gate's report deleted, and with the gate deleted. Everything before
+# the first AFTER_GATE line is the report and nothing else.
+function Get-GateReport { param([string]$Out) return ($Out -split 'AFTER_GATE:')[0] }
+
 $g27a = Invoke-GateProbe -Env @{ STRIDE_HOOK_TIMEOUT_OVERRIDE = '200' }
 Assert-Contains "27a: the gate reports an inherited variable BY NAME" `
-    "STRIDE_HOOK_TIMEOUT_OVERRIDE" $g27a
+    "STRIDE_HOOK_TIMEOUT_OVERRIDE" (Get-GateReport $g27a)
 
 # 27b: it reports the NAME and never the VALUE. A gate that echoes a bearer
 # token into a CI log is worse than the leak it fixes. BOTH reporting paths are
 # covered - the fixed list and the TASK_BASE_REF_* prefix sweep - because a
 # canary in only one leaves the other free to reintroduce value-printing.
 $g27b = Invoke-GateProbe -Env @{ TASK_ID = 's3cr3t-fixed-list'; TASK_BASE_REF_99 = 's3cr3t-prefix-sweep' }
-Assert-Contains "27b: the gate names a fixed-list variable" "TASK_ID" $g27b
-Assert-Contains "27b: and the dynamic base-ref variable" "TASK_BASE_REF_99" $g27b
+Assert-Contains "27b: the gate names a fixed-list variable" "TASK_ID" (Get-GateReport $g27b)
+Assert-Contains "27b: and the dynamic base-ref variable" "TASK_BASE_REF_99" (Get-GateReport $g27b)
 foreach ($g27Canary in @('s3cr3t-fixed-list', 's3cr3t-prefix-sweep')) {
     # The AFTER_GATE lines print values by design, so only the gate's own
-    # REPORT is under test here - everything before the first AFTER_GATE line.
-    $g27Report = ($g27b -split 'AFTER_GATE:')[0]
+    # REPORT is under test here.
     Assert-Eq "27b: the gate never prints a VALUE ($g27Canary)" "False" `
-        "$($g27Report.Contains($g27Canary))"
+        "$((Get-GateReport $g27b).Contains($g27Canary))"
 }
 
 # 27c: it actually UNSETS, rather than only reporting. This is the assertion
@@ -8356,6 +8362,33 @@ Assert-Contains "27d: and the opt-out warns the run is NOT hermetic" "NOT hermet
 $g27e = Invoke-GateProbe
 Assert-Eq "27e: a clean environment produces no gate output" "False" `
     "$($g27e.Contains('neutralising inherited'))"
+
+# 27f: THE TWO NAMES THAT CARRY THE REAL RISK, pinned individually.
+# Everything above probes STRIDE_HOOK_TIMEOUT_OVERRIDE, which is a timeout. The
+# gate's own header says why the other two matter: CLAUDE_PROJECT_DIR points
+# hook code at a project directory, and TASK_BASE_REF selects the git range a
+# snapshot walks - an ambient one silently changes what a capture captures, in
+# the developer's real repo. Dropping either from $script:StrideHookEnvVars
+# would shrink the gate, and until now would have shrunk its test in lockstep,
+# because both the probe and the harness iterate that same list. These two rows
+# name the variables literally, so a shrunken list turns them red.
+#
+# WHAT THIS GROUP DOES AND DOES NOT COVER, stated because the task's security
+# consideration is broader than the gate: the gate neutralises ENVIRONMENT
+# VARIABLES. It is not what keeps the suite off the network or out of the
+# developer's repo - per-case temp fixtures and unreachable 127.0.0.1:1 URLs do
+# that. The task's manual_tests entry (introduce a real network call and a real
+# repo mutation and see whether they are caught) is NOT performed by this group
+# and is recorded as not done rather than implied.
+$g27f = Invoke-GateProbe -Env @{ CLAUDE_PROJECT_DIR = '/tmp/not-a-real-project'; TASK_BASE_REF = 'deadbeef' }
+Assert-Contains "27f: the gate reports CLAUDE_PROJECT_DIR, which aims hook code at a directory" `
+    "CLAUDE_PROJECT_DIR" (Get-GateReport $g27f)
+Assert-Contains "27f: and TASK_BASE_REF, which selects the git range a capture walks" `
+    "TASK_BASE_REF" (Get-GateReport $g27f)
+Assert-Contains "27f: CLAUDE_PROJECT_DIR is CLEARED, not merely reported" `
+    "AFTER_GATE:CLAUDE_PROJECT_DIR=<unset>" $g27f
+Assert-Contains "27f: and so is TASK_BASE_REF" `
+    "AFTER_GATE:TASK_BASE_REF=<unset>" $g27f
 
 # ============================================================
 # Test Group 28: W2105 — hot-path skill byte budgets (mirrors sh 28 / W2079)
@@ -8391,7 +8424,14 @@ if (-not (Test-Path -LiteralPath $g28Script)) {
     # reading raw bytes. `wc -c` and ReadAllBytes().Length both count bytes.
     if (Get-Command bash -ErrorAction SilentlyContinue) {
         $g28Bash = (& bash (Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'scripts/check-skill-budgets.sh') 2>&1 | Out-String)
-        $g28Norm = { param($t) (($t -split "`n") | Where-Object { $_ -like 'ok:*' -or $_ -like 'BUDGET*' } | ForEach-Object { $_.TrimEnd("`r") }) -join "`n" }
+        # The self-reference is normalised out: each script's missing-file error
+        # names ITSELF ("the table is in scripts/check-skill-budgets.sh|.ps1"),
+        # so a renamed budgeted file would fail this on a cosmetic difference
+        # rather than on a real disagreement. Note also that the cross-check
+        # only ever exercises the CLEAN path - neither the over-budget nor the
+        # missing-file branch runs here - so agreement is pinned on that path
+        # alone, which is the honest scope of this assertion.
+        $g28Norm = { param($t) (($t -split "`n") | Where-Object { $_ -like 'ok:*' -or $_ -like 'BUDGET*' } | ForEach-Object { $_.TrimEnd("`r") -replace 'check-skill-budgets\.(sh|ps1)', 'check-skill-budgets.<impl>' }) -join "`n" }
         Assert-Eq "28b: the PowerShell and bash budget checks report byte-identical lines" `
             (& $g28Norm $g28Bash) (& $g28Norm $g28Out)
     } else {
@@ -8449,6 +8489,14 @@ foreach ($n in @($g29Want)) {
     $g29Found += $n
     . ([scriptblock]::Create($g29Defs[$n]))
 }
+# The extracted functions ship with script-scope STATE that lives at the hook's
+# top level, outside every function extent, so the closure cannot carry it.
+# Remove-StrideHeredocBodies READS $script:StrideQuoteState before writing it,
+# so Group 29 worked only by the accident that 29a calls Get-StrideRoute first
+# (which assigns it). Seeded here, mirroring stride-hook.ps1's own
+# initialisation, so the group has no ordering dependency.
+$script:StrideQuoteState = ''
+$script:StrideQuoteRest = ''
 $g29Missing = @($g29Seed | Where-Object { $g29Found -notcontains $_ })
 if ($g29Missing.Count -gt 0) {
     Write-Host "  FAIL: 29-harness: could not extract: $($g29Missing -join ', ')" -ForegroundColor Red
@@ -8526,20 +8574,53 @@ if ($g29Missing.Count -gt 0) {
 # number - the suites diverge in numbering from sh Group 7 onward, so mirroring
 # by number would have produced duplicates and called it coverage.
 #
-#   sh 9  after_goal routing (W504)          -> ps1 Group 8. Already mirrored,
-#         together with sh 10 (W506). Verified by reading, not by title match.
-#   sh 11 End-to-end PUT round-trip (W835)   -> ps1 Group 7 (7a round-trips the
-#         envelope through a real listener and back out of the snapshot file).
+#   sh 9  after_goal routing (W504)          -> ps1 Group 8, PARTIALLY. The
+#         detection and routing core is mirrored (with sh 10 / W506). SEVEN
+#         behaviours are NOT, each a live ps1 branch: the raw tool_response
+#         shape where the response IS the API object with no stdout key
+#         (stride-hook.ps1:1689); an entirely absent "hooks" key; a PASSING
+#         after_goal writing nothing to fd 2 (D65 - asserted for other hooks,
+#         never for this one); the negative half of env forwarding, that a
+#         non-matching hook entry's env must not leak; an EMPTY canonical
+#         response file being ignored (:1095); an INVALID-JSON canonical file
+#         degrading cleanly; and the fd-2 silence of the success path.
+#   sh 11 End-to-end PUT round-trip (W835)   -> NOT MIRRORED, and this is a
+#         recorded omission rather than a counterpart. sh 11 is an OPT-IN test
+#         against a REAL kanban server (STRIDE_TEST_E2E_URL/TOKEN/TASK_ID, with
+#         a production-hostname refusal) that GETs the task back and asserts
+#         the persisted changed_files is neither null nor [] and equals the
+#         snapshot. Its own banner says it exists because stub-only tests
+#         "missed a body-shape regression (D35) because they never crossed the
+#         wire". ps1 Group 7 is the mirror of sh Group 8, and 7a is a recording
+#         HttpListener stub comparing the request body it just sent against the
+#         local snapshot - nothing server-side is read back, so the regression
+#         class sh 11 exists for is invisible to it. Only sh 11c's fail-soft
+#         half has a ps1 counterpart (7d). Mirroring this needs an E2E gate the
+#         ps1 suite does not have. Consequence worth stating: the ps1 base64
+#         envelope shape has never been proved acceptable to a real server by
+#         either suite.
 #   sh 22 D220 command routing               -> ps1 Group 29 (NEW). All five
 #         cases, including the heredoc ones an earlier draft of this ledger
 #         wrongly recorded as unmirrorable.
-#   sh 24 D228 failing after_goal not silent -> ps1 Group 8 (8d1-8d4). Already
-#         mirrored: the JSON context field, the stderr shout, the durable
-#         marker, the success path staying quiet, and the empty-section case.
-#   sh 26 hermeticity gate (D235)            -> ps1 Group 27 (NEW).
+#   sh 24 D228 failing after_goal not silent -> ps1 Group 8 (8d1-8d4) and
+#         Group 20, PARTIALLY. Mirrored: the JSON context field, the stderr
+#         shout, the durable marker, the success path staying quiet, the
+#         empty-section case; sh 24e's one-JSON-document rule is ps1 Group 20,
+#         not Group 8. NOT mirrored: 24h (only after_goal ran - the single
+#         object must sit at the document ROOT with no "sections" wrapper;
+#         ps1 Group 20 exercises only the two-section case, which structurally
+#         cannot see a wrapper emitted for one); 24i (with .stride/ unwritable
+#         the section must STILL RUN - ps1 19g asserts only exit 0 and chmods
+#         the project dir rather than .stride/, so it would pass while the
+#         quality gate silently never ran, which is the regression 24i guards);
+#         and the ABSENT-section half of 24g.
+#   sh 26 hermeticity gate (D235)            -> ps1 Group 27 (NEW). See that
+#         group's own note on what it does and does not assert - it covers
+#         environment neutralisation, NOT network or repository isolation.
 #   sh 28 hot-path skill byte budgets        -> ps1 Group 28 (NEW), invoking
 #         the new scripts/check-skill-budgets.ps1 and cross-checking it against
-#         the bash script line for line.
+#         the bash script on the CLEAN path (the over-budget and missing-file
+#         branches are not exercised by the cross-check).
 #
 # STILL BASH-ONLY, with the reason:
 #   sh 29 W2099 ps1 5.1 static gate. Deliberate: the gate analyses hooks/*.ps1

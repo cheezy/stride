@@ -184,14 +184,24 @@ if ($SelfTestOnly) {
 # run and the scope is visible rather than asserted.
 # ---------------------------------------------------------------------------
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$scanTarget = if ($Path) { $Path } else { Join-Path $repoRoot 'hooks' }
+# (W2105) BOTH hooks/ AND scripts/. The committed default was hooks/ alone, and
+# the comment below said "every .ps1 in this repo is directly in hooks/" - which
+# was already untrue (scripts/check-ps1-compat.ps1) and became more so when
+# W2105 added scripts/check-skill-budgets.ps1. Nothing that runs automatically
+# scanned either, so a 7-only construct added to a scripts/ file would pass
+# every gate and fail only on a user's Windows 5.1 box: exactly the class this
+# gate exists to catch, in the one place nobody was looking.
+$scanTargets = if ($Path) { @($Path) } else { @((Join-Path $repoRoot 'hooks'), (Join-Path $repoRoot 'scripts')) }
 
-if (-not (Test-Path -LiteralPath $scanTarget)) {
-    Write-Output "GATE ERROR: scan target not found: $scanTarget"
-    exit 1
+foreach ($t in $scanTargets) {
+    if (-not (Test-Path -LiteralPath $t)) {
+        Write-Output "GATE ERROR: scan target not found: $t"
+        exit 1
+    }
 }
+$scanTarget = $scanTargets[0]
 
-if (Test-Path -LiteralPath $scanTarget -PathType Leaf) {
+if ($scanTargets.Count -eq 1 -and (Test-Path -LiteralPath $scanTarget -PathType Leaf)) {
     $files = @(Get-Item -LiteralPath $scanTarget)
 }
 else {
@@ -205,7 +215,7 @@ else {
     # than passing clean over an unscanned tree. This warns rather than fails —
     # a nested file is not itself an incompatibility, and the honest report is
     # "these were not scanned", not a red gate for code nobody has judged.
-    $files = @(Get-ChildItem -LiteralPath $scanTarget -Filter '*.ps1' -File | Sort-Object Name)
+    $files = @($scanTargets | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.ps1' -File } | Sort-Object FullName)
 
     # Name everything PowerShell-ish that the *.ps1 glob drops: files one or
     # more levels down, and sibling .psm1 modules. Both are silently invisible

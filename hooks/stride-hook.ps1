@@ -4160,6 +4160,7 @@ function Invoke-SelfHealChangedFilesUpload {
     $stateTask = ''
     $stateCode = ''
     $stateNarrowed = ''
+    $stateBase = ''
     if (Test-Path $stateFile) {
         try {
             foreach ($line in Get-Content -Path $stateFile -Encoding UTF8) {
@@ -4173,6 +4174,11 @@ function Invoke-SelfHealChangedFilesUpload {
                 # computed, or widen one that was. bash gates the same read on
                 # the same terms.
                 if ($line -match '^narrowed=(.*)$' -and -not $stateNarrowed) { $stateNarrowed = $Matches[1] }
+                # (W2103) The base the primary capture anchored at, read and
+                # gated on exactly the same terms as the verdict beside it. Not
+                # consumed as a revision on THIS side - it is carried through
+                # the truncating write below so the record survives the retry.
+                if ($line -match '^base=(.*)$' -and -not $stateBase) { $stateBase = $Matches[1] }
             }
         } catch {
             # Unreadable state degrades to "retry".
@@ -4182,7 +4188,7 @@ function Invoke-SelfHealChangedFilesUpload {
     # foreign verdict leaves $stateNarrowed empty, which Resolve-CaptureNarrowing
     # reports as "no verdict on record" and the replay turns into a live check -
     # the documented fall-through, and the safe answer.
-    if ($stateTask -ne $taskId) { $stateNarrowed = '' }
+    if ($stateTask -ne $taskId) { $stateNarrowed = ''; $stateBase = '' }
     if ($stateTask -eq $taskId -and $stateCode -match '^2') { return }
 
     $apiBase = Resolve-StrideApiUrl
@@ -4197,9 +4203,17 @@ function Invoke-SelfHealChangedFilesUpload {
     # the end of this function is defined on EVERY path. The build below runs
     # only when nothing is on disk; on the ordinary retry path - a snapshot
     # already exists and is left byte-for-byte alone - there is no fresh base or
-    # verdict to carry, and the state file must then keep what it already had
-    # rather than being handed an undefined value.
-    $healBase = ''
+    # verdict to derive, so both are seeded from what the file already held.
+    # THE WRITE AT THE END TRUNCATES, so seeding with '' would not "leave the
+    # record alone" - it would DELETE the base the primary capture persisted,
+    # on the one path that never computes a replacement. Inert on this side
+    # today (nothing here consumes base= as a revision) but not inert across
+    # executors: bash's self-heal PREFERS the persisted base over re-resolving,
+    # precisely because re-resolving after the section's own `git push` can make
+    # a correct base look stale and recompute to HEAD - an EMPTY snapshot
+    # (D142). A shared checkout must not lose that record just because the ps1
+    # ran the retry.
+    $healBase = $stateBase
     $healNarrowed = $stateNarrowed
     if (-not (Test-Path -LiteralPath $snapshotPath -PathType Leaf)) {
         # Only build where there is something to capture FROM. Outside a git
@@ -4226,6 +4240,13 @@ function Invoke-SelfHealChangedFilesUpload {
         # is '[]', which is narrowed by nothing. The two carriers could then
         # disagree with each other AND with the upload.
         $healApplied = 'no'
+        if ($sel.Refused) {
+            # A refusal uploads '[]'. Claiming a base for it would describe a
+            # snapshot that was never measured from one, so the carried value is
+            # dropped here rather than written - bash's _snap_base is "" on the
+            # same branch, for the same reason.
+            $healBase = ''
+        }
         if (-not $sel.Refused) {
             # (W2102) Attribute here too. bash's equivalent states that
             # attribution belongs to EVERY non-refused path, not just the

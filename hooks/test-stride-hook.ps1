@@ -2551,6 +2551,17 @@ echo "br_ran"
     # took the refusal path, which is what makes the three below mean anything.
     # It does not move under any mutation of the verdict logic, and is not
     # meant to.
+    #
+    # ASSERTED ON THE REFUSAL'S OWN EVIDENCE, not on '[]'. This repo has one
+    # commit and a clean tree, so a build that did NOT refuse would resolve
+    # base=HEAD, diff HEAD..HEAD and produce '[]' as well - the empty snapshot
+    # cannot tell the two apart, and a future fixture edit that quietly stopped
+    # the refusal firing would leave every assertion here green over a case
+    # testing nothing it names. That is the fixture-drift hazard round 1 found
+    # in 25c. This string comes from Resolve-TaskSnapshotBase's foreign-owner
+    # branch and from nowhere else.
+    Assert-Contains "9k (D226): CONTROL - the foreign-owner refusal really fired" `
+        "REFUSING the changed_files diff for task 99" $r.Stderr
     Assert-Contains "9k (D226): the refusal uploads an empty snapshot" '[]' "$snapK"
     $stateK = @(Get-Content -Path (Join-Path $shProjK '.stride-diff-upload-state') -Encoding UTF8 -ErrorAction SilentlyContinue)
     Assert-Eq "9k (D273): the refusal records 'no', not the replayed 'yes'" "1" `
@@ -2560,6 +2571,107 @@ echo "br_ran"
     $cacheK2 = @(Get-Content -Path (Join-Path $shProjK '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
     Assert-Eq "9k (D273): and the durable record is written on the refusal path too" "1" `
         "$(@($cacheK2 | Where-Object { $_ -eq "TASK_NARROWED_99='no'" }).Count)"
+}
+
+# 9l (W2103/D273): the replay's POSITIVE direction, and its only production
+# consumer.
+# 9j pins that the self-heal does NOT narrow when it must not. Nothing pinned
+# that it DOES narrow when it must - and that is the direction whose failure is
+# an UNDER-report, the defect D255 and D273 exist to prevent. The consumer is
+# the owned-set override in Invoke-SelfHealChangedFilesUpload, which round 1
+# rewired from the process-local $script:SnapOwnedRecorded (always $false here,
+# because the self-heal runs in a DIFFERENT PROCESS from the capture) to the
+# durable Get-TaskOwnedRecord. All three ways of breaking that - reverting to
+# the script variable, deleting the override outright, or hard-coding the
+# replay decision to $false - left the whole suite green.
+#
+# Identical to 9j but for ONE byte of fixture: task_id=99 on the state line, so
+# the recorded 'yes' is this task's OWN. The geometry then inverts - a.txt must
+# be ABSENT, because the owned set names b's commit alone.
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: 9l: the replay's positive direction needs git" -ForegroundColor Yellow
+} else {
+    $shProjL = Join-Path $TmpDir 'sh-own-verdict'
+    New-Item -ItemType Directory -Path $shProjL -Force | Out-Null
+    & git -C $shProjL init -q 2>$null | Out-Null
+    & git -C $shProjL config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $shProjL config user.name 'Test' 2>$null | Out-Null
+    & git -C $shProjL config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $shProjL '.gitignore') `
+        -Value "/.stride.md`n/.stride-env-cache`n/.stride-changed-files.json`n/.stride-diff-upload-state" -Encoding UTF8
+    Set-Content -Path (Join-Path $shProjL 'seed.txt') -Value 'seed' -Encoding UTF8
+    & git -C $shProjL add -A 2>$null | Out-Null
+    & git -C $shProjL commit -q -m 'seed' 2>$null | Out-Null
+    $shBaseL = (& git -C $shProjL rev-parse HEAD 2>$null | Out-String).Trim()
+    Set-Content -Path (Join-Path $shProjL 'a.txt') -Value 'a' -Encoding UTF8
+    & git -C $shProjL add -A 2>$null | Out-Null
+    & git -C $shProjL commit -q -m 'a' 2>$null | Out-Null
+    Set-Content -Path (Join-Path $shProjL 'b.txt') -Value 'b' -Encoding UTF8
+    & git -C $shProjL add -A 2>$null | Out-Null
+    & git -C $shProjL commit -q -m 'b' 2>$null | Out-Null
+    $shOwnedL = (& git -C $shProjL rev-parse HEAD 2>$null | Out-String).Trim()
+    Set-Content -Path (Join-Path $shProjL '.stride.md') -Value @'
+## before_review
+```bash
+echo "br_ran"
+```
+'@ -Encoding UTF8
+    Set-Content -Path (Join-Path $shProjL '.stride-env-cache') -Encoding UTF8 -Value @(
+        "TASK_ID='99'",
+        "TASK_BASE_REF_99='$shBaseL'",
+        "TASK_OWNED_99='$shOwnedL'")
+    Set-Content -Path (Join-Path $shProjL '.stride-diff-upload-state') `
+        -Value "task_id=99`nhttp_code=500`nnarrowed=yes" -Encoding UTF8
+    Remove-Item -Force (Join-Path $shProjL '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    $r = Invoke-HookScript -InputJson $shUnreachableJson -Phase 'post' -ProjectDir $shProjL
+    Assert-Exit "9l: before_review over this task's own verdict exits 0" 0 $r.ExitCode
+    $snapL = Get-Content -Raw -Path (Join-Path $shProjL '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    # THE CONSUMER. Without the owned-set override the retry uploads base..HEAD
+    # and a.txt - another task's commit - rides along in this task's review.
+    Assert-Contains "9l (D255): the retry narrows to the owned commit" 'b.txt' "$snapL"
+    Assert-Eq "9l (D255): so a commit this task does not own is NOT in the snapshot" "0" `
+        "$(@(@($snapL -split "`n") | Where-Object { $_ -match 'a\.txt' }).Count)"
+    $stateL = @(Get-Content -Path (Join-Path $shProjL '.stride-diff-upload-state') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "9l (D273): and the APPLIED verdict recorded is 'yes'" "1" `
+        "$(@($stateL | Where-Object { $_ -eq 'narrowed=yes' }).Count)"
+    $cacheL = @(Get-Content -Path (Join-Path $shProjL '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "9l (D273): on the durable carrier too" "1" `
+        "$(@($cacheL | Where-Object { $_ -eq "TASK_NARROWED_99='yes'" }).Count)"
+}
+
+# 9m (W2103): the ORDINARY RETRY carries the persisted base through its own
+# truncating write - and only this task's.
+# The retry's state write TRUNCATES the file. On the path where a snapshot is
+# already on disk nothing recomputes a base, so seeding $healBase with '' would
+# not "leave the record alone" - it would DELETE the base the primary capture
+# persisted. Inert on this side (nothing here reads base= as a revision) but not
+# across executors: bash PREFERS the persisted base over re-resolving, because
+# re-resolving after the section's own `git push` can make a correct base look
+# stale and recompute to HEAD, i.e. an empty snapshot (D142).
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: 9m: the base carry needs git" -ForegroundColor Yellow
+} else {
+    foreach ($g9m in @(
+        @{ Name = 'own';     StateTask = '99'; Survives = $true },
+        @{ Name = 'foreign'; StateTask = '88'; Survives = $false }
+    )) {
+        $shProjM = New-SelfHealProject -Name "sh-base-carry-$($g9m.Name)" -StrideMd @'
+## before_review
+```bash
+echo "br_ran"
+```
+'@
+        # New-SelfHealProject leaves a snapshot on disk, which is exactly the
+        # path under test: the retry re-uploads it and never rebuilds.
+        Set-Content -Path (Join-Path $shProjM '.stride-diff-upload-state') `
+            -Value "task_id=$($g9m.StateTask)`nhttp_code=500`nbase=cafed00d`nnarrowed=no" -Encoding UTF8
+        $r = Invoke-HookScript -InputJson $shUnreachableJson -Phase 'post' -ProjectDir $shProjM
+        Assert-Exit "9m ($($g9m.Name)): the retry exits 0" 0 $r.ExitCode
+        $stateM = @(Get-Content -Path (Join-Path $shProjM '.stride-diff-upload-state') -Encoding UTF8 -ErrorAction SilentlyContinue)
+        $expect = if ($g9m.Survives) { "1" } else { "0" }
+        Assert-Eq "9m ($($g9m.Name)): base=cafed00d survives the truncating write: $expect" $expect `
+            "$(@($stateM | Where-Object { $_ -eq 'base=cafed00d' }).Count)"
+    }
 }
 
 # ============================================================
@@ -5569,6 +5681,96 @@ foreach ($w in @(
     $hits = @($g22CodeLines | Where-Object { $_ -match [regex]::Escape($w.Name) }).Count
     Assert-Eq "22r: $($w.Name) has exactly $($w.Expect) production call site(s)" `
         "$($w.Expect)" "$($hits - 1)"
+}
+
+# --- 22s: the D274 defect END TO END, claim then completion ---
+# testing_strategy.integration_tests[0] - "a completion with 22 open windows
+# produces a snapshot over the task's real commits rather than an empty one".
+# 25d counts survivors and 22q asserts cache contents; neither drives a
+# COMPLETION at that window count through to a snapshot, which is the form the
+# defect was actually MEASURED in: 19 concurrently open children left the outer
+# intact, 20 lost its anchor and it completed with an EMPTY snapshot over real
+# commits.
+#
+# The chain is what makes it end to end: a claim evicts (or does not evict) the
+# outer's anchor, and the OUTER's completion is what reveals the loss. With the
+# anchor gone, Resolve-TaskSnapshotBase falls back to the shared TASK_BASE_REF -
+# which that same claim just re-stamped as its own - and D226's foreign-owner
+# refusal correctly uploads '[]'. Correct refusal, lost deliverable.
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: 22s: the end-to-end eviction case needs git" -ForegroundColor Yellow
+} else {
+    $g22s = Join-Path $TmpDir 'g22s-outer-completion'
+    New-Item -ItemType Directory -Path $g22s -Force | Out-Null
+    & git -C $g22s init -q 2>$null | Out-Null
+    & git -C $g22s config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $g22s config user.name 'Test' 2>$null | Out-Null
+    & git -C $g22s config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $g22s '.gitignore') `
+        -Value "/.stride.md`n/.stride-env-cache`n/.stride-changed-files.json`n/.stride-diff-upload-state`n/.stride-dirty-baseline" -Encoding UTF8
+    Set-Content -Path (Join-Path $g22s 'seed.txt') -Value 'seed' -Encoding UTF8
+    & git -C $g22s add -A 2>$null | Out-Null
+    & git -C $g22s commit -q -m 'seed' 2>$null | Out-Null
+    $g22sBase = (& git -C $g22s rev-parse HEAD 2>$null | Out-String).Trim()
+    # The outer task's REAL work - the commit the defect loses.
+    Set-Content -Path (Join-Path $g22s 'outer-deliverable.txt') -Value 'the outer task work' -Encoding UTF8
+    & git -C $g22s add -A 2>$null | Out-Null
+    & git -C $g22s commit -q -m 'outer work' 2>$null | Out-Null
+    Set-Content -Path (Join-Path $g22s '.stride.md') -Value @'
+## before_doing
+```bash
+echo "claimed"
+```
+
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+    # THE OUTER TASK ID IS 4242, NOT 42, AND THE ENV IS CLEARED FIRST. This case
+    # caught the harness contaminating itself: Invoke-HookScript copies the TEST
+    # process environment into the hook child, and Group 22's unit cases leave
+    # TASK_BASE_REF_42='abc123' set. With the anchor evicted, the child then
+    # read that inherited value instead of refusing, Build-ChangedFilesSnapshot
+    # could not resolve 'abc123' and fell back to HEAD~1 - which produces a
+    # non-empty snapshot naming the outer's file. Both payoff assertions below
+    # passed under the very mutation they exist to catch. An unused id plus an
+    # explicit clear makes the cache the only source, which is what this case
+    # claims to be testing.
+    [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_4242', $null, 'Process')
+    # The outer (4242) first, i.e. oldest, then 22 open children - the measured
+    # geometry, one past the 20 that lost it.
+    $g22sLines = New-Object System.Collections.Generic.List[string]
+    $g22sLines.Add("TASK_ID=4242") | Out-Null
+    $g22sLines.Add("TASK_BASE_REF_4242='$g22sBase'") | Out-Null
+    for ($i = 101; $i -le 122; $i++) {
+        $g22sLines.Add("TASK_BASE_REF_$i='$g22sBase'") | Out-Null
+    }
+    Set-Content -Path (Join-Path $g22s '.stride-env-cache') -Encoding UTF8 -Value $g22sLines
+    $g22sClaim = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = '{"data":{"id":99,"identifier":"W99","title":"Inner","status":"in_progress","complexity":"small","priority":"high"}}'; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $g22sClaim -Phase 'post' -ProjectDir $g22s
+    Assert-Exit "22s: the nested claim over 22 open windows exits 0" 0 $r.ExitCode
+    # CONTROL: the anchor is what the completion below depends on, so assert it
+    # survived the claim BEFORE asserting what it buys - otherwise a failure
+    # downstream cannot say which half broke.
+    $g22sCache = @(Get-Content -Path (Join-Path $g22s '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Contains "22s: CONTROL - the outer's anchor survives the nested claim" `
+        "TASK_BASE_REF_4242='$g22sBase'" "$($g22sCache -join "`n")"
+    # Now complete the OUTER task. Port 1 refuses instantly, so only the
+    # on-disk snapshot is under test.
+    $g22sComplete = @{
+        tool_input = @{ command = 'curl -X PATCH http://127.0.0.1:1/api/tasks/4242/complete -H "Authorization: Bearer tok"' }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $g22sComplete -Phase 'pre' -ProjectDir $g22s
+    Assert-Exit "22s: the outer's completion exits 0" 0 $r.ExitCode
+    $g22sSnap = Get-Content -Raw -Path (Join-Path $g22s '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    Assert-Contains "22s (D274): the outer completes over its REAL commits, not an empty snapshot" `
+        'outer-deliverable.txt' "$g22sSnap"
+    Assert-Eq "22s (D274): and the snapshot is not the '[]' the defect produced" "0" `
+        "$(@(@("$g22sSnap".Trim()) | Where-Object { $_ -eq '[]' }).Count)"
 }
 
 }

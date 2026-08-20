@@ -23,7 +23,7 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [1.69.0] - 2026-08-19
+## [1.69.0] - 2026-08-20
 
 ### Added
 

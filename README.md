@@ -452,6 +452,42 @@ What it does catch, also verified by execution: `? :`, `??`, `??=`,
 7-only cmdlets such as `Get-Uptime`, `Test-Json`, `ConvertFrom-Markdown`,
 `Show-Markdown`, `Remove-Service` and `Remove-Alias`.
 
+### The cross-port canon drift check
+
+`scripts/check-port-canon.sh` compares every port repo and vendored catalog
+copy against the rules registered in `docs/port-canon.md`, reporting per rule
+and per port whether the port's anchor is present, stale, unexpected, or
+missing. Unlike the gates above it is **not** part of any hook-suite group and
+nothing runs it for you — it is a **release-time** step, and the release
+documentation is what makes it happen.
+
+```
+bash scripts/check-port-canon.sh              # scan the fleet against the canon
+bash scripts/check-port-canon.sh --self-test  # prove the gate still detects drift
+```
+
+Exit codes: `0` every applicable cell reports ok, `1` at least one cell reports
+MISSING, STALE, UNEXPECTED, DEFECT or UNVERIFIABLE and the drift is listed
+above, `2` no verdict was possible — the canon is absent, unparseable, carries
+an unknown schema version, has a bad registry dir, or the command line was
+wrong. Under `--self-test` the same codes mean all cases passed, at least one
+failed, and the temp dir or the flag combination was wrong.
+
+**Treat `2` as red, not as silence.** It does not mean a missing machine
+dependency the way it does in `check-ps1-compat.sh` — this script shells out to
+nothing but `awk` and `grep`. It means the run proved nothing, so its lack of
+findings is not a pass.
+
+**Fix a red result by placing the anchor, never by editing the canon.** A
+MISSING cell means the port does not carry the rule's marker beside its own
+statement of the rule; the remedy is to add the anchor there, or to write the
+rule in that port's own words first where the substance is genuinely absent.
+Editing an `applies_to` row in `docs/port-canon.md` to make a cell green
+records that the port does not owe a rule it does owe, which turns the gate
+into a report of its own configuration. Where a port truly should not owe a
+rule, that is a change to the canon made deliberately and on its own terms,
+not a way to clear a red line during a release.
+
 ### Optional end-to-end PUT round-trip
 
 `test-stride-hook.sh` Test Group 11 drives `finalize_after_doing` against a

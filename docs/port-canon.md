@@ -19,6 +19,16 @@ byte-identical text across ports would contradict it.
 > An entry's job is to say *that the rule crosses ports and who owes it*, not to
 > become a second definition that can drift from the first.
 
+## Release gate
+
+`scripts/check-port-canon.sh` is what reads this file and reports the fleet
+against it. It is a release-time step rather than an automatic one: nothing
+runs it for you, and `stride/README.md` documents how to invoke it and what its
+exit codes mean. Run it before cutting a port or catalog release, and read a
+non-zero result as blocking. This section deliberately stops here — the
+checker's contract belongs to the script and its README entry, and restating it
+would create exactly the second copy the Scope note above forbids.
+
 ## How to read this file
 
 Every rule below is one H3 entry with the same seven parts in the same order:
@@ -519,10 +529,16 @@ ship a file that trips its own rule.
 ## Discovery — how a maintainer reaches this file
 
 **This is the one mechanism the canon specifies and does not yet install, and it
-is recorded here rather than left to be discovered.** Nothing in the fleet
-currently references this file: no port, no README, no changelog, and none of the
-four source files whose rules it governs. The canon can reach its sources — it
-cites them by path — but no source can reach the canon.
+is recorded here rather than left to be discovered.** The gap is narrower than it
+was and it is still the one that matters. Three things now point here: the
+repository README, which names the release gate that reads this file; the
+changelog entry recording that gate; and one port, `stride-lite`, whose workflow
+skill cites this document by path and rule id where it explains why it defers
+`reason-code-vocabulary`. What still does not exist is a back-reference at an
+**edit site** — none of the four source files whose rules this document governs
+mentions it beside the governed rule, which is the direction that would actually
+catch a maintainer mid-edit. The canon reaches its sources; its sources, at the
+point of editing, do not reach back.
 
 That matters most for the versioning rule below, which requires a version bump
 when a rule's **substance** changes. Substance changes in the source file, not

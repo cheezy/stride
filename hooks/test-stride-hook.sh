@@ -3277,6 +3277,111 @@ STRIDE
     "BOARD_NAME='Stride Development'" "$EHE_OUT_S"
 
   # ----------------------------------------------------------
+  # (D275) The hook-env key filter is an ALLOW-list. What gets past it is
+  # eval'd under `set -a` AND written to .stride-env-cache, which is sourced
+  # under `set -a` on every later invocation — so a key that slips through is
+  # durable, and it arrived in an API response body. The filter used to be a
+  # deny-list naming HOOK_NAME and five client-owned families, which let every
+  # process-critical name through.
+  # ----------------------------------------------------------
+
+  # 9j: the process-critical names never reach the assignment lines. These are
+  # the ones that turn a response body into code execution: PATH re-points
+  # every later git/curl/jq the hook runs, BASH_ENV and ENV are sourced by the
+  # next shell, LD_PRELOAD and DYLD_* inject into it, GIT_SSH_COMMAND and
+  # GIT_EXTERNAL_DIFF are run by git itself, IFS and SHELLOPTS and PS4 steer
+  # the interpreter.
+  D275_HOSTILE='{"hook":{"name":"before_doing","env":{"TASK_ID":"42","PATH":"/evil/bin","BASH_ENV":"/tmp/pwn.sh","ENV":"/tmp/pwn.sh","IFS":"x","SHELLOPTS":"xtrace","LD_PRELOAD":"/tmp/x.so","DYLD_INSERT_LIBRARIES":"/tmp/y.dylib","GIT_SSH_COMMAND":"sh -c id","GIT_EXTERNAL_DIFF":"id","GIT_CONFIG_GLOBAL":"/tmp/g","PS4":"evil","LD_LIBRARY_PATH":"/tmp/l"}}}'
+  D275_OUT=$(
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    extract_hook_env "$D275_HOSTILE" "before_doing"
+  )
+  assert_contains "D275: a documented key alongside the hostile ones still passes" \
+    "TASK_ID='42'" "$D275_OUT"
+  D275_LEAK=$(printf '%s\n' "$D275_OUT" | grep -cE '^(PATH|BASH_ENV|ENV|IFS|SHELLOPTS|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|GIT_SSH_COMMAND|GIT_EXTERNAL_DIFF|GIT_CONFIG_GLOBAL|PS4)=' || true)
+  assert_eq "D275: no process-critical key reaches the assignment lines" "0" "$D275_LEAK"
+
+  # 9k: and none of them reaches the env cache either — the second sink, and
+  # the durable one. apply_env_lines is what writes it, so this drives the real
+  # sink rather than re-checking the filter.
+  D275_CACHE_DIR=$(mktemp -d)
+  (
+    cd "$D275_CACHE_DIR" || exit 1
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    PROJECT_DIR="$D275_CACHE_DIR"
+    ENV_CACHE="$D275_CACHE_DIR/.stride-env-cache"
+    apply_env_lines "$(extract_hook_env "$D275_HOSTILE" "before_doing")"
+  ) > /dev/null 2>&1
+  D275_CACHE_BODY=$(cat "$D275_CACHE_DIR/.stride-env-cache" 2>/dev/null || printf '')
+  # NON-VACUITY GUARD FIRST. Without it this case passes for the wrong reason:
+  # an absent or unwritten cache trivially contains no dangerous key, so the
+  # assertion below would go green while proving nothing. Verified against the
+  # pre-fix deny-list, where this case DID pass vacuously before the guard was
+  # added — the allowed key is what shows the write actually happened.
+  if printf '%s\n' "$D275_CACHE_BODY" | grep -q "^TASK_ID="; then
+    echo -e "  ${GREEN}PASS${RESET}: D275: the env-cache write happened, so the next assertion is not vacuous"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: D275: no env cache was written — the leak check below would prove nothing"
+    FAIL=$((FAIL + 1))
+  fi
+  D275_CACHE_LEAK=$(printf '%s\n' "$D275_CACHE_BODY" | grep -cE '^(PATH|BASH_ENV|ENV|IFS|SHELLOPTS|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|GIT_SSH_COMMAND|GIT_EXTERNAL_DIFF|GIT_CONFIG_GLOBAL|PS4)=' || true)
+  assert_eq "D275: no process-critical key reaches the env cache" "0" "$D275_CACHE_LEAK"
+  rm -rf "$D275_CACHE_DIR"
+
+  # 9l: every documented key still passes. This is the direction an allow-list
+  # gets wrong — omit one and a shipped hook silently loses a variable — so it
+  # is asserted per key rather than in aggregate.
+  D275_ALL='{"hook":{"name":"before_doing","env":{"TASK_ID":"1","TASK_IDENTIFIER":"D275","TASK_TITLE":"t","TASK_DESCRIPTION":"d","TASK_STATUS":"in_progress","TASK_COMPLEXITY":"medium","TASK_PRIORITY":"high","TASK_NEEDS_REVIEW":"false","BOARD_ID":"55","BOARD_NAME":"b","COLUMN_ID":"128","COLUMN_NAME":"Doing","AGENT_NAME":"a","GOAL_ID":"9","GOAL_IDENTIFIER":"G1","GOAL_TITLE":"g","GOAL_DESCRIPTION":"gd"}}}'
+  D275_ALL_OUT=$(
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    extract_hook_env "$D275_ALL" "before_doing"
+  )
+  D275_MISSING=""
+  for _k in TASK_ID TASK_IDENTIFIER TASK_TITLE TASK_DESCRIPTION TASK_STATUS \
+            TASK_COMPLEXITY TASK_PRIORITY TASK_NEEDS_REVIEW BOARD_ID BOARD_NAME \
+            COLUMN_ID COLUMN_NAME AGENT_NAME GOAL_ID GOAL_IDENTIFIER GOAL_TITLE \
+            GOAL_DESCRIPTION; do
+    printf '%s\n' "$D275_ALL_OUT" | grep -q "^${_k}=" || D275_MISSING="$D275_MISSING $_k"
+  done
+  assert_eq "D275: all 17 documented hook-env keys still pass the filter" "" "$D275_MISSING"
+
+  # 9m: the client-owned families stay fenced. They were named one by one in
+  # the old deny-list; under the allow-list they are excluded by absence, and
+  # that has to keep holding — a forged TASK_BASE_REF steers commit
+  # attribution, which is why they were fenced in the first place.
+  D275_OWNED='{"hook":{"name":"before_doing","env":{"TASK_BASE_REF":"dead","TASK_BASE_REF_9":"dead","TASK_HEAD_REF":"beef","TASK_OWNED_9":"x","TASK_NARROWED_9":"y","TASK_BASE_AT_9":"z","STRIDE_FOO":"1","HOOK_NAME":"evil"}}}'
+  D275_OWNED_OUT=$(
+    source "$HOOK_SCRIPT" 2>/dev/null
+    HAS_JQ=true
+    extract_hook_env "$D275_OWNED" "before_doing"
+  )
+  assert_eq "D275: client-owned record families and HOOK_NAME emit nothing at all" "" "$D275_OWNED_OUT"
+
+  # 9n: DRIFT GUARD. The allow-list is a copy of the Variable Inventory in
+  # skills/stride-workflow/hook-execution.md, and a copy rots. Adding a
+  # variable to the docs without adding it here would silently drop it from
+  # every hook; removing one here without the docs would be an undocumented
+  # narrowing. HOOK_NAME is the one documented name deliberately absent — the
+  # executor owns it and the doc says so — so it is subtracted before compare.
+  D275_DOC_KEYS=$(grep -oE '^\| `[A-Z_]+` \|' "$SCRIPT_DIR/../skills/stride-workflow/hook-execution.md" 2>/dev/null \
+    | tr -d '|` ' | grep -v '^HOOK_NAME$' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  D275_CODE_KEYS=$(
+    source "$HOOK_SCRIPT" 2>/dev/null
+    printf '%s' "$STRIDE_HOOK_ENV_ALLOW" | tr -d '[]"' | tr ',' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//'
+  )
+  if [ -z "$D275_DOC_KEYS" ]; then
+    echo -e "  ${RED}FAIL${RESET}: D275: could not read the documented Variable Inventory — the drift guard proved nothing"
+    FAIL=$((FAIL + 1))
+  else
+    assert_eq "D275: the allow-list matches the documented Variable Inventory" \
+      "$D275_DOC_KEYS" "$D275_CODE_KEYS"
+  fi
+
+  # ----------------------------------------------------------
   # D118: canonical response-file fast path for after_goal detection
   # ----------------------------------------------------------
   # The harness truncates large /complete tool_response.stdout mid-JSON, so

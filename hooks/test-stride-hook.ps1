@@ -6227,6 +6227,150 @@ echo "board=[$BOARD_NAME]"
     Write-Host "  SKIP: 23c2: the hook-env hostile-value test needs bash and git" -ForegroundColor Yellow
 }
 
+# --- 23c3 (D275): the hook-env key filter is an ALLOW-list ---
+# Mirrors bash cases 9j-9n. What passes this filter is exported into the
+# Process environment by Set-HookEnv and written to the env cache, so a key the
+# server invents used to reach both: the filter was a deny-list naming
+# HOOK_NAME, the five client-owned record families and STRIDE_*, which let
+# PATH, BASH_ENV and GIT_SSH_COMMAND straight through.
+#
+# The case-INSENSITIVE half is the one with no bash equivalent and is asserted
+# here rather than assumed. Windows environment variable names are
+# case-insensitive, so 'pAtH' and 'PATH' are one variable; a case-sensitive
+# test would admit 'pAtH' as an unrecognised name and then have it collide with
+# PATH on assignment.
+if ($g23Bash -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    $d275Proj = New-GitRepo -Name 'd275-allow-list'
+    Set-Content -Path (Join-Path $d275Proj '.stride.md') -Encoding UTF8 -Value @'
+# Stride Configuration
+
+## before_doing
+```bash
+```
+
+## after_doing
+```bash
+```
+
+## before_review
+```bash
+```
+
+## after_review
+```bash
+```
+
+## after_goal
+```bash
+```
+'@
+    $d275Claim = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{
+            stdout = (@{
+                data = @{ id = 275; identifier = 'D275'; title = 'allow-list'
+                          status = 'in_progress'; complexity = 'medium'; priority = 'high' }
+                hook = @{ name = 'before_doing'; env = [ordered]@{
+                    BOARD_NAME              = 'legit-board'
+                    TASK_IDENTIFIER         = 'D275'
+                    PATH                    = '/evil/bin'
+                    BASH_ENV                = '/tmp/pwn.sh'
+                    GIT_SSH_COMMAND         = 'sh -c id'
+                    LD_PRELOAD              = '/tmp/x.so'
+                    DYLD_INSERT_LIBRARIES   = '/tmp/y.dylib'
+                    SHELLOPTS               = 'xtrace'
+                    TASK_BASE_REF           = 'deadbeef'
+                    STRIDE_FOO              = '1'
+                } }
+            } | ConvertTo-Json -Depth 8 -Compress)
+            stderr = ''; interrupted = $false
+        }
+    } | ConvertTo-Json -Depth 10 -Compress
+    $d275R = Invoke-HookScript -InputJson $d275Claim -Phase 'post' -ProjectDir $d275Proj
+    Assert-Exit "23c3: a claim carrying process-critical hook-env keys exits 0" 0 $d275R.ExitCode
+    $d275Cache = Join-Path $d275Proj '.stride-env-cache'
+    $d275Body = if (Test-Path $d275Cache) { Get-Content -Raw -LiteralPath $d275Cache } else { '' }
+    # NON-VACUITY GUARD FIRST. An unwritten cache contains no dangerous key
+    # either, so without this the leak assertion below could pass while proving
+    # nothing — which is exactly how the bash twin of this case first passed.
+    Assert-Contains "23c3: the env cache was written, so the leak check is not vacuous" `
+        "BOARD_NAME=" $d275Body
+    $d275Bad = @('PATH', 'BASH_ENV', 'GIT_SSH_COMMAND', 'LD_PRELOAD',
+                 'DYLD_INSERT_LIBRARIES', 'SHELLOPTS', 'STRIDE_FOO')
+    $d275Leaked = @()
+    foreach ($k in $d275Bad) {
+        if ($d275Body -match "(?m)^$([regex]::Escape($k))=") { $d275Leaked += $k }
+    }
+    Assert-Eq "23c3: no process-critical key reaches the env cache" `
+        '' ($d275Leaked -join ',')
+    # TASK_BASE_REF is deliberately NOT in the list above: the claim branch
+    # writes it CLIENT-side from its own git resolution (stride-hook.ps1:4169),
+    # so its presence in the cache is correct and asserting the key is absent
+    # would be asserting the wrong thing. The property that matters is that the
+    # SERVER's forged value loses — the payload above supplies 'deadbeef'.
+    Assert-Eq "23c3: a server-forged TASK_BASE_REF does not reach the env cache" `
+        'False' "$($d275Body -match "(?m)^TASK_BASE_REF='deadbeef'")"
+    # The case variant needs its OWN payload: a PowerShell hash literal cannot
+    # hold 'PATH' and 'pAtH' at once (its keys are case-insensitive, and
+    # ConvertFrom-Json rejects the pair outright too), so the collision cannot
+    # be expressed in the claim above. A server can still send 'pAtH' alone,
+    # and on Windows that IS PATH — which is why the filter matches
+    # case-insensitively rather than by exact spelling.
+    $d275Proj2 = New-GitRepo -Name 'd275-case-variant'
+    Copy-Item (Join-Path $d275Proj '.stride.md') (Join-Path $d275Proj2 '.stride.md')
+    $d275Claim2 = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{
+            stdout = (@{
+                data = @{ id = 276; identifier = 'D275b'; title = 'case variant'
+                          status = 'in_progress'; complexity = 'small'; priority = 'low' }
+                hook = @{ name = 'before_doing'; env = [ordered]@{
+                    BOARD_NAME = 'legit-board-2'
+                    pAtH       = '/case/evil'
+                    Bash_Env   = '/tmp/case-pwn.sh'
+                } }
+            } | ConvertTo-Json -Depth 8 -Compress)
+            stderr = ''; interrupted = $false
+        }
+    } | ConvertTo-Json -Depth 10 -Compress
+    $d275R2 = Invoke-HookScript -InputJson $d275Claim2 -Phase 'post' -ProjectDir $d275Proj2
+    Assert-Exit "23c3: a claim carrying case-variant hook-env keys exits 0" 0 $d275R2.ExitCode
+    $d275Cache2 = Join-Path $d275Proj2 '.stride-env-cache'
+    $d275Body2 = if (Test-Path $d275Cache2) { Get-Content -Raw -LiteralPath $d275Cache2 } else { '' }
+    Assert-Contains "23c3: the case-variant run wrote its cache, so the next check is not vacuous" `
+        "BOARD_NAME=" $d275Body2
+    $d275CaseLeak = @()
+    foreach ($k in @('pAtH', 'Bash_Env')) {
+        if ($d275Body2 -match "(?im)^$([regex]::Escape($k))=") { $d275CaseLeak += $k }
+    }
+    Assert-Eq "23c3: a case-variant PATH or BASH_ENV is blocked too" '' ($d275CaseLeak -join ',')
+
+    # The allow-list itself must hold exactly the documented names, and must
+    # agree with the bash twin. A copy of a table rots; this is what notices.
+    # (?-i) is load-bearing on BOTH patterns: PowerShell regex is
+    # case-INSENSITIVE by default, so a bare [A-Z_]+ also matches lowercase and
+    # the doc scrape picked up duration_ms, exit_code and output from unrelated
+    # tables — the guard then reported them as missing from the allow-list.
+    $d275Doc = (Select-String -Path (Join-Path $PSScriptRoot '..' 'skills' 'stride-workflow' 'hook-execution.md') `
+        -Pattern '(?-i)^\| `([A-Z_]+)` \|' -AllMatches).Matches |
+        ForEach-Object { $_.Groups[1].Value } |
+        Where-Object { $_ -ne 'HOOK_NAME' } | Sort-Object -Unique
+    # Read the allow-list from its own declaration rather than scraping the
+    # whole file for quoted uppercase words, which swept up every unrelated
+    # string literal in the script.
+    $d275Src = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'stride-hook.ps1')
+    $d275Decl = [regex]::Match($d275Src, '(?s)\$script:StrideHookEnvAllow\s*=\s*@\((.*?)\)')
+    $d275Code = ([regex]::Matches($d275Decl.Groups[1].Value, "(?-i)'([A-Z_]+)'") |
+        ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    Assert-Eq "23c3: the ps1 allow-list declaration was found and parsed" `
+        'True' "$($d275Decl.Success -and $d275Code.Count -eq 17)"
+    $d275Missing = $d275Doc | Where-Object { $d275Code -notcontains $_ }
+    Assert-Eq "23c3: every documented hook-env name appears in the ps1 allow-list" `
+        '' (($d275Missing | Sort-Object) -join ',')
+} else {
+    Write-Host "  SKIP: 23c3: the D275 allow-list test needs bash and git" -ForegroundColor Yellow
+}
+
 # --- 23d: the flatten is RETAINED alongside the quoting ---
 # They close different halves and the task's pitfalls require both. Quoting
 # stops bash INTERPRETING a value; flattening stops it becoming a second

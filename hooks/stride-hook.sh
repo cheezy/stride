@@ -3683,11 +3683,39 @@ extract_response_payload() {
 #
 # NOTE for editors: the filter is a single-quoted shell string, so it cannot
 # contain an apostrophe. Comments belong here, not inside it.
+# (D275) The key filter is an ALLOW-list of the exact names the executor
+# documents, and it has to be: everything that gets past here is eval'd under
+# `set -a` by apply_env_lines AND appended to .stride-env-cache, which is
+# `.`-sourced under `set -a` on every later invocation. So a key that slips
+# through is not a one-off — it is durable until the next claim truncates the
+# cache, and it arrives from an API response body.
+#
+# The previous filter was a DENY-list naming HOOK_NAME and five client-owned
+# families, which is wrong by construction here because the dangerous set is
+# open-ended: PATH, BASH_ENV, IFS, ENV, SHELLOPTS, LD_PRELOAD, DYLD_*,
+# GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, GIT_CONFIG* and PS4 all passed it. A
+# server-supplied PATH re-points every later git, curl, date, jq and grep the
+# hook runs, in the SAME process, which is code execution on the developer
+# machine sourced from a response body.
+#
+# EXACT names, not prefixes. The server is the untrusted party, so `TASK_*`
+# would readmit exactly the client-owned families the old filter had to name
+# one by one; enumerating instead means those are excluded because they are
+# not on the list, rather than because someone remembered to exclude them.
+# HOOK_NAME is documented but deliberately absent: the executor routes on its
+# own value and sets it around the section run, and hook-execution.md records
+# that it is never taken from the server or written to the cache.
+#
+# The list is the Variable Inventory in skills/stride-workflow/hook-execution.md.
+# Adding a documented variable there means adding it here, and the suite has a
+# case that fails if the two drift.
+STRIDE_HOOK_ENV_ALLOW='["TASK_ID","TASK_IDENTIFIER","TASK_TITLE","TASK_DESCRIPTION","TASK_STATUS","TASK_COMPLEXITY","TASK_PRIORITY","TASK_NEEDS_REVIEW","BOARD_ID","BOARD_NAME","COLUMN_ID","COLUMN_NAME","AGENT_NAME","GOAL_ID","GOAL_IDENTIFIER","GOAL_TITLE","GOAL_DESCRIPTION"]'
+
 extract_hook_env() {
   local _payload="$1" _name="$2"
   [ "$HAS_JQ" = "true" ] || return 0
   [ -n "$_payload" ] || return 0
-  printf '%s' "$_payload" | jq -r --arg name "$_name" '
+  printf '%s' "$_payload" | jq -r --arg name "$_name" --argjson allow "$STRIDE_HOOK_ENV_ALLOW" '
     (
       (.hooks // []) + (if (has("hook") and (.hook | type == "object")) then [.hook] else [] end)
       | map(select(type == "object" and .name == $name))
@@ -3697,7 +3725,7 @@ extract_hook_env() {
     | if type == "object" then . else {} end
     | to_entries[]
     | select(.key | test("^[A-Za-z_][A-Za-z0-9_]*$"))
-    | select(.key != "HOOK_NAME" and (.key | startswith("TASK_BASE_REF") | not) and (.key | startswith("TASK_HEAD_REF") | not) and (.key | startswith("TASK_OWNED") | not) and (.key | startswith("TASK_NARROWED") | not) and (.key | startswith("TASK_BASE_AT") | not) and (.key | startswith("STRIDE_") | not))
+    | select(.key | IN($allow[]))
     | .key + "=" + (.value | tostring | @sh)
   ' 2>/dev/null || true
 }

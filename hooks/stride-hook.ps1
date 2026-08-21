@@ -2023,14 +2023,13 @@ if ($HookName -eq 'before_doing') {
 # enumeration it depends on, rather than hidden in a helper.
 #
 # SCOPE OF THE CLAIM, stated exactly: this closes the route THROUGH THE CACHE.
-# It does NOT make BASH_ENV unreachable in general, and a reader must not
-# conclude that it does. Get-HookEnvFromPayload fences only HOOK_NAME, the five
-# record families and STRIDE_*, so any other server-supplied hook-env key —
-# BASH_ENV, PATH and GIT_SSH_COMMAND included — is still accepted and exported
-# straight into the Process environment by Set-HookEnv, bypassing this loader
-# entirely. That gap is pre-existing, identical in the bash twin, and already
-# filed as D275 with a recorded decision to defer; it is named here rather than
-# fixed so this comment does not read as a completeness claim it cannot support.
+# The other route — a server-supplied key exported straight into the Process
+# environment by Set-HookEnv, bypassing this loader — was the gap this comment
+# used to name as deferred. D275 has since closed it: Get-HookEnvFromPayload is
+# now an allow-list of the documented names, so BASH_ENV, PATH and
+# GIT_SSH_COMMAND no longer reach Set-HookEnv at all. The two gates are still
+# separate and each is still worth having, because they guard different inputs
+# — this one the cache file on disk, that one the response body.
 #
 # The client-owned TASK_BASE_REF* / TASK_HEAD_REF* / TASK_OWNED* /
 # TASK_NARROWED* / TASK_BASE_AT* families ARE allowed, deliberately. They are
@@ -2225,6 +2224,16 @@ function Get-ResponsePayload {
 # line-based. HOOK_NAME is excluded (the executor routes on its own value; a
 # cached HOOK_NAME line would misroute later invocations). TASK_BASE_REF is
 # excluded (client-only diff anchor owned by the claim branch).
+# (D275) The documented hook-env names, from the Variable Inventory in
+# skills/stride-workflow/hook-execution.md. Kept in lockstep with the bash
+# twin's STRIDE_HOOK_ENV_ALLOW; the two lists must hold the same 17 names.
+$script:StrideHookEnvAllow = @(
+    'TASK_ID', 'TASK_IDENTIFIER', 'TASK_TITLE', 'TASK_DESCRIPTION',
+    'TASK_STATUS', 'TASK_COMPLEXITY', 'TASK_PRIORITY', 'TASK_NEEDS_REVIEW',
+    'BOARD_ID', 'BOARD_NAME', 'COLUMN_ID', 'COLUMN_NAME', 'AGENT_NAME',
+    'GOAL_ID', 'GOAL_IDENTIFIER', 'GOAL_TITLE', 'GOAL_DESCRIPTION'
+)
+
 function Get-HookEnvFromPayload {
     param($Payload, [string]$HookEntryName)
 
@@ -2297,7 +2306,27 @@ function Get-HookEnvFromPayload {
             # its own sake: the attribution engine reads head records to bound
             # every window it classifies, so an unfenced one would decide which
             # commits this task is credited with.
-            if ($key -eq 'HOOK_NAME' -or $key -like 'TASK_BASE_REF*' -or $key -like 'TASK_HEAD_REF*' -or $key -like 'TASK_OWNED*' -or $key -like 'TASK_NARROWED*' -or $key -like 'TASK_BASE_AT*' -or $key -like 'STRIDE_*') { continue }
+            # (D275) ALLOW-list, replacing the deny-list that stood here. What
+            # gets past this point is exported straight into the Process
+            # environment by Set-HookEnv, so the dangerous set is open-ended —
+            # BASH_ENV, PATH, GIT_SSH_COMMAND and the rest all passed the old
+            # filter. Enumerating the documented names instead means a key the
+            # server invents is excluded because it is absent from the list,
+            # not because someone remembered to name it.
+            #
+            # Case-INSENSITIVE on purpose, and this is the half that has no
+            # bash equivalent: Windows environment variable names are
+            # case-insensitive, so 'Path' and 'PATH' are the same variable, and
+            # a case-sensitive test would admit 'pAtH' as an unrecognised key
+            # and then have it collide with PATH on assignment. -contains on a
+            # string array is case-insensitive by default, which is the
+            # behaviour wanted here rather than an oversight — the same reason
+            # the deny-list it replaces used -like.
+            #
+            # HOOK_NAME stays out: the executor owns it and sets it around the
+            # section run. The five client-owned record families and STRIDE_*
+            # need no clause now — they are simply not on the list.
+            if ($script:StrideHookEnvAllow -notcontains $key) { continue }
             $envMap[$key] = [string]$prop.Value
         }
         break

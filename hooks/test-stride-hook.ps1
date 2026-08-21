@@ -5220,7 +5220,8 @@ $g22Want = @(
     'Get-TaskBaseRefFor', 'Get-TaskHeadRefFor', 'Set-TaskRecord', 'Set-TaskOwnedRecord',
     'Set-TaskNarrowedRecord', 'Set-TaskHeadRefRecord', 'Set-TaskBaseAtRecord',
     'Write-EnvCache', 'ConvertTo-PrintableForLog',
-    'ConvertTo-CacheByteString', 'ConvertFrom-CacheByteString'
+    'ConvertTo-CacheByteString', 'ConvertFrom-CacheByteString',
+    'Get-EnvCacheRawByte', 'Test-EnvCacheUnchanged'
 )
 $g22Ast = [System.Management.Automation.Language.Parser]::ParseFile($HookScript, [ref]$null, [ref]$null)
 $g22Fns = $g22Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
@@ -6030,6 +6031,67 @@ foreach ($w in @(
     Assert-Eq "22r: $($w.Name) has exactly $($w.Expect) production call site(s)" `
         "$($w.Expect)" "$($hits - 1)"
 }
+
+# --- 22t (D282): a concurrent write is not clobbered by a record write ---
+# W2102 gave the record writers their first production call sites, all inside
+# Invoke-FinalizeAfterDoing, which runs twice per completion and holds a read
+# across Build-ChangedFilesSnapshot — a git shell-out. A claim from a second
+# agent in the same checkout landing in that window used to be lost wholesale,
+# because Set-TaskRecord read the whole cache, filtered one key and rewrote the
+# file with no check that anything had moved underneath it.
+#
+# The interleave is staged deterministically rather than raced: a real
+# concurrent writer would make this test timing-dependent and flaky, and what
+# needs proving is the GUARD, not the scheduler. Each case captures the
+# fingerprint a record write would have taken, mutates the cache the way the
+# other process would, and then completes the write.
+$null = New-RecordFixture -Name 'concurrent'
+
+# 22t-a: the guard fires. A write staged against a stale read must refuse.
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_OWNED_9='mine'`n", (New-Object System.Text.UTF8Encoding($false)))
+$g22Before = Get-EnvCacheRawByte
+Assert-Eq "22t-a (D282): the fingerprint was taken and the cache is readable" "True" `
+    "$($null -ne $g22Before -and -not ($g22Before -is [string]))"
+# The other process commits its claim between our read and our rename.
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_ID='999'`nTASK_IDENTIFIER='W999'`n", (New-Object System.Text.UTF8Encoding($false)))
+$g22Rc = Write-EnvCache -Lines @("TASK_OWNED_9='ours'") -ExpectBytes $g22Before -CompareAndSwap
+Assert-Eq "22t-a (D282): a write staged against a stale read is refused" "changed" "$g22Rc"
+$g22AfterA = (Get-EnvCacheLine) -join '|'
+Assert-Contains "22t-a (D282): and the concurrent claim's record survives untouched" "TASK_ID='999'" $g22AfterA
+if ($g22AfterA -match "TASK_OWNED_9='ours'") {
+    Write-Host "  FAIL: 22t-a (D282): the refused write reached the cache anyway" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 22t-a (D282): and the refused write did not reach the cache" -ForegroundColor Green
+    $script:PASS++
+}
+
+# 22t-b: BOTH survive. This is the acceptance criterion in one case — the
+# concurrent claim's records AND the record write must both be present once
+# Set-TaskRecord retries, because each attempt re-reads and re-applies the
+# delete-and-append against the OTHER writer's content rather than our stale
+# snapshot. A retry that replayed the stale snapshot would pass 22t-a and still
+# lose the claim here.
+$null = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
+$g22AfterB = (Get-EnvCacheLine) -join '|'
+Assert-Contains "22t-b (D282): after the record write, the concurrent claim's TASK_ID survives" `
+    "TASK_ID='999'" $g22AfterB
+Assert-Contains "22t-b (D282): and its TASK_IDENTIFIER survives too" `
+    "TASK_IDENTIFIER='W999'" $g22AfterB
+Assert-Eq "22t-b (D282): and the record write landed alongside it" "yes" `
+    "$((Get-TaskNarrowedRecord -TaskId '9').Value)"
+
+# 22t-c: an unreadable cache is refused, not treated as absent. Returning the
+# absent answer for a locked file would let a compare-and-swap succeed against
+# "expected absent" and wipe a cache another process is holding — which is the
+# same wholesale loss by a different route.
+$g22Unreadable = Get-EnvCacheRawByte
+Assert-Eq "22t-c (D282): a readable cache does not report the unreadable sentinel" "False" `
+    "$($g22Unreadable -is [string])"
+Assert-Eq "22t-c (D282): expected-absent does not match a present cache" "False" `
+    "$(Test-EnvCacheUnchanged -Expected $null -Actual $g22Unreadable)"
+Assert-Eq "22t-c (D282): and the unreadable sentinel never compares equal" "False" `
+    "$(Test-EnvCacheUnchanged -Expected 'unreadable' -Actual $g22Unreadable)"
 
 # --- 22s: the D274 defect END TO END, claim then completion ---
 # testing_strategy.integration_tests[0] - "a completion with 22 open windows

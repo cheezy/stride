@@ -147,8 +147,39 @@ $script:StrideOpenWindowSweepAt = 20
 # resolve to no-change, and each is recorded at its site in stride-hook.sh rather
 # than left as an absence a later reader would have to guess about.
 
+# (D282) The cache's raw bytes, or $null when it does not exist. This is the
+# fingerprint the compare-and-swap below is taken against: comparing CONTENT
+# rather than a timestamp, because the writers stage-and-rename within the same
+# second routinely and a coarse mtime would miss it. The cache is small — the
+# comparison is cheaper than the write it guards.
+function Get-EnvCacheRawByte {
+    try {
+        $p = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EnvCache)
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $null }
+        return [System.IO.File]::ReadAllBytes($p)
+    } catch {
+        # Unreadable is NOT the same as absent, and must not be reported as it:
+        # returning $null here would let a swap succeed against "expected
+        # absent" when the file is simply locked by another process.
+        return 'unreadable'
+    }
+}
+
+# (D282) Byte equality for the compare-and-swap. $null means "expected absent".
+function Test-EnvCacheUnchanged {
+    param($Expected, $Actual)
+    if ($Expected -is [string] -or $Actual -is [string]) { return $false }  # 'unreadable' sentinel
+    if ($null -eq $Expected -and $null -eq $Actual) { return $true }
+    if ($null -eq $Expected -or $null -eq $Actual) { return $false }
+    if ($Expected.Length -ne $Actual.Length) { return $false }
+    for ($i = 0; $i -lt $Expected.Length; $i++) {
+        if ($Expected[$i] -ne $Actual[$i]) { return $false }
+    }
+    return $true
+}
+
 function Write-EnvCache {
-    param([string[]]$Lines)
+    param([string[]]$Lines, $ExpectBytes, [switch]$CompareAndSwap)
     $stageDir = Join-Path $ProjectDir '.stride'
     $tmp = ''
     try {
@@ -206,6 +237,29 @@ function Write-EnvCache {
         $tmpFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($tmp)
         # (D281) ISO-8859-1, matching Get-EnvCacheLine — see THE STORAGE PROJECTION.
         [System.IO.File]::WriteAllText($tmpFull, $joined, [System.Text.Encoding]::GetEncoding(28591))
+        # (D282) COMPARE AND SWAP, immediately before the rename and after the
+        # temp is fully staged, so the window between the check and the commit
+        # is one Move-Item rather than a read, a filter and a file write.
+        #
+        # This narrows the race; it does not make the write atomic, and saying
+        # so plainly matters more than the fix does. A writer landing between
+        # this check and the Move-Item is still lost. What it removes is the
+        # wide window W2102 opened, where Invoke-FinalizeAfterDoing holds a read
+        # across Build-ChangedFilesSnapshot — a git shell-out — and then commits
+        # against it.
+        #
+        # A lock was the alternative and was rejected for this task: FileShare
+        # on the ps1 side cannot coordinate with a concurrent BASH writer in a
+        # mixed checkout, which is the case that motivated the defect, and 5.1's
+        # Move-Item -Force is a non-atomic delete-then-move, so a lock design
+        # risks introducing an absent-cache window that does not exist today.
+        if ($CompareAndSwap) {
+            $nowBytes = Get-EnvCacheRawByte
+            if (-not (Test-EnvCacheUnchanged -Expected $ExpectBytes -Actual $nowBytes)) {
+                if ($tmp -and (Test-Path $tmp)) { Remove-Item -Force -LiteralPath $tmp -ErrorAction SilentlyContinue }
+                return 'changed'
+            }
+        }
         Move-Item -LiteralPath $tmp -Destination $EnvCache -Force -ErrorAction Stop
         return $true
     } catch {
@@ -692,35 +746,67 @@ function Set-TaskRecord {
         [Console]::Error.WriteLine("stride-hook: refusing to record $Key " + [char]0x2014 + " the value contains a newline or NUL, which cannot survive the cache's one-line-per-record shape.")
         return $false
     }
-    $kept = @()
-    if (Test-Path $EnvCache) {
-        try {
-            # (W2101) Read through the SAME byte-faithful splitter the reader
-            # uses. Get-Content here would re-terminate a CRLF line as LF and
-            # split a CR-bearing value, so a write would change what the reader
-            # — and bash — consider a record. Dropping the key is bash's
-            # `grep -v '^KEY='`: prefix match, so a CRLF-terminated line for
-            # this key goes too, exactly as it does there.
-            # (D280 r3) RECORD-aware, not line-aware: dropping this key must
-            # not dismember a multi-line record belonging to another key.
-            $recs = Split-EnvCacheRecord
-            if (-not $recs.Ok) { throw 'env cache ends inside a quoted value' }
-            $kept = @($recs.Records |
-                Where-Object { $_ -notmatch ('^' + [regex]::Escape($Key) + '=') })
-        } catch {
-            # The cache EXISTS but could not be read — a sharing violation while
-            # another process holds it is far likelier on the Windows target than
-            # on POSIX. bash's `grep -v ... || true` degrades to an empty set
-            # here, but bash APPENDS while this writer REPLACES the file, so the
-            # same degradation would silently drop every other record. Refuse
-            # instead: the caller's contract is best-effort, and keeping the
-            # previous cache intact is what Write-EnvCache promises everywhere.
+    # (D282) Read, filter and commit under a compare-and-swap, retried a bounded
+    # number of times. W2102 gave these writers production call sites inside
+    # Invoke-FinalizeAfterDoing, which runs twice per completion and spans the
+    # whole after_doing gate — minutes, with a git shell-out in the middle — so
+    # a claim from a second agent in the same checkout can land between a read
+    # and its rename and be lost wholesale. Before W2102 the writers had no
+    # call sites and the window was unreachable.
+    #
+    # Each attempt re-reads, so a retry re-applies the delete-and-append against
+    # the CONCURRENT writer's content rather than against our stale snapshot.
+    # That is what makes the loop a fix and not just a repeat.
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        $before = Get-EnvCacheRawByte
+        if ($before -is [string]) {
+            # 'unreadable' — the file exists but could not be read. Refuse, do
+            # not treat it as absent: bash's `grep -v ... || true` degrades to
+            # an empty set here, and since BOTH executors rewrite the whole file
+            # (see the D282 note in Invoke-FinalizeAfterDoing — the older claim
+            # that bash appends is false and was retracted), that degradation
+            # would silently drop every other record on either side.
             [Console]::Error.WriteLine("stride-hook: could not read the env cache to record $Key; leaving the cache untouched")
             return $false
         }
+        $kept = @()
+        if ($null -ne $before) {
+            try {
+                # (W2101) Read through the SAME byte-faithful splitter the reader
+                # uses. Get-Content here would re-terminate a CRLF line as LF and
+                # split a CR-bearing value, so a write would change what the reader
+                # — and bash — consider a record. Dropping the key is bash's
+                # `grep -v '^KEY='`: prefix match, so a CRLF-terminated line for
+                # this key goes too, exactly as it does there.
+                # (D280 r3) RECORD-aware, not line-aware: dropping this key must
+                # not dismember a multi-line record belonging to another key.
+                # The retention rule still governs: records are re-emitted through
+                # the splitter, never copied as raw lines.
+                $recs = Split-EnvCacheRecord
+                if (-not $recs.Ok) { throw 'env cache ends inside a quoted value' }
+                $kept = @($recs.Records |
+                    Where-Object { $_ -notmatch ('^' + [regex]::Escape($Key) + '=') })
+            } catch {
+                [Console]::Error.WriteLine("stride-hook: could not read the env cache to record $Key; leaving the cache untouched")
+                return $false
+            }
+        }
+        $new = @($kept) + @($Key + '=' + (ConvertTo-ShSingleQuoted -Value $Value))
+        $rc = Write-EnvCache -Lines $new -ExpectBytes $before -CompareAndSwap
+        if ($rc -is [string] -and $rc -eq 'changed') {
+            if ($attempt -ge 3) {
+                # Refuse rather than clobber. Three collisions is not contention,
+                # it is a writer we cannot keep up with, and overwriting its work
+                # is the exact loss this defect is about.
+                [Console]::Error.WriteLine("stride-hook: the env cache changed under $Key on every attempt; leaving the concurrent write in place")
+                return $false
+            }
+            continue
+        }
+        return [bool]$rc
     }
-    $new = @($kept) + @($Key + '=' + (ConvertTo-ShSingleQuoted -Value $Value))
-    return [bool](Write-EnvCache -Lines $new)
 }
 
 # The four writers. Guards mirror bash exactly, including which families have

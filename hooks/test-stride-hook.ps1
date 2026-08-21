@@ -6186,7 +6186,14 @@ Assert-Eq "22t-d2 (D282): a directory at the cache path reads as unreadable, not
 $g22DirRc = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
 Assert-Eq "22t-d2 (D282): and the record write is refused rather than reporting success" "False" "$g22DirRc"
 $g22Stranded = @(Get-ChildItem -LiteralPath $script:EnvCache -Force -ErrorAction SilentlyContinue).Count
-Assert-Eq "22t-d2 (D282): and nothing was stranded inside the directory" "0" "$g22Stranded"
+# Nothing is stranded — but note WHERE that is decided, because the wording
+# could otherwise be read as a claim about Move-Item. Set-TaskRecord refuses at
+# the sentinel and returns before Write-EnvCache is ever called, so no temp is
+# staged and there is nothing to relocate. Move-Item itself is still unguarded:
+# calling Write-EnvCache WITHOUT -CompareAndSwap over a directory returns $true
+# and strands the staged cache, identically before and after D282. That is
+# pre-existing on the non-CAS path, is NOT fixed here, and is recorded on D289.
+Assert-Eq "22t-d2 (D282): and nothing was stranded, because the refusal precedes any staging" "0" "$g22Stranded"
 Remove-Item -LiteralPath $script:EnvCache -Recurse -Force -ErrorAction SilentlyContinue
 
 # 22t-e: three collisions REFUSE rather than clobber. Nothing else drives the

@@ -2067,6 +2067,272 @@ NEW
     FAIL=$((FAIL + 1))
   fi
   rm -rf "$EXCL4_DIR"
+
+  # ----------------------------------------------------------
+  # (D278) Non-ASCII paths. git quotes any path holding a byte >= 0x80 in its
+  # non--z output (core.quotePath, default true), so the pre-fix code wrote the
+  # octal-escaped display spelling into the snapshot AND fed it back to
+  # `git diff -- <path>`, where it matches nothing: fabricated path, EMPTY
+  # diff, 100% of that file's content lost. These cases pin the -z contract.
+  # They assert a NON-EMPTY diff body, not just the path — an assertion on the
+  # path alone passes on a half-fixed implementation.
+  # ----------------------------------------------------------
+
+  # 7x: tracked file with a non-ASCII NAME — real path, real diff body
+  NA1_DIR=$(mktemp -d)
+  NA1_OUTPUT=$(
+    cd "$NA1_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    printf 'v1\n' > "док.txt"
+    git add -A > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    printf 'v2-changed\n' > "док.txt"
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  assert_eq "D278: non-ASCII filename appears under its real repo-relative path" \
+    "док.txt" \
+    "$(echo "$NA1_OUTPUT" | jq -r '.[0].path')"
+  assert_contains "D278: non-ASCII filename carries a real diff body" \
+    "+v2-changed" \
+    "$(echo "$NA1_OUTPUT" | jq -r '.[0].diff')"
+  rm -rf "$NA1_DIR"
+
+  # 7y: ASCII file under a non-ASCII DIRECTORY component — one Cyrillic folder
+  # otherwise loses every file beneath it
+  NA2_DIR=$(mktemp -d)
+  NA2_OUTPUT=$(
+    cd "$NA2_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    mkdir -p "док"
+    printf 'v1\n' > "док/plain.txt"
+    git add -A > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    printf 'v2-under-dir\n' > "док/plain.txt"
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  assert_eq "D278: ASCII file under a non-ASCII directory keeps its real path" \
+    "док/plain.txt" \
+    "$(echo "$NA2_OUTPUT" | jq -r '.[0].path')"
+  assert_contains "D278: ASCII file under a non-ASCII directory carries a real diff body" \
+    "+v2-under-dir" \
+    "$(echo "$NA2_OUTPUT" | jq -r '.[0].diff')"
+  rm -rf "$NA2_DIR"
+
+  # 7z: UNTRACKED file with a non-ASCII name is captured as a new-file patch
+  NA3_DIR=$(mktemp -d)
+  NA3_OUTPUT=$(
+    cd "$NA3_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    printf 'seed\n' > seed.txt
+    git add -A > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    printf 'brand-new\n' > "файл.txt"
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  assert_eq "D278: untracked non-ASCII file appears under its real path" \
+    "файл.txt" \
+    "$(echo "$NA3_OUTPUT" | jq -r '.[] | select(.path == "файл.txt") | .path')"
+  assert_contains "D278: untracked non-ASCII file carries its new-file patch body" \
+    "+brand-new" \
+    "$(echo "$NA3_OUTPUT" | jq -r '.[] | select(.path == "файл.txt") | .diff')"
+  rm -rf "$NA3_DIR"
+
+  # 7aa: BINARY under a non-ASCII path gets the placeholder, never a raw
+  # "Binary files ... differ" body
+  NA4_DIR=$(mktemp -d)
+  NA4_OUTPUT=$(
+    cd "$NA4_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    mkdir -p "док"
+    printf 'AAA\000\001\002bin' > "док/bin.dat"
+    git add -A > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    printf 'BBB\000\001\002bin-changed\377' > "док/bin.dat"
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  NA4_DIFF=$(echo "$NA4_OUTPUT" | jq -r '.[] | select(.path == "док/bin.dat") | .diff')
+  assert_eq "D278: binary under a non-ASCII path gets the binary placeholder" \
+    "[binary file — no diff captured]" \
+    "$NA4_DIFF"
+  rm -rf "$NA4_DIR"
+
+  # 7bb: RENAMED binary under a non-ASCII directory. `--numstat -z` emits THREE
+  # NUL tokens for a rename ("<a>TAB<d>TAB", old path, new path) where an
+  # ordinary entry is one — the pre-fix fixed-three-field TAB scan could never
+  # match a renamed file, so a renamed binary escaped the placeholder and
+  # leaked a raw "Binary files ... differ" body.
+  NA5_DIR=$(mktemp -d)
+  NA5_OUTPUT=$(
+    cd "$NA5_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    mkdir -p "док"
+    printf 'AAA\000\011bin\377' > "док/bin2.dat"
+    git add -A > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    git mv "док/bin2.dat" "док/бинарный.dat" > /dev/null 2>&1
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  NA5_DIFF=$(echo "$NA5_OUTPUT" | jq -r '.[] | select(.path == "док/бинарный.dat") | .diff')
+  assert_eq "D278: renamed binary under a non-ASCII directory gets the placeholder" \
+    "[binary file — no diff captured]" \
+    "$NA5_DIFF"
+  if echo "$NA5_DIFF" | grep -qF "Binary files"; then
+    echo -e "  ${RED}FAIL${RESET}: D278: renamed binary leaked a raw Binary-files body"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: D278: renamed binary did not leak a raw Binary-files body"
+    PASS=$((PASS + 1))
+  fi
+  rm -rf "$NA5_DIR"
+
+  # 7cc: core.quotePath=false must keep working. It sidesteps the defect on its
+  # own, so this is the non-regression guard for users who already set it —
+  # the fix must not depend on the default being in force.
+  NA6_DIR=$(mktemp -d)
+  NA6_OUTPUT=$(
+    cd "$NA6_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    git config core.quotePath false
+    mkdir -p "док"
+    printf 'v1\n' > "док/plain.txt"
+    git add -A > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    printf 'v2-quotepath-off\n' > "док/plain.txt"
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  assert_eq "D278: core.quotePath=false still yields the real path" \
+    "док/plain.txt" \
+    "$(echo "$NA6_OUTPUT" | jq -r '.[0].path')"
+  assert_contains "D278: core.quotePath=false still yields a real diff body" \
+    "+v2-quotepath-off" \
+    "$(echo "$NA6_OUTPUT" | jq -r '.[0].diff')"
+  rm -rf "$NA6_DIR"
+
+  # 7dd: the baseline <-> capture interaction on a non-ASCII path. This is the
+  # reason record_dirty_baseline was converted to -z alongside the capture:
+  # capture_changed_files string-compares each baseline path against its own
+  # now-RAW $file, so if the baseline still recorded the QUOTED spelling the two
+  # could never match and the W1457 pre-existing-edit filter would go silently
+  # inert for exactly these paths. Fixing the capture alone would have caused
+  # that. Asserting the baseline's spelling AND both filter directions is what
+  # stops a future edit re-opening it — Group 18 covers this only for ASCII.
+  NA7_DIR=$(mktemp -d)
+  (
+    cd "$NA7_DIR" || exit 1
+    git init -q .
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    mkdir -p "док"
+    printf 'one\n' > "док/pre.txt"
+    printf 'keep\n' > "док/work.txt"
+    git add -A > /dev/null
+    git commit -q -m "initial"
+    git rev-parse HEAD > base.ref
+
+    # Pre-claim: the non-ASCII path is already dirty.
+    printf 'pre-existing edit\n' >> "док/pre.txt"
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    PROJECT_DIR="$PWD"
+    record_dirty_baseline "$(cat base.ref)"
+    cp .stride-dirty-baseline baseline.copy 2>/dev/null || true
+
+    # Task work touches a DIFFERENT non-ASCII path.
+    printf 'task edit\n' >> "док/work.txt"
+    capture_changed_files "$(cat base.ref)" > snap1.json 2>/dev/null
+
+    # Now the claim-dirty path is touched again during the task.
+    printf 'task also touched\n' >> "док/pre.txt"
+    capture_changed_files "$(cat base.ref)" > snap2.json 2>/dev/null
+  )
+  NA7_BASELINE=$(cat "$NA7_DIR/baseline.copy" 2>/dev/null)
+  NA7_SNAP1=$(jq -r '.[].path' "$NA7_DIR/snap1.json" 2>/dev/null)
+  NA7_SNAP2=$(jq -r '.[].path' "$NA7_DIR/snap2.json" 2>/dev/null)
+  assert_contains "D278: baseline records a non-ASCII path in its RAW spelling" \
+    "док/pre.txt" "$NA7_BASELINE"
+  if echo "$NA7_BASELINE" | grep -qF '\320'; then
+    echo -e "  ${RED}FAIL${RESET}: D278: baseline recorded the octal-quoted spelling"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: D278: baseline did not record the octal-quoted spelling"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "D278: task-modified non-ASCII path appears in the snapshot" \
+    "док/work.txt" "$NA7_SNAP1"
+  if echo "$NA7_SNAP1" | grep -qx "док/pre.txt"; then
+    echo -e "  ${RED}FAIL${RESET}: D278: claim-dirty non-ASCII path must NOT appear (W1457 filter inert)"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: D278: claim-dirty non-ASCII path excluded by the W1457 filter"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "D278: claim-dirty non-ASCII path RE-modified during the task IS included" \
+    "док/pre.txt" "$NA7_SNAP2"
+  rm -rf "$NA7_DIR"
+
+  # 7ee: TEXT rename under a non-ASCII directory. 7bb covers the binary rename
+  # (the placeholder branch); this covers the ordinary shape, which exercises
+  # the per-file `git diff <base> -- <file>` body — the call that returned
+  # EMPTY for a quoted path and is the defect's second half.
+  NA8_DIR=$(mktemp -d)
+  NA8_OUTPUT=$(
+    cd "$NA8_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    mkdir -p "док"
+    printf 'renamed-content\n' > "док/ren.txt"
+    git add -A > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    git mv "док/ren.txt" "док/переименован.txt" > /dev/null 2>&1
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) 2>/dev/null
+  NA8_DIFF=$(echo "$NA8_OUTPUT" | jq -r '.[] | select(.path == "док/переименован.txt") | .diff')
+  assert_eq "D278: text rename under a non-ASCII directory lands under its new real path" \
+    "док/переименован.txt" \
+    "$(echo "$NA8_OUTPUT" | jq -r '.[] | select(.path == "док/переименован.txt") | .path')"
+  if [ -n "$NA8_DIFF" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: D278: text rename under a non-ASCII directory carries a non-empty diff body"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: D278: text rename under a non-ASCII directory has an EMPTY diff body"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$NA8_DIR"
 fi
 
 # ============================================================

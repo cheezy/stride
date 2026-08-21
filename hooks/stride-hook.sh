@@ -195,26 +195,59 @@ capture_changed_files() {
     fi
   fi
 
+  # (D278) Every path listing below uses -z and is read NUL-delimited into a
+  # bash array. git quotes any path holding a byte >= 0x80 (also TAB, newline,
+  # backslash, double quote) in its non--z output, under core.quotePath, which
+  # defaults to true — so a Cyrillic path arrived as the literal 14-character
+  # string "\320\264\320\276\320\272/plain.txt". That spelling was written
+  # into the snapshot AND fed back to `git diff -- <path>`, which matches
+  # nothing because the quoted form is not a valid pathspec: the entry carried
+  # a fabricated path AND an empty diff, losing 100% of that file's content.
+  # -z emits the raw bytes git accepts as a pathspec, fixing both halves.
+  #
+  # A scalar `$(...)` capture CANNOT hold a NUL-delimited list — bash drops the
+  # NULs and the paths run together into one string. Hence the
+  # `while IFS= read -r -d ''` array loops throughout.
+  #
+  # Arrays are also why the dedupe/exclusion pass below is hand-rolled rather
+  # than awk: this hook runs on macOS's BSD awk, which does NOT honour
+  # RS="\0" (verified — it stops at the first NUL), so the previous
+  # `awk 'NF && !seen[$0]++'` has no NUL-safe equivalent here.
+  #
+  # Do NOT "fix" this by setting core.quotePath: it is user config the hook
+  # must never mutate.
+
   # Tracked files that differ between base and the working tree (committed,
   # staged, and unstaged changes all surface in a single `git diff <base>`).
-  local tracked_files
+  local -a tracked_files=()
+  local _cf_tf
   if [ -n "$own_ranges" ]; then
     # Union of every attributed range plus the uncommitted working tree.
-    tracked_files=$( {
-      expand_own_ranges "$own_ranges" "" diff --name-only
-      git diff --name-only HEAD 2>/dev/null || true
-    } | awk 'NF && !seen[$0]++' )
+    while IFS= read -r -d '' _cf_tf; do
+      [ -n "$_cf_tf" ] && tracked_files+=("$_cf_tf")
+    done < <( {
+      expand_own_ranges "$own_ranges" "" diff --name-only -z
+      git diff --name-only -z HEAD 2>/dev/null || true
+    } )
   else
-    tracked_files=$(git diff --name-only "$base" 2>/dev/null || printf '')
+    while IFS= read -r -d '' _cf_tf; do
+      [ -n "$_cf_tf" ] && tracked_files+=("$_cf_tf")
+    done < <(git diff --name-only -z "$base" 2>/dev/null || true)
   fi
 
   # Untracked files not covered by .gitignore.
-  local untracked_files
-  untracked_files=$(git ls-files --others --exclude-standard 2>/dev/null || printf '')
+  local -a untracked_files=()
+  local _cf_uf
+  while IFS= read -r -d '' _cf_uf; do
+    [ -n "$_cf_uf" ] && untracked_files+=("$_cf_uf")
+  done < <(git ls-files --others --exclude-standard -z 2>/dev/null || true)
 
   # Combine; dedupe by path. Untracked entries should not overlap tracked
-  # (git would report a path as one OR the other, not both), but the awk
-  # `!seen` guard makes a single-entry-per-path invariant explicit.
+  # (git would report a path as one OR the other, not both), but the
+  # `_cf_seen` membership check below makes the single-entry-per-path
+  # invariant explicit. (D278 replaced the awk `!seen[$0]++` pass this
+  # comment used to describe — see the -z note above for why awk cannot do
+  # the job on a NUL-delimited list.)
   #
   # Exclude the hook's OWN bookkeeping artifacts (D67): the upload-state file
   # and the on-disk snapshot live at the project/repo root and otherwise pass
@@ -233,11 +266,27 @@ capture_changed_files() {
   # .last-api-response.json capture) that are gitignored in real projects but
   # must never appear in a task's changed_files even in repos that forgot to
   # ignore them.
-  local all_files
-  all_files=$(printf '%s\n%s\n' "$tracked_files" "$untracked_files" \
-    | awk 'NF && $0 != ".stride-diff-upload-state" && $0 != ".stride-changed-files.json" && $0 != ".stride-dirty-baseline" && $0 != ".stride.md" && $0 != ".stride_auth.md" && $0 !~ /^\.stride\// && !seen[$0]++')
+  local -a all_files=()
+  local _cf_seen=$'\n'
+  local _cf_cand
+  for _cf_cand in ${tracked_files[@]+"${tracked_files[@]}"} ${untracked_files[@]+"${untracked_files[@]}"}; do
+    [ -n "$_cf_cand" ] || continue
+    case "$_cf_cand" in
+      .stride-diff-upload-state|.stride-changed-files.json|.stride-dirty-baseline|.stride.md|.stride_auth.md) continue ;;
+      .stride/*) continue ;;
+    esac
+    # Dedupe. The membership index is a newline-delimited string because bash
+    # 3.2 has no associative arrays and no variable can hold a NUL. A path
+    # containing a literal newline therefore dedupes imprecisely — the same
+    # limit the awk pass had, and the entry is still captured correctly.
+    case "$_cf_seen" in
+      *$'\n'"$_cf_cand"$'\n'*) continue ;;
+    esac
+    _cf_seen="${_cf_seen}${_cf_cand}"$'\n'
+    all_files+=("$_cf_cand")
+  done
 
-  if [ -z "$all_files" ]; then
+  if [ "${#all_files[@]}" -eq 0 ]; then
     printf '[]\n'
     return 0
   fi
@@ -245,15 +294,45 @@ capture_changed_files() {
   # numstat for tracked changes — used to detect binaries among tracked files
   # via the `- - <path>` marker. Untracked files are not in numstat; their
   # binary detection runs separately on file contents.
-  local numstat
-  if [ -n "$own_ranges" ]; then
-    numstat=$( {
-      expand_own_ranges "$own_ranges" "" diff --numstat
-      git diff --numstat HEAD 2>/dev/null || true
-    } )
-  else
-    numstat=$(git diff --numstat "$base" 2>/dev/null || printf '')
-  fi
+  # (D278) Binary detection reads `--numstat -z` and collects the set of binary
+  # paths up front. The -z form is not just the non--z form with NULs: for a
+  # RENAME git emits THREE NUL tokens — "<added>TAB<deleted>TAB" (no path), then
+  # the old path, then the new path — where an ordinary entry is a single
+  # "<added>TAB<deleted>TAB<path>" token. The previous fixed-three-field TAB scan
+  # could never match a renamed file, so a renamed BINARY escaped the
+  # placeholder and leaked a raw "Binary files ... differ" body. This walk
+  # advances variably and records the NEW path, which is the one the snapshot
+  # lists. (Ported from stride-hook.ps1 Get-NumstatBinarySet.)
+  local -a binary_paths=()
+  local _cf_ns _cf_ns_added _cf_ns_rest _cf_ns_deleted _cf_ns_path
+  local _cf_ns_isbin=0 _cf_ns_state=0
+  while IFS= read -r -d '' _cf_ns; do
+    case "$_cf_ns_state" in
+      1) _cf_ns_state=2; continue ;;
+      2) _cf_ns_state=0
+         [ "$_cf_ns_isbin" -eq 1 ] && binary_paths+=("$_cf_ns")
+         continue ;;
+    esac
+    _cf_ns_added="${_cf_ns%%	*}"
+    _cf_ns_rest="${_cf_ns#*	}"
+    _cf_ns_deleted="${_cf_ns_rest%%	*}"
+    _cf_ns_path="${_cf_ns_rest#*	}"
+    if [ "$_cf_ns_added" = "-" ] && [ "$_cf_ns_deleted" = "-" ]; then
+      _cf_ns_isbin=1
+    else
+      _cf_ns_isbin=0
+    fi
+    if [ -z "$_cf_ns_path" ]; then
+      _cf_ns_state=1
+    elif [ "$_cf_ns_isbin" -eq 1 ]; then
+      binary_paths+=("$_cf_ns_path")
+    fi
+  done < <( if [ -n "$own_ranges" ]; then
+      expand_own_ranges "$own_ranges" "" diff --numstat -z
+      git diff --numstat -z HEAD 2>/dev/null || true
+    else
+      git diff --numstat -z "$base" 2>/dev/null || true
+    fi )
 
   local jsonl_file
   jsonl_file=$(mktemp)
@@ -272,17 +351,18 @@ capture_changed_files() {
   # migration exactly this way: they were dirty at claim time, the auto-commit
   # committed that same content, and the unchanged-since-claim blob hash then
   # excluded them from the snapshot.
-  local committed_range
-  if [ -n "$own_ranges" ]; then
-    committed_range=$( {
-      expand_own_ranges "$own_ranges" "" diff --name-only
-    } | awk 'NF && !seen[$0]++' )
-  else
-    committed_range=$(git diff --name-only "$base" HEAD 2>/dev/null || printf '')
-  fi
+  local -a committed_range=()
+  local _cf_cr
+  while IFS= read -r -d '' _cf_cr; do
+    [ -n "$_cf_cr" ] && committed_range+=("$_cf_cr")
+  done < <( if [ -n "$own_ranges" ]; then
+      expand_own_ranges "$own_ranges" "" diff --name-only -z
+    else
+      git diff --name-only -z "$base" HEAD 2>/dev/null || true
+    fi )
 
   local file
-  while IFS= read -r file; do
+  for file in ${all_files[@]+"${all_files[@]}"}; do
     [ -z "$file" ] && continue
 
     if [ -s "$_baseline_file" ]; then
@@ -304,14 +384,14 @@ capture_changed_files() {
       done < "$_baseline_file"
       # (D142) Committed-range override: a path the task's commits contain is
       # task work by definition — never baseline-excluded.
-      if [ "$_bl_excluded" -eq 1 ] && [ -n "$committed_range" ]; then
+      if [ "$_bl_excluded" -eq 1 ] && [ "${#committed_range[@]}" -gt 0 ]; then
         local _cr
-        while IFS= read -r _cr; do
+        for _cr in "${committed_range[@]}"; do
           if [ "$_cr" = "$file" ]; then
             _bl_excluded=0
             break
           fi
-        done <<< "$committed_range"
+        done
       fi
       [ "$_bl_excluded" -eq 1 ] && continue
     fi
@@ -320,14 +400,14 @@ capture_changed_files() {
     # not just empty check — tracked_files and untracked_files were merged
     # above with dedupe).
     local is_untracked=0
-    if [ -n "$untracked_files" ]; then
+    if [ "${#untracked_files[@]}" -gt 0 ]; then
       local u
-      while IFS= read -r u; do
+      for u in "${untracked_files[@]}"; do
         if [ "$u" = "$file" ]; then
           is_untracked=1
           break
         fi
-      done <<< "$untracked_files"
+      done
     fi
 
     local is_binary=0
@@ -353,18 +433,14 @@ capture_changed_files() {
       if printf '%s\n' "$diff_text" | grep -q '^Binary files .* differ$'; then
         is_binary=1
       fi
-    elif [ -n "$numstat" ]; then
-      local nl added rest deleted path
-      while IFS= read -r nl; do
-        added="${nl%%	*}"
-        rest="${nl#*	}"
-        deleted="${rest%%	*}"
-        path="${rest#*	}"
-        if [ "$added" = "-" ] && [ "$deleted" = "-" ] && [ "$path" = "$file" ]; then
+    elif [ "${#binary_paths[@]}" -gt 0 ]; then
+      local _bp
+      for _bp in "${binary_paths[@]}"; do
+        if [ "$_bp" = "$file" ]; then
           is_binary=1
           break
         fi
-      done <<< "$numstat"
+      done
     fi
 
     if [ "$is_binary" -eq 1 ]; then
@@ -405,7 +481,7 @@ ${trunc_marker}"
     fi
 
     jq -n --arg path "$file" --arg diff "$diff_text" '{path: $path, diff: $diff}' >> "$jsonl_file"
-  done <<< "$all_files"
+  done
 
   if [ -s "$jsonl_file" ]; then
     jq -s '.' < "$jsonl_file"
@@ -429,13 +505,32 @@ record_dirty_baseline() {
   rm -f "$_bl_file" 2>/dev/null || true
   command -v git > /dev/null 2>&1 || return 0
   [ -n "$_base" ] || return 0
-  local _paths _p _h
-  _paths=$( (cd "$PROJECT_DIR" 2>/dev/null && {
-    git diff --name-only "$_base" 2>/dev/null
-    git ls-files --others --exclude-standard 2>/dev/null
-  } | awk 'NF && !seen[$0]++') || true )
-  [ -n "$_paths" ] || return 0
-  while IFS= read -r _p; do
+  # (D278) -z here too, and for a reason beyond this function's own
+  # correctness: capture_changed_files string-compares each baseline path
+  # against its own now-RAW path. Left quoted, the two spellings could never
+  # match for a non-ASCII path, so the W1457 pre-existing-edit filter would go
+  # silently inert for exactly those files — fixing the capture alone would
+  # have introduced that. The file stays `<hash> <path>` newline-delimited;
+  # only the spelling of <path> changes.
+  #
+  # DIVERGENCE, recorded deliberately rather than left implicit: the two
+  # executors now disagree here. Bash records the baseline RAW and captures
+  # RAW, so its W1457 filter matches on non-ASCII paths. The PowerShell twin's
+  # Write-DirtyBaseline still lists WITHOUT -z, so it records QUOTED while its
+  # own capture (W2100) records RAW — leaving that filter inert for non-ASCII
+  # paths on Windows only. stride-hook.ps1 marks that pre-existing and out of
+  # scope; the failure direction is over-report, which is the documented safe
+  # direction. Filed as a follow-up rather than fixed from the bash side.
+  local -a _paths=()
+  local _p _h
+  while IFS= read -r -d '' _p; do
+    [ -n "$_p" ] && _paths+=("$_p")
+  done < <( (cd "$PROJECT_DIR" 2>/dev/null && {
+    git diff --name-only -z "$_base" 2>/dev/null
+    git ls-files --others --exclude-standard -z 2>/dev/null
+  }) || true )
+  [ "${#_paths[@]}" -gt 0 ] || return 0
+  for _p in "${_paths[@]}"; do
     [ -z "$_p" ] && continue
     if [ -f "$PROJECT_DIR/$_p" ]; then
       _h=$( (cd "$PROJECT_DIR" && git hash-object -- "$_p") 2>/dev/null || echo "unhashable")
@@ -443,7 +538,7 @@ record_dirty_baseline() {
       _h="absent"
     fi
     printf '%s %s\n' "$_h" "$_p" >> "$_bl_file" 2>/dev/null || true
-  done <<< "$_paths"
+  done
   return 0
 }
 

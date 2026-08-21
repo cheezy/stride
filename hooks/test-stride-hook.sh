@@ -2333,6 +2333,114 @@ NEW
     FAIL=$((FAIL + 1))
   fi
   rm -rf "$NA8_DIR"
+
+  # 7ff: bash/PowerShell snapshot parity on a non-ASCII fixture — the task's
+  # one integration test, and the criterion the rest of this group cannot
+  # reach on its own. The two executors are meant to be semantically
+  # interchangeable; D278 existed precisely because they had silently stopped
+  # being so, and only a head-to-head run proves they are again.
+  #
+  # HARNESS: stride-hook.ps1 cannot be dot-sourced — it interleaves function
+  # definitions with top-level flow, so a plain `. script` defines nothing
+  # useful. The functions are extracted from the real file by AST and
+  # dot-sourced individually, exactly as Test Group 22 of the PowerShell suite
+  # does (test-stride-hook.ps1:5204-5231). Binding to the shipped text is the
+  # point: a re-implementation would prove nothing about the code that ships.
+  # Read-DirtyBaseline is in the extraction list because
+  # Build-ChangedFilesSnapshot calls it and the function's own try/catch
+  # swallows the resulting error into a bare '[]' — a missing extraction here
+  # is invisible, which is why the harness hard-fails on an incomplete one.
+  if ! command -v pwsh > /dev/null 2>&1; then
+    if [ "${STRIDE_PS1_GATE_REQUIRED:-0}" = "1" ]; then
+      echo -e "  ${RED}FAIL${RESET}: 7ff: STRIDE_PS1_GATE_REQUIRED=1 but pwsh is not installed"
+      FAIL=$((FAIL + 1))
+    else
+      echo "  SKIP: 7ff: pwsh not installed — the bash/PowerShell parity check needs it"
+      echo "        (set STRIDE_PS1_GATE_REQUIRED=1 to make this a failure instead)"
+    fi
+  else
+    PAR_DIR=$(mktemp -d)
+    PAR_REF_FILE=$(mktemp)
+    export PAR_REF_FILE
+    (
+      cd "$PAR_DIR" || exit 1
+      git init -q .
+      git config user.email "test@test.local"
+      git config user.name "Test"
+      mkdir -p "док"
+      printf 'v1\n' > "док/plain.txt"
+      printf 'v1\n' > ascii.txt
+      printf 'AAA\000\001bin' > "док/bin.dat"
+      git add -A > /dev/null
+      git commit -q -m "base"
+      git rev-parse HEAD > "$PAR_REF_FILE"
+      # A second commit so the HEAD~1 fallback inside the ps1 is reachable and
+      # the two implementations resolve the same base.
+      printf 'seed2\n' > seed2.txt
+      git add seed2.txt > /dev/null
+      git commit -q -m "second"
+      # Divergent working tree: tracked edits, a binary edit, an untracked add,
+      # each touching a non-ASCII path or living under one.
+      printf 'v2-changed\n' > "док/plain.txt"
+      printf 'v2-ascii\n' > ascii.txt
+      printf 'BBB\000\001bin-new\377' > "док/bin.dat"
+      printf 'brand-new\n' > "файл.txt"
+    )
+    PAR_BASE=$(cat "$PAR_REF_FILE")
+    PAR_BASH=$(
+      cd "$PAR_DIR" || exit 1
+      # shellcheck disable=SC1090
+      source "$HOOK_SCRIPT" 2>/dev/null || true
+      capture_changed_files "$PAR_BASE"
+    ) 2>/dev/null
+    # NOT inside $PAR_DIR: the fixture is a git repo, so a file written there
+    # is an untracked path the snapshot would capture — and it would land
+    # between the two runs, appearing on one side only.
+    PAR_PS1_FILE=$(mktemp)
+    cat > "$PAR_PS1_FILE" <<'PARITY_PS1'
+param([string]$HookPs1, [string]$Dir, [string]$Base)
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($HookPs1, [ref]$null, [ref]$null)
+$fns = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
+$want = @('Get-GitDiffBody','Split-NulList','Get-NumstatBinarySet','Test-SafeRepoPath',
+          'Invoke-GitCapture','Expand-OwnRanges','Build-ChangedFilesSnapshot','Read-DirtyBaseline')
+$got = @()
+foreach ($f in $fns) { if ($want -contains $f.Name) { $got += $f.Name; . ([scriptblock]::Create($f.Extent.Text)) } }
+# A silently-incomplete extraction would make the comparison pass vacuously on
+# '[]' == '[]', so refuse to produce output at all.
+if ($got.Count -ne $want.Count) {
+    [Console]::Error.WriteLine("extraction incomplete: got $($got -join ',')")
+    exit 1
+}
+$ProjectDir = $Dir
+$global:ProjectDir = $Dir
+Set-Location $Dir
+Build-ChangedFilesSnapshot -Base $Base -OwnRanges ''
+PARITY_PS1
+    PAR_PS1_HOOK="$SCRIPT_DIR/stride-hook.ps1"
+    PAR_PS=$(pwsh -NoProfile -File "$PAR_PS1_FILE" "$PAR_PS1_HOOK" "$PAR_DIR" "$PAR_BASE" 2>/dev/null)
+    rm -f "$PAR_PS1_FILE"
+    # Compare the SEMANTIC shape: which paths, which are binary placeholders,
+    # which carry an empty body. Raw diff text legitimately differs (git's own
+    # patch headers echo core.quotePath), so comparing it byte-for-byte would
+    # fail on a difference the criterion does not care about.
+    PAR_NORM='map({path: .path, ph: (.diff | startswith("[binary file")), empty: (.diff == "")}) | sort_by(.path)'
+    PAR_BASH_N=$(echo "$PAR_BASH" | jq -S "$PAR_NORM" 2>/dev/null)
+    PAR_PS_N=$(echo "$PAR_PS" | jq -S "$PAR_NORM" 2>/dev/null)
+    if [ -z "$PAR_PS_N" ] || [ "$PAR_PS_N" = "[]" ]; then
+      echo -e "  ${RED}FAIL${RESET}: 7ff: the PowerShell harness produced no snapshot to compare"
+      FAIL=$((FAIL + 1))
+    else
+      assert_eq "D278: bash and PowerShell snapshots agree on a non-ASCII fixture" \
+        "$PAR_BASH_N" "$PAR_PS_N"
+      # Guard the comparison itself: agreement on a set that never contained a
+      # non-ASCII path would be agreement about nothing.
+      assert_contains "D278: the parity fixture actually exercised a non-ASCII path" \
+        "док/plain.txt" "$PAR_BASH_N"
+      assert_contains "D278: the parity fixture actually exercised a binary placeholder" \
+        '"ph": true' "$PAR_BASH_N"
+    fi
+    rm -rf "$PAR_DIR"; rm -f "$PAR_REF_FILE"
+  fi
 fi
 
 # ============================================================

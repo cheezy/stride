@@ -6351,7 +6351,17 @@ if ($g23Bash -and (Get-Command git -ErrorAction SilentlyContinue)) {
     # case-INSENSITIVE by default, so a bare [A-Z_]+ also matches lowercase and
     # the doc scrape picked up duration_ms, exit_code and output from unrelated
     # tables — the guard then reported them as missing from the allow-list.
-    $d275Doc = (Select-String -Path (Join-Path $PSScriptRoot '..' 'skills' 'stride-workflow' 'hook-execution.md') `
+    # NESTED two-argument Join-Path, not the three-argument form. The extra
+    # arguments bind -AdditionalChildPath, which is PowerShell 6+; on Windows
+    # PowerShell 5.1 — the host stride-hook.sh execs, and the host this file is
+    # held in scope for — that is a parameter-binding error, and under this
+    # suite's $ErrorActionPreference = 'Stop' it would terminate the whole run.
+    # scripts/check-ps1-compat.sh cannot catch it: that gate checks cmdlet
+    # NAMES, not their parameters (README.md:397-407), and a pwsh 7 run on
+    # macOS is green either way. It would have been the one part of D275 that
+    # does not execute on the shipping host.
+    $d275DocPath = Join-Path (Join-Path (Join-Path (Join-Path $PSScriptRoot '..') 'skills') 'stride-workflow') 'hook-execution.md'
+    $d275Doc = (Select-String -Path $d275DocPath `
         -Pattern '(?-i)^\| `([A-Z_]+)` \|' -AllMatches).Matches |
         ForEach-Object { $_.Groups[1].Value } |
         Where-Object { $_ -ne 'HOOK_NAME' } | Sort-Object -Unique

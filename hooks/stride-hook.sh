@@ -1488,8 +1488,19 @@ task_owned_key() { task_record_key 'TASK_OWNED_' "${1:-}"; }
 # 1 = no record. Reads the CACHE FILE, not the environment, so absent-vs-empty
 # is decidable and an exported variable cannot forge a record.
 # (D273) Read a per-task record from the cache FILE, accepting ONLY a
-# well-formed KEY='value' line. Every file-reading per-task lookup goes through
-# here.
+# well-formed KEY='value' line.
+#
+# (D287) It is NOT the only file-reading path, and the sentence that used to
+# claim so here — "every file-reading per-task lookup goes through here" — was
+# false when written and is what let the gap below go unnoticed. The four window
+# readers (dead_open_window_ids, select_kept_window_records,
+# another_open_window_exists, attributed_commit_ranges) read the BASE_REF,
+# HEAD_REF and OWNED families line by line and never route through this
+# function, so this shape check never covered them. They are now quote-aware at
+# their own source — see cache_record_start_lines — which closes the same class
+# one step earlier, before a candidate line is ever matched. Both guards stand:
+# this one proves a single record well-formed, that one decides which lines are
+# records at all.
 #
 # The shape check is a security boundary, not tidiness. A server-supplied hook
 # env VALUE may legitimately contain newlines — TASK_DESCRIPTION routinely does
@@ -1552,6 +1563,280 @@ record_task_owned() {
   return 0
 }
 
+# (D287) Emit the cache's record-START lines, and only those.
+#
+# THE PROBLEM THIS SOLVES. Four window readers are LINE-oriented: each greps
+# $ENV_CACHE for a record-family prefix one physical line at a time —
+# dead_open_window_ids, select_kept_window_records, another_open_window_exists
+# and attributed_commit_ranges.
+#
+# A FIFTH SITE reads the same prefixes the same way and is deliberately NOT
+# converted: the `_preserved` grep -v in finalize_before_doing, and its twin on
+# the claim path. Those are exclusion-only, so they cannot PROMOTE a planted line
+# — but they can splice an interior line out of the middle of a legitimate
+# multi-line TASK_TITLE or TASK_DESCRIPTION that happens to begin with one of
+# these prefixes, corrupting that value rather than forging a record. Different
+# defect, different direction, out of this one's scope; recorded here so the next
+# reader does not take the list of four as exhaustive. It is not.
+# A value on an ALLOWED hook-env key can carry a newline — extract_hook_env's
+# `@sh` escapes quotes but preserves newlines, and apply_env_lines deliberately
+# does not flatten, because `source` reassembles a quoted value across one. So a
+# task title of the form
+#
+#     Fix<LF>TASK_BASE_REF_99='<sha>'<LF>end
+#
+# lands in the cache as three physical lines with a bare, record-SHAPED line in
+# the middle of a quoted value. Sourcing that cache is safe — `source` is
+# quote-aware and hands the whole thing back as one TASK_TITLE. Grepping it is
+# not: the interior line matches, select_kept_window_records keeps it, and the
+# rebuilt cache then writes it out as a STANDALONE record. After that rebuild it
+# is a genuine record — D273's `^KEY='[^']*'$` shape check in read_task_record no
+# longer applies, because the line is no longer a continuation — and
+# task_base_ref_for reads the forged value straight from the environment. The
+# result is a forged snapshot base or head/owned record for another task: the
+# D226/D268/D273 commit-attribution property defeated through a fence that
+# filters KEYS only (D275) while the VALUE channel stayed open.
+#
+# THE FIX is to decide what a record IS before matching one. A line begins a
+# record only when the scanner is OUTSIDE a quoted value; anywhere else it is
+# continuation text, whatever it looks like.
+#
+# The quote/escape state machine is `scan()`, byte-identical to the one in
+# apply_env_lines. Stated plainly because the first version of this comment
+# claimed it was "one idiom, three call sites", which it is not: awk has no
+# include, so this is a COPY, and it takes the number of byte-identical copies
+# of `scan()` in this file from four to six. That is a real cost — a fix to the
+# state machine has to land in six places — and it is accepted here rather than
+# hidden, because the alternative on offer was a second, differently-worded
+# scanner, which is the thing that actually goes wrong. Anyone changing one copy
+# must change all six; count them with `grep -c '^ *function scan(s,'`, which is
+# anchored so it does not match this sentence — an unanchored count returns
+# seven and the seventh is this comment. Saying otherwise would be the same
+# species of false comment this change corrects above read_task_record.
+#
+# This is the property stride-hook.ps1 has carried since D280 via
+# Split-EnvCacheRecord, which groups physical lines into records before any regex
+# runs; bash had no equivalent, so this is an executor divergence closed, not a
+# new invention.
+#
+# FAILS CLOSED, and the buffering is what makes that true. Matches accumulate in
+# out[] and are printed only from END, so an unterminated quote at EOF exits
+# non-zero having printed NOTHING — a streaming `print` would have emitted every
+# match before reaching the broken quote, which is fail-OPEN wearing a check.
+#
+# EMPTY OUTPUT IS NOT THE WHOLE CONTRACT: the STATUS is, and the two callers of
+# this function want opposite things from it. The three pure READERS take the
+# empty and degrade safely — the sweep proves nothing dead, the predicate reports
+# no other open window, the attribution loop attributes no window, all of which
+# make a task OVER-report its commits, the recoverable half of the D244/D274
+# trade. select_kept_window_records is not a pure reader: its output is written
+# BACK, so for it an empty set is not a safe degrade but an erasure, and it
+# propagates the failure instead so its callers skip the rebuild entirely. An
+# earlier version of this comment claimed all four callers behave "exactly as
+# they do for an empty cache" and treated that as uniformly safe; that was wrong
+# in the one case that writes, which is the case that matters.
+cache_record_start_lines() {
+  [ -f "$ENV_CACHE" ] || return 0
+  awk -v q="'" '
+    function scan(s,   i, c) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) { if (c == q) inq = 0 }
+        else if (esc) { esc = 0 }
+        else if (c == "\\") { esc = 1 }
+        else if (c == q) { inq = 1 }
+      }
+    }
+    BEGIN { inq = 0; esc = 0; n = 0 }
+    { if (!inq && index($0, "=") > 1) { n++; out[n] = $0 } scan($0) }
+    END { if (inq) exit 1; for (i = 1; i <= n; i++) print out[i] }
+  ' "$ENV_CACHE" 2>/dev/null || {
+    # (D287 r2) The status is the caller's to act on, so it is returned rather
+    # than swallowed. Without this, "the cache does not parse" and "the cache
+    # holds no records" are the same empty string — and they demand OPPOSITE
+    # handling at the one caller that writes its output back. The stderr line
+    # follows write_env_cache's convention: this file already tells an operator
+    # when it degrades, and a silent degrade here is the expensive kind to
+    # diagnose because every symptom appears one claim later.
+    printf 'stride-hook: env cache could not be read (unterminated quote, or awk unavailable); no window records read\n' >&2
+    return 1
+  }
+}
+
+# (D287 r2) Emit only WELL-FORMED per-task window records: a numeric id and the
+# canonical `KEY='value'` shape read_task_record (D273) already demands.
+#
+# WHY A SHAPE GATE ON TOP OF THE QUOTE-AWARENESS. Making the readers quote-aware
+# stops a NEW planted line from being promoted, but it does nothing about a line
+# a pre-D287 hook ALREADY promoted — and the strongest payload is the unquoted
+# one. A title of the form `Fix<LF>TASK_BASE_REF_<victim>=<40 hex><LF>end` plants
+# an interior line with zero quote toggles; once an old hook promoted it, it sits
+# in the cache as a standalone, well-formed-looking, UNQUOTED assignment that the
+# quote scanner has no reason to reject. The selector would carry it forward at
+# every claim — D274 pins open windows outright, and a base with no head is an
+# open window — so it would outlive the fix indefinitely.
+#
+# Every record this file actually writes goes through sq_escape or jq `@sh`, so
+# it is always `KEY='...'`, and every id goes through task_record_key, which
+# rejects a non-numeric one. The promoted residue passes neither test. Raised by
+# the security review of this change, which correctly noted that the loader gate
+# below already makes this argument for legacy PATH lines and then failed to
+# apply it to the record families the defect is actually about.
+#
+# The three sanctioned non-numeric siblings — TASK_BASE_REF_TRUSTED, _OWNER and
+# _UNPROVEN — are not window records and are not emitted here; the readers never
+# wanted them (each excluded them by hand) and the loader admits them by name.
+cache_window_record_lines() {
+  # (D287 r3) Captured FIRST, then filtered — not `{ ... || return 1; } | awk`,
+  # which was the r2 shape. The defect there was the awk's trailing `|| true`,
+  # which reset the pipeline's status to 0, so the caller's `|| return 1` could
+  # never fire: both rebuild-skip guards were unreachable and the erasure
+  # regression they were added to close stayed fully live, while the suite
+  # reported green because every assertion checked output and none checked a
+  # status. Found by review round 2.
+  #
+  # An earlier version of this comment called that shape "inert twice over",
+  # adding that a `return` on the left of a pipe exits a subshell rather than
+  # the function. The mechanism is real but it was NOT a second cause here:
+  # this script runs under `set -uo pipefail` (line 14), so the subshell's 1
+  # became the pipeline's status and `|| true` alone is what discarded it —
+  # verified by repro, the same shape without `|| true` returns 1. Capturing
+  # first is still the right form: it makes the status the caller reads a
+  # property of the assignment rather than of pipefail staying enabled.
+  local _starts
+  _starts=$(cache_record_start_lines) || return 1
+  printf '%s\n' "$_starts" | awk -v q="'" '
+    function quoted(s, k,   v) {
+      v = substr(s, length(k) + 2)
+      if (length(v) < 2) return 0
+      if (substr(v, 1, 1) != q) return 0
+      if (substr(v, length(v), 1) != q) return 0
+      if (index(substr(v, 2, length(v) - 2), q) != 0) return 0
+      return 1
+    }
+    {
+      if (index($0, "=") <= 1) next
+      key = substr($0, 1, index($0, "=") - 1)
+      if (key !~ /^TASK_(BASE_REF|HEAD_REF|OWNED|NARROWED|BASE_AT)_[0-9]+$/) next
+      if (!quoted($0, key)) next
+      print
+    }
+  ' 2>/dev/null
+}
+
+# (D287) Emit the cache's WHOLE records — start line plus every continuation
+# line — for allowed keys only, dropping the rest. The loader's gate.
+#
+# WHY A GATE HERE AT ALL, superseding the D281 ruling that used to sit at the
+# loader. That ruling declined a key filter on two grounds, and D287 falsifies
+# the load-bearing one. It argued the only residual case was "a cache authored by
+# something other than the two executors — at which point the attacker already
+# has write access to a file bash sources." That is not the only case: an
+# executor ITSELF could author a hostile record, because select_kept_window_records
+# promoted a planted interior line and write_env_cache committed it. The upstream
+# D275 allow-list also stops NEW poisoning without cleaning a cache already
+# written by a pre-D275 hook — one that accepted PATH, BASH_ENV, LD_PRELOAD and
+# the rest — and that line is sourced on every non-claim invocation until the next
+# claim rebuilds the cache. Every machine that ran the old hook against a hostile
+# response carries one until then.
+#
+# The ruling's OTHER ground was sound and is honoured rather than overturned: an
+# allow-list must not cost the reassembly of a quoted multi-line value, which is
+# the one thing this side does right and the ps1 had to work to imitate. So the
+# mechanism is unchanged — the filtered text is still interpreted by the shell,
+# under `set -a`, exactly as apply_env_lines already does with `eval` — and only
+# the CONTENT is gated. A record is admitted or dropped whole, so a multi-line
+# TASK_TITLE still arrives as one value.
+#
+# NO THIRD KEY LIST. Admission is STRIDE_HOOK_ENV_ALLOW — the same 17 documented
+# hook-env names D275 fenced the server down to — plus the five client-owned
+# `task_*_key` record families, plus the bare TASK_BASE_REF that the claim's own
+# identity block writes. STRIDE_ is deliberately NOT admitted: nothing writes an
+# executor tuning knob to the cache, so a STRIDE_ record could only be a forged
+# or legacy one, and admitting it would re-open the D273 age-horizon knob.
+#
+# Fails closed on an unterminated quote for the same reason and by the same
+# buffering as cache_record_start_lines: nothing is sourced, so the hook falls
+# back to the server-supplied env applied immediately below it.
+filter_cache_records() {
+  local _allow
+  [ -f "$ENV_CACHE" ] || return 0
+  _allow=$(printf '%s' "$STRIDE_HOOK_ENV_ALLOW" | tr -d '[]"' | tr ',' ' ')
+  awk -v q="'" -v allow="$_allow TASK_BASE_REF" '
+    function scan(s,   i, c) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) { if (c == q) inq = 0 }
+        else if (esc) { esc = 0 }
+        else if (c == "\\") { esc = 1 }
+        else if (c == q) { inq = 1 }
+      }
+    }
+    function quoted(s, k,   v) {
+      v = substr(s, length(k) + 2)
+      if (length(v) < 2) return 0
+      if (substr(v, 1, 1) != q) return 0
+      if (substr(v, length(v), 1) != q) return 0
+      if (index(substr(v, 2, length(v) - 2), q) != 0) return 0
+      return 1
+    }
+    BEGIN {
+      inq = 0; esc = 0; keep = 0; n = 0
+      na = split(allow, a, " ")
+      for (i = 1; i <= na; i++) if (a[i] != "") ok[a[i]] = 1
+    }
+    {
+      # Outside a quoted value, every line decides its own fate: a record start
+      # is admitted on its key, and anything else at this level is junk. Inside
+      # one, the start line'"'"'s verdict carries, which is what keeps a
+      # multi-line value whole.
+      if (!inq) {
+        keep = 0
+        if (index($0, "=") > 1) {
+          key = substr($0, 1, index($0, "=") - 1)
+          # (D287 r2) Anchored, and charset-checked before anything else. The
+          # family test used to be an unanchored prefix with no validation of
+          # the key at all, so a start line such as
+          # `TASK_OWNED_0;curl ...|sh; x=1` satisfied it and was handed verbatim
+          # to `eval` under `set -a` — arbitrary execution rather than an
+          # assignment. Not reachable today, because extract_hook_env has
+          # enforced this same charset on server keys since W1453 — but this
+          # gate exists precisely to be the last line of defence for a cache the
+          # file already treats as hostile, so it validates rather than assumes.
+          if (key ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+            if (key in ok) keep = 1
+            else if (key == "TASK_BASE_REF_TRUSTED" || key == "TASK_BASE_REF_OWNER" \
+                     || key == "TASK_BASE_REF_UNPROVEN") keep = 1
+            else if (key ~ /^TASK_(BASE_REF|HEAD_REF|OWNED|NARROWED|BASE_AT)_[0-9]+$/ \
+                     && quoted($0, key)) keep = 1
+          }
+        }
+      }
+      if (keep) { n++; out[n] = $0 }
+      scan($0)
+    }
+    END { if (inq) exit 1; for (i = 1; i <= n; i++) print out[i] }
+  ' "$ENV_CACHE" 2>/dev/null || {
+    # (D287 r3) The loader's degrade is the quietest one in the file and the
+    # most confusing to hit: nothing is sourced, so the hook runs with no
+    # TASK_ID, TASK_IDENTIFIER or TASK_TITLE and every downstream symptom looks
+    # like a server problem. Say so here rather than leaving the operator to
+    # infer it.
+    #
+    # Status is deliberately NOT propagated: the loader has nothing better to do
+    # than continue with nothing. On the POST phase the server-supplied env is
+    # applied immediately below, so the identity keys come back; on the PRE
+    # phase (which is how after_doing is routed) they do NOT — apply_env_lines
+    # is gated on `[ "$PHASE" = "post" ]` — so that invocation genuinely runs
+    # without them. An earlier version of this comment cited the re-application
+    # without that qualifier and was therefore only half true. Failing the hook
+    # instead would be worse: a torn cache would then block completion rather
+    # than degrade it.
+    printf 'stride-hook: env cache could not be read (unterminated quote, or awk unavailable); continuing without cached values\n' >&2
+    return 0
+  }
+}
+
 # (D274) Liveness sweep for OPEN windows — the replacement for D268's
 # open-window count cap, which could not tell a live enclosing outer from an
 # abandoned claim and so evicted the outer. $1 = the sweep threshold, $2 =
@@ -1584,7 +1869,7 @@ record_task_owned() {
 dead_open_window_ids() {
   local _sweep_at="${1:-0}" _reserve="${2:-}" _open _id _b _dead=""
   [ -f "$ENV_CACHE" ] || return 0
-  _open=$(awk -v reserve="$_reserve" '
+  _open=$( { cache_window_record_lines || true; } | awk -v reserve="$_reserve" '
     /^TASK_BASE_REF_[A-Za-z0-9_]*=/ {
       key = $0; sub(/=.*/, "", key)
       if (key == "TASK_BASE_REF_TRUSTED" || key == "TASK_BASE_REF_OWNER" \
@@ -1598,7 +1883,7 @@ dead_open_window_ids() {
       id = $0; sub(/^TASK_HEAD_REF_/, "", id); sub(/=.*/, "", id); head[id] = 1
     }
     END { for (i = 1; i <= nb; i++) if (!(bid[i] in head)) print bid[i] "\t" bval[bid[i]] }
-  ' "$ENV_CACHE" 2>/dev/null || true)
+  ' 2>/dev/null || true)
   [ -n "$_open" ] || return 0
   [ "$(printf '%s\n' "$_open" | wc -l | tr -d ' ')" -gt "$_sweep_at" ] || return 0
   (cd "$PROJECT_DIR" 2>/dev/null && git rev-parse --verify --quiet HEAD > /dev/null 2>&1) || return 0
@@ -1694,17 +1979,39 @@ dead_open_window_ids() {
 # the caller appends a fresh record for that task itself; the sweep threshold
 # drops by one then, matching the pre-D274 cap's reserved-slot arithmetic.
 select_kept_window_records() {
-  local _reserve="${1:-}" _sweep_at="$STRIDE_OPEN_WINDOW_SWEEP_AT" _dead
+  local _reserve="${1:-}" _sweep_at="$STRIDE_OPEN_WINDOW_SWEEP_AT" _dead _recs
   [ -n "$_reserve" ] && _sweep_at=$((_sweep_at - 1))
   _dead=$(dead_open_window_ids "$_sweep_at" "$_reserve" || true)
+  # (D287) THE PROMOTION SITE. These three greps used to run against the cache
+  # FILE, so a record-shaped line planted inside a quoted value matched, was
+  # kept, and was written back by write_env_cache as a record in its own right.
+  # They now run against record-START lines only. Parsed ONCE and reused, not
+  # three times: the fail-closed empty on a broken quote must be the same answer
+  # for all three families, or a partly-parsed cache could keep a head record
+  # whose base was dropped — precisely the orphan state the selector's kept[]
+  # gate exists to prevent.
+  # (D287 r2) NOT `|| true`. This function is the only one of the four whose
+  # output is written BACK: by the time finalize_before_doing calls it, the
+  # `_preserved` grep has already stripped every family line from the cache, so
+  # an empty return here does not mean "read nothing this once" — it means the
+  # rebuild commits a cache with every window record gone, permanently. When the
+  # erased record is a live enclosing OUTER task's own anchor, that task's
+  # completion finds no record, hits select_task_snapshot_base's owner-mismatch
+  # refusal and uploads an EMPTY snapshot over real commits: the D274 outcome,
+  # and the under-report direction this defect's own security note says must not
+  # be traded for. So a parse failure propagates and both call sites skip the
+  # rewrite, leaving the previous cache intact — write_env_cache's existing
+  # contract. Found by the security review of this change; the first version
+  # returned empty here and called it fail-closed.
+  _recs=$(cache_window_record_lines) || return 1
   {
-    grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null \
+    printf '%s\n' "$_recs" | grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' 2>/dev/null \
       | grep -v -e '^TASK_BASE_REF_TRUSTED=' -e '^TASK_BASE_REF_OWNER=' \
           -e '^TASK_BASE_REF_UNPROVEN=' || true
     printf '::FAMILY::\n'
-    grep -e '^TASK_HEAD_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true
+    printf '%s\n' "$_recs" | grep -e '^TASK_HEAD_REF_[A-Za-z0-9_]*=' 2>/dev/null || true
     printf '::FAMILY::\n'
-    grep -e '^TASK_OWNED_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true
+    printf '%s\n' "$_recs" | grep -e '^TASK_OWNED_[A-Za-z0-9_]*=' 2>/dev/null || true
   } | awk -v reserve="$_reserve" -v dead="$_dead" '
     BEGIN { if (dead != "") { nd = split(dead, _d, " "); for (k = 1; k <= nd; k++) deadid[_d[k]] = 1 } }
     $0 == "::FAMILY::" { fam++; next }
@@ -1943,7 +2250,7 @@ another_open_window_exists() {
     [ "$_age" -ge 0 ] || continue
     [ "$_age" -gt "$_max_age" ] && continue
     return 0
-  done <<< "$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)"
+  done <<< "$( { cache_window_record_lines || true; } | grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' 2>/dev/null || true)"
   return 1
 }
 
@@ -2184,7 +2491,7 @@ attributed_commit_ranges() {
       done
     fi
     _windows="${_windows}${_b} ${_h}"$'\n'
-  done <<< "$(grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' "$ENV_CACHE" 2>/dev/null || true)"
+  done <<< "$( { cache_window_record_lines || true; } | grep -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' 2>/dev/null || true)"
 
   [ -n "$_windows" ] || return 0
 
@@ -2601,7 +2908,9 @@ finalize_before_doing() {
   # closed windows capped at 20, and head/owned records live and die with
   # their base so the cap can never leave a half-bounded window. The refusal
   # path in select_task_snapshot_base is untouched.
-  _records=$(select_kept_window_records "$_key" || true)
+  # (D287 r2) A parse failure means "do not rebuild", not "rebuild with nothing".
+  local _rebuild_ok=1
+  _records=$(select_kept_window_records "$_key") || { _records=""; _rebuild_ok=0; }
   # (D255) A claim opens a fresh window for this task: its own owned record
   # from a PREVIOUS completion must not survive into it. Other tasks' records
   # pass through untouched (they are the whole point). Unproven claims (no
@@ -2686,6 +2995,13 @@ finalize_before_doing() {
   # record (last writer wins) — which degrades to a REFUSAL rather than a
   # wrong diff, since the surviving owner stamp will name someone else — but
   # no reader can observe a partial file.
+  if [ "$_rebuild_ok" = 0 ]; then
+    # (D287 r2) The previous cache stands, untouched. Skipping this rewrite is
+    # the same failure contract write_env_cache already keeps, and it is the
+    # only branch that does not erase live window anchors.
+    printf 'stride-hook: skipping the env-cache rebuild; the previous cache is kept intact\n' >&2
+    return 0
+  fi
   {
     [ -n "$_preserved" ] && printf '%s\n' "$_preserved"
     [ -n "$_records" ] && printf '%s\n' "$_records"
@@ -4386,7 +4702,19 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # select_kept_window_records for the decided
     # policy and the family-desync answer (head/owned live and die with their
     # base; a half-bounded window can no longer be produced by the cap).
-    _kept_window_records=$(select_kept_window_records || true)
+    # (D287 r2) Same rule as finalize_before_doing: an unparseable cache skips
+    # the rebuild rather than committing one with every window record dropped.
+    #
+    # A parse failure here is a TORN WRITE, never an injection. Every writer
+    # into this cache balances its quotes — jq `@sh` and sq_escape both render
+    # an embedded quote as '\'' — so no server-supplied value can leave the
+    # file unterminated. The reachable causes are the non-atomic append
+    # fallback interrupted by a budget kill, or a missing awk. That is why
+    # preserving the previous cache is the right answer rather than a risk:
+    # the corrupt state is not attacker-shaped, and the records being preserved
+    # are this checkout's real anchors.
+    _kept_window_rebuild=1
+    _kept_window_records=$(select_kept_window_records) || _kept_window_rebuild=0
     # (D273) Carry each KEPT window's claim-time stamp through the rebuild.
     # This branch emits ONLY the selector's three families plus the six fixed
     # identity keys, so without this every TASK_BASE_AT_ line is erased at the
@@ -4425,6 +4753,25 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # Values are single-quote escaped via sq_escape (W1453) so titles with
     # spaces, quotes, or dollar signs survive the `set -a` sourcing without
     # any shell interpretation.
+    #
+    # (D287 r2) Skipped entirely when the selector could not parse the cache.
+    # This claim then records no base of its own, which lands on the documented
+    # unproven-base path: select_task_snapshot_base REFUSES rather than
+    # attributing a wrong diff.
+    #
+    # (r3) That is the right trade but it is NOT self-healing, and an earlier
+    # version of this comment said it was. Nothing on the claim path repairs a
+    # torn cache: the next claim reads the same unparseable file, skips the
+    # rebuild again and records no base again, and the `_preserved` fallback
+    # below keeps the torn file rather than replacing it. The only unconditional
+    # deletion is the after_review cleanup, which is itself skipped when
+    # after_goal rode the response. So the honest statement is: every affected
+    # task REFUSES rather than uploading a wrong diff, and it keeps refusing
+    # until someone removes the cache. Refusal is recoverable; erasing every
+    # other task's anchor is not.
+    if [ "$_kept_window_rebuild" = 0 ]; then
+      printf 'stride-hook: skipping the env-cache rebuild; the previous cache is kept intact\n' >&2
+    else
     {
       [ -n "$_kept_window_records" ] && printf '%s\n' "$_kept_window_records"
       [ -n "$_kept_window_stamps" ] && printf '%s' "$_kept_window_stamps"
@@ -4445,6 +4792,7 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
       echo "TASK_COMPLEXITY=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.complexity // empty')")"
       echo "TASK_PRIORITY=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.priority // empty')")"
     } | write_env_cache || true
+    fi
   elif [ -f "$ENV_CACHE" ]; then
     # (W1086/D142) No parseable response and no usable persisted file: keep
     # the existing TASK_ identity lines (a later completion can still recover
@@ -4561,26 +4909,21 @@ fi
 
 # Load cached env vars if available (all hooks benefit from this)
 if [ -f "$ENV_CACHE" ]; then
+  # (D287, superseding the D281 loader ruling) The cache is filtered by key
+  # before the shell sees it. The reasoning — which of D281's two grounds
+  # survived, and why the mechanism is still shell interpretation rather than a
+  # hand-rolled parse-and-export — is above filter_cache_records.
+  #
+  # `eval` rather than `.` because the content is now a filtered STRING, not the
+  # file. The two are equivalent for assignment lines, and apply_env_lines has
+  # used `eval` under `set -a` on exactly this content since it was written.
+  # An empty result — an absent cache, a cache with nothing admissible, or a
+  # broken quote — evaluates to nothing, which is the fail-closed outcome.
+  STRIDE_CACHE_LINES=$(filter_cache_records)
   set -a
-  # (D281) RULING, the loader's missing gates: bash gets NO shape check, key
-  # allow-list or encoding guard here, and that is the decision rather than an
-  # oversight. The three gates on the ps1 side exist because that loader is a
-  # PARSER this port had to write; bash's loader is `source`, the shell itself.
-  # An allow-list cannot be bolted onto `source` — imposing one means REPLACING
-  # it with a hand-rolled parse-and-export, which would immediately lose the one
-  # thing this side does right and the ps1 had to work to imitate: reassembling
-  # a quoted multi-line value. That trade goes the wrong way.
-  #
-  # The gate that matters is already upstream, where server data actually
-  # enters: D275 made extract_hook_env an allow-list of the documented hook-env
-  # names, so no server-invented key reaches this file. The residual case is a
-  # cache authored by something other than the two executors — at which point
-  # the attacker already has write access to a file bash sources, and no key
-  # filter here would help.
-  #
-  # Full ruling above Write-EnvCache in stride-hook.ps1.
-  . "$ENV_CACHE" 2>/dev/null || true
+  eval "$STRIDE_CACHE_LINES" 2>/dev/null || true
   set +a
+  unset STRIDE_CACHE_LINES
 fi
 
 # (W1453) Forward the server-supplied hook env for the routed hook. The

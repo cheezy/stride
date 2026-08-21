@@ -8949,6 +8949,244 @@ else
 fi
 rm -rf "$D273_N" "$D273_N500"
 
+# 23z22 (D287): the VALUE channel, which D275's key allow-list does not close.
+# 23z19 above pins this attack against TASK_NARROWED_, the one family whose
+# reader routes through read_task_record's shape check. The BASE_REF, HEAD_REF
+# and OWNED families have no such reader — four line-oriented functions grep the
+# cache file directly — so the identical payload aimed at them succeeded, and
+# worse than a misread: select_kept_window_records KEPT the planted line and the
+# rebuilt cache wrote it back as a standalone record, at which point it is a
+# genuine record that outlives every later invocation.
+#
+# Asserted against the functions directly, in the 23z17 idiom, because the
+# promotion is a property of the READERS rather than of any one hook phase — an
+# end-to-end fixture would pin one route to them and leave the other three
+# unpinned.
+#
+# WHAT THIS BLOCK IS AND IS NOT RED AGAINST, measured rather than asserted.
+# Run against the pre-D287 tree, four rows fail: the fixture guard, the
+# selector's kept set, the genuine-record row, and the multi-line round-trip.
+# The other six PASS there — not because that tree is safe, but because the
+# functions under test do not exist on it, so `$(filter_cache_records)` expands
+# to nothing and every "did not reach the environment" row compares empty to
+# empty. That is why the guard row exists and why it is asserted FIRST: it is
+# the row that says whether the other results mean anything at all. The
+# behaviour itself was verified two-sided by driving both trees directly — the
+# pre-fix run promoted the planted record and hijacked PATH to /evil/bin, which
+# it demonstrated by its own cleanup `rm` failing with command-not-found.
+D287_ROOT=$(mktemp -d)
+D287_OUT="$D287_ROOT/out"
+(
+  # shellcheck source=/dev/null
+  HAS_JQ=true RESPONSE_PAYLOAD='{}' source "$HOOK_SCRIPT" > /dev/null 2>&1 || true
+  PROJECT_DIR="$D287_ROOT"
+  ENV_CACHE="$D287_ROOT/.stride-env-cache"
+  d287_sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+  # A hostile title, escaped exactly as extract_hook_env's @sh would: quotes
+  # escaped, newlines PRESERVED. Three physical lines, the middle one shaped
+  # like a base-ref record for another task.
+  {
+    printf 'TASK_ID=%s\n' "$(d287_sq 6403)"
+    printf 'TASK_TITLE=%s\n' "$(d287_sq "Fix
+TASK_BASE_REF_99='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
+TASK_HEAD_REF_99='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
+TASK_OWNED_99='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
+end")"
+    printf 'TASK_BASE_REF_6403=%s\n' "$(d287_sq abc1230000000000000000000000000000000000)"
+    printf 'TASK_HEAD_REF_6403=%s\n' "$(d287_sq def4560000000000000000000000000000000000)"
+    printf 'PATH=%s\n' "$(d287_sq /evil/bin)"
+  } > "$ENV_CACHE"
+
+  # The selector is the promotion site: what it emits is what gets written back.
+  select_kept_window_records > "$D287_OUT.kept" 2>/dev/null
+  # The other three readers see the same lines the same way.
+  another_open_window_exists 100 > /dev/null 2>&1 && printf 'LIVE' > "$D287_OUT.other" || printf 'NONE' > "$D287_OUT.other"
+  dead_open_window_ids 0 > "$D287_OUT.dead" 2>/dev/null
+
+  # The loader gate: what actually reaches the environment.
+  D287_LINES=$(filter_cache_records)
+  set -a; eval "$D287_LINES" 2>/dev/null || true; set +a
+  printf '%s' "${TASK_BASE_REF_99:-<unset>}" > "$D287_OUT.env99"
+  printf '%s' "$(task_base_ref_for 99)" > "$D287_OUT.reader99"
+  printf '%s' "$(task_base_ref_for 6403)" > "$D287_OUT.reader6403"
+  printf '%s' "$PATH" > "$D287_OUT.path"
+  # A legitimate multi-line value must still round-trip whole through the gate.
+  printf '%s' "$(printf '%s' "$TASK_TITLE" | grep -c '')" > "$D287_OUT.titlelines"
+
+  # An unterminated quote must fail CLOSED — nothing emitted, nothing sourced.
+  printf "TASK_ID='6403'\nTASK_BASE_REF_6403='abc\n" > "$ENV_CACHE"
+  printf '[%s][%s]' "$(cache_record_start_lines)" "$(filter_cache_records)" > "$D287_OUT.broken"
+
+  # FIXTURE GUARD, and it is not decoration. Several rows below assert that
+  # something did NOT reach the environment, and a missing function produces
+  # exactly that shape: `$(filter_cache_records)` on a tree without it expands
+  # to nothing, `eval ""` sets nothing, and the row passes having tested
+  # nothing. Measured, not supposed — run against the pre-D287 tree, six of
+  # these nine rows passed for that reason. Recording what the harness actually
+  # bound turns those into one loud failure instead of six quiet successes.
+  printf '%s %s' "$(type -t cache_record_start_lines)" "$(type -t filter_cache_records)" > "$D287_OUT.guard"
+) > /dev/null 2>&1 || true
+
+assert_eq "23z22 (D287): FIXTURE GUARD — both readers under test are actually bound (a missing one makes every did-not-reach row vacuous)" \
+  "function function" "$(cat "$D287_OUT.guard" 2>/dev/null)"
+
+assert_eq "23z22 (D287): a record-shaped line planted inside an allowed value is never kept as a window record" \
+  "TASK_BASE_REF_6403='abc1230000000000000000000000000000000000'
+TASK_HEAD_REF_6403='def4560000000000000000000000000000000000'" \
+  "$(cat "$D287_OUT.kept" 2>/dev/null)"
+assert_eq "23z22 (D287): the planted line never reaches the environment as a record" \
+  "<unset>" "$(cat "$D287_OUT.env99" 2>/dev/null)"
+assert_eq "23z22 (D287): a forged TASK_BASE_REF_<id> never reaches task_base_ref_for" \
+  "" "$(cat "$D287_OUT.reader99" 2>/dev/null)"
+assert_eq "23z22 (D287): the genuine record for the real task is untouched (the fix is not a blanket drop)" \
+  "abc1230000000000000000000000000000000000" "$(cat "$D287_OUT.reader6403" 2>/dev/null)"
+assert_eq "23z22 (D287): the liveness predicate does not count a planted window as open" \
+  "NONE" "$(cat "$D287_OUT.other" 2>/dev/null)"
+assert_eq "23z22 (D287): the dead-window sweep never sees the planted id" \
+  "" "$(cat "$D287_OUT.dead" 2>/dev/null)"
+
+# 23z23 (D287): the loader's second gap, recorded on the same defect. bash's
+# loader was a bare `set -a` + `source` with NO key filter, so a cache line
+# keyed PATH — which a pre-D275 hook accepted from the server and wrote — was
+# sourced on every non-claim invocation until the next claim rebuilt the cache.
+# D275 stopped new poisoning; it could not clean a cache already written.
+if [ "$(cat "$D287_OUT.path" 2>/dev/null)" = "/evil/bin" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 23z23 (D287): a legacy PATH record in the cache reached the environment"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 23z23 (D287): a legacy cache line keyed PATH is not sourced into the environment"
+  PASS=$((PASS + 1))
+fi
+# The gate admits whole RECORDS, not lines, which is what the D281 ruling was
+# protecting when it declined a filter: a multi-line value must survive intact.
+assert_eq "23z23 (D287): a legitimate multi-line value still round-trips whole through the key filter" \
+  "5" "$(cat "$D287_OUT.titlelines" 2>/dev/null)"
+# Fail-closed, and buffered so it is really closed: a streaming print would have
+# emitted every match made BEFORE the broken quote was reached.
+assert_eq "23z23 (D287): an unterminated quote emits nothing from either reader rather than a partial parse" \
+  "[][]" "$(cat "$D287_OUT.broken" 2>/dev/null)"
+rm -rf "$D287_ROOT"
+
+# 23z24 (D287): the INTEGRATION route the testing_strategy names — a hostile
+# value reaches the cache, a later claim rebuilds it, and task_base_ref_for must
+# still read nothing for the planted id. 23z22 asserts the same end invariant
+# against the functions directly, which proves the readers but assumes the shape
+# a real run writes. This drives the actual hook three times, so the fixture is
+# the hook's own output rather than a hand-built file.
+#
+# THE PAYLOAD RIDES ON BOARD_NAME IN A COMPLETION'S HOOK ENV, exactly as 23z19
+# does, and NOT on a claim's title — which is what a first draft of this case
+# tried. That draft was vacuous and its own fixture guard caught it: the claim
+# rebuild's `_preserved` grep -v strips any line beginning with a record-family
+# prefix, so it SPLICED the planted line out of the middle of the title before
+# anything could promote it. (That splice is the fifth-site defect recorded above
+# cache_record_start_lines — here it removes a hostile line, but it removes a
+# legitimate one just as readily.) apply_env_lines has no such filter, so this is
+# the route on which a planted line actually reaches the cache and survives.
+#
+# Verified two-sided against the pre-D287 tree: there the second claim promotes
+# the line to a standalone record and this block goes red.
+D287_E2E=$(mktemp -d)
+d226_fixture "$D287_E2E"
+d226_claim "$D287_E2E" 555
+(
+  cd "$D287_E2E" || exit 1
+  jq -nc --arg cmd "curl -X PATCH https://stride.example.com/api/tasks/555/complete" \
+    --arg out '{"data":{"id":555},"hooks":[{"name":"before_review","env":{"BOARD_NAME":"b\nTASK_BASE_REF_777=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\nend"}}]}' \
+    '{tool_input:{command:$cmd},tool_response:{stdout:$out}}' \
+    | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+)
+# NON-VACUITY, asserted BEFORE the rebuild that would promote it: the planted
+# line must really be sitting in the cache at column 0, which is the state that
+# makes promotion possible. Without this the rows below pass on a cache that
+# never carried the payload — which is precisely how the first draft of this
+# case passed while testing nothing.
+assert_eq "23z24 (D287): fixture guard — the planted line really is in the cache, at column 0, before the rebuild" \
+  "1" "$(grep -c '^TASK_BASE_REF_777=' "$D287_E2E/.stride-env-cache" 2>/dev/null)"
+
+# The rebuild that pre-D287 turned that line into a record of its own.
+d226_claim "$D287_E2E" 556
+
+assert_eq "23z24 (D287): a planted line never survives the rebuild as a standalone record" \
+  "0" "$(grep -c '^TASK_BASE_REF_777=' "$D287_E2E/.stride-env-cache" 2>/dev/null)"
+assert_contains "23z24 (D287): and the rebuild really ran (the claiming task's own record was written)" \
+  "TASK_BASE_REF_556=" "$(cat "$D287_E2E/.stride-env-cache" 2>/dev/null)"
+D287_E2E_READ=$(
+  # shellcheck source=/dev/null
+  HAS_JQ=true RESPONSE_PAYLOAD='{}' source "$HOOK_SCRIPT" > /dev/null 2>&1 || true
+  PROJECT_DIR="$D287_E2E"
+  ENV_CACHE="$D287_E2E/.stride-env-cache"
+  STRIDE_CACHE_LINES=$(filter_cache_records)
+  set -a; eval "$STRIDE_CACHE_LINES" 2>/dev/null || true; set +a
+  printf '%s' "$(task_base_ref_for 777)"
+)
+assert_eq "23z24 (D287): task_base_ref_for reads nothing for the planted id after a real claim rebuild" \
+  "" "$D287_E2E_READ"
+rm -rf "$D287_E2E"
+
+# 23z25 (D287 r3): the rebuild-skip guard, which had NO coverage and was
+# therefore inert while the suite reported 839/0 and called the fix verified.
+#
+# The guard exists because select_kept_window_records is not a pure reader: its
+# output is written back, and by then the `_preserved` grep has already stripped
+# every family line from the cache, so an empty return commits a cache with every
+# window record gone. A live enclosing OUTER task then finds no record of its own
+# and uploads an EMPTY snapshot over real commits — the D274 under-report this
+# defect's second security consideration says must never be traded for.
+#
+# It was inert because the emitter's awk carried a trailing `|| true`, which
+# reset the pipeline status the caller tested — invisible to an output-only
+# assertion, because the OUTPUT was correct throughout. So these rows assert
+# STATUS and FILE STATE, never just output.
+#
+# THE BASELINE FOR THE END-TO-END ROW IS NOT THIS COMMIT'S PARENT, which is
+# worth stating because the obvious check is the wrong one. The parent is the
+# pre-D287 tree, where select_kept_window_records greps $ENV_CACHE directly;
+# grep is quote-blind, so a torn cache still yields the record, the rebuild
+# writes it back, and this row PASSES there for a reason that has nothing to do
+# with the guard. Its only true baseline is the intermediate commit whose guards
+# were inert, where the record is erased (grep -c 0) against 1 here. That
+# commit was measured before it was amended away and is no longer referenced by
+# any branch, so this row is pinned by that measurement rather than by a tree a
+# future reader can check out.
+D287_G=$(mktemp -d)
+(
+  # shellcheck source=/dev/null
+  HAS_JQ=true RESPONSE_PAYLOAD='{}' source "$HOOK_SCRIPT" > /dev/null 2>&1 || true
+  PROJECT_DIR="$D287_G"
+  ENV_CACHE="$D287_G/.stride-env-cache"
+  printf "TASK_BASE_REF_555='aaa1230000000000000000000000000000000000'\nTASK_TITLE='torn\n" > "$ENV_CACHE"
+  cache_record_start_lines  > /dev/null 2>&1; printf '%s' "$?" > "$D287_G/st_starts"
+  cache_window_record_lines > /dev/null 2>&1; printf '%s' "$?" > "$D287_G/st_window"
+  select_kept_window_records > /dev/null 2>&1; printf '%s' "$?" > "$D287_G/st_sel"
+  # The same three on a WELL-FORMED cache must all be 0, or "always fails" would
+  # pass the rows above while breaking every normal run.
+  printf "TASK_BASE_REF_555='aaa1230000000000000000000000000000000000'\n" > "$ENV_CACHE"
+  cache_record_start_lines  > /dev/null 2>&1; printf '%s' "$?" > "$D287_G/ok_starts"
+  cache_window_record_lines > /dev/null 2>&1; printf '%s' "$?" > "$D287_G/ok_window"
+  select_kept_window_records > /dev/null 2>&1; printf '%s' "$?" > "$D287_G/ok_sel"
+) > /dev/null 2>&1 || true
+assert_eq "23z25 (D287): a torn cache makes the record emitters report failure, not an empty success" \
+  "1 1 1" "$(cat "$D287_G/st_starts" 2>/dev/null) $(cat "$D287_G/st_window" 2>/dev/null) $(cat "$D287_G/st_sel" 2>/dev/null)"
+assert_eq "23z25 (D287): and a well-formed cache still reports success on all three (the status is not simply always non-zero)" \
+  "0 0 0" "$(cat "$D287_G/ok_starts" 2>/dev/null) $(cat "$D287_G/ok_window" 2>/dev/null) $(cat "$D287_G/ok_sel" 2>/dev/null)"
+rm -rf "$D287_G"
+
+# The end-to-end half: a REAL claim against a torn cache must leave the previous
+# task's anchor on disk. This is the row that fails against the committed r2
+# tree, where both guards were unreachable.
+D287_SKIP=$(mktemp -d)
+d226_fixture "$D287_SKIP"
+d226_claim "$D287_SKIP" 555
+assert_eq "23z25 (D287): fixture guard — the first claim really recorded its own anchor" \
+  "1" "$(grep -c '^TASK_BASE_REF_555=' "$D287_SKIP/.stride-env-cache" 2>/dev/null)"
+# Tear the cache the way a killed non-atomic append would: an unterminated quote.
+printf "TASK_TITLE='torn\n" >> "$D287_SKIP/.stride-env-cache"
+d226_claim "$D287_SKIP" 556
+assert_eq "23z25 (D287): a claim against a torn cache SKIPS the rebuild and leaves the earlier task's anchor intact" \
+  "1" "$(grep -c '^TASK_BASE_REF_555=' "$D287_SKIP/.stride-env-cache" 2>/dev/null)"
+rm -rf "$D287_SKIP"
+
 # 23v2 (D272): the zero-commit steal RATCHETS. 23v pins the k=1 instance; this
 # pins what k of them do, because the amplification is a different fact about
 # the same branch and nothing pinned it. Each childless completion's window

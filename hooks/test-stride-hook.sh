@@ -2510,12 +2510,19 @@ PARITY_PS1
   # its integration test ("a repository with two 100KB single-line files
   # produces a snapshot well within the after_doing budget") and its edge case
   # ("a diff that is one line of several hundred KB with NO trailing newline").
-  # Both matter for different reasons. Two files prove the cost is per-file and
-  # accumulates, which is how a repo with several vendored bundles hits the
-  # budget without any single file looking extreme. The missing trailing
-  # newline is the boundary the count arithmetic turns on: printf supplies the
-  # terminator wc counts, so a body that does not end in one must still come
-  # out as newline-count + 1 rather than one short.
+  # Two files prove the cost is per-file and accumulates, which is how a repo
+  # with several vendored bundles hits the budget without any single file
+  # looking extreme.
+  #
+  # The no-trailing-newline file is a weaker check than it looks, and the limit
+  # is worth stating rather than leaving for the next reader to discover. Its
+  # body is a handful of lines, nowhere near the 500 trigger, so the assertion
+  # below can only show that nothing was truncated — an off-by-one in the count
+  # would be invisible to it. It is also not the distinguishing input it
+  # appears to be: `$(git diff ...)` strips trailing newlines, so diff_text
+  # never ends in LF on a real capture whatever the file on disk looks like.
+  # The count arithmetic itself is pinned where it can actually fail, at the
+  # 499/500/501 boundary, by 7a-7c through trunc_diff_inline.
   PERF2_DIR=$(mktemp -d)
   (
     cd "$PERF2_DIR" || exit 1

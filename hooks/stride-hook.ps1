@@ -121,12 +121,27 @@ $script:StrideOpenWindowSweepAt = 20
 # other" criterion from the code:
 #
 #   1 continuation line promoted to a record  -> closed by D280 r3; the loader
-#     reads Split-EnvCacheRecord.Records, not physical lines. 22h4 pins it.
-#   2 a CR destroyed by an unrelated write    -> 22h4.
-#   3 encoding-signature disagreement          -> 22h3 (both executors call a
-#     BOM-prefixed record absent).
-#   4 invalid bytes destroyed by a rewrite     -> THIS change. 22h5 and 22h6b
-#     pin the ps1 side; 22h6c pins it across both executors on one cache.
+#     reads Split-EnvCacheRecord.Records, not physical lines. Pinned by the
+#     23-series loader cases, notably 23j ("the whole record goes, interior
+#     included - no promotion") and the BASH_ENV promotion block beside it.
+#     NOT 22h4 — that is the CRLF/writer case below.
+#   2 a CR destroyed by an unrelated write     -> 22h4 ("an unrelated write does
+#     not promote a CRLF line" and "the CR survives the rewrite byte-faithfully").
+#   4 bash EXECUTING a BOM-prefixed cache line -> reader half closed; 22h3 has
+#     both executors call a BOM-prefixed record absent. The numbering follows
+#     the task's own security_considerations, which name the BOM case as
+#     divergence 4 — do not renumber it to close the gap below.
+#
+#   Divergence 3 is NOT recoverable from any surviving record. The session that
+#   enumerated the four is gone, and neither the task text nor the in-source
+#   comments name it. Left as a gap rather than guessed at, because a map whose
+#   whole purpose is auditing criterion 4 is worse than useless if one row is
+#   invented.
+#
+#   The invalid-byte class — destroyed by a rewrite — is what THIS change
+#   closes. It is the residue the source called the D281 root cause rather than
+#   one of the four numbered divergences. 22h5 and 22h6b pin the ps1 side;
+#   22h6c pins it across both executors on one shared cache.
 #
 # The bash side is UNCHANGED by this ruling. Both axes that could have obliged it
 # resolve to no-change, and each is recorded at its site in stride-hook.sh rather

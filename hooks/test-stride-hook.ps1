@@ -5587,7 +5587,7 @@ printf "BOARD_NAME=caf\351\nTASK_OWNED_9='keep'\n" > "$ENV_CACHE"
     $g22CrossPreHasE9 = $false
     foreach ($b in $g22CrossPre) { if ($b -eq 0xE9) { $g22CrossPreHasE9 = $true } }
     # Fixture guard: if bash did not write the byte, everything below is vacuous.
-    Assert-Eq "22h6c (D281): bash's own writer produced the invalid byte" "True" "$g22CrossPreHasE9"
+    Assert-Eq "22h6c (D281): the bash-seeded cache really contains the invalid byte" "True" "$g22CrossPreHasE9"
 
     # bash's reading of the record, before and after, captured to FILES and
     # compared as BYTES. Comparing two console-decoded strings cannot fail on

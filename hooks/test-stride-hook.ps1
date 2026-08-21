@@ -6066,32 +6066,166 @@ if ($g22AfterA -match "TASK_OWNED_9='ours'") {
     $script:PASS++
 }
 
-# 22t-b: BOTH survive. This is the acceptance criterion in one case — the
-# concurrent claim's records AND the record write must both be present once
-# Set-TaskRecord retries, because each attempt re-reads and re-applies the
-# delete-and-append against the OTHER writer's content rather than our stale
-# snapshot. A retry that replayed the stale snapshot would pass 22t-a and still
-# lose the claim here.
-$null = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
-$g22AfterB = (Get-EnvCacheLine) -join '|'
-Assert-Contains "22t-b (D282): after the record write, the concurrent claim's TASK_ID survives" `
-    "TASK_ID='999'" $g22AfterB
-Assert-Contains "22t-b (D282): and its TASK_IDENTIFIER survives too" `
-    "TASK_IDENTIFIER='W999'" $g22AfterB
+# 22t-b: a REAL interleave, and the case acceptance criterion 3 rests on.
+#
+# An earlier version of this case wrote the concurrent claim and only THEN
+# called Set-TaskNarrowedRecord, so the record write read the already-updated
+# cache, the compare-and-swap passed on attempt 1 and the retry never ran. Its
+# exact sequence passed against the pre-D282 tree, which makes it no regression
+# pin at all. Sequencing alone cannot produce this race: the concurrent write
+# has to land BETWEEN the record write's read and its rename.
+#
+# So the injection goes where the window actually is. Get-EnvCacheRawByte is
+# what Set-TaskRecord calls to fingerprint the cache; shadowing it lets the
+# claim commit immediately AFTER the fingerprint is taken and before anything
+# is staged. Attempt 1 then holds a genuinely stale $before, the swap refuses,
+# and attempt 2 re-reads and re-applies against the claim's content. A retry
+# that replayed the stale snapshot would lose the claim here — which is the
+# thing the old case could not have caught.
+$null = New-RecordFixture -Name 'interleave'
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_BASE_REF_9='abc123'`nTASK_OWNED_9='mine'`n", (New-Object System.Text.UTF8Encoding($false)))
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_9', 'abc123', 'Process')
+$script:g22Injected = 0
+$g22RealRawByte = ${function:Get-EnvCacheRawByte}
+function Get-EnvCacheRawByte {
+    $bytes = & $g22RealRawByte
+    if ($script:g22Injected -eq 0) {
+        $script:g22Injected = 1
+        # The other agent's claim commits, after our fingerprint and before our
+        # rename. Written with the real encoder so it is a legitimate cache.
+        [System.IO.File]::WriteAllText($script:EnvCache,
+            "TASK_BASE_REF_9='abc123'`nTASK_OWNED_9='mine'`nTASK_ID='999'`nTASK_IDENTIFIER='W999'`n",
+            [System.Text.Encoding]::GetEncoding(28591))
+    }
+    return ,$bytes
+}
+$g22SetRc = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
+${function:Get-EnvCacheRawByte} = $g22RealRawByte
+Assert-Eq "22t-b (D282): the interleave actually fired" "1" "$($script:g22Injected)"
+Assert-Eq "22t-b (D282): the record write still reports success after retrying" "True" "$g22SetRc"
+$g22Inter = (Get-EnvCacheLine) -join '|'
+Assert-Contains "22t-b (D282): the concurrent claim's TASK_ID survives the interleave" "TASK_ID='999'" $g22Inter
+Assert-Contains "22t-b (D282): and its TASK_IDENTIFIER survives too" "TASK_IDENTIFIER='W999'" $g22Inter
 Assert-Eq "22t-b (D282): and the record write landed alongside it" "yes" `
     "$((Get-TaskNarrowedRecord -TaskId '9').Value)"
 
-# 22t-c: an unreadable cache is refused, not treated as absent. Returning the
-# absent answer for a locked file would let a compare-and-swap succeed against
-# "expected absent" and wipe a cache another process is holding — which is the
-# same wholesale loss by a different route.
-$g22Unreadable = Get-EnvCacheRawByte
-Assert-Eq "22t-c (D282): a readable cache does not report the unreadable sentinel" "False" `
-    "$($g22Unreadable -is [string])"
+# 22t-c: helper semantics, including the zero-byte case that used to read as
+# absent. PowerShell unrolls a returned array, so a 0-byte cache came back as
+# $null exactly like a missing one — and Write-EnvCache -Lines @() reaches that
+# state, so a swap against "expected absent" could commit over a file another
+# process had just created.
+$null = New-RecordFixture -Name 'helpers'
+[System.IO.File]::WriteAllText($script:EnvCache, "BOARD_ID=55`n", (New-Object System.Text.UTF8Encoding($false)))
+$g22Present = Get-EnvCacheRawByte
+Assert-Eq "22t-c (D282): a readable cache does not report the unreadable sentinel" "False" "$($g22Present -is [string])"
 Assert-Eq "22t-c (D282): expected-absent does not match a present cache" "False" `
-    "$(Test-EnvCacheUnchanged -Expected $null -Actual $g22Unreadable)"
+    "$(Test-EnvCacheUnchanged -Expected $null -Actual $g22Present)"
 Assert-Eq "22t-c (D282): and the unreadable sentinel never compares equal" "False" `
-    "$(Test-EnvCacheUnchanged -Expected 'unreadable' -Actual $g22Unreadable)"
+    "$(Test-EnvCacheUnchanged -Expected 'unreadable' -Actual $g22Present)"
+[System.IO.File]::WriteAllBytes($script:EnvCache, [byte[]]@())
+$g22Empty = Get-EnvCacheRawByte
+Assert-Eq "22t-c (D282): a zero-byte cache is not reported as absent" "False" "$($null -eq $g22Empty)"
+Assert-Eq "22t-c (D282): and expected-absent does not match a zero-byte cache" "False" `
+    "$(Test-EnvCacheUnchanged -Expected $null -Actual $g22Empty)"
+
+# 22t-d: the cache is UNREADABLE at re-read time — the task's first named edge
+# case, driven for real rather than asserted about.
+#
+# A first draft put a DIRECTORY at the cache path, on the assumption that
+# ReadAllBytes would throw. It does not get that far: Test-Path -PathType Leaf
+# is false for a container, so the helper reports ABSENT, and Move-Item then
+# moves the staged temp INTO the directory and reports success. Recorded
+# because the wrong answer there looks exactly like the right one — the write
+# "succeeds" while the cache is nowhere. Nothing creates a directory at that
+# path, so it is not filed, but it is not what "unreadable" means either.
+#
+# A permission denial is the real shape, and matches the Windows sharing
+# violation the helper's comment is about. Skipped when running as root, where
+# the mode is not enforced.
+$null = New-RecordFixture -Name 'unreadable'
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_BASE_REF_9='abc123'`n", (New-Object System.Text.UTF8Encoding($false)))
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_9', 'abc123', 'Process')
+$g22Uid = (& id -u 2>$null | Out-String).Trim()
+if ($g22Uid -eq '0' -or -not $g22Uid) {
+    Write-Host "  SKIP: 22t-d (D282): the unreadable-cache case needs a non-root uid" -ForegroundColor Yellow
+} else {
+    & chmod 000 $script:EnvCache 2>$null
+    $g22ReadBack = Get-EnvCacheRawByte
+    # Non-vacuity: if the chmod did not take, the case below proves nothing.
+    Assert-Eq "22t-d (D282): the cache really is unreadable now" "True" "$($g22ReadBack -is [string])"
+    $g22UnreadRc = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
+    Assert-Eq "22t-d (D282): a record write over an unreadable cache is refused" "False" "$g22UnreadRc"
+    & chmod 644 $script:EnvCache 2>$null
+    $g22Restored = (Get-EnvCacheLine) -join '|'
+    Assert-Contains "22t-d (D282): and the original content is left untouched" "TASK_BASE_REF_9='abc123'" $g22Restored
+    if ($g22Restored -match 'TASK_NARROWED_9=') {
+        Write-Host "  FAIL: 22t-d (D282): the refused write reached the cache anyway" -ForegroundColor Red
+        $script:FAIL++
+    } else {
+        Write-Host "  PASS: 22t-d (D282): and the refused write did not reach the cache" -ForegroundColor Green
+        $script:PASS++
+    }
+}
+
+# 22t-e: three collisions REFUSE rather than clobber. Nothing else drives the
+# bounded-retry exit, so without this the refusal branch is unreachable in test.
+$null = New-RecordFixture -Name 'persistent'
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_BASE_REF_9='abc123'`nTASK_ID='777'`n", (New-Object System.Text.UTF8Encoding($false)))
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_9', 'abc123', 'Process')
+$script:g22Collide = 0
+$g22RealRawByte2 = ${function:Get-EnvCacheRawByte}
+function Get-EnvCacheRawByte {
+    $bytes = & $g22RealRawByte2
+    # A writer we cannot keep up with: it commits on EVERY attempt.
+    $script:g22Collide++
+    [System.IO.File]::WriteAllText($script:EnvCache,
+        "TASK_BASE_REF_9='abc123'`nTASK_ID='777'`nTASK_SPIN='$($script:g22Collide)'`n",
+        [System.Text.Encoding]::GetEncoding(28591))
+    return ,$bytes
+}
+$g22SpinRc = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
+${function:Get-EnvCacheRawByte} = $g22RealRawByte2
+Assert-Eq "22t-e (D282): a write that collides on every attempt is refused, not forced" "False" "$g22SpinRc"
+# SIX, not three: Get-EnvCacheRawByte is called twice per attempt — once by
+# Set-TaskRecord to take the fingerprint, once by Write-EnvCache to re-check it
+# immediately before the rename. Pinning the observed number rather than the
+# attempt count makes a change to EITHER visible: add a third read per attempt,
+# or a fourth attempt, and this fails and says so.
+Assert-Eq "22t-e (D282): it gave up after 3 attempts (2 cache reads each)" "6" "$($script:g22Collide)"
+$g22Spun = (Get-EnvCacheLine) -join '|'
+Assert-Contains "22t-e (D282): the concurrent writer's content is left in place" "TASK_ID='777'" $g22Spun
+if ($g22Spun -match "TASK_NARROWED_9=") {
+    Write-Host "  FAIL: 22t-e (D282): the refused record was written anyway" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 22t-e (D282): and the refused record never reached the cache" -ForegroundColor Green
+    $script:PASS++
+}
+
+# 22t-f: two record writes to DIFFERENT keys interleave — the task's second
+# named edge case. Neither may erase the other.
+$null = New-RecordFixture -Name 'twokeys'
+[System.IO.File]::WriteAllText($script:EnvCache, "TASK_BASE_REF_9='abc123'`nTASK_BASE_REF_8='def456'`n", (New-Object System.Text.UTF8Encoding($false)))
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_9', 'abc123', 'Process')
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_8', 'def456', 'Process')
+$script:g22TwoKey = 0
+$g22RealRawByte3 = ${function:Get-EnvCacheRawByte}
+function Get-EnvCacheRawByte {
+    $bytes = & $g22RealRawByte3
+    if ($script:g22TwoKey -eq 0) {
+        $script:g22TwoKey = 1
+        # The other task's record write commits inside our window.
+        [System.IO.File]::WriteAllText($script:EnvCache,
+            "TASK_BASE_REF_9='abc123'`nTASK_BASE_REF_8='def456'`nTASK_NARROWED_8='no'`n",
+            [System.Text.Encoding]::GetEncoding(28591))
+    }
+    return ,$bytes
+}
+$null = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
+${function:Get-EnvCacheRawByte} = $g22RealRawByte3
+Assert-Eq "22t-f (D282): the two-key interleave actually fired" "1" "$($script:g22TwoKey)"
+Assert-Eq "22t-f (D282): the other task's record survives" "no" "$((Get-TaskNarrowedRecord -TaskId '8').Value)"
+Assert-Eq "22t-f (D282): and ours lands beside it" "yes" "$((Get-TaskNarrowedRecord -TaskId '9').Value)"
 
 # --- 22s: the D274 defect END TO END, claim then completion ---
 # testing_strategy.integration_tests[0] - "a completion with 22 open windows

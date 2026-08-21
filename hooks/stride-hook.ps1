@@ -156,7 +156,14 @@ function Get-EnvCacheRawByte {
     try {
         $p = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EnvCache)
         if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $null }
-        return [System.IO.File]::ReadAllBytes($p)
+        # The unary comma is load-bearing. PowerShell unrolls a returned array
+        # into the pipeline, so a ZERO-BYTE cache would come back as $null —
+        # indistinguishable from an absent one, and a swap taken against
+        # "expected absent" would then commit over a 0-byte file another process
+        # had just created. Write-EnvCache -Lines @() produces exactly that
+        # state, so it is reachable rather than theoretical. Wrapping keeps the
+        # empty byte[] an empty byte[].
+        return ,([System.IO.File]::ReadAllBytes($p))
     } catch {
         # Unreadable is NOT the same as absent, and must not be reported as it:
         # returning $null here would let a swap succeed against "expected

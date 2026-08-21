@@ -115,6 +115,19 @@ $script:StrideOpenWindowSweepAt = 20
 # which both document as deliberate — closing it on one side alone would
 # manufacture the very divergence this layer exists to prevent.
 #
+# WHERE EACH FILED DIVERGENCE IS NOW PINNED. The session that filed D281 listed
+# four, and that session is not re-derivable, so the map lives here instead — it
+# is the only way a later reader can audit the "present to one, present to the
+# other" criterion from the code:
+#
+#   1 continuation line promoted to a record  -> closed by D280 r3; the loader
+#     reads Split-EnvCacheRecord.Records, not physical lines. 22h4 pins it.
+#   2 a CR destroyed by an unrelated write    -> 22h4.
+#   3 encoding-signature disagreement          -> 22h3 (both executors call a
+#     BOM-prefixed record absent).
+#   4 invalid bytes destroyed by a rewrite     -> THIS change. 22h5 and 22h6b
+#     pin the ps1 side; 22h6c pins it across both executors on one cache.
+#
 # The bash side is UNCHANGED by this ruling. Both axes that could have obliged it
 # resolve to no-change, and each is recorded at its site in stride-hook.sh rather
 # than left as an absence a later reader would have to guess about.
@@ -279,12 +292,32 @@ function ConvertTo-ShSingleQuoted {
 # and a value leaving the cache for the process environment must be projected
 # back. A missed IN boundary on a value holding U+0080-U+00FF — 'café' is the
 # case — silently writes one byte where bash writes two, and Write-EnvCache's
-# guard cannot catch it because those characters are <= U+00FF. The boundaries
-# are therefore enumerated rather than left to care: four IN (Set-TaskRecord,
-# the claim identity block, Set-HookEnv, the finalize block) and one OUT (the
-# bulk loader's SetEnvironmentVariable). The end-to-end tests assert the ON-DISK
-# BYTES of a non-ASCII title rather than a round-trip, because a round-trip is
-# symmetric and passes under any self-consistent-but-wrong encoding.
+# guard cannot catch it because those characters are <= U+00FF.
+#
+# THE BOUNDARIES, enumerated so a reader can reconcile this comment against
+# `grep ConvertTo-CacheByteString` and get the same answer — TWO sites project,
+# and the rest are ASCII-constrained by construction:
+#
+#   IN, projecting (2):
+#     - the claim identity block, folded into its $flat lambda so all six lines
+#       get it. Server-supplied title and identifier routinely carry non-ASCII.
+#     - Set-HookEnv, for the same reason: the values are server text.
+#
+#   IN, ASCII-only by construction, so no projection and none needed (2):
+#     - Set-TaskRecord. Its callers pass only 'yes'/'no', a git SHA, a
+#       space-joined SHA list or the OVERFLOW sentinel, and epoch digits.
+#     - the finalize block: a rev-parse SHA, the literal '1', a digit-gated
+#       owner id, and an epoch.
+#     A future caller handing either of these free-form text MUST project it, or
+#     it lands as Latin-1 bytes. That is the whole failure mode.
+#
+#   OUT, projecting (1):
+#     - the bulk loader's SetEnvironmentVariable. Without it every non-ASCII
+#       value reaches each section child as mojibake.
+#
+# The end-to-end tests assert the ON-DISK BYTES of a non-ASCII title rather than
+# a round-trip, because a round-trip is symmetric and passes under any
+# self-consistent-but-wrong encoding.
 #
 # The encoding is constructed inside each function rather than memoized in a
 # $script: variable: hooks/test-stride-hook.ps1 extracts these functions by AST

@@ -5567,8 +5567,11 @@ Assert-Eq "22h6f (D281): and the previous cache is left byte-identical" "True" "
 # same file said.
 if ($g22Bash) {
     $null = New-RecordFixture -Name 'crossexec'
-    # bash authors the cache through its OWN writer, not a PowerShell
-    # approximation of it — the point is what the shipped bash code produces.
+    # The cache is seeded by bash with a plain printf redirect, not through
+    # write_env_cache — stated exactly, because an earlier version of this
+    # comment claimed the shipped bash WRITER was exercised and it is not. The
+    # half that is genuinely the shipped mechanism is the READ: `. "$ENV_CACHE"`
+    # is bash's real loader, and that is the side this case is about.
     $g22CrossSeed = @'
 set -u
 . "$1" > /dev/null 2>&1 || true
@@ -5586,16 +5589,28 @@ printf "BOARD_NAME=caf\351\nTASK_OWNED_9='keep'\n" > "$ENV_CACHE"
     # Fixture guard: if bash did not write the byte, everything below is vacuous.
     Assert-Eq "22h6c (D281): bash's own writer produced the invalid byte" "True" "$g22CrossPreHasE9"
 
-    # bash's reading of the record, BEFORE the ps1 touches the file.
-    $g22CrossBefore = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$BOARD_NAME"' _ $script:EnvCache 2>$null | Out-String).TrimEnd("`r", "`n")
+    # bash's reading of the record, before and after, captured to FILES and
+    # compared as BYTES. Comparing two console-decoded strings cannot fail on
+    # the regression this case exists for: pre-fix the bytes differ (caf<E9>
+    # becomes caf<EF BF BD>) but on a UTF-8 console BOTH decode to the same
+    # "caf\uFFFD", so the assertion is green either way — and green on an empty
+    # capture too, since "" equals "". Bytes are the only form that fails.
+    $g22CrossOutA = Join-Path $script:ProjectDir 'read-before.out'
+    $g22CrossOutB = Join-Path $script:ProjectDir 'read-after.out'
+    & bash -c '. "$1" > /dev/null 2>&1; printf %s "$BOARD_NAME" > "$2"' _ $script:EnvCache $g22CrossOutA 2>$null | Out-Null
 
     # The ps1 rewrites an UNRELATED record.
     $null = Set-TaskNarrowedRecord -TaskId '9' -Value 'fresh'
 
-    # bash reads it again from the same file.
-    $g22CrossAfter = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$BOARD_NAME"' _ $script:EnvCache 2>$null | Out-String).TrimEnd("`r", "`n")
-    Assert-Eq "22h6c (D281): bash reads the same value before and after an unrelated ps1 write" `
-        $g22CrossBefore $g22CrossAfter
+    & bash -c '. "$1" > /dev/null 2>&1; printf %s "$BOARD_NAME" > "$2"' _ $script:EnvCache $g22CrossOutB 2>$null | Out-Null
+    $g22BeforeBytes = if (Test-Path $g22CrossOutA) { [System.IO.File]::ReadAllBytes($g22CrossOutA) } else { [byte[]]@() }
+    $g22AfterBytes2 = if (Test-Path $g22CrossOutB) { [System.IO.File]::ReadAllBytes($g22CrossOutB) } else { [byte[]]@() }
+    # Non-vacuity: an empty capture on both sides would compare equal.
+    Assert-Eq "22h6c (D281): bash's pre-write read is non-empty, so the comparison is not vacuous" "True" `
+        "$($g22BeforeBytes.Length -gt 0)"
+    $g22CrossSame = $g22BeforeBytes.Length -eq $g22AfterBytes2.Length
+    if ($g22CrossSame) { for ($i = 0; $i -lt $g22BeforeBytes.Length; $i++) { if ($g22BeforeBytes[$i] -ne $g22AfterBytes2[$i]) { $g22CrossSame = $false; break } } }
+    Assert-Eq "22h6c (D281): bash reads identical BYTES before and after an unrelated ps1 write" "True" "$g22CrossSame"
     # And the record the ps1 was actually asked to write landed.
     Assert-Eq "22h6c (D281): the ps1's own write took effect on the shared cache" "fresh" `
         "$((Get-TaskNarrowedRecord -TaskId '9').Value)"
@@ -6416,10 +6431,26 @@ if ($g23Bash -and (Get-Command git -ErrorAction SilentlyContinue)) {
         }
         Assert-Eq "23c5 (D281): a non-ASCII title reaches disk as UTF-8 (C3 A9), as bash writes it" "True" "$d281HasUtf8Eacute"
         Assert-Eq "23c5 (D281): and NOT as a mis-projected bare Latin-1 byte (E9)" "False" "$d281HasBareE9"
-        # The bash executor must read back exactly what was written — the
-        # cross-executor half, on the same bytes.
-        $d281FromBash = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$TASK_TITLE"' _ $d281Cache 2>$null | Out-String).TrimEnd("`r", "`n")
-        Assert-Eq "23c5 (D281): bash sources the non-ASCII title back verbatim" $d281Title $d281FromBash
+        # The bash executor must read back exactly what was written. Compare
+        # BYTES, via a file, never bash's stdout: native-command output is
+        # decoded through [Console]::OutputEncoding, which is UTF-8 on pwsh 7
+        # but the console OEM code page on Windows PowerShell 5.1 — the shipping
+        # host. A non-ASCII literal compared against captured stdout therefore
+        # FAILS ON A CORRECT IMPLEMENTATION there, which is pitfall 2 exactly.
+        # stride-hook.ps1 documents the same trap for `git ls-files` and pins the
+        # encoding; a test can do better and keep the decoder out of the path.
+        $d281Echo = Join-Path $d281Proj 'title.out'
+        & bash -c '. "$1" > /dev/null 2>&1; printf %s "$TASK_TITLE" > "$2"' _ $d281Cache $d281Echo 2>$null | Out-Null
+        if (-not (Test-Path $d281Echo)) {
+            Write-Host "  FAIL: 23c5 (D281): bash wrote no readback file, so the byte comparison would prove nothing" -ForegroundColor Red
+            $script:FAIL++
+        } else {
+            $d281EchoBytes = [System.IO.File]::ReadAllBytes($d281Echo)
+            $d281WantBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($d281Title)
+            $d281Same = $d281EchoBytes.Length -eq $d281WantBytes.Length
+            if ($d281Same) { for ($i = 0; $i -lt $d281WantBytes.Length; $i++) { if ($d281EchoBytes[$i] -ne $d281WantBytes[$i]) { $d281Same = $false; break } } }
+            Assert-Eq "23c5 (D281): bash sources the non-ASCII title back byte-for-byte" "True" "$d281Same"
+        }
     }
 } else {
     Write-Host "  SKIP: 23c5: the D281 non-ASCII byte test needs bash and git" -ForegroundColor Yellow

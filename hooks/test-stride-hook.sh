@@ -2575,6 +2575,104 @@ PARITY_PS1
     FAIL=$((FAIL + 1))
   fi
   rm -rf "$PERF2_DIR"
+
+  # 7ii (D281): a bash record write must not destroy an invalid byte in an
+  # UNRELATED record. D281 made this matter more rather than less. Its ps1 fix
+  # PRESERVES bytes that used to be replaced with U+FFFD, so caches carrying
+  # invalid bytes now persist instead of being scrubbed on the next ps1 write —
+  # and bash's own record writers are `grep -v "^KEY=" "$ENV_CACHE"` piped into
+  # write_env_cache, whose behaviour on invalid multibyte input is an
+  # implementation and locale question, not a settled one.
+  #
+  # Measured on this machine: /usr/bin/grep (BSD grep 2.6.0-FreeBSD) keeps every
+  # line and preserves the byte under both LC_ALL=C and LC_ALL=en_US.UTF-8. But
+  # ugrep, which some contributors have first on PATH, treats the same file as
+  # BINARY and emits nothing at all without -a — which through this pipeline
+  # would empty the cache. GNU grep on Linux is a third implementation and was
+  # not reachable from here.
+  #
+  # So this asserts the PROPERTY against whatever grep the runner actually has,
+  # rather than encoding one implementation's answer. A host whose grep drops
+  # or mangles the line fails here instead of silently losing records.
+  D281_DIR=$(mktemp -d)
+  (
+    cd "$D281_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo seed > seed.txt
+    git add -A > /dev/null
+    git commit -q -m base
+    # A cache holding an invalid byte in one record and a normal record beside it.
+    printf "BOARD_NAME=caf\351\n" > .stride-env-cache
+    printf "TASK_OWNED_9='keep'\n" >> .stride-env-cache
+    # An EXISTING record for the key about to be written, so the writer's
+    # `grep -v` actually removes a line. Without it the filter is a pure
+    # pass-through and the case pins "this grep reproduces the file" rather
+    # than what the record writers do: drop the old line for this key from a
+    # file that also holds an invalid byte, then re-add it.
+    printf "TASK_NARROWED_9='stale'\n" >> .stride-env-cache
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    PROJECT_DIR="$D281_DIR"
+    ENV_CACHE="$D281_DIR/.stride-env-cache"
+    # Drive the real writer idiom: filter one key out and rewrite the cache.
+    {
+      grep -v "^TASK_NARROWED_9=" "$ENV_CACHE" 2>/dev/null || true
+      printf "TASK_NARROWED_9='fresh'\n"
+    } | write_env_cache || true
+  ) > /dev/null 2>&1
+  D281_HEX=$(od -An -tx1 < "$D281_DIR/.stride-env-cache" 2>/dev/null | tr -d ' \n')
+  # Non-vacuity: an empty cache trivially contains no bad byte AND no good one.
+  if [ -n "$D281_HEX" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: D281: the bash record write produced a non-empty cache"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: D281: the bash record write emptied the cache — this grep cannot be used in the writer pipeline"
+    FAIL=$((FAIL + 1))
+  fi
+  case "$D281_HEX" in
+    *e9*) echo -e "  ${GREEN}PASS${RESET}: D281: an invalid byte in an unrelated record survives a bash record write"
+          PASS=$((PASS + 1)) ;;
+    *)    echo -e "  ${RED}FAIL${RESET}: D281: the invalid byte was destroyed by a bash record write (grep: $(command -v grep))"
+          FAIL=$((FAIL + 1)) ;;
+  esac
+  # The remaining checks search the HEX, not the file, for the same reason the
+  # first two do: this case's subject is grep's behaviour, so grep must not be
+  # the measuring instrument. A `grep -q` here would return non-zero on a host
+  # whose grep refuses binary input whether or not the record is present, and
+  # the case would print "an untouched record was lost" when the truthful
+  # statement is "this grep will not read the cache" — fail-closed, but
+  # misattributed, and the diagnostic is the whole value of a property test
+  # someone hits on an unfamiliar host.
+  d281_hex_of() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
+  case "$D281_HEX" in
+    *"$(d281_hex_of "TASK_OWNED_9='keep'")"*)
+      echo -e "  ${GREEN}PASS${RESET}: D281: and the untouched record beside it survives too"
+      PASS=$((PASS + 1)) ;;
+    *)
+      echo -e "  ${RED}FAIL${RESET}: D281: an untouched record was lost by a bash record write (grep: $(command -v grep))"
+      FAIL=$((FAIL + 1)) ;;
+  esac
+  case "$D281_HEX" in
+    *"$(d281_hex_of "TASK_NARROWED_9='fresh'")"*)
+      echo -e "  ${GREEN}PASS${RESET}: D281: and the record the write was asked to make landed"
+      PASS=$((PASS + 1)) ;;
+    *)
+      echo -e "  ${RED}FAIL${RESET}: D281: the intended record never landed, so the case above proves nothing"
+      FAIL=$((FAIL + 1)) ;;
+  esac
+  # The stale line for that key must be GONE — this is what makes the case
+  # exercise the writer idiom rather than a pass-through.
+  case "$D281_HEX" in
+    *"$(d281_hex_of "TASK_NARROWED_9='stale'")"*)
+      echo -e "  ${RED}FAIL${RESET}: D281: the superseded record survived, so the filter did not filter"
+      FAIL=$((FAIL + 1)) ;;
+    *)
+      echo -e "  ${GREEN}PASS${RESET}: D281: and the superseded record for that key was removed"
+      PASS=$((PASS + 1)) ;;
+  esac
+  rm -rf "$D281_DIR"
 fi
 
 # ============================================================

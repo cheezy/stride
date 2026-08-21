@@ -5219,7 +5219,8 @@ $g22Want = @(
     'Get-TaskOwnedRecord', 'Get-TaskBaseAtRecord', 'Get-TaskNarrowedRecord',
     'Get-TaskBaseRefFor', 'Get-TaskHeadRefFor', 'Set-TaskRecord', 'Set-TaskOwnedRecord',
     'Set-TaskNarrowedRecord', 'Set-TaskHeadRefRecord', 'Set-TaskBaseAtRecord',
-    'Write-EnvCache', 'ConvertTo-PrintableForLog'
+    'Write-EnvCache', 'ConvertTo-PrintableForLog',
+    'ConvertTo-CacheByteString', 'ConvertFrom-CacheByteString'
 )
 $g22Ast = [System.Management.Automation.Language.Parser]::ParseFile($HookScript, [ref]$null, [ref]$null)
 $g22Fns = $g22Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
@@ -5473,25 +5474,138 @@ Assert-Eq "22h5: the \z anchor rejects a trailing newline where `$ would accept 
 Assert-Eq "22h5: and still accepts the clean record" "True" `
     "$($g22Anchor.IsMatch("TASK_NARROWED_801='yes'"))"
 
-# (b) The documented limit of the byte-faithfulness claim. The decoder's
-# invalid-byte fallback is replacement, so a non-UTF-8 byte in an UNRELATED line
-# does not survive a Set-TaskRecord rewrite. This is inherited behaviour, not
-# introduced here, and it is inert while 22r holds — pinned so the seam is
-# visible and so closing it (the D281 root cause) turns this test red rather
-# than passing silently. If this ever fails, the fix landed: flip the assertion.
+# (b) (D281) A write re-emits every record it was not asked to touch as its
+# ORIGINAL bytes. This used to be the documented limit of the byte-faithfulness
+# claim and was pinned here as KNOWN LIMIT (D281): the decoder's invalid-byte
+# fallback is replacement, so a non-UTF-8 byte in an UNRELATED line was
+# destroyed by any Set-TaskRecord rewrite while bash's byte-oriented `grep -v`
+# left it alone. D281 closed it with a Latin-1 storage projection, which is
+# bijective over 0x00-0xFF, so the read/write pair is lossless for ALL bytes.
 $null = New-RecordFixture -Name 'invalidutf8'
 $g22RawBytes = [System.Text.Encoding]::UTF8.GetBytes("BOARD_NAME=caf") + [byte[]](0xE9) + [System.Text.Encoding]::UTF8.GetBytes("`n")
 [System.IO.File]::WriteAllBytes($script:EnvCache, $g22RawBytes)
+# FIXTURE GUARD, before the write: without it every assertion below could pass
+# on a file that never contained the byte in the first place.
+$g22PreE9 = $false
+foreach ($b in [System.IO.File]::ReadAllBytes($script:EnvCache)) { if ($b -eq 0xE9) { $g22PreE9 = $true } }
+Assert-Eq "22h5 (D281): the fixture really contains the invalid byte before the write" "True" "$g22PreE9"
 [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_42', 'abc123', 'Process')
 $null = Set-TaskNarrowedRecord -TaskId '42' -Value 'yes'
 $g22AfterBytes = [System.IO.File]::ReadAllBytes($script:EnvCache)
 $g22HasE9 = $false
 foreach ($b in $g22AfterBytes) { if ($b -eq 0xE9) { $g22HasE9 = $true } }
-Assert-Eq "22h5: KNOWN LIMIT (D281) — a lone invalid byte does NOT survive a rewrite" "False" "$g22HasE9"
-Assert-Eq "22h5: it is replaced by U+FFFD rather than corrupting the quoting" "True" `
-    "$(@(Get-EnvCacheLine | Where-Object { $_ -like "BOARD_NAME=caf*" }).Count -eq 1)"
+Assert-Eq "22h5 (D281): a lone invalid byte in an UNRELATED record survives a rewrite" "True" "$g22HasE9"
+# Not merely 'an E9 exists somewhere' — a byte-count assertion would pass if the
+# write relocated it into a different record. Assert the exact subsequence.
+$g22Want59 = [System.Text.Encoding]::ASCII.GetBytes("BOARD_NAME=caf") + [byte[]](0xE9)
+$g22FoundSeq = $false
+for ($i = 0; $i -le ($g22AfterBytes.Length - $g22Want59.Length); $i++) {
+    $m = $true
+    for ($j = 0; $j -lt $g22Want59.Length; $j++) { if ($g22AfterBytes[$i + $j] -ne $g22Want59[$j]) { $m = $false; break } }
+    if ($m) { $g22FoundSeq = $true; break }
+}
+Assert-Eq "22h5 (D281): and it survives in its own record, not relocated" "True" "$g22FoundSeq"
+# No U+FFFD replacement was written (EF BF BD) — the old lossy behaviour.
+$g22HasFffd = $false
+for ($i = 0; $i -le ($g22AfterBytes.Length - 3); $i++) {
+    if ($g22AfterBytes[$i] -eq 0xEF -and $g22AfterBytes[$i+1] -eq 0xBF -and $g22AfterBytes[$i+2] -eq 0xBD) { $g22HasFffd = $true; break }
+}
+Assert-Eq "22h5 (D281): no U+FFFD replacement was written" "False" "$g22HasFffd"
 Assert-Eq "22h5: and the record written alongside it is intact" "yes" `
     "$((Get-TaskNarrowedRecord -TaskId '42').Value)"
+
+# --- 22h6 (D281): the rest of the invalid-byte class, and the writer guard ---
+# 22h6b: not just a lone high byte. Each of these is a distinct way to be
+# invalid UTF-8, and the replacement fallback collapsed them all identically.
+$null = New-RecordFixture -Name 'invalidclass'
+$g22Seqs = @{
+    'lone FF'            = [byte[]](0xFF)
+    'truncated lead C3'  = [byte[]](0xC3)
+    'overlong C0 80'     = [byte[]](0xC0, 0x80)
+    'lone surrogate'     = [byte[]](0xED, 0xA0, 0x80)
+}
+foreach ($name in ($g22Seqs.Keys | Sort-Object)) {
+    $seq = $g22Seqs[$name]
+    $pre = [System.Text.Encoding]::ASCII.GetBytes("BOARD_NAME=x") + $seq + [byte[]](0x0A)
+    [System.IO.File]::WriteAllBytes($script:EnvCache, $pre)
+    $null = Set-TaskNarrowedRecord -TaskId '77' -Value 'ok'
+    $post = [System.IO.File]::ReadAllBytes($script:EnvCache)
+    $found = $false
+    for ($i = 0; $i -le ($post.Length - $seq.Length); $i++) {
+        $m = $true
+        for ($j = 0; $j -lt $seq.Length; $j++) { if ($post[$i + $j] -ne $seq[$j]) { $m = $false; break } }
+        if ($m) { $found = $true; break }
+    }
+    Assert-Eq "22h6b (D281): '$name' in an unrelated record survives a rewrite" "True" "$found"
+}
+
+# 22h6f: the writer guard. A line carrying a character above U+00FF was never
+# converted at its IN boundary, and Latin-1 would silently encode it as '?'
+# (0x3F). Write-EnvCache must refuse rather than write a corrupted cache, and
+# must leave the previous cache byte-identical — the contract it already keeps
+# on every other failure. Auto-repair is deliberately NOT the behaviour: 'all
+# chars <= U+00FF' cannot tell a converted byte-string from an unconverted
+# 'café', so repairing would corrupt the legitimate case.
+$null = New-RecordFixture -Name 'guard'
+$g22GuardPre = [System.Text.Encoding]::ASCII.GetBytes("BOARD_ID=55`n")
+[System.IO.File]::WriteAllBytes($script:EnvCache, $g22GuardPre)
+Assert-Eq "22h6f (D281): the guard fixture starts non-empty, so 'unchanged' is a real claim" "True" `
+    "$([System.IO.File]::ReadAllBytes($script:EnvCache).Length -gt 0)"
+$g22GuardRc = Write-EnvCache -Lines @("BOARD_NAME='ok'", ("TASK_TITLE='" + [string][char]0x2705 + "'"))
+Assert-Eq "22h6f (D281): Write-EnvCache refuses a line holding a char above U+00FF" "False" "$g22GuardRc"
+$g22GuardPost = [System.IO.File]::ReadAllBytes($script:EnvCache)
+$g22GuardSame = $g22GuardPost.Length -eq $g22GuardPre.Length
+if ($g22GuardSame) { for ($i = 0; $i -lt $g22GuardPre.Length; $i++) { if ($g22GuardPre[$i] -ne $g22GuardPost[$i]) { $g22GuardSame = $false } } }
+Assert-Eq "22h6f (D281): and the previous cache is left byte-identical" "True" "$g22GuardSame"
+
+# --- 22h6c (D281): ONE shared cache, BOTH executors, criterion 5 ---
+# Every D281 divergence is invisible to a suite that only asks one executor, so
+# this drives the round trip that actually matters in a mixed checkout: BASH
+# writes a cache carrying an invalid byte, the PS1 rewrites an unrelated record,
+# and bash must still read back exactly what it wrote. Before D281 the ps1's
+# rewrite destroyed the byte and the two executors then disagreed about what the
+# same file said.
+if ($g22Bash) {
+    $null = New-RecordFixture -Name 'crossexec'
+    # bash authors the cache through its OWN writer, not a PowerShell
+    # approximation of it — the point is what the shipped bash code produces.
+    $g22CrossSeed = @'
+set -u
+. "$1" > /dev/null 2>&1 || true
+PROJECT_DIR="$2"
+ENV_CACHE="$2/.stride-env-cache"
+printf "BOARD_NAME=caf\351\nTASK_OWNED_9='keep'\n" > "$ENV_CACHE"
+'@
+    $g22CrossSh = Join-Path $script:ProjectDir 'seed.sh'
+    [System.IO.File]::WriteAllText($g22CrossSh, $g22CrossSeed, (New-Object System.Text.UTF8Encoding($false)))
+    & bash $g22CrossSh $g22Sh $script:ProjectDir 2>$null | Out-Null
+
+    $g22CrossPre = [System.IO.File]::ReadAllBytes($script:EnvCache)
+    $g22CrossPreHasE9 = $false
+    foreach ($b in $g22CrossPre) { if ($b -eq 0xE9) { $g22CrossPreHasE9 = $true } }
+    # Fixture guard: if bash did not write the byte, everything below is vacuous.
+    Assert-Eq "22h6c (D281): bash's own writer produced the invalid byte" "True" "$g22CrossPreHasE9"
+
+    # bash's reading of the record, BEFORE the ps1 touches the file.
+    $g22CrossBefore = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$BOARD_NAME"' _ $script:EnvCache 2>$null | Out-String).TrimEnd("`r", "`n")
+
+    # The ps1 rewrites an UNRELATED record.
+    $null = Set-TaskNarrowedRecord -TaskId '9' -Value 'fresh'
+
+    # bash reads it again from the same file.
+    $g22CrossAfter = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$BOARD_NAME"' _ $script:EnvCache 2>$null | Out-String).TrimEnd("`r", "`n")
+    Assert-Eq "22h6c (D281): bash reads the same value before and after an unrelated ps1 write" `
+        $g22CrossBefore $g22CrossAfter
+    # And the record the ps1 was actually asked to write landed.
+    Assert-Eq "22h6c (D281): the ps1's own write took effect on the shared cache" "fresh" `
+        "$((Get-TaskNarrowedRecord -TaskId '9').Value)"
+    # The unrelated record bash wrote is still present to the ps1 reader too —
+    # criterion 4, present to one executor means present to the other.
+    Assert-Eq "22h6c (D281): and the record bash wrote is still present to the ps1 reader" "keep" `
+        "$((Get-TaskOwnedRecord -TaskId '9').Value)"
+} else {
+    Write-Host "  SKIP: 22h6c (D281): the cross-executor shared-cache case needs bash" -ForegroundColor Yellow
+}
 
 # --- 22i: last well-formed match wins ---
 $null = New-RecordFixture -Name 'lastwins'
@@ -6225,6 +6339,90 @@ echo "board=[$BOARD_NAME]"
     Remove-Item -Force $g23Marker2 -ErrorAction SilentlyContinue
 } else {
     Write-Host "  SKIP: 23c2: the hook-env hostile-value test needs bash and git" -ForegroundColor Yellow
+}
+
+# --- 23c5 (D281): a non-ASCII value reaches disk as UTF-8, not as Latin-1 ---
+# This is the guard for the ONE thing the Latin-1 storage projection can get
+# wrong. The cache stores byte-strings, so a value that is TEXT must be
+# projected at its IN boundary; miss that and 'café' is written as the single
+# byte E9 where bash writes C3 A9 — a silent new divergence, and one the
+# Write-EnvCache guard cannot catch because é is <= U+00FF.
+#
+# Assert the ON-DISK BYTES, never a round-trip. A round-trip is symmetric: it
+# passes under any self-consistent-but-wrong encoding, which is exactly what a
+# missed boundary produces. The byte assertion is the only form that fails.
+#
+# This case is GREEN before D281 and must STAY green after it. It is not a
+# regression pin for the fix — it is the standing guard against the fix's own
+# failure mode. Do not delete it as redundant.
+if ($g23Bash -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    $d281Proj = New-GitRepo -Name 'd281-nonascii'
+    Set-Content -Path (Join-Path $d281Proj '.stride.md') -Encoding UTF8 -Value @'
+# Stride Configuration
+
+## before_doing
+```bash
+```
+
+## after_doing
+```bash
+```
+
+## before_review
+```bash
+```
+
+## after_review
+```bash
+```
+
+## after_goal
+```bash
+```
+'@
+    # Two characters that exercise different halves of the risk: é is
+    # U+0080-U+00FF, the range a missed projection silently mangles into one
+    # byte; the CJK char is above U+00FF, which would trip the writer guard if
+    # a projection were missed rather than being written wrongly.
+    $d281Title = "Caf" + [string][char]0x00E9 + " " + [string][char]0x6F22 + " deja"
+    $d281Claim = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{
+            stdout = (@{
+                data = @{ id = 281; identifier = 'D281'; title = $d281Title
+                          status = 'in_progress'; complexity = 'large'; priority = 'high' }
+            } | ConvertTo-Json -Depth 8 -Compress)
+            stderr = ''; interrupted = $false
+        }
+    } | ConvertTo-Json -Depth 10 -Compress
+    $d281R = Invoke-HookScript -InputJson $d281Claim -Phase 'post' -ProjectDir $d281Proj
+    Assert-Exit "23c5: a claim carrying a non-ASCII title exits 0" 0 $d281R.ExitCode
+    $d281Cache = Join-Path $d281Proj '.stride-env-cache'
+    if (-not (Test-Path $d281Cache)) {
+        Write-Host "  FAIL: 23c5 (D281): no env cache was written, so the byte assertions would prove nothing" -ForegroundColor Red
+        $script:FAIL++
+    } else {
+        $d281Bytes = [System.IO.File]::ReadAllBytes($d281Cache)
+        # é as UTF-8 is C3 A9. As mis-projected Latin-1 it would be a bare E9.
+        $d281HasUtf8Eacute = $false
+        for ($i = 0; $i -lt ($d281Bytes.Length - 1); $i++) {
+            if ($d281Bytes[$i] -eq 0xC3 -and $d281Bytes[$i+1] -eq 0xA9) { $d281HasUtf8Eacute = $true; break }
+        }
+        $d281HasBareE9 = $false
+        for ($i = 0; $i -lt $d281Bytes.Length; $i++) {
+            if ($d281Bytes[$i] -eq 0xE9) {
+                if ($i -eq 0 -or $d281Bytes[$i-1] -ne 0xC3) { $d281HasBareE9 = $true; break }
+            }
+        }
+        Assert-Eq "23c5 (D281): a non-ASCII title reaches disk as UTF-8 (C3 A9), as bash writes it" "True" "$d281HasUtf8Eacute"
+        Assert-Eq "23c5 (D281): and NOT as a mis-projected bare Latin-1 byte (E9)" "False" "$d281HasBareE9"
+        # The bash executor must read back exactly what was written — the
+        # cross-executor half, on the same bytes.
+        $d281FromBash = (& bash -c '. "$1" > /dev/null 2>&1; printf %s "$TASK_TITLE"' _ $d281Cache 2>$null | Out-String).TrimEnd("`r", "`n")
+        Assert-Eq "23c5 (D281): bash sources the non-ASCII title back verbatim" $d281Title $d281FromBash
+    }
+} else {
+    Write-Host "  SKIP: 23c5: the D281 non-ASCII byte test needs bash and git" -ForegroundColor Yellow
 }
 
 # --- 23c3 (D275): the hook-env key filter is an ALLOW-list ---

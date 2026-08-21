@@ -84,6 +84,41 @@ $script:StrideOpenWindowSweepAt = 20
 # `-Force` as delete-then-move. "Never partial" still holds there — a reader
 # sees the old cache or none — but "never absent" does not: a crash inside
 # that window leaves no cache, which degrades safely to the HEAD~1 fallback.
+# THE RECORD DEFINITION — which executor wins, per axis (D281)
+#
+# stride-hook.sh and stride-hook.ps1 share one .stride-env-cache in a mixed
+# checkout, and it anchors snapshot bases and window attribution. They disagreed
+# about what a record IS and what one SAYS. This is the ruling, made once, so the
+# divergences are not patched separately and left to drift apart again.
+#
+#   LINE TERMINATORS — bash wins. A record ends at LF and only at LF; a lone CR
+#   and a CRLF are data inside a line, never terminators. Already true since
+#   W2101. D281 adds that the BYTES of such a value survive an unrelated write.
+#
+#   ENCODING SIGNATURE — bash wins. The cache is a byte stream with no declared
+#   encoding. A BOM is three data bytes on the first line, not a marker: it is
+#   preserved, never emitted, and never re-encoded. THE STORAGE PROJECTION above
+#   is what makes that literal rather than aspirational; UTF-8 is the
+#   interpretation applied only at the process-environment boundary.
+#
+#   MULTI-LINE VALUES — bash wins for the FILE FORMAT, the ps1 for ITS OWN
+#   WRITES, and this asymmetry is deliberate and permanent. A quoted value may
+#   legally span physical lines and `source` reassembles it, so both READERS
+#   honour that. But the ps1's own writers flatten, because ConvertTo-FlatEnvValue
+#   is one of the two halves that closed D280's BASH_ENV route, and its class is
+#   wider than CR/LF (NEL, LS, PS) because .NET and PowerShell readers honour
+#   terminators bash does not. This is a CONTENT divergence, not a PRESENCE one:
+#   both readers present a TASK_TITLE either way, only the newlines differ.
+#
+# What this ruling does NOT cover, named so its absence is not read as coverage:
+# the double-quote and '#' gap in Split-EnvCacheRecord and in bash's awk scanner,
+# which both document as deliberate — closing it on one side alone would
+# manufacture the very divergence this layer exists to prevent.
+#
+# The bash side is UNCHANGED by this ruling. Both axes that could have obliged it
+# resolve to no-change, and each is recorded at its site in stride-hook.sh rather
+# than left as an absence a later reader would have to guess about.
+
 function Write-EnvCache {
     param([string[]]$Lines)
     $stageDir = Join-Path $ProjectDir '.stride'
@@ -108,6 +143,27 @@ function Write-EnvCache {
         # So the terminator is written explicitly as LF rather than left to the
         # platform. Byte-identical to the previous behaviour under pwsh 7 on
         # POSIX, so nothing already asserted moves.
+        # (D281) A character above U+00FF means this line never passed its IN
+        # boundary: ISO-8859-1 would encode it as '?' (0x3F), silently corrupting
+        # it. Refuse the whole write and keep the previous cache — the contract
+        # this function already keeps on every other failure. Deliberately NOT
+        # auto-repaired: 'every char <= U+00FF' cannot distinguish an already
+        # converted byte-string from an unconverted 'café', so a repair would
+        # corrupt the legitimate case. Only the KEY is named; the value may carry
+        # task text.
+        if ($Lines) {
+            foreach ($_l in @($Lines)) {
+                if ($null -eq $_l) { continue }
+                foreach ($_c in $_l.ToCharArray()) {
+                    if ([int]$_c -gt 0xFF) {
+                        $_eq = $_l.IndexOf('=')
+                        $_key = if ($_eq -gt 0) { $_l.Substring(0, $_eq) } else { '<unkeyed line>' }
+                        [Console]::Error.WriteLine('stride-hook: refusing an env-cache write; a line was not projected to the cache byte-string: ' + (ConvertTo-PrintableForLog -Value $_key))
+                        return $false
+                    }
+                }
+            }
+        }
         $joined = ''
         if ($Lines -and @($Lines).Count -gt 0) { $joined = (@($Lines) -join "`n") + "`n" }
         # Resolve to an ABSOLUTE path before handing it to the .NET API. The
@@ -120,7 +176,8 @@ function Write-EnvCache {
         # intended tree, Move-Item cannot find it, and the cleanup misses it too,
         # stranding a file containing the whole env cache somewhere unintended.
         $tmpFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($tmp)
-        [System.IO.File]::WriteAllText($tmpFull, $joined, (New-Object System.Text.UTF8Encoding($false)))
+        # (D281) ISO-8859-1, matching Get-EnvCacheLine — see THE STORAGE PROJECTION.
+        [System.IO.File]::WriteAllText($tmpFull, $joined, [System.Text.Encoding]::GetEncoding(28591))
         Move-Item -LiteralPath $tmp -Destination $EnvCache -Force -ErrorAction Stop
         return $true
     } catch {
@@ -200,6 +257,56 @@ function ConvertTo-ShSingleQuoted {
 # readers, and no legitimate value in this cache — ids, titles, SHAs, yes/no,
 # epoch digits — has any business carrying one. Refusing the whole class costs
 # nothing and removes the next variant of this bug rather than the one instance.
+# (D281) THE STORAGE PROJECTION. This layer's [string] is a sequence of BYTES,
+# not text. Get-EnvCacheLine decodes and Write-EnvCache encodes with ISO-8859-1
+# (code page 28591), which is bijective over 0x00-0xFF, so a line read from disk
+# and written back is byte-identical for ANY byte sequence — valid UTF-8,
+# invalid UTF-8, NUL, BOM, lone CR. UTF-8 could not do that: its decoder's
+# invalid-byte fallback is REPLACEMENT, so a byte that is not valid UTF-8 became
+# U+FFFD on read and EF BF BD on write, destroying a record the writer was never
+# asked to touch, while bash's byte-oriented `grep -v` left it alone.
+#
+# This is not an approximation of the bash semantics, it IS them: bash preserves
+# bytes because grep, awk and printf operate on bytes, and Latin-1 makes a
+# PowerShell string in this layer mean exactly what a bash line means. Every
+# filter here keys off ASCII, and UTF-8 lead and continuation bytes are all
+# >= 0x80, so no multibyte character can produce a byte in the ASCII set the
+# regexes, -like tests, IndexOf calls and quote scanner use — which is why none
+# of them needed changing.
+#
+# The cost is a boundary discipline, and it is the one thing this design can get
+# wrong. A value that is TEXT must be projected before it becomes a cache line,
+# and a value leaving the cache for the process environment must be projected
+# back. A missed IN boundary on a value holding U+0080-U+00FF — 'café' is the
+# case — silently writes one byte where bash writes two, and Write-EnvCache's
+# guard cannot catch it because those characters are <= U+00FF. The boundaries
+# are therefore enumerated rather than left to care: four IN (Set-TaskRecord,
+# the claim identity block, Set-HookEnv, the finalize block) and one OUT (the
+# bulk loader's SetEnvironmentVariable). The end-to-end tests assert the ON-DISK
+# BYTES of a non-ASCII title rather than a round-trip, because a round-trip is
+# symmetric and passes under any self-consistent-but-wrong encoding.
+#
+# The encoding is constructed inside each function rather than memoized in a
+# $script: variable: hooks/test-stride-hook.ps1 extracts these functions by AST
+# and dot-sources them individually, where a top-level assignment does not exist
+# and Set-StrictMode makes reading it a terminating error.
+
+# Text -> the byte-string this layer stores. Call at every IN boundary.
+function ConvertTo-CacheByteString {
+    param([string]$Value)
+    if ($null -eq $Value -or $Value -eq '') { return '' }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    return [System.Text.Encoding]::GetEncoding(28591).GetString($utf8.GetBytes($Value))
+}
+
+# The stored byte-string -> text. Call at the OUT boundary only.
+function ConvertFrom-CacheByteString {
+    param([string]$Value)
+    if ($null -eq $Value -or $Value -eq '') { return '' }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    return $utf8.GetString([System.Text.Encoding]::GetEncoding(28591).GetBytes($Value))
+}
+
 function ConvertTo-FlatEnvValue {
     param([string]$Value)
     return ($Value -replace '[\r\n\u0085\u2028\u2029]', ' ')
@@ -287,19 +394,19 @@ function Get-TaskNarrowedKey { param([string]$TaskId) return (Get-TaskRecordKey 
 # reports ABSENT. Decoding the bytes verbatim keeps the BOM in the first line,
 # so both executors agree it is not a record.
 #
-# SCOPE OF THE BYTE-FAITHFULNESS CLAIM, stated exactly rather than generously:
-# it holds for VALID UTF-8. The decoder's invalid-byte fallback is replacement,
-# not throw, so a byte sequence that is not valid UTF-8 decodes to U+FFFD and a
-# Set-TaskRecord rewrite re-encodes it as EF BF BD — the one byte class where
-# this splitter and bash's byte-oriented `grep -v` still disagree. Inherited
-# unchanged from the ReadAllText/Get-Content pair this function replaced, so it
-# is neither introduced nor widened here, and it is inert while 22r holds. It is
-# NOT closed by throwing on invalid bytes: that would make one bad byte anywhere
-# blind the reader to every record in the file, while bash keeps reading the
-# valid lines — a NEW executor divergence, which is the exact thing this
-# function exists to prevent. Closing it properly means a byte-preserving
-# codepath through the writer too, which is the D281 root cause; folded there.
-# 22h5 pins the current behaviour so the seam is visible rather than assumed.
+# BYTE FAITHFULNESS — the claim now holds for ALL bytes (D281).
+# It used to hold only for VALID UTF-8: the decoder's invalid-byte fallback is
+# replacement, so a byte sequence that was not valid UTF-8 decoded to U+FFFD and
+# a Set-TaskRecord rewrite re-encoded it as EF BF BD, destroying a record the
+# writer had not been asked to touch while bash's byte-oriented `grep -v` left it
+# alone. That was the one byte class where this reader and bash disagreed.
+#
+# D281 closed it with the ISO-8859-1 storage projection described above
+# ConvertTo-FlatEnvValue, which is bijective over 0x00-0xFF, so read-then-write
+# is lossless for every byte sequence. It was NOT closed by throwing on invalid
+# bytes: that would make one bad byte blind this reader to every record in the
+# file while bash kept reading the valid ones — a NEW divergence, and the exact
+# thing this function exists to prevent. 22h5 and 22h6b pin the closed invariant.
 #
 # Resolve to an ABSOLUTE path first, for the reason Write-EnvCache states at
 # length: the provider cmdlets around this layer (Test-Path in Read-TaskRecord,
@@ -313,7 +420,8 @@ function Get-TaskNarrowedKey { param([string]$TaskId) return (Get-TaskRecordKey 
 function Get-EnvCacheLine {
     $cachePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EnvCache)
     $bytes = [System.IO.File]::ReadAllBytes($cachePath)
-    $raw = (New-Object System.Text.UTF8Encoding($false)).GetString($bytes)
+    # (D281) ISO-8859-1, not UTF-8 — see THE STORAGE PROJECTION above.
+    $raw = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
     $lines = @($raw -split "`n")
     # Write-EnvCache terminates the LAST line too, so a faithful split yields a
     # trailing empty element that is not a line. Drop exactly that one — never
@@ -1854,7 +1962,12 @@ if ($HookName -eq 'before_doing') {
             # requires an LF and let a lone CR through, which Get-Content then
             # honoured as a line terminator and the loader exported as a forged
             # record. See the helper for the reproduced BASH_ENV route.
-            $flat = { param($v) (ConvertTo-FlatEnvValue -Value ([string]$v)) }
+            # (D281) The projection rides on $flat so every line built below gets
+            # it — this is one of the four IN boundaries. Without it a title of
+            # 'café' reaches the cache as the single byte E9 where bash writes
+            # C3 A9, which is the one way the Latin-1 storage projection can be
+            # got wrong. See THE STORAGE PROJECTION above ConvertTo-FlatEnvValue.
+            $flat = { param($v) (ConvertTo-CacheByteString -Value (ConvertTo-FlatEnvValue -Value ([string]$v))) }
             $cacheLines = @(
                 "TASK_ID=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.id))
                 "TASK_IDENTIFIER=" + (ConvertTo-ShSingleQuoted -Value (& $flat $taskJson.identifier))
@@ -2130,8 +2243,13 @@ if ($script:StrideCacheLines.Count -gt 0) {
         # BEFORE unquoting, because the quotes are the evidence.
         if ($cacheKey -match $script:StrideRecordKeyPattern -and
             $cacheValue -cnotmatch "^'[^']*'\z") { continue }
+        # (D281) The single OUT boundary. The cache stores byte-strings; the
+        # process environment wants text. Without this projection every
+        # non-ASCII value reaches each section child as mojibake.
         [System.Environment]::SetEnvironmentVariable(
-            $cacheKey, (ConvertFrom-ShSingleQuoted -Value $cacheValue), 'Process')
+            $cacheKey,
+            (ConvertFrom-CacheByteString -Value (ConvertFrom-ShSingleQuoted -Value $cacheValue)),
+            'Process')
     }
 }
 
@@ -2432,7 +2550,10 @@ function Set-HookEnv {
         # the defect D280 exists to close. Order matters only in that the
         # flatten must not run over the escaped form, where it could rewrite a
         # newline that quoting had already made safe to keep.
-        $cacheLines += "$key=" + (ConvertTo-ShSingleQuoted -Value (ConvertTo-FlatEnvValue -Value $value))
+        # (D281) IN boundary — see THE STORAGE PROJECTION. Server-supplied
+        # values routinely carry non-ASCII, so this one is load-bearing rather
+        # than belt-and-braces.
+        $cacheLines += "$key=" + (ConvertTo-ShSingleQuoted -Value (ConvertTo-CacheByteString -Value (ConvertTo-FlatEnvValue -Value $value)))
     }
     # (D260) Replace-in-place for the keys THIS call writes, rather than a bare
     # append. Appending left two lines per identity key after a single

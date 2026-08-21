@@ -4430,6 +4430,16 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
       [ -n "$_kept_window_stamps" ] && printf '%s' "$_kept_window_stamps"
       echo "TASK_ID=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.id // empty')")"
       echo "TASK_IDENTIFIER=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.identifier // empty')")"
+      # (D281) RULING, multi-line values: bash does NOT flatten, and must not
+      # start. `source` reassembles a quoted value across newlines, and a
+      # TASK_DESCRIPTION legitimately carries them for sections to consume;
+      # flattening would be a user-visible regression on the shipping executor
+      # for no security gain. The PowerShell twin DOES flatten its own writes,
+      # deliberately — ConvertTo-FlatEnvValue is half of what closed D280's
+      # BASH_ENV route, and .NET readers honour terminators bash does not. That
+      # asymmetry is permanent and must not be copied back here. It is a CONTENT
+      # divergence, not a PRESENCE one: both readers present a TASK_TITLE either
+      # way. The full ruling is above Write-EnvCache in stride-hook.ps1.
       echo "TASK_TITLE=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.title // empty')")"
       echo "TASK_STATUS=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.status // empty')")"
       echo "TASK_COMPLEXITY=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.complexity // empty')")"
@@ -4552,6 +4562,23 @@ fi
 # Load cached env vars if available (all hooks benefit from this)
 if [ -f "$ENV_CACHE" ]; then
   set -a
+  # (D281) RULING, the loader's missing gates: bash gets NO shape check, key
+  # allow-list or encoding guard here, and that is the decision rather than an
+  # oversight. The three gates on the ps1 side exist because that loader is a
+  # PARSER this port had to write; bash's loader is `source`, the shell itself.
+  # An allow-list cannot be bolted onto `source` — imposing one means REPLACING
+  # it with a hand-rolled parse-and-export, which would immediately lose the one
+  # thing this side does right and the ps1 had to work to imitate: reassembling
+  # a quoted multi-line value. That trade goes the wrong way.
+  #
+  # The gate that matters is already upstream, where server data actually
+  # enters: D275 made extract_hook_env an allow-list of the documented hook-env
+  # names, so no server-invented key reaches this file. The residual case is a
+  # cache authored by something other than the two executors — at which point
+  # the attacker already has write access to a file bash sources, and no key
+  # filter here would help.
+  #
+  # Full ruling above Write-EnvCache in stride-hook.ps1.
   . "$ENV_CACHE" 2>/dev/null || true
   set +a
 fi

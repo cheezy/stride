@@ -215,7 +215,7 @@ When the Stride plugin is enabled, `.stride.md` hooks execute **automatically wi
 
 **Native Windows runs now capture, attribute and narrow their own diffs (v1.68.0+).** Before this, `stride-hook.ps1` had no capture step at all: it PUT a `.stride-changed-files.json` that something else was assumed to have written, and on native Windows that something is nobody — `stride-hook.sh` execs the ps1 and exits. A native-Windows run therefore produced **no snapshot at all, with no error**. The ps1 hook now builds the snapshot (`Build-ChangedFilesSnapshot`), carries the five per-task record families, runs the same window-classification engine as bash (D236 windows, the D244 purity heuristic, the D256 fixpoint), evicts per window rather than by count so a live outer task's anchor survives (D268/D274), and replays the capture-time narrowing verdict on retry instead of re-deriving it (D273). The ps1 suite went from 530 to 961 assertions; the bash suite is unchanged at 787 and both bash files are byte-identical across the whole port.
 
-**What still does not work on Windows PowerShell 5.1, stated because an over-claim here is the hazard (v1.68.0+).** `Invoke-WebRequest -SkipHttpErrorCheck` is a PowerShell 7.0+ parameter and it sits at **two** call sites. At the upload, binding fails before the request is issued and the PUT is recorded as `000`, indistinguishable from a refused connection — so a 5.1 run now *writes* a snapshot and still cannot *upload* one (**D277**). At the after_goal detection call it sits under a `catch { return }`, so D119 detection degrades to a silent no-op on every 5.1 run. Separately, nothing in this repo has ever *executed* the hook under `powershell.exe` — the compatibility gate is static and the ps1 suite runs under pwsh 7 (**D237**). D277 was found by reading rather than by a red gate, which is the measure of what the gate cannot see.
+**What still does not work on Windows PowerShell 5.1, stated because an over-claim here is the hazard.** The `Invoke-WebRequest -SkipHttpErrorCheck` blocker is **fixed** (**D277**): the 7.0+ parameter is gone from both call sites, so a non-2xx now throws on either host and the real status is recovered from the exception's `.Response`, with a null response — the transport case — yielding `000`, matching what the bash twin gets from `|| printf '000'`. Before that fix, binding failed before the request issued and every 5.1 upload recorded `000`, while the after_goal detection call swallowed the same failure under a `catch { return }` and no-opped D119 silently. What has **not** changed is the harder gap: nothing in this repo has ever *executed* the hook under `powershell.exe` — the compatibility gate is static and the ps1 suite runs under pwsh 7 (**D237**), so D277's fix is verified by reasoning and by pwsh-7 behaviour, not by a 5.1 run. D277 was found by reading rather than by a red gate; the regression cover that would now catch its return is Test Group 30 in the ps1 suite, not the gate.
 
 **Commit attribution hardening (v1.67.0+).** The window model that attributes commits to tasks now classifies each window before subtracting it: a window whose residual is one commit is PURE and subtracts whole, two or more residual commits make it AMBIGUOUS and it subtracts only what other windows cover, with the trade decided for never losing an author's commit (D244). A nested task that commits through `after_doing` records its exact SHAs, so it no longer absorbs the outer's mid-window commit (D255); purity is a fixpoint, so two concurrently-open siblings can no longer manufacture purity from their mutual overlap (D256); eviction is per window and open-window-aware, so a live outer's anchor never falls to the cap (D268); and an outermost task — which has no enclosing window to absorb a dropped commit — keeps its manual commits instead of silently under-reporting them (D271). The remaining zero-commit-child steal is documented and pinned rather than fixed: the candidate branch was implemented behind a flag and measured to break nine pre-existing pins, reverting per-window attribution for every hand-committing agent (D272).
 
@@ -394,17 +394,39 @@ A clean run means exactly this: no PowerShell 7-only **syntax**, and no cmdlet
 *runs* on 5.1 — runtime verification on a real Windows host is a separate job.
 The gaps below were each confirmed by execution, not assumed:
 
-- **7-only parameters on cmdlets that exist in 5.1 are invisible.**
-  `ForEach-Object -Parallel`, `Get-Content -AsByteStream` and
-  `ConvertFrom-Json -AsHashtable` all pass silently: the cmdlet rule checks
-  that a cmdlet *name* resolves, never which parameters it accepts.
-  This repo has **two live instances**, named here rather than left as a
-  hypothetical class (W2106): `Invoke-WebRequest -SkipHttpErrorCheck` at
-  `hooks/stride-hook.ps1:3651` and `:4931`, filed as **D277**. The first
-  means the `changed_files` PUT never issues on 5.1; the second sits under a
-  `catch { return }`, so D119 after_goal detection degrades to a silent no-op.
-  Both were found by reading, not by this gate — which is the measure of the
-  blind spot.
+- **7-only parameters on cmdlets that exist in 5.1 are invisible to _this
+  gate_, and still are.** `ForEach-Object -Parallel`,
+  `Get-Content -AsByteStream` and `ConvertFrom-Json -AsHashtable` all pass
+  silently: the cmdlet rule checks that a cmdlet *name* resolves, never which
+  parameters it accepts. Nothing below changes that — the coverage that closed
+  **D277** lives in the ps1 suite, not here.
+  This repo *had* **two live instances** (W2106):
+  `Invoke-WebRequest -SkipHttpErrorCheck` at both call sites — the
+  `changed_files` PUT, which therefore never issued on 5.1, and the after_goal
+  detection call, which sits under a `catch { return }` and so degraded D119
+  detection to a silent no-op on every 5.1 run. **Both are removed as of
+  D277**; the surviving mentions in `hooks/stride-hook.ps1` are comments
+  recording why the parameter is not used. Line numbers are deliberately not
+  cited here — the two this entry used to name had already drifted by the time
+  D277 was worked, which is its own small lesson about pinning a defect to a
+  line in prose.
+  They were found by reading, not by this gate. What replaces the reading is
+  **Test Group 30 in `hooks/test-stride-hook.ps1`**: an AST walk over
+  `hooks/*.ps1` and `scripts/*.ps1` that checks each command's named parameters
+  against a per-cmdlet denylist of 7-only ones. It is **abbreviation-aware** (so
+  `-SkipHttpError` is caught too) and **alias-aware** (`iwr -SkipHttpErrorCheck`
+  resolves to `Invoke-WebRequest` before the lookup — without that it passed
+  clean, which is what D277's review found). It also catches the positional form
+  of the same class: a 3-argument `Join-Path`, which silently binds the 7-only
+  `-AdditionalChildPath`. It carries a planted-violation case, exercised through
+  the same function the real assertions use, so a scan that silently stopped
+  matching fails rather than passing clean.
+  A denylist is **incomplete by construction** — it catches what someone has
+  learned to list. That is strictly more than the name-only gate sees, and
+  strictly less than "every 7-only parameter".
+  **It is suite coverage, not a gate**, so it runs with the ps1 suite and not
+  with `check-ps1-compat.sh`; extending the denylist is how a newly-learned
+  parameter gets pinned.
 - **The .NET API surface is invisible.** A 3-argument
   `[System.IO.File]::Move(src, dst, overwrite)` — an overload .NET Framework
   does not have — is flagged by neither rule. Related and more important:

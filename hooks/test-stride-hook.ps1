@@ -9258,6 +9258,408 @@ if ($g29Missing.Count -gt 0) {
 # ps1 957 and sh 787, printed by each suite's own summary line.
 
 # ============================================================
+# Test Group 30: D277 — 7-only cmdlet PARAMETERS
+# ============================================================
+# scripts/check-ps1-compat.sh checks PowerShell 7-only SYNTAX and 7-only cmdlet
+# NAMES. It cannot see a 7-only PARAMETER on a cmdlet that exists in 5.1, and
+# README.md records that as a deliberate gap. D277 is what that gap costs:
+# Invoke-WebRequest -SkipHttpErrorCheck bound on pwsh 7 and threw a
+# ParameterBindingException on the shipping 5.1 host, where surrounding catches
+# blamed a transport failure — so the changed_files PUT never issued and D119's
+# after_goal detection silently no-opped, while every test stayed green.
+#
+# Both instances were found by READING. This group is so the next one is not.
+# It walks the AST of every hooks/*.ps1 and scripts/*.ps1 file and checks each
+# command's named parameters against the 7-only set for that cmdlet.
+#
+# It is deliberately a DENYLIST and therefore incomplete — a parameter nobody
+# has listed still passes. A complete answer needs PSScriptAnalyzer's
+# PSUseCompatibleCommands with a 5.1 profile, which is a larger change. This
+# catches the class that has actually bitten this repo twice.
+Write-Host ""
+Write-Host "=== Test Group 30: D277 7-only cmdlet parameters ==="
+
+# Keyed by cmdlet, lowercase. Each entry is a parameter that does NOT exist in
+# Windows PowerShell 5.1. Prefix matching is deliberate: PowerShell accepts any
+# unambiguous abbreviation, so -SkipHttpError binds -SkipHttpErrorCheck.
+$g30Deny = @{
+    'invoke-webrequest'  = @('SkipHttpErrorCheck', 'SkipHeaderValidation', 'Resume', 'SslProtocol', 'Authentication', 'Token', 'NoProxy', 'CustomMethod', 'PreserveAuthorizationOnRedirect')
+    'invoke-restmethod'  = @('SkipHttpErrorCheck', 'SkipHeaderValidation', 'Resume', 'SslProtocol', 'Authentication', 'Token', 'NoProxy', 'PreserveAuthorizationOnRedirect', 'FollowRelLink', 'ResponseHeadersVariable', 'StatusCodeVariable')
+    'convertto-json'     = @('AsArray', 'EscapeHandling')
+    'convertfrom-json'   = @('AsHashtable', 'NoEnumerate', 'Depth')
+    'get-content'        = @('AsByteStream')
+    'set-content'        = @('AsByteStream')
+    'add-content'        = @('AsByteStream')
+    'foreach-object'     = @('Parallel', 'ThrottleLimit', 'AsJob', 'TimeoutSeconds')
+    'get-date'           = @('AsUTC', 'Unixtimeseconds')
+    'join-path'          = @('AdditionalChildPath')
+    'select-string'      = @('NoEmphasis', 'Raw')
+    'sort-object'        = @('Stable', 'Top', 'Bottom')
+    'test-connection'    = @('MtuSize', 'Repeat', 'Traceroute', 'TargetName')
+}
+
+# ALIASES RESOLVE TO THE CMDLET BEFORE THE LOOKUP. CommandAst.GetCommandName()
+# returns the name AS WRITTEN, so `iwr -SkipHttpErrorCheck` - the D277 defect
+# itself, one keystroke shorter - would miss every key above and be skipped
+# before the parameter loop ran. Nothing else covers it: the static gate's
+# settings enable only PSUseCompatibleSyntax and PSUseCompatibleCmdlets, not
+# PSAvoidUsingCmdletAliases, so an aliased reintroduction passes both checks.
+#
+# Resolution is done HERE, once, rather than per command: Get-Alias is resolved
+# against the RUNNING host, which is pwsh 7, and that is the right direction -
+# an alias 7 knows is exactly what a developer on 7 would type.
+# Memoised: this now runs for EVERY command node in six files, not just the
+# denylisted ones, and Get-Alias is a cmdlet call per hit. The cache turns
+# thousands of lookups into a few dozen.
+$script:G30KeyCache = @{}
+function Resolve-G30CommandKey {
+    param([string]$Name)
+    if ($script:G30KeyCache.ContainsKey($Name)) { return $script:G30KeyCache[$Name] }
+    $key = $Name.ToLowerInvariant()
+    $a = Get-Alias -Name $Name -ErrorAction SilentlyContinue
+    if ($a -and $a.ResolvedCommandName) { $key = $a.ResolvedCommandName.ToLowerInvariant() }
+    $script:G30KeyCache[$Name] = $key
+    return $key
+}
+
+# ONE walk, called by both the real-file scan and the 30d probe. It used to be
+# two textual copies, which meant 30d validated its own transcription: an edit
+# that broke matching in the real loop left the probe loop untouched and 30d
+# stayed green while 30b silently stopped detecting anything. A shared function
+# is what makes the planted violation exercise the code the assertions rely on.
+function Test-Ps1FileForSevenOnlyParams {
+    param([string]$Path, [hashtable]$Deny)
+    $hits = @()
+    $positional = @()
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+    if ($null -eq $ast) { return @{ Hits = $hits; Positional = $positional } }
+    $leaf = Split-Path -Leaf $Path
+    foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+        $name = $c.GetCommandName()
+        if (-not $name) { continue }
+        $key = Resolve-G30CommandKey -Name $name
+        if (-not $Deny.ContainsKey($key)) { continue }
+        foreach ($e in $c.CommandElements) {
+            if ($e -is [System.Management.Automation.Language.CommandParameterAst]) {
+                foreach ($bad in $Deny[$key]) {
+                    # Abbreviation-aware: -SkipHttpError binds -SkipHttpErrorCheck.
+                    if ($bad.ToLowerInvariant().StartsWith($e.ParameterName.ToLowerInvariant()) -and
+                        $e.ParameterName.Length -ge 3) {
+                        $hits += "${leaf}:$($e.Extent.StartLineNumber) $name -$($e.ParameterName)"
+                    }
+                }
+            }
+        }
+        # Join-Path's third positional argument BINDS -AdditionalChildPath, so it
+        # is 7-only without any parameter name appearing at all. This is the form
+        # that shipped in D275's drift guard and would have terminated the suite
+        # on 5.1 under ErrorActionPreference Stop.
+        if ($key -eq 'join-path') {
+            $args3 = @($c.CommandElements | Select-Object -Skip 1 |
+                Where-Object { $_ -isnot [System.Management.Automation.Language.CommandParameterAst] })
+            if ($args3.Count -ge 3) {
+                $positional += "${leaf}:$($c.Extent.StartLineNumber) Join-Path with $($args3.Count) positional arguments"
+            }
+        }
+    }
+    return @{ Hits = $hits; Positional = $positional }
+}
+
+$g30Files = @()
+$g30Files += (Get-ChildItem -LiteralPath $ScriptDir -Filter '*.ps1' -File | ForEach-Object { $_.FullName })
+$g30ScriptsDir = Join-Path (Split-Path -Parent $ScriptDir) 'scripts'
+if (Test-Path -LiteralPath $g30ScriptsDir) {
+    $g30Files += (Get-ChildItem -LiteralPath $g30ScriptsDir -Filter '*.ps1' -File | ForEach-Object { $_.FullName })
+}
+Assert-Eq "30a (D277): the scan found ps1 files to walk" "True" "$($g30Files.Count -gt 0)"
+
+$g30Hits = @()
+$g30Positional = @()
+foreach ($g30f in $g30Files) {
+    $g30r = Test-Ps1FileForSevenOnlyParams -Path $g30f -Deny $g30Deny
+    $g30Hits += $g30r.Hits
+    $g30Positional += $g30r.Positional
+}
+
+Assert-Eq "30b (D277): no 7-only cmdlet parameter in any shipped ps1" "" ($g30Hits -join '; ')
+Assert-Eq "30c (D277): no 3-argument Join-Path, which binds the 7-only -AdditionalChildPath" "" ($g30Positional -join '; ')
+
+# 30d: the scan is not vacuous. It must actually flag a planted instance —
+# otherwise 30b and 30c pass on any codebase, including one where the AST walk
+# is silently broken.
+# The probe goes through Test-Ps1FileForSevenOnlyParams - the SAME function 30b
+# and 30c depend on - so breaking the walk turns this red instead of leaving it
+# green against a private copy. It lives under $TmpDir, outside hooks/ and
+# scripts/, so 30b never scans it; the planted text sits in a single-quoted
+# here-string, so 30b scanning THIS file does not trip on it either.
+$g30Probe = Join-Path $TmpDir 'g30-probe.ps1'
+Set-Content -LiteralPath $g30Probe -Encoding UTF8 -Value @'
+$r = Invoke-WebRequest -Uri 'http://x' -UseBasicParsing -SkipHttpErrorCheck
+$p = Join-Path $a 'b' 'c'
+$r2 = iwr -Uri 'http://x' -UseBasicParsing -SkipHttpErrorCheck
+'@
+$g30PR = Test-Ps1FileForSevenOnlyParams -Path $g30Probe -Deny $g30Deny
+$g30PHits = @($g30PR.Hits); $g30PPos = @($g30PR.Positional)
+Assert-Eq "30d (D277): the scan flags a planted -SkipHttpErrorCheck" "True" "$($g30PHits.Count -ge 1)"
+Assert-Eq "30d (D277): and a planted 3-argument Join-Path" "True" "$($g30PPos.Count -ge 1)"
+# THE ALIASED FORM IS A SEPARATE ASSERTION, not a bonus on the one above: the
+# scan keyed on the written name until D277's review, so `iwr` skipped the
+# parameter loop entirely and the canonical defect passed clean under an alias.
+# Two hits means the alias resolved; one means only the spelled-out form landed.
+Assert-Eq "30d (D277): and the SAME parameter written through the alias iwr" "2" "$($g30PHits.Count)"
+Remove-Item -LiteralPath $g30Probe -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------
+# 30e/30f (D277): the BEHAVIOURAL half of the same defect.
+#
+# 30a-30d are static: they fail if a 7-only parameter comes back. They say
+# nothing about what the code does once it is gone, and the two questions are
+# independent - a scan can stay green while the replacement catch is wrong.
+#
+# What these two pin is the discriminator: an HTTP error yields its REAL
+# status, a transport failure yields '000', and the two are distinguishable.
+# That is the contract Get-WebExceptionStatus implements by reading
+# .Exception.Response and treating a NULL response as the transport case,
+# and it is the same contract the bash twin gets from `|| printf '000'`.
+#
+# HONEST LIMIT, stated because the reverse would be easy to imply: neither of
+# these is red against the pre-fix code ON THIS HOST. pwsh 7 BINDS
+# -SkipHttpErrorCheck, so pre-fix the 409 never throws and the status is read
+# straight off the response - the same 409 this asserts. The defect was only
+# ever observable on 5.1, where the parameter fails to bind. The pre-fix red
+# evidence for this task is 30a-30d, which fail on any host. These two are
+# regression cover for the replacement path: neuter Get-WebExceptionStatus to
+# return '000' unconditionally and 30e goes red, which is the mutation that
+# matters now that the parameter is gone.
+Write-Host ""
+Write-Host "=== Test Group 30e/30f: recovered status is real, transport failure is 000 (D277) ==="
+
+# 30e: a 4xx carrying a JSON error body - the task's named edge case. The body
+# is deliberately non-empty to exercise the one thing the helper must NOT do
+# with it: this path's request body is a base64 diff, so a handler that echoed
+# the response would put request content in the state file.
+$g30eProj = New-SelfHealProject -Name 'd277-non2xx' -StrideMd @'
+## after_doing
+```bash
+echo "ran"
+```
+'@
+$g30ePort = 18894
+$g30eJob = Start-Job -ArgumentList $g30ePort -ScriptBlock {
+    param($Port)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        # after_doing PUTs twice (early + refresh), exactly as 9d pins.
+        for ($i = 0; $i -lt 2; $i++) {
+            $ctx = $l.GetContext()
+            $null = [System.IO.StreamReader]::new($ctx.Request.InputStream).ReadToEnd()
+            $ctx.Response.StatusCode = 409
+            $ctx.Response.ContentType = 'application/json'
+            $b = [System.Text.Encoding]::UTF8.GetBytes('{"error":"conflict","detail":"SENTINEL_BODY_MUST_NOT_LEAK"}')
+            $ctx.Response.OutputStream.Write($b, 0, $b.Length)
+            $ctx.Response.OutputStream.Close()
+        }
+    } catch { } finally { if ($l.IsListening) { $l.Stop() } }
+}
+try {
+    $null = Wait-ForListener -Port $g30ePort
+    $g30eJson = @{ tool_input = @{ command = "curl -X PATCH http://localhost:$g30ePort/api/tasks/99/complete -H `"Authorization: Bearer tok`"" } } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $g30eJson -Phase 'pre' -ProjectDir $g30eProj
+    Wait-Job $g30eJob -Timeout 8 | Out-Null
+    Remove-Job $g30eJob -Force -ErrorAction SilentlyContinue
+    $g30eState = Get-Content -Raw -Path (Join-Path $g30eProj '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+    # ORDER IS THE GUARD. Assert-NotContains coerces a null haystack to '' and
+    # passes vacuously, so an absent state file would satisfy every negative
+    # below on its own. The positive assertion runs FIRST and fails on exactly
+    # that case, which is what stops the negatives from being decoration.
+    Assert-Contains "30e (D277): a 409 records its REAL status, not 000" "http_code=409" $g30eState
+    Assert-NotContains "30e (D277): and is not misfiled as a transport failure" "http_code=000" $g30eState
+    # The operator warning must carry the real code too - a warning that says
+    # 000 for an HTTP error sends the reader looking for a network fault.
+    Assert-Contains "30e (D277): the stderr warning names the real code" "HTTP 409" $r.Stderr
+    Assert-NotContains "30e (D277): the response body never reaches the state file" "SENTINEL_BODY_MUST_NOT_LEAK" $g30eState
+    Assert-NotContains "30e (D277): nor stderr" "SENTINEL_BODY_MUST_NOT_LEAK" $r.Stderr
+    # STDOUT IS THE THIRD SINK, and the one a plausible future change would hit.
+    # On pwsh 7 the response body is one property from the caught error, in
+    # .ErrorDetails.Message, so a well-meaning `Write-Host "$_"` added to the
+    # catch would put the base64 diff on the hook's stdout while both
+    # assertions above stayed green. Stdout is also the hook's structured-JSON
+    # channel, so anything landing there is read by the caller, not just logged.
+    Assert-NotContains "30e (D277): nor stdout, the channel a leak would most likely reach" "SENTINEL_BODY_MUST_NOT_LEAK" $r.Stdout
+} finally {
+    if ($g30eJob -and $g30eJob.State -eq 'Running') { Stop-Job $g30eJob -ErrorAction SilentlyContinue }
+    Remove-Job $g30eJob -Force -ErrorAction SilentlyContinue
+}
+
+# 30f: the other side of the discriminator. Port 1 is refused, so the exception
+# carries a NULL .Response and there is no status to recover. 9c already
+# observes 000 on this port as a side-effect of a different assertion; this
+# states it as the contract, next to 30e, so the PAIR is what a future reader
+# sees rather than two unrelated numbers in two groups.
+$g30fProj = New-SelfHealProject -Name 'd277-refused' -StrideMd @'
+## after_doing
+```bash
+echo "ran"
+```
+'@
+$g30fJson = @{ tool_input = @{ command = 'curl -X PATCH http://127.0.0.1:1/api/tasks/99/complete -H "Authorization: Bearer tok"' } } | ConvertTo-Json -Compress
+$r = Invoke-HookScript -InputJson $g30fJson -Phase 'pre' -ProjectDir $g30fProj
+$g30fState = Get-Content -Raw -Path (Join-Path $g30fProj '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+# Positive first here too, for the reason 30e states.
+Assert-Contains "30f (D277): a refused connection records 000" "http_code=000" $g30fState
+Assert-NotContains "30f (D277): and invents no HTTP status" "http_code=4" $g30fState
+
+# ------------------------------------------------------------
+# 30g (D277): criterion 1's named edge cases - 0, 1 and many entries.
+#
+# The parameter this criterion is about, `ConvertTo-Json -AsArray`, was already
+# gone before D277 was worked: W2100 replaced both sites with hand-wrapping.
+# What W2100 did NOT leave behind is a test pinning the shape that parameter
+# existed to guarantee, and the shape is the whole point - `ConvertTo-Json` on
+# a ONE-element collection emits a bare object, not a one-element array, and
+# the server reads this file as an array.
+#
+# The assertion has to be on the RAW TEXT. ConvertFrom-Json unwraps a
+# single-element array to a scalar and Get-CaptureEntries re-wraps it with @(),
+# so a parsed count of 1 is identical for `[{...}]` and `{...}` - the exact
+# distinction under test would be erased by the parse. The first non-space
+# character is the primitive that actually separates them.
+Write-Host ""
+Write-Host "=== Test Group 30g: snapshot is an ARRAY at 0, 1 and many entries (D277) ==="
+
+foreach ($g30gCase in @(
+    @{ Name = 'zero';  Files = @();                              Expect = 0 },
+    @{ Name = 'one';   Files = @('a.txt');                       Expect = 1 },
+    @{ Name = 'many';  Files = @('a.txt', 'b.txt', 'c.txt');     Expect = 3 }
+)) {
+    $g30gDir = New-CaptureRepo -Name "d277-shape-$($g30gCase.Name)"
+    # BaseRef=HEAD explicitly: New-CaptureRepo has a single commit, so the
+    # no-BaseRef HEAD~1 fallback (21i) has nothing to resolve and would empty
+    # every case, making the 1-and-many rows pass as though they were the zero
+    # row. The entries here are untracked working-tree files, which the capture
+    # picks up against any base.
+    Set-CaptureBase -Dir $g30gDir -TaskId '42' `
+        -BaseRef (& git -C $g30gDir rev-parse HEAD | Out-String).Trim()
+    foreach ($f in $g30gCase.Files) {
+        Set-Content -Path (Join-Path $g30gDir $f) -Value "content of $f" -Encoding UTF8
+    }
+    $null = Invoke-CaptureRun -Dir $g30gDir -TaskId '42'
+    $g30gRaw = Get-Content -Raw -Path (Join-Path $g30gDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
+    $g30gTrim = "$g30gRaw".Trim()
+
+    # Non-vacuity: a missing or empty file would otherwise satisfy the negatives.
+    Assert-Eq "30g/$($g30gCase.Name) (D277): a snapshot was written" "True" "$($g30gTrim.Length -gt 0)"
+    # THE assertion. `[` for every count, including one.
+    Assert-Eq "30g/$($g30gCase.Name) (D277): the snapshot opens as a JSON array, not a bare object" `
+        "True" "$($g30gTrim.StartsWith('[') -and $g30gTrim.EndsWith(']'))"
+    # Well-formed, and the count the capture actually saw.
+    $g30gParsed = $null
+    $g30gOk = $true
+    try { $g30gParsed = @($g30gTrim | ConvertFrom-Json) } catch { $g30gOk = $false }
+    Assert-Eq "30g/$($g30gCase.Name) (D277): and parses as valid JSON" "True" "$g30gOk"
+    Assert-Eq "30g/$($g30gCase.Name) (D277): with $($g30gCase.Expect) entr$(if ($g30gCase.Expect -eq 1) { 'y' } else { 'ies' })" `
+        "$($g30gCase.Expect)" "$($g30gParsed.Count)"
+}
+
+# ------------------------------------------------------------
+# 30h/30i (D277): the UPLOAD-side filtered array, which is the site the task's
+# "single-entry filtered array" edge case actually names.
+#
+# 30g pins the CAPTURE-side hand-wrap in Build-ChangedFilesSnapshot, read off
+# .stride-changed-files.json. That is a different site from the one that
+# matters here: Invoke-ChangedFilesUpload wraps $filteredJson SEPARATELY, after
+# dropping .stride_auth.md and the hook's own artifacts, and it is that wrap the
+# security_considerations point at. Two hand-wraps, and covering one says
+# nothing about the other - reviewing D277 is what surfaced the gap.
+#
+# The existing upload-filter tests (7e, 7e2, 14b) all leave two or three
+# survivors and assert with ConvertFrom-Json + -contains, which cannot see the
+# difference between `[{...}]` and `{...}` at one element. So the ONE-survivor
+# shape - the exact case ConvertTo-Json -AsArray existed to handle - was
+# untested at this site.
+#
+# Assert on the DECODED TEXT's first and last character, for the reason 30g
+# gives: a parsed count of 1 is identical either way.
+Write-Host ""
+Write-Host "=== Test Group 30h/30i: the upload-side FILTERED array at 1 and 0 survivors (D277) ==="
+
+foreach ($g30hCase in @(
+    @{ Name = 'one-survivor';  Port = 18896
+       Snapshot = '[{"path":".stride-diff-upload-state","diff":"state"},{"path":"lib/only.ex","diff":"real patch"},{"path":".stride_auth.md","diff":"SECRET"}]'
+       Expect = 1; Survivor = 'lib/only.ex' },
+    @{ Name = 'zero-survivors'; Port = 18898
+       Snapshot = '[{"path":".stride-diff-upload-state","diff":"state"},{"path":".stride_auth.md","diff":"SECRET"}]'
+       Expect = 0; Survivor = '' }
+)) {
+    # Not a git repo, for the reason 7e2 states: the self-heal skips its build
+    # when a snapshot is on disk, and the filter is name-based, so this case
+    # exercises the filter and nothing else.
+    $g30hProj = Join-Path $TmpDir "d277-filtered-$($g30hCase.Name)"
+    New-Item -ItemType Directory -Path $g30hProj -Force | Out-Null
+    Set-Content -Path (Join-Path $g30hProj '.stride.md') -Value @'
+## before_review
+```bash
+echo "reviewing"
+```
+'@ -Encoding UTF8
+    Set-Content -Path (Join-Path $g30hProj '.stride-env-cache') -Value "TASK_ID=42" -Encoding UTF8
+    Set-Content -Path (Join-Path $g30hProj '.stride-changed-files.json') -Value $g30hCase.Snapshot -Encoding UTF8
+
+    $g30hFix = Join-Path $TmpDir "d277-filtered-$($g30hCase.Name)-fixture.json"
+    if (Test-Path $g30hFix) { Remove-Item -Force $g30hFix }
+    $g30hJob = Start-Job -ArgumentList $g30hCase.Port, $g30hFix -ScriptBlock {
+        param($Port, $Fixture)
+        $l = [System.Net.HttpListener]::new()
+        $l.Prefixes.Add("http://localhost:$Port/")
+        try {
+            $l.Start(); $ctx = $l.GetContext()
+            $reader = [System.IO.StreamReader]::new($ctx.Request.InputStream)
+            @{ Body = $reader.ReadToEnd() } | ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+            $ctx.Response.StatusCode = 200; $ctx.Response.OutputStream.Close()
+        } catch { } finally { if ($l.IsListening) { $l.Stop() } }
+    }
+    try {
+        $null = Wait-ForListener -Port $g30hCase.Port
+        $g30hCmd = "curl -X PATCH http://localhost:$($g30hCase.Port)/api/tasks/42/complete -H `"Authorization: Bearer tok`""
+        $g30hJson = @{ tool_input = @{ command = $g30hCmd } } | ConvertTo-Json -Compress
+        $null = Invoke-HookScript -InputJson $g30hJson -Phase 'post' -ProjectDir $g30hProj
+        Wait-Job $g30hJob -Timeout 8 | Out-Null
+        Remove-Job $g30hJob -Force -ErrorAction SilentlyContinue
+
+        # Non-vacuity first: no PUT means every assertion below is meaningless.
+        Assert-Eq "30h/$($g30hCase.Name) (D277): the PUT reached the listener" "True" "$(Test-Path $g30hFix)"
+        if (Test-Path $g30hFix) {
+            $g30hRec  = Get-Content -Raw -Path $g30hFix | ConvertFrom-Json
+            $g30hBody = $g30hRec.Body | ConvertFrom-Json
+            $g30hTxt  = [System.Text.Encoding]::UTF8.GetString(
+                [System.Convert]::FromBase64String($g30hBody.changed_files.data)).Trim()
+
+            # THE assertion: the filtered wrap is an ARRAY at this survivor count.
+            Assert-Eq "30h/$($g30hCase.Name) (D277): the FILTERED body is a JSON array, not a bare object" `
+                "True" "$($g30hTxt.StartsWith('[') -and $g30hTxt.EndsWith(']'))"
+
+            $g30hPaths = @(@($g30hTxt | ConvertFrom-Json) | ForEach-Object { $_.path })
+            Assert-Eq "30h/$($g30hCase.Name) (D277): exactly $($g30hCase.Expect) entr$(if ($g30hCase.Expect -eq 1) { 'y' } else { 'ies' }) survived" `
+                "$($g30hCase.Expect)" "$($g30hPaths.Count)"
+            # The filter did its job - otherwise a pass-through would also be an
+            # array and the shape assertion above would prove nothing.
+            Assert-Eq "30h/$($g30hCase.Name) (D277): the credential file did not survive" `
+                "False" "$($g30hPaths -contains '.stride_auth.md')"
+            Assert-NotContains "30h/$($g30hCase.Name) (D277): and its content is nowhere in the uploaded body" "SECRET" $g30hTxt
+            if ($g30hCase.Survivor) {
+                Assert-Eq "30h/$($g30hCase.Name) (D277): the real change survived" `
+                    "True" "$($g30hPaths -contains $g30hCase.Survivor)"
+            }
+        }
+    } finally {
+        if ($g30hJob -and $g30hJob.State -eq 'Running') { Stop-Job $g30hJob -ErrorAction SilentlyContinue }
+        Remove-Job $g30hJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

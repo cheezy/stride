@@ -3806,6 +3806,55 @@ function Write-ChangedFilesSnapshot {
     } catch { }
 }
 
+# (D277) Recover an HTTP status from a thrown web exception, on BOTH hosts.
+#
+# -SkipHttpErrorCheck used to keep non-2xx responses on the success path, but it
+# is PowerShell 7.0+. stride-hook.sh execs powershell.exe — Windows PowerShell
+# 5.1 — so on the shipping host that parameter did not bind, the call threw a
+# ParameterBindingException, and the surrounding catch attributed it to a
+# transport failure and recorded '000'. Every upload silently failed there, and
+# the code looked right in every pwsh 7 test.
+#
+# Without the parameter both hosts THROW on a non-2xx, and both expose the
+# status the same way: 5.1 raises System.Net.WebException whose .Response is an
+# HttpWebResponse; 7 raises Microsoft.PowerShell.Commands.HttpResponseException
+# whose .Response is an HttpResponseMessage. Both carry .StatusCode, so one
+# expression covers both and no $PSVersionTable branch is needed. Measured on 7:
+# a 409 arrives as HttpResponseException and recovers as 409.
+#
+# THE TRANSPORT CASE REACHES '000' BY A DIFFERENT ROUTE ON EACH HOST, and the
+# inner catch is load-bearing rather than defensive padding — an earlier version
+# of this comment claimed a refused connection simply yields a null .Response on
+# both, which is wrong and would invite someone to delete the catch:
+#
+#   * 5.1 raises WebException, which HAS a .Response property, null when the
+#     request never got an answer. The `$null -eq $r` branch is that host's.
+#   * 7 raises System.Net.Http.HttpRequestException, which has NO .Response
+#     property AT ALL. This script runs under Set-StrictMode -Version Latest, so
+#     reading it raises PropertyNotFoundException — measured, not assumed — and
+#     the catch is what turns that into '000'. Delete the catch and a refused
+#     connection becomes an unhandled throw on the shipping path.
+#
+# Either way the answer is the discriminator the bash twin gets from
+# `|| printf '000'`: an HTTP error yields its status, a transport failure
+# yields '000'.
+#
+# Only .StatusCode is read. The body is never touched, logged or persisted — it
+# can echo request content, which on this path is a base64 diff. On 7 the body
+# is sitting one property away, in the ErrorRecord's .ErrorDetails.Message; this
+# function never receives a path to it, and must not grow one.
+function Get-WebExceptionStatus {
+    param($ErrorRecord)
+    try {
+        $r = $ErrorRecord.Exception.Response
+        if ($null -eq $r) { return '000' }
+        return "$([int]$r.StatusCode)"
+    } catch {
+        # See above: on 7 this is the REFUSED-CONNECTION path, not an edge case.
+        return '000'
+    }
+}
+
 # PUT the on-disk snapshot to /api/tasks/<id>/changed_files as the
 # transport-encoded envelope {"changed_files":{"encoding":"base64",
 # "data":"<b64>"}} so an edge request filter does not misread a unified code
@@ -3925,8 +3974,12 @@ function Invoke-ChangedFilesUpload {
                 # -AsArray forms are byte-identical, so 7e2 would pass either
                 # way, and the static gate checks cmdlet NAMES, never parameters.
                 # The 5.1 binding failure is therefore unpinned here by
-                # construction; a parameter-aware check is D277's job. Say so
-                # rather than letting the test name imply cover it does not give.
+                # construction. D277 supplied the parameter-aware check this
+                # comment used to forward-reference: test group 30 walks the AST
+                # of every shipped ps1 and fails on a 7-only parameter by name,
+                # -AsArray included, so a reintroduction here is caught on any
+                # host. Say that rather than letting the test name imply cover
+                # the test itself does not give.
                 if ($filtered.Count -eq 0) {
                     $filteredJson = '[]'
                 } else {
@@ -3942,20 +3995,23 @@ function Invoke-ChangedFilesUpload {
         $b64 = [System.Convert]::ToBase64String($bytes)
         $body = @{ changed_files = @{ encoding = 'base64'; data = $b64 } } |
             ConvertTo-Json -Depth 5 -Compress
-        # -SkipHttpErrorCheck keeps non-2xx responses on the success path so
-        # the real status code is recorded instead of a generic '000'.
+        # (D277) No -SkipHttpErrorCheck: it is 7.0+ and did not bind on the
+        # shipping 5.1 host, where the ParameterBindingException was then
+        # misread as a transport failure. A non-2xx now throws on both hosts and
+        # the status is recovered from the exception.
         $resp = Invoke-WebRequest `
             -Uri "$ApiBase/api/tasks/$TaskId/changed_files" `
             -Method Put `
             -Body $body `
             -ContentType 'application/json' `
             -Headers @{ Authorization = "Bearer $Token" } `
-            -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 10
-        $httpCode = "$($resp.StatusCode)"
+            -UseBasicParsing -TimeoutSec 10
+        $httpCode = "$([int]$resp.StatusCode)"
     } catch {
-        # Transport failure (connection refused, DNS, timeout) — '000',
+        # An HTTP error carries a response and yields its real code; a genuine
+        # transport failure (refused, DNS, timeout) has none and yields '000',
         # matching the bash twin's `|| printf '000'`.
-        $httpCode = '000'
+        $httpCode = Get-WebExceptionStatus -ErrorRecord $_
     }
     # Surface a failed upload instead of dropping it silently. The diff is
     # non-fatal to completion, so we warn rather than abort.
@@ -4240,13 +4296,24 @@ function Invoke-FinalizeAfterDoing {
 #     captures "Binary files ... differ" as its diff body instead. Pinned by
 #     test 21aa.
 # NOT PORTED, deliberately, and what it costs:
-#   * THE UPLOAD ITSELF, on 5.1. Invoke-ChangedFilesUpload calls
+#   * (D277) THE UPLOAD ITSELF IS NOW UNBLOCKED ON 5.1, and this entry moved out
+#     of NOT PORTED rather than being deleted, so the history of the claim stays
+#     readable. It used to say: Invoke-ChangedFilesUpload calls
 #     Invoke-WebRequest -SkipHttpErrorCheck, which is PowerShell 7.0+, so on
 #     Windows PowerShell 5.1 parameter binding fails BEFORE the request is
 #     issued and the PUT never happens — recorded as '000', indistinguishable
-#     from a refused connection. So W2100 makes a native-Windows run WRITE a
-#     snapshot; it does not yet make it UPLOAD one. Filed as D277. Say this
-#     plainly rather than letting "writes the result before the PUT" above read
+#     from a refused connection; W2100 made a native-Windows run WRITE a
+#     snapshot without making it UPLOAD one. D277 removed the parameter from
+#     both call sites, so a non-2xx now throws on either host and
+#     Get-WebExceptionStatus recovers the real code, with a transport failure
+#     still yielding '000'. Test group 30 in test-stride-hook.ps1 is the
+#     regression cover: an AST walk checking each command's named parameters
+#     against a per-cmdlet DENYLIST, alias-resolved. A denylist is by definition
+#     incomplete — it catches what someone has learned to list, which is more
+#     than the name-only gate sees but is not "the whole class", and an earlier
+#     draft of this very comment said it was. Still NOT claimed: nobody has ever EXECUTED this file under
+#     powershell.exe (D237), so this is a removed blocker, not a verified 5.1
+#     run. Say that plainly rather than letting "the upload is unblocked" read
 #     as end-to-end parity — that over-claim is the exact shape this comment
 #     keeps having to correct.
 #   * (W2102) THE NARROWING ORCHESTRATION IS NOW PORTED, and this entry moved
@@ -4318,15 +4385,23 @@ function Invoke-FinalizeAfterDoing {
 #   * (W2106) WHAT IS LEFT, at the close of G413, so this list can be read as
 #     finished rather than merely long. The capture, attribution, eviction and
 #     replay machinery is ported and covered. Three things are NOT, and none
-#     of them can be closed from this host:
-#       - THE 7-ONLY -SkipHttpErrorCheck, at BOTH Invoke-WebRequest call sites
-#         (D277): :3651 in Invoke-ChangedFilesUpload and :4931 in
-#         Invoke-AfterGoalDetectionViaApi. The first means a native-Windows run
-#         now WRITES a snapshot and still cannot PUT one. The SECOND is easy to
+#     of them can be closed from this host. ONE OF THE THREE SINCE HAS BEEN,
+#     and is kept here marked rather than removed, because a list that only ever
+#     grows is a list nobody trusts:
+#       - [CLOSED by D277] THE 7-ONLY -SkipHttpErrorCheck, at BOTH
+#         Invoke-WebRequest call sites — Invoke-ChangedFilesUpload and
+#         Invoke-AfterGoalDetectionViaApi. The first meant a native-Windows run
+#         WROTE a snapshot and still could not PUT one. The SECOND is easy to
 #         miss and was: that call sits under `catch { return }`, so on 5.1 the
-#         D119 after_goal detection guarantee degrades to a SILENT no-op on
+#         D119 after_goal detection guarantee degraded to a SILENT no-op on
 #         every run. Two consequences, one parameter, and the reason "Windows
-#         parity" must not be claimed unqualified.
+#         parity" must not be claimed unqualified. The parameter is gone from
+#         both sites; test group 30 fails if it — or any other parameter ON ITS
+#         DENYLIST, written plainly or through an alias — returns anywhere in
+#         hooks/*.ps1 or scripts/*.ps1. Extending that denylist is how a
+#         newly-learned parameter gets pinned; it is not a check that knows
+#         every 7-only parameter there is. No line numbers are cited here on purpose — the two this entry used to name
+#         had both drifted onto unrelated code by the time D277 was worked.
 #       - RUNTIME VERIFICATION ON A REAL 5.1 HOST (D237). Every check that
 #         exists here is STATIC: scripts/check-ps1-compat.sh reads syntax and
 #         cmdlet names, and the ps1 suite runs on pwsh 7. Neither executes this
@@ -5236,12 +5311,21 @@ function Invoke-AfterGoalDetectionViaApi {
 
     $resp = $null
     try {
+        # (D277) No -SkipHttpErrorCheck, for the same reason as the upload
+        # path — and this site was the worse of the two. Its catch frames every
+        # failure as an unreachable endpoint, so on 5.1 the parameter never
+        # bound, this returned early on EVERY run, and D119's after_goal
+        # detection silently no-opped on the shipping host.
         $resp = Invoke-WebRequest `
             -Uri "$apiBase/api/tasks/$taskId/after_goal_status" `
             -Method Get `
             -Headers @{ Authorization = "Bearer $token" } `
-            -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 10
+            -UseBasicParsing -TimeoutSec 10
     } catch {
+        # A non-2xx from this endpoint is genuinely nothing to act on — there is
+        # no armed goal to read — so returning is right. What changed is that we
+        # now get here only for a real HTTP or transport error, never because a
+        # parameter failed to bind.
         return
     }
     if ($null -eq $resp) { return }

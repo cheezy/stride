@@ -1367,10 +1367,13 @@ else
     local max_lines="$2"
     local marker="$3"
 
+    # (D279) Kept in lockstep with capture_changed_files' own counter. This
+    # helper is a hand-duplicated mirror of that code, so leaving the quadratic
+    # substitution here would have meant Group 7 went on testing the old path
+    # and proving nothing about the fix.
     local line_count=0
     if [ -n "$diff_text" ]; then
-      local _no_nl="${diff_text//$'\n'/}"
-      line_count=$(( ${#diff_text} - ${#_no_nl} + 1 ))
+      line_count=$(printf '%s\n' "$diff_text" | wc -l | tr -d ' ')
     fi
     if [ "$line_count" -gt "$max_lines" ]; then
       local truncated
@@ -2441,6 +2444,130 @@ PARITY_PS1
     fi
     rm -rf "$PAR_DIR"; rm -f "$PAR_REF_FILE"
   fi
+
+  # 7gg (D279): a long single-line diff must capture in linear time. The old
+  # counter built a second copy of the diff with the newlines substituted out,
+  # which bash does quadratically once the line is long: MEASURED at 9,529 ms
+  # for 100KB, 37,488 ms for 200KB, and beyond the 120s after_doing budget at
+  # 400KB — where the hook is killed and the snapshot is lost SILENTLY, the
+  # completion still succeeding with no diffs in Review. After the fix the same
+  # three inputs take 116 / 127 / 157 ms.
+  #
+  # The ceiling below is deliberately loose. This suite already warns that its
+  # wall-clock backstops skew when the machine is loaded, so a tight bound
+  # would flake; 30s still leaves ~190x headroom over the measured 157 ms while
+  # catching any return to quadratic, which blew straight past 120s.
+  #
+  # The shape matters as much as the size: a 400KB string with NO newline at
+  # all runs the old idiom in 112 ms. The blowup needs newlines PRESENT in a
+  # long line — a minified bundle, a one-line lockfile, a base64 asset — so the
+  # fixture is a single very long line inside a real diff, not a bare string.
+  PERF_DIR=$(mktemp -d)
+  (
+    cd "$PERF_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo seed > seed.txt
+    git add -A > /dev/null
+    git commit -q -m "base"
+    # ~400KB on one line, the shape a minified bundle has. Built with tr from
+    # /dev/zero rather than by string concatenation in a loop — appending in a
+    # shell or awk loop is itself quadratic, which would make the fixture, not
+    # the code under test, the slow part.
+    head -c 409600 /dev/zero | tr '\0' 'x' > bundle.min.js
+    printf '\n' >> bundle.min.js
+  )
+  PERF_BASE=$(cd "$PERF_DIR" && git rev-parse HEAD)
+  PERF_START=$(date +%s)
+  PERF_OUT2=$(
+    cd "$PERF_DIR" || exit 1
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$PERF_BASE"
+  ) 2>/dev/null
+  PERF_ELAPSED=$(( $(date +%s) - PERF_START ))
+  if [ "$PERF_ELAPSED" -lt 30 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: D279: 400KB single-line diff captured in ${PERF_ELAPSED}s (ceiling 30s)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: D279: 400KB single-line diff took ${PERF_ELAPSED}s — the line counter has gone superlinear again"
+    FAIL=$((FAIL + 1))
+  fi
+  # Correctness alongside speed: fast because it is linear, not because it
+  # silently dropped the file.
+  PERF_LEN=$(echo "$PERF_OUT2" | jq -r '.[] | select(.path == "bundle.min.js") | .diff | length' 2>/dev/null)
+  if [ -n "$PERF_LEN" ] && [ "$PERF_LEN" -gt 400000 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: D279: the large single-line entry still carries its full diff body ($PERF_LEN bytes)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: D279: expected a >400000-byte diff body, got '${PERF_LEN:-<absent>}'"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$PERF_DIR"
+
+  # 7hh (D279): the two remaining shapes the task's testing_strategy names —
+  # its integration test ("a repository with two 100KB single-line files
+  # produces a snapshot well within the after_doing budget") and its edge case
+  # ("a diff that is one line of several hundred KB with NO trailing newline").
+  # Both matter for different reasons. Two files prove the cost is per-file and
+  # accumulates, which is how a repo with several vendored bundles hits the
+  # budget without any single file looking extreme. The missing trailing
+  # newline is the boundary the count arithmetic turns on: printf supplies the
+  # terminator wc counts, so a body that does not end in one must still come
+  # out as newline-count + 1 rather than one short.
+  PERF2_DIR=$(mktemp -d)
+  (
+    cd "$PERF2_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo seed > seed.txt
+    git add -A > /dev/null
+    git commit -q -m "base"
+    head -c 102400 /dev/zero | tr '\0' 'a' > one.min.js
+    printf '\n' >> one.min.js
+    # Deliberately NO trailing newline on the second file.
+    head -c 102400 /dev/zero | tr '\0' 'b' > two.min.js
+  )
+  PERF2_BASE=$(cd "$PERF2_DIR" && git rev-parse HEAD)
+  PERF2_START=$(date +%s)
+  PERF2_OUT=$(
+    cd "$PERF2_DIR" || exit 1
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$PERF2_BASE"
+  ) 2>/dev/null
+  PERF2_ELAPSED=$(( $(date +%s) - PERF2_START ))
+  if [ "$PERF2_ELAPSED" -lt 30 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: D279: two 100KB single-line files captured in ${PERF2_ELAPSED}s (ceiling 30s)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: D279: two 100KB single-line files took ${PERF2_ELAPSED}s — per-file cost is accumulating superlinearly"
+    FAIL=$((FAIL + 1))
+  fi
+  PERF2_A=$(echo "$PERF2_OUT" | jq -r '.[] | select(.path == "one.min.js") | .diff | length' 2>/dev/null)
+  PERF2_B=$(echo "$PERF2_OUT" | jq -r '.[] | select(.path == "two.min.js") | .diff | length' 2>/dev/null)
+  if [ -n "$PERF2_A" ] && [ "$PERF2_A" -gt 100000 ] && [ -n "$PERF2_B" ] && [ "$PERF2_B" -gt 100000 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: D279: both large single-line entries carry full diff bodies ($PERF2_A, $PERF2_B bytes)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: D279: expected two >100000-byte bodies, got '${PERF2_A:-<absent>}' and '${PERF2_B:-<absent>}'"
+    FAIL=$((FAIL + 1))
+  fi
+  # The no-trailing-newline file must not be truncated: its body is one long
+  # line, so the count is 2 (git's own header lines plus the content line) and
+  # nowhere near the 500 trigger. A count that came out short or long here
+  # would be the arithmetic drifting, not a performance problem.
+  if echo "$PERF2_OUT" | jq -e --arg m "[diff truncated at 500 lines]" \
+       '.[] | select(.path == "two.min.js") | select(.diff | contains($m) | not)' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: D279: a long single-line diff with no trailing newline is not truncated"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: D279: the no-trailing-newline single-line diff was truncated"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$PERF2_DIR"
 fi
 
 # ============================================================

@@ -467,10 +467,30 @@ capture_changed_files() {
         fi
       fi
       # diff_text for untracked was already captured above.
+      # (D279) Count lines with wc, NOT by substituting the newlines out.
+      # `${diff_text//$'\n'/}` builds a second copy of the whole diff, and on a
+      # long line bash's substitution goes quadratic: MEASURED on a 200KB
+      # single-line diff, the count alone took 37,063 ms while the git call
+      # that produced the diff took 34 ms, the binary probe 30 ms and the jq
+      # encode 35 ms. A 400KB diff never finished inside the 120s after_doing
+      # budget, so the hook was killed and the snapshot lost silently — the
+      # completion still succeeded and Review simply showed no diffs.
+      #
+      # The blowup needs newlines to be PRESENT, which is why this hid for so
+      # long: the same substitution over a 400KB string containing NO newline
+      # runs in 112 ms. A minified bundle, a single-line lockfile or a base64
+      # asset is a handful of newlines in a very long line — exactly the shape
+      # that is slowest.
+      #
+      # `printf '%s\n' | wc -l | tr -d ' '` is the idiom this file already
+      # uses in four other places; the tr strips the leading pad BSD wc emits.
+      # It is arithmetically identical to the old expression — newline count
+      # plus one — because printf appends the terminator wc counts on: verified
+      # equal for empty, one-line, trailing-newline, no-trailing-newline, and
+      # at the 499/500/501/750 truncation boundaries. Same count, 30 ms.
       local line_count=0
       if [ -n "$diff_text" ]; then
-        local _no_nl="${diff_text//$'\n'/}"
-        line_count=$(( ${#diff_text} - ${#_no_nl} + 1 ))
+        line_count=$(printf '%s\n' "$diff_text" | wc -l | tr -d ' ')
       fi
       if [ "$line_count" -gt "$max_lines" ]; then
         local truncated

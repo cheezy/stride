@@ -155,7 +155,18 @@ $script:StrideOpenWindowSweepAt = 20
 function Get-EnvCacheRawByte {
     try {
         $p = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EnvCache)
-        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $null }
+        # ABSENT and NOT-A-FILE are different answers, and conflating them was a
+        # regression this change introduced. -PathType Leaf is false for a
+        # DIRECTORY, so a directory at the cache path reported absent; the swap
+        # then matched "expected absent", Move-Item relocated the staged temp
+        # INTO the directory, and Set-TaskRecord returned success over a cache
+        # that does not exist as a file — stranding a copy carrying TASK_*
+        # identity lines at an unintended path. The pre-D282 code failed SAFE
+        # here (Test-Path with no -PathType is true for a container, the
+        # splitter threw, and the write refused); this failed success-shaped,
+        # which is the very shape D282 exists to close.
+        if (-not (Test-Path -LiteralPath $p)) { return $null }
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return 'unreadable' }
         # The unary comma is load-bearing. PowerShell unrolls a returned array
         # into the pipeline, so a ZERO-BYTE cache would come back as $null —
         # indistinguishable from an absent one, and a swap taken against

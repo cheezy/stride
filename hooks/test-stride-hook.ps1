@@ -6075,32 +6075,34 @@ if ($g22AfterA -match "TASK_OWNED_9='ours'") {
 # pin at all. Sequencing alone cannot produce this race: the concurrent write
 # has to land BETWEEN the record write's read and its rename.
 #
-# So the injection goes where the window actually is. Get-EnvCacheRawByte is
-# what Set-TaskRecord calls to fingerprint the cache; shadowing it lets the
-# claim commit immediately AFTER the fingerprint is taken and before anything
-# is staged. Attempt 1 then holds a genuinely stale $before, the swap refuses,
-# and attempt 2 re-reads and re-applies against the claim's content. A retry
-# that replayed the stale snapshot would lose the claim here — which is the
-# thing the old case could not have caught.
+# The injection POINT matters as much as its existence, and a second draft got
+# that wrong too. Shadowing Get-EnvCacheRawByte lands the concurrent write after
+# the FINGERPRINT but before Split-EnvCacheRecord re-reads, so attempt 1 already
+# stages fresh content and the retry, though it runs, carries nothing: measured
+# against a mutant with the guard deleted, that version still passed 5/5. The
+# write has to land after the SPLITTER has read, so the staged line set is
+# genuinely stale and only the swap can save the claim. Shadowing
+# Split-EnvCacheRecord puts it there.
 $null = New-RecordFixture -Name 'interleave'
 [System.IO.File]::WriteAllText($script:EnvCache, "TASK_BASE_REF_9='abc123'`nTASK_OWNED_9='mine'`n", (New-Object System.Text.UTF8Encoding($false)))
 [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_9', 'abc123', 'Process')
 $script:g22Injected = 0
-$g22RealRawByte = ${function:Get-EnvCacheRawByte}
-function Get-EnvCacheRawByte {
-    $bytes = & $g22RealRawByte
+$g22RealSplit = ${function:Split-EnvCacheRecord}
+function Split-EnvCacheRecord {
+    $recs = & $g22RealSplit
     if ($script:g22Injected -eq 0) {
         $script:g22Injected = 1
-        # The other agent's claim commits, after our fingerprint and before our
-        # rename. Written with the real encoder so it is a legitimate cache.
+        # The other agent's claim commits AFTER we have read the records we are
+        # about to stage, so the line set we build is already stale when it is
+        # written. Only the compare-and-swap can save the claim from here.
         [System.IO.File]::WriteAllText($script:EnvCache,
             "TASK_BASE_REF_9='abc123'`nTASK_OWNED_9='mine'`nTASK_ID='999'`nTASK_IDENTIFIER='W999'`n",
             [System.Text.Encoding]::GetEncoding(28591))
     }
-    return ,$bytes
+    return $recs
 }
 $g22SetRc = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
-${function:Get-EnvCacheRawByte} = $g22RealRawByte
+${function:Split-EnvCacheRecord} = $g22RealSplit
 Assert-Eq "22t-b (D282): the interleave actually fired" "1" "$($script:g22Injected)"
 Assert-Eq "22t-b (D282): the record write still reports success after retrying" "True" "$g22SetRc"
 $g22Inter = (Get-EnvCacheLine) -join '|'
@@ -6167,6 +6169,26 @@ if ($g22Uid -eq '0' -or -not $g22Uid) {
     }
 }
 
+# 22t-d2: a DIRECTORY at the cache path is "not a file", not "absent". This was
+# a regression D282 introduced and is fixed here rather than only noted: the
+# helper's -PathType Leaf test is false for a container, so the path reported
+# absent, the swap matched "expected absent", and Move-Item relocated the staged
+# temp INTO the directory while Set-TaskRecord returned SUCCESS over a cache
+# that does not exist as a file — stranding a copy carrying TASK_* identity
+# lines at an unintended path. The pre-D282 code failed safe here. Failing
+# success-shaped is the exact shape this task exists to close.
+$null = New-RecordFixture -Name 'dircache'
+Remove-Item -LiteralPath $script:EnvCache -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $script:EnvCache -Force | Out-Null
+[System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_9', 'abc123', 'Process')
+Assert-Eq "22t-d2 (D282): a directory at the cache path reads as unreadable, not absent" "True" `
+    "$((Get-EnvCacheRawByte) -is [string])"
+$g22DirRc = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
+Assert-Eq "22t-d2 (D282): and the record write is refused rather than reporting success" "False" "$g22DirRc"
+$g22Stranded = @(Get-ChildItem -LiteralPath $script:EnvCache -Force -ErrorAction SilentlyContinue).Count
+Assert-Eq "22t-d2 (D282): and nothing was stranded inside the directory" "0" "$g22Stranded"
+Remove-Item -LiteralPath $script:EnvCache -Recurse -Force -ErrorAction SilentlyContinue
+
 # 22t-e: three collisions REFUSE rather than clobber. Nothing else drives the
 # bounded-retry exit, so without this the refusal branch is unreachable in test.
 $null = New-RecordFixture -Name 'persistent'
@@ -6181,6 +6203,11 @@ function Get-EnvCacheRawByte {
     [System.IO.File]::WriteAllText($script:EnvCache,
         "TASK_BASE_REF_9='abc123'`nTASK_ID='777'`nTASK_SPIN='$($script:g22Collide)'`n",
         [System.Text.Encoding]::GetEncoding(28591))
+    # The comma is only correct for a byte[]. Applied to the 'unreadable'
+    # sentinel it yields an Object[], and `-is [string]` is then False, so
+    # Set-TaskRecord's refuse branch would be skipped and the write would
+    # proceed against a garbage fingerprint. A shadow must preserve the sentinel.
+    if ($bytes -is [string]) { return $bytes }
     return ,$bytes
 }
 $g22SpinRc = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
@@ -6209,20 +6236,21 @@ $null = New-RecordFixture -Name 'twokeys'
 [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_9', 'abc123', 'Process')
 [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_8', 'def456', 'Process')
 $script:g22TwoKey = 0
-$g22RealRawByte3 = ${function:Get-EnvCacheRawByte}
-function Get-EnvCacheRawByte {
-    $bytes = & $g22RealRawByte3
+$g22RealSplit3 = ${function:Split-EnvCacheRecord}
+function Split-EnvCacheRecord {
+    $recs = & $g22RealSplit3
     if ($script:g22TwoKey -eq 0) {
         $script:g22TwoKey = 1
-        # The other task's record write commits inside our window.
+        # The other task's record write commits after we read, so our staged
+        # line set does not contain it.
         [System.IO.File]::WriteAllText($script:EnvCache,
             "TASK_BASE_REF_9='abc123'`nTASK_BASE_REF_8='def456'`nTASK_NARROWED_8='no'`n",
             [System.Text.Encoding]::GetEncoding(28591))
     }
-    return ,$bytes
+    return $recs
 }
 $null = Set-TaskNarrowedRecord -TaskId '9' -Value 'yes'
-${function:Get-EnvCacheRawByte} = $g22RealRawByte3
+${function:Split-EnvCacheRecord} = $g22RealSplit3
 Assert-Eq "22t-f (D282): the two-key interleave actually fired" "1" "$($script:g22TwoKey)"
 Assert-Eq "22t-f (D282): the other task's record survives" "no" "$((Get-TaskNarrowedRecord -TaskId '8').Value)"
 Assert-Eq "22t-f (D282): and ours lands beside it" "yes" "$((Get-TaskNarrowedRecord -TaskId '9').Value)"

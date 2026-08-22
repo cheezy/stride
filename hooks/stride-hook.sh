@@ -533,14 +533,18 @@ record_dirty_baseline() {
   # have introduced that. The file stays `<hash> <path>` newline-delimited;
   # only the spelling of <path> changes.
   #
-  # DIVERGENCE, recorded deliberately rather than left implicit: the two
-  # executors now disagree here. Bash records the baseline RAW and captures
-  # RAW, so its W1457 filter matches on non-ASCII paths. The PowerShell twin's
-  # Write-DirtyBaseline still lists WITHOUT -z, so it records QUOTED while its
-  # own capture (W2100) records RAW — leaving that filter inert for non-ASCII
-  # paths on Windows only. stride-hook.ps1 marks that pre-existing and out of
-  # scope; the failure direction is over-report, which is the documented safe
-  # direction. Filed as a follow-up rather than fixed from the bash side.
+  # (D286) The divergence this comment used to record is CLOSED. For one window
+  # the two executors disagreed here: bash recorded the baseline RAW and
+  # captured RAW, while the PowerShell twin's Write-DirtyBaseline still listed
+  # WITHOUT -z, recording QUOTED against its own RAW capture (W2100) and leaving
+  # the W1457 filter inert for non-ASCII paths on Windows only. That was a
+  # follow-up rather than a bash-side fix, and D286 closed it: Write-DirtyBaseline
+  # now lists with -z and splits on NUL through the same Split-NulList this side
+  # mirrors. Both executors record RAW and capture RAW.
+  #
+  # The pair must stay in step. Fixing one side alone is what created the
+  # divergence in the first place, and the failure it produced was silent —
+  # over-report is the safe direction, so nothing was ever loud about it.
   local -a _paths=()
   local _p _h
   while IFS= read -r -d '' _p; do

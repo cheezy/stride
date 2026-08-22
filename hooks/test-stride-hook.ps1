@@ -9660,6 +9660,243 @@ echo "reviewing"
 }
 
 # ============================================================
+# Test Group 31: D286 — non-ASCII paths through the dirty baseline
+# ============================================================
+# The ps1 suite had NO non-ASCII path fixture anywhere before this group. It is
+# NOT true that it had no coverage of these functions — Group 14 drives both end
+# to end through the hook script, 14a asserting the baseline was written and 14b
+# driving the capture filter that reads it. An earlier version of this header
+# claimed otherwise; the gap was always the non-ASCII fixture specifically, and
+# overstating it obscures which check was actually missing. That absence is what
+# let the defect sit: Build-ChangedFilesSnapshot was fixed to list with -z
+# by W2100 and the bash twin by D278, while Write-DirtyBaseline kept listing
+# without it — recording the octal-escaped display spelling against a snapshot
+# keyed on the raw one, so the W1457 pre-existing-edit filter could never match
+# a non-ASCII path and went silently inert for exactly those files, on Windows
+# only. The failure direction is over-report, which is why nothing was loud.
+#
+# Same AST-extraction harness as Group 22, and the same non-vacuity rule: an
+# incomplete extraction FAILS rather than letting every case below pass on
+# functions that were never bound.
+Write-Host ""
+Write-Host "=== Test Group 31: D286 non-ASCII dirty baseline ==="
+
+# Build-ChangedFilesSnapshot and its dependencies are extracted too, because
+# AC3 asks for non-ASCII coverage of the SNAPSHOT as well as the baseline — and
+# because asserting the W1457 filter's DECISION by hand-comparing two
+# hash-object outputs proves the arithmetic, not the filter. The set mirrors the
+# bash parity case 7ff's own want-list, which is the established list for
+# driving this function out of process.
+$g31Want = @('Write-DirtyBaseline', 'Read-DirtyBaseline', 'Split-NulList', 'Get-GitDiffBody',
+             'Invoke-GitCapture', 'Get-NumstatBinarySet', 'Test-SafeRepoPath', 'Expand-OwnRanges',
+             'Build-ChangedFilesSnapshot')
+$g31Ast = [System.Management.Automation.Language.Parser]::ParseFile($HookScript, [ref]$null, [ref]$null)
+$g31Fns = $g31Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
+$g31Found = @()
+foreach ($f in $g31Fns) {
+    if ($g31Want -contains $f.Name) {
+        $g31Found += $f.Name
+        . ([scriptblock]::Create($f.Extent.Text))
+    }
+}
+$g31Missing = @($g31Want | Where-Object { $g31Found -notcontains $_ })
+if ($g31Missing.Count -gt 0) {
+    Write-Host "  FAIL: 31-harness: could not extract from stride-hook.ps1: $($g31Missing -join ', ')" -ForegroundColor Red
+    $script:FAIL++
+} else {
+    Write-Host "  PASS: 31-harness: all $($g31Want.Count) baseline functions extracted from the real hook" -ForegroundColor Green
+    $script:PASS++
+
+    $g31Git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $g31Git) {
+        Write-Host "  SKIP: 31: git unavailable" -ForegroundColor Yellow
+    } else {
+        # Two names that exercise the two distinct shapes D278 named on the bash
+        # side: a non-ASCII FILENAME, and an ASCII file under a non-ASCII
+        # DIRECTORY component. Both are quoted by git without -z.
+        $g31File = [char]0x00E9 + 'clair.txt'                 # eclair.txt with e-acute
+        $g31Dir  = [char]0x0441 + [char]0x043F + [char]0x0431 # Cyrillic directory
+        foreach ($g31Case in @(
+            @{ Name = 'quotePath-default'; QuotePath = $null },
+            @{ Name = 'quotePath-false';   QuotePath = 'false' }
+        )) {
+            $g31Repo = Join-Path $TmpDir "d286_$($g31Case.Name)"
+            New-Item -ItemType Directory -Force -Path $g31Repo | Out-Null
+            Push-Location $g31Repo
+            try {
+                & git init -q 2>$null
+                & git config user.email 'test@test.local' 2>$null
+                & git config user.name 'Test' 2>$null
+                if ($g31Case.QuotePath) { & git config core.quotePath $g31Case.QuotePath 2>$null }
+                Set-Content -LiteralPath (Join-Path $g31Repo 'ascii.txt') -Value 'v1' -Encoding UTF8
+                & git add -A 2>$null; & git commit -q -m v1 2>$null
+                $g31Base = (& git rev-parse HEAD 2>$null | Out-String).Trim()
+
+                # A tracked non-ASCII file, modified but not committed, plus an
+                # ASCII file under a non-ASCII directory, untracked. Both are
+                # "dirty at claim time".
+                Set-Content -LiteralPath (Join-Path $g31Repo $g31File) -Value 'one' -Encoding UTF8
+                & git add -A 2>$null; & git commit -q -m v2 2>$null
+                $g31Base = (& git rev-parse HEAD 2>$null | Out-String).Trim()
+                Set-Content -LiteralPath (Join-Path $g31Repo $g31File) -Value 'dirty-at-claim' -Encoding UTF8
+                New-Item -ItemType Directory -Force -Path (Join-Path $g31Repo $g31Dir) | Out-Null
+                Set-Content -LiteralPath (Join-Path $g31Repo (Join-Path $g31Dir 'inner.txt')) -Value 'untracked' -Encoding UTF8
+
+                $ProjectDir = $g31Repo
+                Write-DirtyBaseline -BaseRef $g31Base
+                $g31Bl = Join-Path $g31Repo '.stride-dirty-baseline'
+                $g31Txt = if (Test-Path -LiteralPath $g31Bl) { Get-Content -LiteralPath $g31Bl -Raw -Encoding UTF8 } else { '' }
+
+                # THE DEFECT, stated as an assertion: the RAW spelling is on
+                # file and the octal-escaped one is not. A backslash in a
+                # baseline path is the quoted form's signature.
+                Assert-Contains "31a/$($g31Case.Name) (D286): the baseline records the non-ASCII filename in its RAW spelling" `
+                    $g31File $g31Txt
+                Assert-NotContains "31a/$($g31Case.Name) (D286): and not the octal-escaped display spelling" `
+                    '\3' $g31Txt
+                Assert-Contains "31a/$($g31Case.Name) (D286): an ASCII file under a non-ASCII DIRECTORY is recorded raw too" `
+                    $g31Dir $g31Txt
+
+                # The hash is the half the quoted spelling also broke, and the
+                # sentinel it produced is 'absent', NOT 'unhashable': the writer
+                # Test-Paths the path before hashing, and the quoted spelling
+                # names no file on disk, so the entry recorded the file as
+                # non-existent. Measured on the pre-D286 tree, where the whole
+                # line reads `absent "\303\251clair.txt"`. An earlier version of
+                # this row asserted 'unhashable' and passed on BOTH trees —
+                # a vacuous row, caught by running it against the pre-fix hook
+                # rather than by reading it.
+                Assert-NotContains "31a/$($g31Case.Name) (D286): the non-ASCII entry is not recorded as 'absent'" `
+                    'absent' $g31Txt
+                $g31Blob = ($g31Txt -split "`n" | Where-Object { $_ -like "*$g31File*" } | Select-Object -First 1) -replace ' .*$', ''
+                Assert-Eq "31a/$($g31Case.Name) (D286): and carries a real 40-hex blob id, so the filter has something to compare" `
+                    "True" "$($g31Blob -match '^[0-9a-f]{40}$')"
+
+                # Round-trip: the reader must key on the same raw spelling.
+                $g31Map = Read-DirtyBaseline
+                Assert-Eq "31b/$($g31Case.Name) (D286): the reader keys the baseline on the same raw path the writer wrote" `
+                    "True" "$($null -ne $g31Map -and $g31Map.ContainsKey($g31File))"
+
+                # W1457's actual question, both answers. Unchanged since claim →
+                # the path is in the baseline with a MATCHING hash (excluded).
+                # Re-modified after claim → the hash differs (included).
+                $g31HashAtClaim = $g31Map[$g31File]
+                $g31HashNow = (& git hash-object -- $g31File 2>$null | Out-String).Trim()
+                Assert-Eq "31c/$($g31Case.Name) (D286): a claim-dirty non-ASCII path unchanged since claim compares EQUAL (excluded)" `
+                    $g31HashAtClaim $g31HashNow
+                Set-Content -LiteralPath (Join-Path $g31Repo $g31File) -Value 'changed-again' -Encoding UTF8
+                $g31HashAfter = (& git hash-object -- $g31File 2>$null | Out-String).Trim()
+                Assert-Eq "31c/$($g31Case.Name) (D286): re-modified after claim compares DIFFERENT (included)" `
+                    "True" "$($g31HashAtClaim -ne $g31HashAfter)"
+
+                # 31d: the SNAPSHOT, which is what AC3's second half asks for and
+                # what 31c above only approximates. 31c compares two hash-object
+                # outputs by hand; that proves the arithmetic the filter uses,
+                # not that the filter reaches the same answer. Here the real
+                # Build-ChangedFilesSnapshot runs over the same fixture and the
+                # assertion is made on what it actually emitted.
+                $g31Snap = Build-ChangedFilesSnapshot -Base $g31Base -OwnRanges ''
+                $g31Paths = @()
+                if ($g31Snap) {
+                    try { $g31Paths = @(($g31Snap | ConvertFrom-Json) | ForEach-Object { $_.path }) } catch { $g31Paths = @() }
+                }
+                Assert-Eq "31d/$($g31Case.Name) (D286): the snapshot is non-empty (a vacuous [] would pass every row below)" `
+                    "True" "$($g31Paths.Count -gt 0)"
+                # WHICH ROW DISCRIMINATES, AND IN WHICH VARIANT — measured, and
+                # qualified, because this loop runs two. In the quotePath-DEFAULT
+                # variant (the shipping Windows default) the EXCLUDED row is the
+                # regression pin: pre-fix the baseline holds the quoted spelling,
+                # nothing matches the raw path the capture produces, and the
+                # untouched file is wrongly reported as changed. The INCLUDED row
+                # is a control even there — an inert filter excludes nothing, so
+                # a path that should be present is present for the wrong reason.
+                # In the quotePath-FALSE variant git emits the raw spelling with
+                # or without -z, so the defect cannot manifest and every row here
+                # passes on both trees; that variant is a non-regression guard,
+                # not a pin. An earlier version of this comment named the red row
+                # without saying which variant it was red in.
+                Assert-Eq "31d/$($g31Case.Name) (D286): a claim-dirty non-ASCII path re-modified after the claim IS in the snapshot" `
+                    "True" "$($g31Paths -contains $g31File)"
+                # The untracked file under a non-ASCII directory is unchanged
+                # since the baseline was written, so the filter must drop it.
+                $g31Inner = "$g31Dir/inner.txt"
+                Assert-Eq "31d/$($g31Case.Name) (D286): a claim-dirty path under a non-ASCII directory, untouched since the claim, is EXCLUDED" `
+                    "False" "$($g31Paths -contains $g31Inner)"
+
+                # 31e: the two operations that produce a path git must spell,
+                # and what each one actually exercises — MEASURED, because both
+                # my first version of this case and the review comment that
+                # prompted it assumed something git does not do.
+                #
+                # A RENAME DOES NOT LIST BOTH SIDES. `git diff --name-only`
+                # collapses a detected rename to its DESTINATION only: against a
+                # base where the file was `eclair.txt`, after `git mv` to
+                # `ubung.txt`, --name-only emits the new path alone
+                # (--name-status shows `R100 old new`, but --name-only does not).
+                # So the rename case exercises the new path, and nothing else.
+                #
+                # THE VANISHED-SIDE BRANCH IS REACHED BY A DELETION, not by a
+                # rename. `git rm` leaves the path listed against the base with
+                # no file on disk, which is Write-DirtyBaseline's Test-Path-fails
+                # branch and its 'absent' sentinel. That branch is the one worth
+                # pinning with a non-ASCII path, so it gets its own operation
+                # rather than being assumed as a side effect of the rename.
+                #
+                # Both rows compare whole records by their PATH column. A first
+                # version built the rename target as 'renamed-' + the old name,
+                # so the new spelling CONTAINED the old one and Assert-Contains —
+                # a plain .Contains() over the whole file — passed the old-path
+                # row on the strength of the new-path line.
+                $g31Renamed = [char]0x00FC + 'bung.txt'
+                & git mv -- $g31File $g31Renamed 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-DirtyBaseline -BaseRef $g31Base
+                    $g31RenLines = @(Get-Content -LiteralPath $g31Bl -Encoding UTF8)
+                    $g31RenNew = @($g31RenLines | Where-Object { ($_ -replace '^\S+ ', '') -eq $g31Renamed })
+                    Assert-Eq "31e/$($g31Case.Name) (D286): a rename records the destination non-ASCII path as its own raw record" `
+                        "1" "$($g31RenNew.Count)"
+                    Assert-Eq "31e/$($g31Case.Name) (D286): and it carries a real blob id, so the rename target is hashable" `
+                        "True" "$($g31RenNew.Count -eq 1 -and $g31RenNew[0] -match '^[0-9a-f]{40} ')"
+                    Assert-NotContains "31e/$($g31Case.Name) (D286): the rename destination is not octal-escaped" `
+                        '\3' ($g31RenLines -join "`n")
+
+                    # Now the deletion, on the path the rename just created.
+                    # -f is required, not decorative: the rename is staged and
+                    # uncommitted, so a plain `git rm` refuses with "has changes
+                    # staged in the index". Without it this half SKIPPED, and a
+                    # skip is a silent hole — the branch it exists to reach would
+                    # simply never have been exercised.
+                    & git rm -q -f -- $g31Renamed 2>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-DirtyBaseline -BaseRef $g31Base
+                        $g31DelLines = @(Get-Content -LiteralPath $g31Bl -Encoding UTF8)
+                        # The path the baseline now carries is the ORIGINAL one,
+                        # not the rename target. Against the base, rename+delete
+                        # nets out to "the committed file is gone": the base held
+                        # $g31File, the working tree holds neither, so
+                        # --name-only lists $g31File as deleted and $g31Renamed —
+                        # never committed — does not appear at all. Asserting on
+                        # the rename target here is what made these two rows fail
+                        # when the skip was lifted; the suite caught it.
+                        $g31DelOld = @($g31DelLines | Where-Object { ($_ -replace '^\S+ ', '') -eq $g31File })
+                        Assert-Eq "31e/$($g31Case.Name) (D286): a deleted non-ASCII path is still recorded, as its own raw record" `
+                            "1" "$($g31DelOld.Count)"
+                        Assert-Eq "31e/$($g31Case.Name) (D286): and carries the 'absent' sentinel, so the Test-Path-fails branch was really reached with a raw path" `
+                            "True" "$($g31DelOld.Count -eq 1 -and $g31DelOld[0] -like 'absent *')"
+                    } else {
+                        Write-Host "  SKIP: 31e/$($g31Case.Name): git rm failed on this host" -ForegroundColor Yellow
+                    }
+                } else {
+                    Write-Host "  SKIP: 31e/$($g31Case.Name): git mv failed on this host" -ForegroundColor Yellow
+                }
+            } finally {
+                Pop-Location
+            }
+        }
+    }
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

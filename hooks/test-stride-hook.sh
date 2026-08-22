@@ -2445,6 +2445,109 @@ PARITY_PS1
     rm -rf "$PAR_DIR"; rm -f "$PAR_REF_FILE"
   fi
 
+  # 7hh2 (D286): bash/PowerShell parity for the DIRTY BASELINE, which 7ff above
+  # does not cover — it extracts Read-DirtyBaseline but never the WRITER, so the
+  # one artifact whose two implementations had diverged was the one the parity
+  # check could not see. That divergence was D286: Write-DirtyBaseline listed
+  # without -z and recorded the octal-escaped display spelling, while its own
+  # snapshot capture recorded the raw one, so the W1457 pre-existing-edit filter
+  # went silently inert for non-ASCII paths on Windows only.
+  #
+  # A separate case rather than an extension of 7ff, deliberately: 7ff passes
+  # today and compares snapshots, and folding a second artifact into it would
+  # put a passing check at risk to test something it was not built for. This
+  # compares only the PATH SPELLINGS the two writers record, which is the whole
+  # of the property that diverged.
+  if ! command -v pwsh > /dev/null 2>&1; then
+    if [ "${STRIDE_PS1_GATE_REQUIRED:-}" = "1" ]; then
+      echo -e "  ${RED}FAIL${RESET}: 7hh2: STRIDE_PS1_GATE_REQUIRED=1 but pwsh is not installed"
+      FAIL=$((FAIL + 1))
+    else
+      echo "  SKIP: 7hh2: pwsh not installed — the baseline parity check needs it"
+    fi
+  else
+    BL_DIR=$(mktemp -d)
+    BL_REF=$(mktemp)
+    (
+      cd "$BL_DIR" || exit 1
+      git init -q .
+      git config user.email "test@test.local"
+      git config user.name "Test"
+      mkdir -p "док"
+      printf 'v1\n' > "док/plain.txt"
+      printf 'v1\n' > "éclair.txt"
+      git add -A > /dev/null
+      git commit -q -m base
+      git rev-parse HEAD > "$BL_REF"
+      # Dirty at claim time: one tracked non-ASCII edit, one tracked edit under a
+      # non-ASCII directory, and one untracked non-ASCII add.
+      printf 'v2\n' > "док/plain.txt"
+      printf 'v2\n' > "éclair.txt"
+      printf 'new\n' > "новый.txt"
+    )
+    BL_BASE=$(cat "$BL_REF")
+    BL_BASH_PATHS=$(
+      cd "$BL_DIR" || exit 1
+      PROJECT_DIR="$BL_DIR"
+      # shellcheck disable=SC1090
+      source "$HOOK_SCRIPT" 2>/dev/null || true
+      PROJECT_DIR="$BL_DIR"
+      record_dirty_baseline "$BL_BASE" > /dev/null 2>&1
+      # sed, not awk: rebuilding the record with awk's default OFS collapses
+      # runs of whitespace INSIDE a path, while the PowerShell side's
+      # -replace '^\S+ ' preserves them — the two sides would then disagree
+      # spuriously on any path holding two consecutive spaces or a tab. Latent
+      # on this fixture, which has none; fixed anyway because a parity check
+      # that can report a false divergence is worse than none.
+      sed 's/^[^ ]* //' "$BL_DIR/.stride-dirty-baseline" 2>/dev/null | LC_ALL=C sort
+    )
+    rm -f "$BL_DIR/.stride-dirty-baseline"
+    BL_PS1_FILE=$(mktemp)
+    cat > "$BL_PS1_FILE" <<'BASELINE_PS1'
+param([string]$HookPs1, [string]$Dir, [string]$Base)
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($HookPs1, [ref]$null, [ref]$null)
+$fns = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
+$want = @('Write-DirtyBaseline','Split-NulList','Get-GitDiffBody','Invoke-GitCapture')
+$got = @()
+foreach ($f in $fns) { if ($want -contains $f.Name) { $got += $f.Name; . ([scriptblock]::Create($f.Extent.Text)) } }
+if ($got.Count -ne $want.Count) {
+    [Console]::Error.WriteLine("extraction incomplete: got $($got -join ',')")
+    exit 1
+}
+$ProjectDir = $Dir
+$global:ProjectDir = $Dir
+Set-Location $Dir
+Write-DirtyBaseline -BaseRef $Base
+$bl = Join-Path $Dir '.stride-dirty-baseline'
+if (Test-Path -LiteralPath $bl) {
+    Get-Content -LiteralPath $bl -Encoding UTF8 | ForEach-Object { ($_ -replace '^\S+ ', '') }
+}
+BASELINE_PS1
+    BL_PS_PATHS=$(pwsh -NoProfile -File "$BL_PS1_FILE" "$SCRIPT_DIR/stride-hook.ps1" "$BL_DIR" "$BL_BASE" 2>/dev/null | LC_ALL=C sort)
+    rm -f "$BL_PS1_FILE"
+    if [ -z "$BL_PS_PATHS" ]; then
+      echo -e "  ${RED}FAIL${RESET}: 7hh2: the PowerShell harness produced no baseline to compare"
+      FAIL=$((FAIL + 1))
+    else
+      assert_eq "7hh2 (D286): bash and PowerShell record the SAME baseline path spellings on a non-ASCII fixture" \
+        "$BL_BASH_PATHS" "$BL_PS_PATHS"
+      # Non-vacuity, twice: agreement on a set that never held a non-ASCII path
+      # would be agreement about nothing, and agreement on the QUOTED spelling
+      # would be both sides being wrong together — which is exactly the state
+      # this pair was in before D278 fixed the bash half.
+      assert_contains "7hh2 (D286): the fixture really exercised a non-ASCII path" \
+        "éclair.txt" "$BL_BASH_PATHS"
+      if printf '%s' "$BL_BASH_PATHS" | grep -q '\\3'; then
+        echo -e "  ${RED}FAIL${RESET}: 7hh2 (D286): the baseline recorded an octal-escaped path, not the raw spelling"
+        FAIL=$((FAIL + 1))
+      else
+        echo -e "  ${GREEN}PASS${RESET}: 7hh2 (D286): both sides record the RAW spelling, not the octal-escaped one"
+        PASS=$((PASS + 1))
+      fi
+    fi
+    rm -rf "$BL_DIR"; rm -f "$BL_REF"
+  fi
+
   # 7gg (D279): a long single-line diff must capture in linear time. The old
   # counter built a second copy of the diff with the newlines substituted out,
   # which bash does quadratically once the line is long: MEASURED at 9,529 ms

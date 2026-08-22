@@ -1303,10 +1303,60 @@ function Write-DirtyBaseline {
     Remove-Item -Force $blFile -ErrorAction SilentlyContinue
     if (-not $BaseRef) { return }
     try {
-        $tracked = @(& git -C $ProjectDir diff --name-only $BaseRef 2>$null)
-        if ($LASTEXITCODE -ne 0) { $tracked = @() }
-        $untracked = @(& git -C $ProjectDir ls-files --others --exclude-standard 2>$null)
-        if ($LASTEXITCODE -ne 0) { $untracked = @() }
+        # (D286) -z on BOTH listings, matching Build-ChangedFilesSnapshot and the
+        # bash twin's record_dirty_baseline. Without it git returns the
+        # octal-escaped display spelling for any path holding a byte >= 0x80
+        # (core.quotePath, default true), so the baseline was keyed on a spelling
+        # the snapshot never produces — it lists with -z and records the RAW
+        # path. The two could never match for a non-ASCII path, which made the
+        # W1457 pre-existing-edit filter silently INERT for exactly those files,
+        # on Windows only. The failure direction is over-report, which is why
+        # nothing broke loudly; it was still a divergence between the executors,
+        # and D278 fixed the bash half while this one was left behind.
+        #
+        # The quoted spelling also defeated the hash, and the sentinel it
+        # produced is 'absent', NOT 'unhashable' — the quoted path fails the
+        # Test-Path below, so git hash-object is never reached.
+        #
+        # The hash column is not, however, what decided the outcome pre-fix, and
+        # an earlier version of this comment claimed it was. The baseline was
+        # KEYED on the quoted spelling including its surrounding double quotes
+        # (`absent "\303\251clair.txt"` is the whole line, measured), so the
+        # filter's lookup against the raw capture path missed and the entry was
+        # never found at all. The path was then included by the no-baseline-entry
+        # default, not by a hash comparison that failed — the hash column was
+        # never consulted. Same outcome, different mechanism, and the mechanism
+        # is the part a reader would act on.
+        #
+        # Two different correct patterns, because the two git reads differ:
+        # `diff` goes through Invoke-GitCapture's byte-exact --output file read,
+        # while `ls-files` has no --output and must pin [Console]::OutputEncoding
+        # for the duration of the call. That asymmetry is not stylistic — see the
+        # long note above the ls-files call in Build-ChangedFilesSnapshot.
+        #
+        # ONE NEW DEPENDENCY, recorded rather than worked around: routing the
+        # tracked listing through Invoke-GitCapture makes this function depend on
+        # $ProjectDir/.stride being creatable, because that helper reports a
+        # failure rather than falling back to system temp. Where it is not, the
+        # ps1 baseline loses its TRACKED half while the bash twin, which shells
+        # out directly, keeps it — a small asymmetry in the pair this change
+        # exists to keep in step. The direction is over-report, and the
+        # completion-side snapshot degrades the same way under the same
+        # conditions, so the practical impact is close to nil.
+        $tracked = @(Split-NulList (Get-GitDiffBody -GitArgs @('diff', '--name-only', '-z', $BaseRef)))
+        $prevOutEnc = [Console]::OutputEncoding
+        $untrackedRaw = ''
+        try {
+            try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+            $untrackedRaw = (& git -C $ProjectDir ls-files -z --others --exclude-standard 2>$null | Out-String)
+            if ($LASTEXITCODE -ne 0) { $untrackedRaw = '' }
+        } finally {
+            try { [Console]::OutputEncoding = $prevOutEnc } catch { }
+        }
+        # TrimEnd the newline Out-String appends, or the trailing NUL is followed
+        # by a bare CRLF that Split-NulList emits as a phantom entry — the same
+        # trap the snapshot's own ls-files read documents.
+        $untracked = @(Split-NulList ($untrackedRaw.TrimEnd("`r", "`n")))
         $paths = @(($tracked + $untracked) | Where-Object { $_ } | Select-Object -Unique)
         if ($paths.Count -eq 0) { return }
         $lines = @()
@@ -3626,8 +3676,10 @@ function Build-ChangedFilesSnapshot {
         # ls-files has no --output, so it cannot go through Invoke-GitCapture;
         # but -z leaves no newlines for PowerShell to split on, so the list
         # arrives whole and is split on NUL here instead.
-        # (Write-DirtyBaseline at the top of this file still uses the unquoted
-        # form; that is pre-existing and out of scope here, not an endorsement.)
+        # (D286) Write-DirtyBaseline at the top of this file now uses this same
+        # -z form. It did not when this note was written, and the mismatch was
+        # the whole of that defect: a baseline keyed on the quoted spelling could
+        # never match a snapshot keyed on the raw one.
         # This is the one git read that cannot use Invoke-GitCapture's byte-exact
         # --output path (ls-files has no --output), so its bytes are decoded
         # through [Console]::OutputEncoding. On Windows PowerShell 5.1 — the

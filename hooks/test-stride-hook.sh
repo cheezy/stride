@@ -2959,6 +2959,31 @@ d288_probe() {
         } > "$ENV_CACHE"
         printf 'kept=%s' "$(drop_shared_base_records | awk '{ p = index($0, "="); if (p > 1) printf "%s,", substr($0, 1, p - 1) }')"
         ;;
+      crafted-description)
+        # (D288 r3) Consideration 2, realised. TASK_DESCRIPTION is
+        # attacker-authored free-form text and lands multi-line. Its LAST line
+        # here begins with the very key the writer drops, so a line-oriented
+        # filter deleted the line carrying the value closing quote, handed the
+        # sink a torn stream, and got a LEGITIMATE write refused — content
+        # suppressing a write. Quote-aware filters must keep the description
+        # whole, drop only the real TASK_OWNED_9 record, and let the write land.
+        {
+          printf "AGENT_NAME='a'\n"
+          printf "TASK_DESCRIPTION='harmless first line\n"
+          printf "TASK_OWNED_9=x'\n"
+          printf "TASK_OWNED_9='stale'\n"
+        } > "$ENV_CACHE"
+        { drop_cache_key "TASK_OWNED_9"
+          printf "TASK_OWNED_9='fresh'\n"; } | write_env_cache --preserve-from-cache 2>/dev/null
+        d288_rc=$?
+        # The description must survive whole, the stale record must be gone,
+        # and the fresh one must have landed.
+        d288_desc=no; d288_stale=yes; d288_fresh=no
+        awk '/^TASK_DESCRIPTION=/{d=1} END{exit !d}' "$ENV_CACHE" 2>/dev/null && d288_desc=yes
+        awk "/^TASK_OWNED_9='stale'/{f=1} END{exit !f}" "$ENV_CACHE" 2>/dev/null || d288_stale=no
+        awk "/^TASK_OWNED_9='fresh'/{f=1} END{exit !f}" "$ENV_CACHE" 2>/dev/null && d288_fresh=yes
+        printf 'rc=%s desc=%s stale=%s fresh=%s' "$d288_rc" "$d288_desc" "$d288_stale" "$d288_fresh"
+        ;;
       unreadable-cache)
         # (D288 r2) The cache EXISTS but cannot be read. Both the filter and
         # the count come back empty, `[ -s ]` is satisfied by stat alone, and
@@ -3025,6 +3050,9 @@ assert_eq "7ij (D288): drop_task_window_records drops all five per-task families
 D288_R=$(d288_probe shared-filter)
 assert_eq "7ij (D288): drop_shared_base_records keeps every per-task window record" \
   "kept=AGENT_NAME,BOARD_NAME,TASK_BASE_REF_9,TASK_OWNED_9," "$D288_R"
+D288_R=$(d288_probe crafted-description)
+assert_eq "7ij (D288): a crafted description cannot suppress a legitimate record write" \
+  "rc=0 desc=yes stale=no fresh=yes" "$D288_R"
 D288_R=$(d288_probe unreadable-cache)
 assert_eq "7ij (D288): an unreadable cache refuses the write and survives byte-for-byte" \
   "rc=1 cache=same" "$D288_R"

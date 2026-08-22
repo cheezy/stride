@@ -67,7 +67,7 @@ exit code, new tool.
 no cache filter matches a regex against `$0` or against a value. Matching is
 done with `index`/`substr` on the ASCII key before the first `=`. A regex
 applied to that *already-extracted* key is safe and two filters legitimately do
-it — the family test in `cache_record_start_lines` and the loader's charset gate,
+it — the family test in `cache_window_record_lines` and the loader's charset gate,
 both of which need a regex to say what a well-formed key is. Verified rather
 than assumed:
 
@@ -193,18 +193,26 @@ awk '/grep /{s=NR; b=$0; while (b ~ /\\$/ && (getline l)>0) b=b" "l;
              if (b ~ /ENV_CACHE/) print s": "b}' hooks/stride-hook.sh
 ```
 
-**Four** greps do still run on cache-DERIVED content, in **three** functions —
-`another_open_window_exists`, `attributed_commit_ranges`, and two inside
-`finalize_before_doing`. None of them opens the cache: the first two filter the
-output of `cache_window_record_lines`, and the other two filter the `_records`
-and `_at_lines` strings already in hand. That content is the shape-filtered
-window-record subset — hex refs, space-joined hex, ids, timestamps and
-`yes`/`no` — so it cannot contain a byte >= 0x80 and a binary refusal cannot
-fire on it. Changing them would buy nothing and churn four working filters.
+**Eight** greps do still run on cache-DERIVED content, in **four** functions:
+four in `select_kept_window_records`, one in `another_open_window_exists`, one
+in `attributed_commit_ranges`, and two in `finalize_before_doing`. None of them
+opens the cache. They filter strings already in hand — the output of
+`cache_window_record_lines`, or the `_records` / `_at_lines` sets — and that
+content is the shape-filtered window-record subset: quoted hex refs,
+space-joined hex, ids, timestamps and `yes`/`no`. It cannot contain a byte
+>= 0x80, so a binary refusal cannot fire on it, and the unconditional shape gate
+would refuse a notice line at the sink in any case. Changing them would buy
+nothing and churn eight working filters.
 
-(An earlier draft of this section said "one reader", and a later one named
-`select_kept_window_records`. Both were wrong; the list above is what the sweep
-actually found.)
+`select_kept_window_records` earns its explicit mention: its output is written
+back into the cache, which is the one property this inventory's safety argument
+is actually about.
+
+(This section has been wrong twice. A first draft said "one reader". A second
+said four greps in three functions and *retracted* the mention of
+`select_kept_window_records` — but the retraction was the error, not the
+original. The count above is what the sweep returns; it is recorded this way so
+the next person can re-run the sweep rather than trust the prose.)
 
 ## Two operational notes
 

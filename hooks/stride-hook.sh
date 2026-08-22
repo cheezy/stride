@@ -1381,7 +1381,7 @@ task_id_from_command() {
 # tool. No cache filter below matches a regex against $0 or against a value;
 # matching is index/substr on the ASCII key before the first "=". A regex on an
 # already-EXTRACTED key is safe and two filters elsewhere legitimately use one
-# (the family test in cache_record_start_lines, and the loader charset gate) -
+# (the family test in cache_window_record_lines, and the loader charset gate) -
 # it is the subject of the match that has to be clean, not the tool.
 # LC_ALL=C would also make awk byte-oriented, and is deliberately NOT used:
 # D288 pitfall 1 rules it out, and index/substr needs no locale assumption at
@@ -1394,7 +1394,36 @@ drop_cache_key() {
   # below. The `|| true` this used to end in made those two cases identical,
   # and the count gate could not tell them apart either.
   [ -f "$ENV_CACHE" ] || return 0
-  awk -v k="$_k" 'substr($0, 1, length(k) + 1) != k "="' "$ENV_CACHE" 2>/dev/null
+  # (D288 r3) QUOTE-AWARE, and this is a deliberate semantic change rather than
+  # the byte-for-byte grep swap the first pass aimed at. The grep was line
+  # oriented; the shape gate downstream is not. A value is attacker-authored
+  # free-form text (TASK_DESCRIPTION and GOAL_DESCRIPTION are allow-listed and
+  # land multi-line), so a description whose LAST line began with this key had
+  # that line - the one carrying the value's closing quote - deleted from the
+  # middle of a well-formed cache, and the torn stream was then refused by the
+  # gate. A crafted description could therefore suppress a legitimate write.
+  # Matching only OUTSIDE quotes, and dropping the record's whole span, makes
+  # this filter agree with the gate about what a record is. It also fixes the
+  # older, quieter half of the same bug: the grep silently deleted any INTERIOR
+  # value line that happened to start with the key.
+  awk -v k="$_k" -v q="'" '
+    function scan(s,   i, c) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) { if (c == q) inq = 0 }
+        else if (esc) { esc = 0 }
+        else if (c == "\\") { esc = 1 }
+        else if (c == q) { inq = 1 }
+      }
+    }
+    BEGIN { inq = 0; esc = 0; drop = 0 }
+    {
+      if (!inq) { drop = (substr($0, 1, length(k) + 1) == k "=") }
+      scan($0)
+      if (!drop) print
+    }
+    END { if (inq) exit 1 }
+  ' "$ENV_CACHE" 2>/dev/null
 }
 
 # (D288) The key of a cache line, or "" when the line does not begin one.
@@ -1431,20 +1460,38 @@ drop_task_window_records() {
   # not read it" would make the caller skip a rebuild it must perform. Only a
   # cache that EXISTS and could not be filtered propagates a failure.
   [ -f "$ENV_CACHE" ] || return 0
-  awk "$CACHE_KEY_AWK_FNS"'
-    {
-      k = key_of($0)
-      if (k == "TASK_BASE_REF") next
-      if (k == "TASK_BASE_REF_TRUSTED") next
-      if (k == "TASK_BASE_REF_OWNER") next
-      if (k == "TASK_BASE_REF_UNPROVEN") next
-      if (has_prefix(k, "TASK_BASE_REF_")) next
-      if (has_prefix(k, "TASK_HEAD_REF_")) next
-      if (has_prefix(k, "TASK_OWNED_")) next
-      if (has_prefix(k, "TASK_BASE_AT_")) next
-      if (has_prefix(k, "TASK_NARROWED_")) next
-      print
+  # (D288 r3) Quote-aware, for the reason set out above drop_cache_key: a
+  # crafted description whose last line began with one of these keys otherwise
+  # tore the closing quote off a well-formed cache and got the rebuild refused.
+  awk -v q="'" "$CACHE_KEY_AWK_FNS"'
+    function scan(s,   i, c) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) { if (c == q) inq = 0 }
+        else if (esc) { esc = 0 }
+        else if (c == "\\") { esc = 1 }
+        else if (c == q) { inq = 1 }
+      }
     }
+    BEGIN { inq = 0; esc = 0; drop = 0 }
+    {
+      if (!inq) {
+        k = key_of($0)
+        if (k == "TASK_BASE_REF") { drop = 1 }
+        else if (k == "TASK_BASE_REF_TRUSTED") { drop = 1 }
+        else if (k == "TASK_BASE_REF_OWNER") { drop = 1 }
+        else if (k == "TASK_BASE_REF_UNPROVEN") { drop = 1 }
+        else if (has_prefix(k, "TASK_BASE_REF_")) { drop = 1 }
+        else if (has_prefix(k, "TASK_HEAD_REF_")) { drop = 1 }
+        else if (has_prefix(k, "TASK_OWNED_")) { drop = 1 }
+        else if (has_prefix(k, "TASK_BASE_AT_")) { drop = 1 }
+        else if (has_prefix(k, "TASK_NARROWED_")) { drop = 1 }
+        else { drop = 0 }
+      }
+      scan($0)
+      if (!drop) print
+    }
+    END { if (inq) exit 1 }
   ' "$ENV_CACHE" 2>/dev/null
 }
 
@@ -1458,15 +1505,33 @@ drop_shared_base_records() {
   # not read it" would make the caller skip a rebuild it must perform. Only a
   # cache that EXISTS and could not be filtered propagates a failure.
   [ -f "$ENV_CACHE" ] || return 0
-  awk "$CACHE_KEY_AWK_FNS"'
-    {
-      k = key_of($0)
-      if (k == "TASK_BASE_REF") next
-      if (k == "TASK_BASE_REF_TRUSTED") next
-      if (k == "TASK_BASE_REF_OWNER") next
-      if (k == "TASK_BASE_REF_UNPROVEN") next
-      print
+  # (D288 r3) Quote-aware, for the reason set out above drop_cache_key: a
+  # crafted description whose last line began with one of these keys otherwise
+  # tore the closing quote off a well-formed cache and got the rebuild refused.
+  awk -v q="'" "$CACHE_KEY_AWK_FNS"'
+    function scan(s,   i, c) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) { if (c == q) inq = 0 }
+        else if (esc) { esc = 0 }
+        else if (c == "\\") { esc = 1 }
+        else if (c == q) { inq = 1 }
+      }
     }
+    BEGIN { inq = 0; esc = 0; drop = 0 }
+    {
+      if (!inq) {
+        k = key_of($0)
+        if (k == "TASK_BASE_REF") { drop = 1 }
+        else if (k == "TASK_BASE_REF_TRUSTED") { drop = 1 }
+        else if (k == "TASK_BASE_REF_OWNER") { drop = 1 }
+        else if (k == "TASK_BASE_REF_UNPROVEN") { drop = 1 }
+        else { drop = 0 }
+      }
+      scan($0)
+      if (!drop) print
+    }
+    END { if (inq) exit 1 }
   ' "$ENV_CACHE" 2>/dev/null
 }
 
@@ -1706,8 +1771,16 @@ record_task_head_ref() {
   [ -n "$(task_base_ref_for "$_tid")" ] || return 0
   _head=$( (cd "$PROJECT_DIR" 2>/dev/null && git rev-parse HEAD 2>/dev/null) || printf '')
   [ -n "$_head" ] || return 0
+  # (D288 r3) Capture the filter FIRST and consume its status here. Inside a
+  # brace-group pipeline the filter's exit code is invisible, which left the
+  # sink's count gate as the only thing standing between an unreadable cache
+  # and a one-record cache committed over a populated one — and that gate works
+  # only because awk happens to treat an unopenable input as fatal. Checking
+  # here does not depend on that.
+  local _body
+  _body=$(drop_cache_key "$_key") || return 0
   {
-    drop_cache_key "$_key"
+    [ -n "$_body" ] && printf '%s\n' "$_body"
     printf "%s='%s'\n" "$_key" "$_head"
   } | write_env_cache --preserve-from-cache || true
   return 0
@@ -1808,8 +1881,12 @@ record_task_owned() {
   # back from owned-set narrowing to the purity heuristic — an accepted,
   # transitional, safe-direction delta (over-collect, never under-report).
   [ -n "$(task_base_ref_for "$_tid")" ] || return 0
+  # (D288 r3) Filter status consumed here, not left to the sink — see
+  # record_task_head_ref.
+  local _body
+  _body=$(drop_cache_key "$_key") || return 0
   {
-    drop_cache_key "$_key"
+    [ -n "$_body" ] && printf '%s\n' "$_body"
     printf "%s=%s\n" "$_key" "$(sq_escape "$_val")"
   } | write_env_cache --preserve-from-cache || true
   return 0
@@ -2562,8 +2639,12 @@ record_task_narrowed() {
   [ -n "$_tid" ] || return 0
   _key=$(task_narrowed_key "$_tid")
   [ -n "$_key" ] || return 0
+  # (D288 r3) Filter status consumed here, not left to the sink — see
+  # record_task_head_ref.
+  local _body
+  _body=$(drop_cache_key "$_key") || return 0
   {
-    drop_cache_key "$_key"
+    [ -n "$_body" ] && printf '%s\n' "$_body"
     printf "%s=%s\n" "$_key" "$(sq_escape "$_val")"
   } | write_env_cache --preserve-from-cache || true
   return 0

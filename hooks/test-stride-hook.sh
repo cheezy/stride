@@ -2697,86 +2697,321 @@ BASELINE_PS1
   # So this asserts the PROPERTY against whatever grep the runner actually has,
   # rather than encoding one implementation's answer. A host whose grep drops
   # or mangles the line fails here instead of silently losing records.
-  D281_DIR=$(mktemp -d)
+  # (D288) Extended, not duplicated. Three things changed here and the reason
+  # for each is worth stating, because the second one is why D288 exists.
+  #
+  # 1. The driver now calls the idiom that actually SHIPS - drop_cache_key piped
+  #    into write_env_cache --preserve-from-cache. It used to inline `grep -v`,
+  #    which stopped being what the record writers do when D288 replaced grep
+  #    with awk. A property test that drives a pipeline the product no longer
+  #    has is testing nothing.
+  # 2. The same five assertions are re-run with a grep on PATH that REFUSES
+  #    binary input - in BOTH of the refusal shapes measured for D288: emitting
+  #    nothing at exit 1 (ugrep -I), and printing "Binary file <path> matches"
+  #    on STDOUT at exit 0 (ugrep's default). The second shape is the one that
+  #    matters most: it is not empty, so a sink guard that only tested for an
+  #    empty stream would commit that notice AS the cache.
+  # 3. The assertions live in a function called once per pass instead of being
+  #    written out three times.
+  #
+  # The shim is put on PATH only around the write itself, not around sourcing
+  # the hook, so a failure is attributable to the writer path rather than to
+  # having booted the script with a hostile grep.
+  d281_hex_of() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
+
+  # A grep that declines to read its input, in the two shapes measured for D288.
+  make_refusing_grep_stub() {
+    local stub_dir="$1" mode="$2"
+    mkdir -p "$stub_dir"
+    if [ "$mode" = notice ]; then
+      cat > "$stub_dir/grep" << 'GREPSTUB'
+#!/usr/bin/env bash
+# ugrep's DEFAULT shape: a notice on stdout, exit 0.
+for a in "$@"; do last="$a"; done
+printf 'Binary file %s matches\n' "$last"
+exit 0
+GREPSTUB
+    else
+      cat > "$stub_dir/grep" << 'GREPSTUB'
+#!/usr/bin/env bash
+# ugrep -I's shape: nothing at all, exit 1.
+exit 1
+GREPSTUB
+    fi
+    chmod +x "$stub_dir/grep"
+  }
+
+  # One pass: build the fixture, drive the real writer, assert the five
+  # properties. $2 is a directory to prepend to PATH for the write, or "".
+  d281_pass() {
+    local label="$1" stub_dir="$2" dir hex
+    dir=$(mktemp -d)
+    (
+      cd "$dir" || exit 1
+      git init -q
+      git config user.email "test@test.local"
+      git config user.name "Test"
+      echo seed > seed.txt
+      git add -A > /dev/null
+      git commit -q -m base
+      # A cache holding an invalid byte in one record and a normal record beside it.
+      printf "BOARD_NAME=caf\351\n" > .stride-env-cache
+      printf "TASK_OWNED_9='keep'\n" >> .stride-env-cache
+      # An EXISTING record for the key about to be written, so the writer's
+      # filter actually removes a line. Without it the filter is a pure
+      # pass-through and the case pins "this filter reproduces the file" rather
+      # than what the record writers do: drop the old line for this key from a
+      # file that also holds an invalid byte, then re-add it.
+      printf "TASK_NARROWED_9='stale'\n" >> .stride-env-cache
+      # shellcheck disable=SC1090
+      source "$HOOK_SCRIPT" 2>/dev/null || true
+      PROJECT_DIR="$dir"
+      ENV_CACHE="$dir/.stride-env-cache"
+      [ -n "$stub_dir" ] && PATH="$stub_dir:$PATH"
+      {
+        drop_cache_key "TASK_NARROWED_9"
+        printf "TASK_NARROWED_9='fresh'\n"
+      } | write_env_cache --preserve-from-cache || true
+    ) > /dev/null 2>&1
+    hex=$(od -An -tx1 < "$dir/.stride-env-cache" 2>/dev/null | tr -d ' \n')
+    # Non-vacuity: an empty cache trivially contains no bad byte AND no good one.
+    if [ -n "$hex" ]; then
+      echo -e "  ${GREEN}PASS${RESET}: D281/$label: the bash record write produced a non-empty cache"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: D281/$label: the bash record write emptied the cache"
+      FAIL=$((FAIL + 1))
+    fi
+    case "$hex" in
+      *e9*) echo -e "  ${GREEN}PASS${RESET}: D281/$label: an invalid byte in an unrelated record survives a bash record write"
+            PASS=$((PASS + 1)) ;;
+      *)    echo -e "  ${RED}FAIL${RESET}: D281/$label: the invalid byte was destroyed by a bash record write (grep: $(command -v grep))"
+            FAIL=$((FAIL + 1)) ;;
+    esac
+    # The remaining checks search the HEX, not the file, for the same reason the
+    # first two do: this case's subject is a filter's behaviour, so that filter
+    # must not be the measuring instrument. A `grep -q` here would return
+    # non-zero on a host whose grep refuses binary input whether or not the
+    # record is present, and the case would print "an untouched record was lost"
+    # when the truthful statement is "this grep will not read the cache" —
+    # fail-closed, but misattributed, and the diagnostic is the whole value of a
+    # property test someone hits on an unfamiliar host.
+    case "$hex" in
+      *"$(d281_hex_of "TASK_OWNED_9='keep'")"*)
+        echo -e "  ${GREEN}PASS${RESET}: D281/$label: and the untouched record beside it survives too"
+        PASS=$((PASS + 1)) ;;
+      *)
+        echo -e "  ${RED}FAIL${RESET}: D281/$label: an untouched record was lost by a bash record write (grep: $(command -v grep))"
+        FAIL=$((FAIL + 1)) ;;
+    esac
+    case "$hex" in
+      *"$(d281_hex_of "TASK_NARROWED_9='fresh'")"*)
+        echo -e "  ${GREEN}PASS${RESET}: D281/$label: and the record the write was asked to make landed"
+        PASS=$((PASS + 1)) ;;
+      *)
+        echo -e "  ${RED}FAIL${RESET}: D281/$label: the intended record never landed, so the case above proves nothing"
+        FAIL=$((FAIL + 1)) ;;
+    esac
+    # The stale line for that key must be GONE — this is what makes the case
+    # exercise the writer idiom rather than a pass-through.
+    case "$hex" in
+      *"$(d281_hex_of "TASK_NARROWED_9='stale'")"*)
+        echo -e "  ${RED}FAIL${RESET}: D281/$label: the superseded record survived, so the filter did not filter"
+        FAIL=$((FAIL + 1)) ;;
+      *)
+        echo -e "  ${GREEN}PASS${RESET}: D281/$label: and the superseded record for that key was removed"
+        PASS=$((PASS + 1)) ;;
+    esac
+    rm -rf "$dir"
+  }
+
+  D281_STUBS=$(mktemp -d)
+  make_refusing_grep_stub "$D281_STUBS/silent" silent
+  make_refusing_grep_stub "$D281_STUBS/notice" notice
+  d281_pass "host-grep" ""
+  d281_pass "refusing-grep-silent" "$D281_STUBS/silent"
+  d281_pass "refusing-grep-notice" "$D281_STUBS/notice"
+  rm -rf "$D281_STUBS"
+fi
+
+# ------------------------------------------------------------
+# 7ij (D288): direct coverage of the two write_env_cache gates and the two
+# family filters. 7ii above drives the writers end to end and proves the
+# PROPERTY under three greps; this proves the MECHANISMS 7ii relies on, which
+# 7ii cannot distinguish between (it would pass if the guards were absent and
+# the filters simply worked). The count gate is what acceptance criterion 3
+# rests on, and drop_task_window_records is what carries GOAL_*, BOARD_* and
+# TASK_DESCRIPTION across a claim — an equivalence bug there is the exact loss
+# D288 exists to prevent.
+#
+# Each probe runs in a subshell that sources the hook, does one thing, and
+# echoes a single token; the parent asserts on the token, so no hook side
+# effect reaches the suite's own state.
+d288_probe() {
   (
-    cd "$D281_DIR" || exit 1
-    git init -q
-    git config user.email "test@test.local"
-    git config user.name "Test"
-    echo seed > seed.txt
-    git add -A > /dev/null
-    git commit -q -m base
-    # A cache holding an invalid byte in one record and a normal record beside it.
-    printf "BOARD_NAME=caf\351\n" > .stride-env-cache
-    printf "TASK_OWNED_9='keep'\n" >> .stride-env-cache
-    # An EXISTING record for the key about to be written, so the writer's
-    # `grep -v` actually removes a line. Without it the filter is a pure
-    # pass-through and the case pins "this grep reproduces the file" rather
-    # than what the record writers do: drop the old line for this key from a
-    # file that also holds an invalid byte, then re-add it.
-    printf "TASK_NARROWED_9='stale'\n" >> .stride-env-cache
+    d288_dir=$(mktemp -d) || exit 1
+    PROJECT_DIR="$d288_dir"
+    ENV_CACHE="$d288_dir/.stride-env-cache"
     # shellcheck disable=SC1090
     source "$HOOK_SCRIPT" 2>/dev/null || true
-    PROJECT_DIR="$D281_DIR"
-    ENV_CACHE="$D281_DIR/.stride-env-cache"
-    # Drive the real writer idiom: filter one key out and rewrite the cache.
-    {
-      grep -v "^TASK_NARROWED_9=" "$ENV_CACHE" 2>/dev/null || true
-      printf "TASK_NARROWED_9='fresh'\n"
-    } | write_env_cache || true
-  ) > /dev/null 2>&1
-  D281_HEX=$(od -An -tx1 < "$D281_DIR/.stride-env-cache" 2>/dev/null | tr -d ' \n')
-  # Non-vacuity: an empty cache trivially contains no bad byte AND no good one.
-  if [ -n "$D281_HEX" ]; then
-    echo -e "  ${GREEN}PASS${RESET}: D281: the bash record write produced a non-empty cache"
-    PASS=$((PASS + 1))
-  else
-    echo -e "  ${RED}FAIL${RESET}: D281: the bash record write emptied the cache — this grep cannot be used in the writer pipeline"
-    FAIL=$((FAIL + 1))
-  fi
-  case "$D281_HEX" in
-    *e9*) echo -e "  ${GREEN}PASS${RESET}: D281: an invalid byte in an unrelated record survives a bash record write"
-          PASS=$((PASS + 1)) ;;
-    *)    echo -e "  ${RED}FAIL${RESET}: D281: the invalid byte was destroyed by a bash record write (grep: $(command -v grep))"
-          FAIL=$((FAIL + 1)) ;;
-  esac
-  # The remaining checks search the HEX, not the file, for the same reason the
-  # first two do: this case's subject is grep's behaviour, so grep must not be
-  # the measuring instrument. A `grep -q` here would return non-zero on a host
-  # whose grep refuses binary input whether or not the record is present, and
-  # the case would print "an untouched record was lost" when the truthful
-  # statement is "this grep will not read the cache" — fail-closed, but
-  # misattributed, and the diagnostic is the whole value of a property test
-  # someone hits on an unfamiliar host.
-  d281_hex_of() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
-  case "$D281_HEX" in
-    *"$(d281_hex_of "TASK_OWNED_9='keep'")"*)
-      echo -e "  ${GREEN}PASS${RESET}: D281: and the untouched record beside it survives too"
-      PASS=$((PASS + 1)) ;;
-    *)
-      echo -e "  ${RED}FAIL${RESET}: D281: an untouched record was lost by a bash record write (grep: $(command -v grep))"
-      FAIL=$((FAIL + 1)) ;;
-  esac
-  case "$D281_HEX" in
-    *"$(d281_hex_of "TASK_NARROWED_9='fresh'")"*)
-      echo -e "  ${GREEN}PASS${RESET}: D281: and the record the write was asked to make landed"
-      PASS=$((PASS + 1)) ;;
-    *)
-      echo -e "  ${RED}FAIL${RESET}: D281: the intended record never landed, so the case above proves nothing"
-      FAIL=$((FAIL + 1)) ;;
-  esac
-  # The stale line for that key must be GONE — this is what makes the case
-  # exercise the writer idiom rather than a pass-through.
-  case "$D281_HEX" in
-    *"$(d281_hex_of "TASK_NARROWED_9='stale'")"*)
-      echo -e "  ${RED}FAIL${RESET}: D281: the superseded record survived, so the filter did not filter"
-      FAIL=$((FAIL + 1)) ;;
-    *)
-      echo -e "  ${GREEN}PASS${RESET}: D281: and the superseded record for that key was removed"
-      PASS=$((PASS + 1)) ;;
-  esac
-  rm -rf "$D281_DIR"
-fi
+    PROJECT_DIR="$d288_dir"
+    ENV_CACHE="$d288_dir/.stride-env-cache"
+    # Three records, one holding an invalid byte, so every probe runs against
+    # the input the whole defect is about.
+    d288_seed() {
+      {
+        printf "AGENT_NAME='a'\n"
+        printf "BOARD_NAME=caf\351\n"
+        printf "TASK_OWNED_9='keep'\n"
+      } > "$ENV_CACHE"
+    }
+    case "$1" in
+      shape-gate-notice)
+        # ugrep's default refusal shape: a notice line, then the new record.
+        d288_seed
+        { printf 'Binary file %s matches\n' "$ENV_CACHE"
+          printf "TASK_OWNED_9='fresh'\n"; } | write_env_cache --preserve-from-cache 2>/dev/null
+        printf 'rc=%s records=%s' "$?" "$(count_cache_records "$ENV_CACHE")"
+        ;;
+      shape-gate-unguarded)
+        # The same notice with NO --preserve-from-cache: the shape gate is
+        # unconditional, so a rebuild-site caller is protected from it too.
+        d288_seed
+        { printf 'Binary file %s matches\n' "$ENV_CACHE"
+          printf "GOAL_ID='7'\n"; } | write_env_cache 2>/dev/null
+        printf 'rc=%s records=%s' "$?" "$(count_cache_records "$ENV_CACHE")"
+        ;;
+      count-gate)
+        # ugrep -I's shape: the filter emitted nothing, so only the new record
+        # arrives and two unrelated records would be dropped.
+        d288_seed
+        printf "TASK_OWNED_9='fresh'\n" | write_env_cache --preserve-from-cache 2>/dev/null
+        printf 'rc=%s records=%s' "$?" "$(count_cache_records "$ENV_CACHE")"
+        ;;
+      count-gate-allows-one-drop)
+        # A record write legitimately removes exactly one record and adds it
+        # back; the floor must not fire on that, nor on a write that GROWS.
+        d288_seed
+        { drop_cache_key "TASK_OWNED_9"
+          printf "TASK_OWNED_9='fresh'\nTASK_NARROWED_9='new'\n"; } \
+          | write_env_cache --preserve-from-cache 2>/dev/null
+        printf 'rc=%s records=%s' "$?" "$(count_cache_records "$ENV_CACHE")"
+        ;;
+      legit-empty)
+        # Pitfall 3: a cache legitimately becomes empty. No floor requested,
+        # nothing malformed — this must SUCCEED, or a stale cache is stranded.
+        d288_seed
+        : | write_env_cache 2>/dev/null
+        printf 'rc=%s bytes=%s' "$?" "$(wc -c < "$ENV_CACHE" | tr -d ' ')"
+        ;;
+      already-empty)
+        # An already-empty cache is the fresh-checkout case: the floor is
+        # skipped (`[ -s "$ENV_CACHE" ]`) so the first record write lands.
+        : > "$ENV_CACHE"
+        printf "TASK_OWNED_9='first'\n" | write_env_cache --preserve-from-cache 2>/dev/null
+        printf 'rc=%s records=%s' "$?" "$(count_cache_records "$ENV_CACHE")"
+        ;;
+      multiline-value)
+        # The live cache really does carry these (TASK_DESCRIPTION is a
+        # paragraph). The shape gate must not read a continuation line as a
+        # top-level non-record, and the count must see one record, not four.
+        d288_seed
+        { printf "AGENT_NAME='a'\n"
+          printf "TASK_DESCRIPTION='one\ntwo\nthree'\n"
+          printf "TASK_OWNED_9='keep'\n"; } | write_env_cache --preserve-from-cache 2>/dev/null
+        printf 'rc=%s records=%s' "$?" "$(count_cache_records "$ENV_CACHE")"
+        ;;
+      window-filter)
+        # drop_task_window_records must drop all five per-task families and
+        # keep everything else — over an invalid byte.
+        {
+          printf "AGENT_NAME='a'\n"
+          printf "BOARD_NAME=caf\351\n"
+          printf "TASK_DESCRIPTION='d'\n"
+          printf "TASK_BASE_REF='shared'\n"
+          printf "TASK_BASE_REF_TRUSTED='1'\n"
+          printf "TASK_BASE_REF_OWNER='9'\n"
+          printf "TASK_BASE_REF_UNPROVEN='1'\n"
+          printf "TASK_BASE_REF_9='b'\n"
+          printf "TASK_HEAD_REF_9='h'\n"
+          printf "TASK_OWNED_9='o'\n"
+          printf "TASK_BASE_AT_9='1'\n"
+          printf "TASK_NARROWED_9='yes'\n"
+        } > "$ENV_CACHE"
+        # Key names only, extracted with awk: the fixture holds an invalid
+        # byte on purpose, and `sed` refuses it ("RE error: illegal byte
+        # sequence") then truncates its output — the same class of refusal
+        # this whole case is about, one tool further out.
+        printf 'kept=%s' "$(drop_task_window_records | awk '{ p = index($0, "="); if (p > 1) printf "%s,", substr($0, 1, p - 1) }')"
+        ;;
+      shared-filter)
+        # drop_shared_base_records drops only the four shared records and
+        # leaves every per-task window record in place.
+        {
+          printf "AGENT_NAME='a'\n"
+          printf "BOARD_NAME=caf\351\n"
+          printf "TASK_BASE_REF='shared'\n"
+          printf "TASK_BASE_REF_TRUSTED='1'\n"
+          printf "TASK_BASE_REF_OWNER='9'\n"
+          printf "TASK_BASE_REF_UNPROVEN='1'\n"
+          printf "TASK_BASE_REF_9='b'\n"
+          printf "TASK_OWNED_9='o'\n"
+        } > "$ENV_CACHE"
+        printf 'kept=%s' "$(drop_shared_base_records | awk '{ p = index($0, "="); if (p > 1) printf "%s,", substr($0, 1, p - 1) }')"
+        ;;
+      filter-status)
+        # The filters must PROPAGATE failure rather than returning empty at
+        # exit 0 — the distinction the rebuild sites depend on to tell "this
+        # cache holds nothing else" from "the filter could not read it". But an
+        # ABSENT cache is the fresh-checkout case and must stay a clean empty
+        # result, or a claim skips the rebuild it exists to perform.
+        rm -f "$ENV_CACHE"
+        drop_task_window_records > /dev/null 2>&1
+        d288_missing=$?
+        d288_seed
+        chmod 000 "$ENV_CACHE" 2>/dev/null
+        drop_task_window_records > /dev/null 2>&1
+        d288_unreadable=$?
+        chmod 644 "$ENV_CACHE" 2>/dev/null
+        if [ "$d288_unreadable" -ne 0 ]; then d288_unreadable=nonzero; fi
+        printf 'missing_rc=%s unreadable_rc=%s' "$d288_missing" "$d288_unreadable"
+        ;;
+    esac
+    rm -rf "$d288_dir"
+  )
+}
+
+D288_R=$(d288_probe shape-gate-notice)
+assert_eq "7ij (D288): the shape gate refuses a Binary-file notice and keeps all 3 records" \
+  "rc=1 records=3" "$D288_R"
+D288_R=$(d288_probe shape-gate-unguarded)
+assert_eq "7ij (D288): the shape gate is unconditional, protecting rebuild callers too" \
+  "rc=1 records=3" "$D288_R"
+D288_R=$(d288_probe count-gate)
+assert_eq "7ij (D288): the count gate refuses a write that would drop 2 of 3 records" \
+  "rc=1 records=3" "$D288_R"
+D288_R=$(d288_probe count-gate-allows-one-drop)
+assert_eq "7ij (D288): the count gate allows a legitimate replace-and-add" \
+  "rc=0 records=4" "$D288_R"
+D288_R=$(d288_probe legit-empty)
+assert_eq "7ij (D288): a cache that legitimately becomes empty still commits (pitfall 3)" \
+  "rc=0 bytes=0" "$D288_R"
+D288_R=$(d288_probe already-empty)
+assert_eq "7ij (D288): the first record write over an already-empty cache lands" \
+  "rc=0 records=1" "$D288_R"
+D288_R=$(d288_probe multiline-value)
+assert_eq "7ij (D288): a multi-line value passes the shape gate and counts once" \
+  "rc=0 records=3" "$D288_R"
+D288_R=$(d288_probe window-filter)
+assert_eq "7ij (D288): drop_task_window_records drops all five per-task families" \
+  "kept=AGENT_NAME,BOARD_NAME,TASK_DESCRIPTION," "$D288_R"
+D288_R=$(d288_probe shared-filter)
+assert_eq "7ij (D288): drop_shared_base_records keeps every per-task window record" \
+  "kept=AGENT_NAME,BOARD_NAME,TASK_BASE_REF_9,TASK_OWNED_9," "$D288_R"
+D288_R=$(d288_probe filter-status)
+assert_eq "7ij (D288): absent cache is a clean empty result; an unreadable one reports failure" \
+  "missing_rc=0 unreadable_rc=nonzero" "$D288_R"
+
 
 # ============================================================
 # Test Group 8: PUT snapshot upload (W780)

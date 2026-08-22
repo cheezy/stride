@@ -1338,6 +1338,129 @@ task_id_from_command() {
 # A flat `TASK_BASE_REF_<id>` line keeps this inside the existing cache on
 # purpose: a new dotfile would need a `.gitignore` entry in every consuming
 # project, which the plugin cannot add on the user's behalf.
+# (D288) Drop every record whose key is exactly $1 from the env cache, on
+# stdout. This replaces `grep -v "^KEY="` at the record-writer sites, and the
+# reason is the whole of D288: those writers pipe the filter's stdout straight
+# into write_env_cache, so a grep that declines to read the cache commits
+# whatever little it did emit. That is not hypothetical - measured here, on a
+# cache holding one byte >= 0x80:
+#
+#   /usr/bin/grep (BSD 2.6.0-FreeBSD)  LC_ALL=C and en_US.UTF-8   keeps every
+#                                      line, invalid byte survives - SAFE
+#   ugrep 7.8.4 with -I                emits NOTHING, exit 1      - every
+#                                      unrelated record silently lost
+#   ugrep 7.8.4 default                prints "Binary file <path> matches" on
+#                                      STDOUT at exit 0 - the cache is replaced
+#                                      by that notice plus the new record, and
+#                                      the cache's own path is embedded in it
+#
+# Locale made no difference in any row, which is why LC_ALL=C is not the remedy
+# (D288 pitfall 1). `grep -a` is not POSIX and would need cross-host evidence
+# this task does not have (pitfall 2). awk has no binary-input refusal at all,
+# is POSIX, and is already how the claim block computes its own preserved set -
+# so the fix is to stop asking grep. GNU grep on Linux remains unmeasured; with
+# grep out of this path that is no longer load-bearing here.
+#
+# A literal prefix comparison, not a regex, so a key never has to be escaped -
+# and deliberately NOT quote-aware, because the grep it replaces was not
+# either: this is a byte-for-byte behaviour swap, not a semantic change.
+#
+# REGEX-FREE ON PURPOSE, and this is the sharp edge of the whole fix. awk is
+# immune to grep's binary refusal; awk's REGEX engine is not immune to the same
+# byte. Measured on the same cache:
+#
+#   awk '/^AGENT_NAME=/ {next} {print}'    LC_ALL=C          rc 0, 2 lines
+#   awk '/^AGENT_NAME=/ {next} {print}'    LC_ALL=en_US.UTF-8 rc 2, NOTHING,
+#                                          "awk: towc: multibyte conversion
+#                                          failure" - and the ambient locale on
+#                                          a developer machine is a UTF-8 one
+#   awk 'substr($0,1,11) != "AGENT_NAME="' both locales      rc 0, 2 lines
+#
+# So swapping grep for a REGEX awk would have moved the defect rather than
+# fixed it: same silent-empty stdout, same exit-code-swallowing `|| true`, new
+# tool. Every cache filter below therefore matches with index/substr only.
+# LC_ALL=C would also make awk byte-oriented, and is deliberately NOT used:
+# D288 pitfall 1 rules it out, and index/substr needs no locale assumption at
+# all, which is the stronger property.
+drop_cache_key() {
+  local _k="${1:-}"
+  [ -n "$_k" ] || { cat "$ENV_CACHE" 2>/dev/null || true; return 0; }
+  awk -v k="$_k" 'substr($0, 1, length(k) + 1) != k "="' "$ENV_CACHE" 2>/dev/null || true
+}
+
+# (D288) The key of a cache line, or "" when the line does not begin one.
+# Walks only the ASCII run before the first "=", so an invalid byte in the
+# VALUE is never inspected. Shared, as awk text, by every filter below - the
+# alternative was four copies that could drift.
+CACHE_KEY_AWK_FNS='
+function key_of(s,   p, i, c) {
+  p = index(s, "=")
+  if (p < 2) return ""
+  for (i = 1; i < p; i++) {
+    c = substr(s, i, 1)
+    if (index("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_", c) == 0) return ""
+  }
+  if (index("0123456789", substr(s, 1, 1)) > 0) return ""
+  return substr(s, 1, p - 1)
+}
+function has_prefix(k, pfx) { return (k != "" && substr(k, 1, length(pfx)) == pfx) }
+'
+
+# (D288) The per-window records a claim rebuilds from scratch. Exactly the set
+# the grep -v it replaces named, one test per pattern, in the same order.
+#
+# NO `|| true`. The caller MUST be able to tell "the filter ran and this cache
+# genuinely holds nothing else" from "the filter could not read the cache" -
+# swallowing the status collapses those into an empty string at exit 0, which
+# is precisely the shape D288 exists to remove. Moving the defect from grep to
+# awk would have been no fix at all.
+# TRUSTED/OWNER/UNPROVEN stay spelled out even though the generic
+# TASK_BASE_REF_ test already covers them, exactly as the grep spelled them.
+drop_task_window_records() {
+  # (D288) An ABSENT cache is an empty starting point, not a failure to read
+  # one — a fresh checkout has no cache, and treating that as "the filter could
+  # not read it" would make the caller skip a rebuild it must perform. Only a
+  # cache that EXISTS and could not be filtered propagates a failure.
+  [ -f "$ENV_CACHE" ] || return 0
+  awk "$CACHE_KEY_AWK_FNS"'
+    {
+      k = key_of($0)
+      if (k == "TASK_BASE_REF") next
+      if (k == "TASK_BASE_REF_TRUSTED") next
+      if (k == "TASK_BASE_REF_OWNER") next
+      if (k == "TASK_BASE_REF_UNPROVEN") next
+      if (has_prefix(k, "TASK_BASE_REF_")) next
+      if (has_prefix(k, "TASK_HEAD_REF_")) next
+      if (has_prefix(k, "TASK_OWNED_")) next
+      if (has_prefix(k, "TASK_BASE_AT_")) next
+      if (has_prefix(k, "TASK_NARROWED_")) next
+      print
+    }
+  ' "$ENV_CACHE" 2>/dev/null
+}
+
+# (D288) The narrower set the claim block's fallback drops - the four shared
+# base-ref records only, leaving every per-task window record in place. Status
+# propagated for the same reason as above, and it matters more here: the
+# caller DELETES the cache when this comes back empty.
+drop_shared_base_records() {
+  # (D288) An ABSENT cache is an empty starting point, not a failure to read
+  # one — a fresh checkout has no cache, and treating that as "the filter could
+  # not read it" would make the caller skip a rebuild it must perform. Only a
+  # cache that EXISTS and could not be filtered propagates a failure.
+  [ -f "$ENV_CACHE" ] || return 0
+  awk "$CACHE_KEY_AWK_FNS"'
+    {
+      k = key_of($0)
+      if (k == "TASK_BASE_REF") next
+      if (k == "TASK_BASE_REF_TRUSTED") next
+      if (k == "TASK_BASE_REF_OWNER") next
+      if (k == "TASK_BASE_REF_UNPROVEN") next
+      print
+    }
+  ' "$ENV_CACHE" 2>/dev/null
+}
+
 # (D226) Every write of the env cache goes through here, so no reader can ever
 # observe a half-written file. Three sites used to truncate in place — and a
 # reader mid-write is not hypothetical, because parallel dispatched runners
@@ -1355,7 +1478,17 @@ task_id_from_command() {
 # On any failure the PREVIOUS cache survives intact — never truncated, never
 # absent. Reads the new content from stdin.
 write_env_cache() {
-  local _tmp
+  local _tmp _floor=0 _prev=0 _staged=0
+  # (D288) --preserve-from-cache asks the sink to refuse a write that would
+  # drop records the caller never meant to drop. Opt-in, because only the
+  # single-key record writers have the "output is the previous cache minus at
+  # most one record" invariant; the rebuild sites legitimately shrink the cache
+  # (window eviction, the claim block's preserved-only fallback) and must not
+  # be held to it.
+  if [ "${1:-}" = "--preserve-from-cache" ]; then
+    _floor=1
+    shift
+  fi
   mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null || true
   _tmp=$(mktemp "$PROJECT_DIR/.stride/env-cache.XXXXXX" 2>/dev/null || printf '')
   if [ -z "$_tmp" ]; then
@@ -1372,12 +1505,86 @@ write_env_cache() {
     printf 'stride-hook: could not stage an env-cache write; keeping the previous cache\n' >&2
     return 1
   fi
+  # (D288) Shape gate, unconditional, and the half that catches the failure the
+  # task did not anticipate. A grep that declines to read the cache may not go
+  # quiet: ugrep's default prints "Binary file <path> matches" to STDOUT and
+  # exits 0, so an emptiness test - the remedy D288 was filed proposing - passes
+  # it straight through and commits a "cache" that is one line of English prose
+  # plus the new record. Every top-level line of a real cache is KEY=..., and a
+  # value can only contribute lines while the scanner is INSIDE its quotes, so
+  # a top-level line that is not a record did not come from the cache. Blank
+  # lines are allowed: they carry nothing and no notice looks like one.
+  #
+  # Not steerable by cache content (D288 security consideration 2): every value
+  # is sq_escape'd, so an attacker-authored title lands inside single quotes,
+  # where this check does not look. Unbalanced quotes at EOF mean the stream is
+  # truncated or was never a cache; refusing keeps the previous file, which is
+  # the direction the PowerShell twin already fails in.
+  if ! awk -v q="'" "$CACHE_KEY_AWK_FNS"'
+    function scan(s,   i, c) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) { if (c == q) inq = 0 }
+        else if (esc) { esc = 0 }
+        else if (c == "\\") { esc = 1 }
+        else if (c == q) { inq = 1 }
+      }
+    }
+    BEGIN { inq = 0; esc = 0 }
+    {
+      if (!inq && $0 != "" && key_of($0) == "") exit 1
+      scan($0)
+    }
+    END { if (inq) exit 1 }
+  ' "$_tmp" 2>/dev/null; then
+    rm -f "$_tmp" 2>/dev/null || true
+    printf 'stride-hook: REFUSING an env-cache write that is not shaped like a cache; keeping the previous cache (%s) - remove that file to recover\n' \
+      "$ENV_CACHE" >&2
+    return 1
+  fi
+  # (D288) Count gate, opt-in. A single-key record writer removes at most one
+  # record and adds one back, so a result holding fewer than (previous - 1)
+  # records means the filter ahead of it dropped records nobody asked it to.
+  # Counted quote-aware, so a multi-line value counts once - the live cache
+  # really does carry those, since TASK_DESCRIPTION is a whole paragraph.
+  if [ "$_floor" = 1 ] && [ -s "$ENV_CACHE" ]; then
+    _prev=$(count_cache_records "$ENV_CACHE")
+    _staged=$(count_cache_records "$_tmp")
+    if [ -n "$_prev" ] && [ -n "$_staged" ] && [ "$_prev" -gt 0 ] \
+       && [ "$_staged" -lt $((_prev - 1)) ]; then
+      rm -f "$_tmp" 2>/dev/null || true
+      printf 'stride-hook: REFUSING an env-cache write that would drop %s of %s records; keeping the previous cache\n' \
+        "$((_prev - _staged))" "$_prev" >&2
+      return 1
+    fi
+  fi
   if ! mv -f "$_tmp" "$ENV_CACHE" 2>/dev/null; then
     rm -f "$_tmp" 2>/dev/null || true
     printf 'stride-hook: could not commit an env-cache write; keeping the previous cache\n' >&2
     return 1
   fi
   return 0
+}
+
+# (D288) Quote-aware count of records in a cache file. A record starts only on
+# a line the scanner reaches outside quotes; continuation lines of a multi-line
+# value belong to the record that opened them. Prints nothing on a parse
+# failure (EOF inside a value), which the caller reads as "do not judge".
+count_cache_records() {
+  awk -v q="'" "$CACHE_KEY_AWK_FNS"'
+    function scan(s,   i, c) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) { if (c == q) inq = 0 }
+        else if (esc) { esc = 0 }
+        else if (c == "\\") { esc = 1 }
+        else if (c == q) { inq = 1 }
+      }
+    }
+    BEGIN { inq = 0; esc = 0; n = 0 }
+    { if (!inq && key_of($0) != "") n++; scan($0) }
+    END { if (inq) exit 1; print n }
+  ' "${1:-}" 2>/dev/null || printf ''
 }
 
 # The per-task keys share a namespace with TASK_BASE_REF_TRUSTED and
@@ -1476,9 +1683,9 @@ record_task_head_ref() {
   _head=$( (cd "$PROJECT_DIR" 2>/dev/null && git rev-parse HEAD 2>/dev/null) || printf '')
   [ -n "$_head" ] || return 0
   {
-    grep -v "^${_key}=" "$ENV_CACHE" 2>/dev/null || true
+    drop_cache_key "$_key"
     printf "%s='%s'\n" "$_key" "$_head"
-  } | write_env_cache || true
+  } | write_env_cache --preserve-from-cache || true
   return 0
 }
 
@@ -1531,11 +1738,28 @@ task_owned_key() { task_record_key 'TASK_OWNED_' "${1:-}"; }
 read_task_record() { # $1 = full key
   local _key="${1:-}" _line
   [ -n "$_key" ] || return 1
-  _line=$(grep -e "^${_key}='[^']*'$" "$ENV_CACHE" 2>/dev/null | tail -n 1 || true)
+  # (D288) awk, not grep, and the read side needed this as much as the write
+  # side did. Under ugrep's default refusal this grep does not return nothing -
+  # it returns "Binary file <path> matches" on stdout at exit 0. That line has
+  # no "=", so the strips below are all no-ops and the function hands the
+  # English diagnostic back to its callers AS the record's value, which then
+  # reaches attribution and gets re-written into the cache sq_escape'd. The
+  # shape is checked explicitly here rather than trusted from an anchored
+  # pattern: starts with KEY=', ends with ', and no quote in between.
+  _line=$(awk -v k="$_key" -v q="'" '
+    {
+      pfx = k "=" q
+      if (length($0) < length(pfx) + 1) next
+      if (substr($0, 1, length(pfx)) != pfx) next
+      if (substr($0, length($0), 1) != q) next
+      body = substr($0, length(pfx) + 1, length($0) - length(pfx) - 1)
+      if (index(body, q) > 0) next
+      found = 1
+      last = body
+    }
+    END { if (found) print last }
+  ' "$ENV_CACHE" 2>/dev/null || true)
   [ -n "$_line" ] || return 1
-  _line="${_line#*=}"
-  _line="${_line#\'}"
-  _line="${_line%\'}"
   printf '%s' "$_line"
   return 0
 }
@@ -1561,9 +1785,9 @@ record_task_owned() {
   # transitional, safe-direction delta (over-collect, never under-report).
   [ -n "$(task_base_ref_for "$_tid")" ] || return 0
   {
-    grep -v -e "^${_key}=" "$ENV_CACHE" 2>/dev/null || true
+    drop_cache_key "$_key"
     printf "%s=%s\n" "$_key" "$(sq_escape "$_val")"
-  } | write_env_cache || true
+  } | write_env_cache --preserve-from-cache || true
   return 0
 }
 
@@ -2315,9 +2539,9 @@ record_task_narrowed() {
   _key=$(task_narrowed_key "$_tid")
   [ -n "$_key" ] || return 0
   {
-    grep -v -e "^${_key}=" "$ENV_CACHE" 2>/dev/null || true
+    drop_cache_key "$_key"
     printf "%s=%s\n" "$_key" "$(sq_escape "$_val")"
-  } | write_env_cache || true
+  } | write_env_cache --preserve-from-cache || true
   return 0
 }
 
@@ -2888,12 +3112,22 @@ finalize_before_doing() {
   # TASK_NARROWED_ is dropped and NOT re-emitted: a claim opens a new window,
   # and a verdict from a previous completion must not survive into it — the
   # same reasoning that clears .stride-diff-upload-state at claim time.
-  _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
-    -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_UNPROVEN=' \
-    -e '^TASK_BASE_REF_[A-Za-z0-9_]*=' \
-    -e '^TASK_HEAD_REF_[A-Za-z0-9_]*=' -e '^TASK_OWNED_[A-Za-z0-9_]*=' \
-    -e '^TASK_BASE_AT_[A-Za-z0-9_]*=' -e '^TASK_NARROWED_[A-Za-z0-9_]*=' \
-    "$ENV_CACHE" 2>/dev/null || true)
+  # (D288) awk, not grep, for the reason set out above drop_cache_key: a grep
+  # that refuses to read a cache carrying a byte >= 0x80 returns nothing here,
+  # and this set is what carries GOAL_*, BOARD_* and TASK_DESCRIPTION across a
+  # claim. The patterns are the same ones, one per line, in the same order -
+  # TRUSTED/OWNER/UNPROVEN stay spelled out even though the generic
+  # TASK_BASE_REF_ rule already covers them, exactly as the grep spelled them.
+  # (D288) A filter that could not read the cache is NOT an empty preserved
+  # set. Treated as one, this site would omit GOAL_*, BOARD_* and
+  # TASK_DESCRIPTION and commit the result at exit 0 - the same silent loss,
+  # one tool along. Routed into the existing _rebuild_ok sentinel below, whose
+  # contract is already "the previous cache stands, untouched".
+  local _preserved_failed=0
+  if ! _preserved=$(drop_task_window_records); then
+    _preserved=""
+    _preserved_failed=1
+  fi
   # (D268) The cap keeps a long-lived checkout from growing the cache without
   # bound — but the old per-family `tail` dropped the OLDEST record, which is
   # structurally the still-open OUTER task's own anchor, and at 20 nested
@@ -2914,6 +3148,7 @@ finalize_before_doing() {
   # path in select_task_snapshot_base is untouched.
   # (D287 r2) A parse failure means "do not rebuild", not "rebuild with nothing".
   local _rebuild_ok=1
+  [ "$_preserved_failed" = 1 ] && _rebuild_ok=0
   _records=$(select_kept_window_records "$_key") || { _records=""; _rebuild_ok=0; }
   # (D255) A claim opens a fresh window for this task: its own owned record
   # from a PREVIOUS completion must not survive into it. Other tasks' records
@@ -4294,7 +4529,7 @@ ${_key}=''"
   # empty default on file while the process env holds the parent id — the same
   # cache/env divergence this block exists to close, never a corrupted or
   # truncated cache.
-  if _collapsed=$(awk -v q="'" '
+  if _collapsed=$(awk -v q="'" "$CACHE_KEY_AWK_FNS"'
     function scan(s,   i, c) {
       for (i = 1; i <= length(s); i++) {
         c = substr(s, i, 1)
@@ -4306,7 +4541,15 @@ ${_key}=''"
     }
     BEGIN { inq = 0; esc = 0; drop = 0 }
     {
-      if (!inq) { drop = ($0 ~ /^GOAL_(ID|IDENTIFIER|TITLE|DESCRIPTION)=/) }
+      # (D288) key_of, not a regex on $0 - same reason as every other cache
+      # filter: the awk regex engine aborts on a byte >= 0x80 in a UTF-8
+      # locale, and this one sits on a write path too. (No apostrophes in
+      # here: this comment lives inside a single-quoted awk program.)
+      if (!inq) {
+        k = key_of($0)
+        drop = (k == "GOAL_ID" || k == "GOAL_IDENTIFIER" \
+                || k == "GOAL_TITLE" || k == "GOAL_DESCRIPTION")
+      }
       scan($0)
       if (!drop) print
     }
@@ -4862,7 +5105,16 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # a value means the sq_escape invariant was violated, so it falls back to
     # the previous deny-list behaviour, which over-preserves (today's bug)
     # rather than dropping a record it could not parse.
-    if ! _preserved=$(awk -v q="'" '
+    # (D288) Matched with key_of/has_prefix rather than regexes on $0. This is
+    # the PRIMARY branch, and it was the last cache filter still using a regex:
+    # on a cache holding a byte >= 0x80 in a UTF-8 locale awk aborts with
+    # "towc: multibyte conversion failure", which would send every such claim
+    # down the fallback below forever. That degrades safely (the fallback
+    # over-preserves) but it is not what this branch is for, and it made the
+    # decision document's "every cache filter matches with index/substr" claim
+    # untrue. The keep-set is unchanged: the six fixed identity keys, plus the
+    # five per-task families, minus the three shared TASK_BASE_REF_ flags.
+    if ! _preserved=$(awk -v q="'" "$CACHE_KEY_AWK_FNS"'
       function scan(s,   i, c) {
         for (i = 1; i <= length(s); i++) {
           c = substr(s, i, 1)
@@ -4872,23 +5124,46 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
           else if (c == q) { inq = 1 }
         }
       }
+      function keep_key(k) {
+        if (k == "TASK_ID" || k == "TASK_IDENTIFIER" || k == "TASK_TITLE" \
+            || k == "TASK_STATUS" || k == "TASK_COMPLEXITY" || k == "TASK_PRIORITY") return 1
+        if (k == "TASK_BASE_REF_TRUSTED" || k == "TASK_BASE_REF_OWNER" \
+            || k == "TASK_BASE_REF_UNPROVEN") return 0
+        # The regex required at least one character after the family prefix
+        # (`_[A-Za-z0-9_]+=`), so a bare `TASK_OWNED_=` was never kept.
+        if (has_prefix(k, "TASK_BASE_REF_") && length(k) > length("TASK_BASE_REF_")) return 1
+        if (has_prefix(k, "TASK_HEAD_REF_") && length(k) > length("TASK_HEAD_REF_")) return 1
+        if (has_prefix(k, "TASK_OWNED_") && length(k) > length("TASK_OWNED_")) return 1
+        if (has_prefix(k, "TASK_BASE_AT_") && length(k) > length("TASK_BASE_AT_")) return 1
+        if (has_prefix(k, "TASK_NARROWED_") && length(k) > length("TASK_NARROWED_")) return 1
+        return 0
+      }
       BEGIN { inq = 0; esc = 0; keep = 0 }
       {
-        if (!inq) {
-          keep = ($0 ~ /^TASK_(ID|IDENTIFIER|TITLE|STATUS|COMPLEXITY|PRIORITY)=/) \
-            || ($0 ~ /^TASK_(BASE_REF|HEAD_REF|OWNED|BASE_AT|NARROWED)_[A-Za-z0-9_]+=/ \
-                && $0 !~ /^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)=/)
-        }
+        if (!inq) { keep = keep_key(key_of($0)) }
         scan($0)
         if (keep) print
       }
       END { if (inq) exit 1 }
     ' "$ENV_CACHE" 2>/dev/null); then
-      _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' \
-        -e '^TASK_BASE_REF_OWNER=' -e '^TASK_BASE_REF_UNPROVEN=' "$ENV_CACHE" 2>/dev/null || true)
+      # (D288) awk for the same reason as the writer sites, and this one bites
+      # harder than they do: an empty result here does not commit a short cache,
+      # it takes the else branch below and DELETES the cache outright. This is
+      # the fallback for the quote-aware scan above having failed to parse, so
+      # it stays a plain line filter - what it must not stay is a grep that can
+      # decline to read the file at all.
+      # (D288) Same distinction as finalize_before_doing, and the stakes are
+      # higher: the else branch below deletes the cache. Only a filter that
+      # RAN and found nothing may reach it.
+      if ! _preserved=$(drop_shared_base_records); then
+        _preserved=""
+        _preserved_failed=1
+      fi
     fi
     if [ -n "$_preserved" ]; then
       printf '%s\n' "$_preserved" | write_env_cache || true
+    elif [ "${_preserved_failed:-0}" = 1 ]; then
+      printf 'stride-hook: could not filter the env cache; keeping the previous cache rather than deleting it\n' >&2
     else
       rm -f "$ENV_CACHE" 2>/dev/null || true
     fi

@@ -1394,6 +1394,256 @@ try {
     }
 }
 
+# 7e3 (D290): the upload filter's FAILURE path. 7e2 above pins what the filter
+# drops when it runs to completion; this pins what happens when it throws
+# part-way. The filter sits inside a try whose catch used to "recover" by
+# uploading the RAW bytes, so any throw inside it re-armed the very fail-open
+# W2100 closed for its one named cause — and under Set-StrictMode -Version
+# Latest an entry carrying no `path` property throws at exactly that comparison.
+# The path-less entry is deliberately placed BEFORE the credential entry, which
+# is what makes this the realistic shape: the filter aborts before it ever
+# reaches the artifact it exists to strip.
+#
+# Asserts on what reached the LISTENER, not merely on what the hook logged — a
+# refusal that still PUT the body would satisfy a log-only assertion. The
+# fixture value below is a placeholder, never a real token.
+$refuseProj = Join-Path $TmpDir 'put-refuse-selfheal'
+New-Item -ItemType Directory -Path $refuseProj -Force | Out-Null
+Set-Content -Path (Join-Path $refuseProj '.stride.md') -Value @'
+## before_review
+```bash
+echo "reviewing"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $refuseProj '.stride-env-cache') -Value "TASK_ID=42" -Encoding UTF8
+Set-Content -Path (Join-Path $refuseProj '.stride-changed-files.json') `
+    -Value '[{"path":"lib/foo.ex","diff":"real patch"},{"diff":"entry with no path property"},{"path":".stride_auth.md","diff":"placeholder-not-a-real-token"}]' -Encoding UTF8
+$refusePort = 18905
+$refuseFixture = Join-Path $TmpDir 'put-refuse-selfheal-fixture.json'
+if (Test-Path $refuseFixture) { Remove-Item -Force $refuseFixture }
+# Unlike 7e2's listener this one records EVERY request until a deadline, and
+# records the method and URL alongside the body. 7e2 can stop at the first
+# request because the PUT it asserts on is the first thing the hook sends; here
+# the PUT is expected NOT to happen, so the first arrival is the D119
+# after_goal_status GET the hook fires afterwards. A listener that stopped at
+# the first request would capture that GET and a naive "nothing arrived" check
+# would fail on it — which is exactly what the first draft of this test did.
+$refuseJob = Start-Job -ArgumentList $refusePort, $refuseFixture -ScriptBlock {
+    param($Port, $Fixture)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    $records = New-Object System.Collections.ArrayList
+    try {
+        $l.Start()
+        $deadline = (Get-Date).AddSeconds(8)
+        while ((Get-Date) -lt $deadline) {
+            $pending = $l.GetContextAsync()
+            $remainingMs = [int][math]::Max(1, ($deadline - (Get-Date)).TotalMilliseconds)
+            if (-not $pending.Wait($remainingMs)) { break }
+            $ctx = $pending.Result
+            $reader = [System.IO.StreamReader]::new($ctx.Request.InputStream)
+            $null = $records.Add(@{
+                Method = "$($ctx.Request.HttpMethod)"
+                Url    = "$($ctx.Request.RawUrl)"
+                Body   = $reader.ReadToEnd()
+            })
+            $ctx.Response.StatusCode = 200
+            $ctx.Response.OutputStream.Close()
+        }
+    } catch {
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+    @{ Records = @($records) } | ConvertTo-Json -Depth 5 -Compress |
+        Set-Content -Path $Fixture -Encoding UTF8
+}
+try {
+    $null = Wait-ForListener -Port $refusePort
+    $refuseCmd = "curl -X PATCH http://localhost:$refusePort/api/tasks/42/complete -H `"Authorization: Bearer tok`""
+    $refuseJson = @{ tool_input = @{ command = $refuseCmd } } | ConvertTo-Json -Compress
+    $r3 = Invoke-HookScript -InputJson $refuseJson -Phase 'post' -ProjectDir $refuseProj
+    Assert-Exit "7e3: a refused upload is still non-fatal to the hook" 0 $r3.ExitCode
+    Wait-Job $refuseJob -Timeout 20 | Out-Null
+    Stop-Job $refuseJob -ErrorAction SilentlyContinue
+    Remove-Job $refuseJob -Force -ErrorAction SilentlyContinue
+    $refusePut = $null
+    if (Test-Path $refuseFixture) {
+        $recR = Get-Content -Raw -Path $refuseFixture | ConvertFrom-Json
+        foreach ($entry in @($recR.Records)) {
+            if ($null -eq $entry) { continue }
+            if ("$($entry.Method)" -eq 'PUT' -and "$($entry.Url)" -match '/changed_files') {
+                $refusePut = $entry
+                break
+            }
+        }
+    }
+    Assert-Eq "7e3: a throw inside the filter PUTs no changed_files at all" "True" "$($null -eq $refusePut)"
+    if ($null -ne $refusePut) {
+        # Only reachable on a regression, and worth the extra line: it says
+        # whether the leak actually carried the credential name or was merely a
+        # stray PUT. Decoded defensively — a regression may not produce the
+        # envelope shape at all, and this assertion must not crash the suite.
+        $leaked = ''
+        try {
+            $bodyR = $refusePut.Body | ConvertFrom-Json
+            $leaked = [System.Text.Encoding]::UTF8.GetString(
+                [System.Convert]::FromBase64String($bodyR.changed_files.data))
+        } catch {
+            $leaked = "$($refusePut.Body)"
+        }
+        Assert-Eq "7e3: the leaked body does not name the credential file" "False" "$($leaked -match '\.stride_auth\.md')"
+    }
+    Assert-Eq "7e3: the refusal is reported on stderr" "True" "$($r3.Stderr -match 'upload REFUSED')"
+    Assert-Eq "7e3: the refusal routes through the existing non-2xx warning" "True" "$($r3.Stderr -match 'changed_files upload failed \(HTTP 000\)')"
+} finally {
+    if ($refuseJob -and $refuseJob.State -eq 'Running') {
+        Stop-Job $refuseJob -ErrorAction SilentlyContinue
+        Remove-Job $refuseJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 7e4 (D290): the other half of the same change — its NARROWNESS. The raw-bytes
+# path is genuinely correct for a snapshot that is not parseable as the expected
+# array, and D290 deliberately did not delete it. Same throwing entry as 7e3,
+# minus any hard-excluded name: the re-check inside the catch finds nothing to
+# refuse, so the raw bytes upload byte-for-byte as they did before D290.
+#
+# Without this case the refusal could widen to "any throw refuses" and nothing
+# would notice.
+$rawProj = Join-Path $TmpDir 'put-rawpath-selfheal'
+New-Item -ItemType Directory -Path $rawProj -Force | Out-Null
+Set-Content -Path (Join-Path $rawProj '.stride.md') -Value @'
+## before_review
+```bash
+echo "reviewing"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $rawProj '.stride-env-cache') -Value "TASK_ID=42" -Encoding UTF8
+$rawSnapshot = '[{"path":"lib/foo.ex","diff":"real patch"},{"diff":"entry with no path property"}]'
+Set-Content -Path (Join-Path $rawProj '.stride-changed-files.json') -Value $rawSnapshot -Encoding UTF8 -NoNewline
+$rawPort = 18906
+$rawFixture = Join-Path $TmpDir 'put-rawpath-selfheal-fixture.json'
+if (Test-Path $rawFixture) { Remove-Item -Force $rawFixture }
+$rawJob = Start-Job -ArgumentList $rawPort, $rawFixture -ScriptBlock {
+    param($Port, $Fixture)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        $ctx = $l.GetContext()
+        $reader = [System.IO.StreamReader]::new($ctx.Request.InputStream)
+        @{ Body = $reader.ReadToEnd() } | ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+        $ctx.Response.StatusCode = 200
+        $ctx.Response.OutputStream.Close()
+    } catch {
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+}
+try {
+    $null = Wait-ForListener -Port $rawPort
+    $rawCmd = "curl -X PATCH http://localhost:$rawPort/api/tasks/42/complete -H `"Authorization: Bearer tok`""
+    $rawJson = @{ tool_input = @{ command = $rawCmd } } | ConvertTo-Json -Compress
+    $r4 = Invoke-HookScript -InputJson $rawJson -Phase 'post' -ProjectDir $rawProj
+    Assert-Exit "7e4: the self-heal exits 0" 0 $r4.ExitCode
+    Wait-Job $rawJob -Timeout 8 | Out-Null
+    Remove-Job $rawJob -Force -ErrorAction SilentlyContinue
+    if (Test-Path $rawFixture) {
+        $rec4 = Get-Content -Raw -Path $rawFixture | ConvertFrom-Json
+        $body4 = $rec4.Body | ConvertFrom-Json
+        $txt4 = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($body4.changed_files.data))
+        Assert-Eq "7e4: an unparseable snapshot naming no artifact still uploads" $rawSnapshot $txt4
+    } else {
+        Write-Host "  FAIL: 7e4: the raw-bytes upload did not arrive at the listener" -ForegroundColor Red
+        $script:FAIL++
+    }
+} finally {
+    if ($rawJob -and $rawJob.State -eq 'Running') {
+        Stop-Job $rawJob -ErrorAction SilentlyContinue
+        Remove-Job $rawJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 7e5 (D290): the re-check must see the DECODED spelling, not just the literal
+# one. The structured filter compares paths ConvertFrom-Json has already
+# unescaped, so a snapshot naming the credential file with JSON escapes —
+# "\u002estride_auth.md" decodes to '.stride_auth.md' — is the excluded path as
+# far as the filter is concerned, but slips an exact-name regex run over the raw
+# text. Same throwing entry as 7e3 so the catch is the path under test; only the
+# spelling differs. Surfaced by the D290 security review as the one way the
+# backstop could still be walked past.
+$escProj = Join-Path $TmpDir 'put-escaped-selfheal'
+New-Item -ItemType Directory -Path $escProj -Force | Out-Null
+Set-Content -Path (Join-Path $escProj '.stride.md') -Value @'
+## before_review
+```bash
+echo "reviewing"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $escProj '.stride-env-cache') -Value "TASK_ID=42" -Encoding UTF8
+Set-Content -Path (Join-Path $escProj '.stride-changed-files.json') `
+    -Value '[{"path":"lib/foo.ex","diff":"real patch"},{"diff":"entry with no path property"},{"path":"\u002estride_auth.md","diff":"placeholder-not-a-real-token"}]' -Encoding UTF8
+$escPort = 18907
+$escFixture = Join-Path $TmpDir 'put-escaped-selfheal-fixture.json'
+if (Test-Path $escFixture) { Remove-Item -Force $escFixture }
+$escJob = Start-Job -ArgumentList $escPort, $escFixture -ScriptBlock {
+    param($Port, $Fixture)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    $records = New-Object System.Collections.ArrayList
+    try {
+        $l.Start()
+        $deadline = (Get-Date).AddSeconds(8)
+        while ((Get-Date) -lt $deadline) {
+            $pending = $l.GetContextAsync()
+            $remainingMs = [int][math]::Max(1, ($deadline - (Get-Date)).TotalMilliseconds)
+            if (-not $pending.Wait($remainingMs)) { break }
+            $ctx = $pending.Result
+            $reader = [System.IO.StreamReader]::new($ctx.Request.InputStream)
+            $null = $records.Add(@{
+                Method = "$($ctx.Request.HttpMethod)"
+                Url    = "$($ctx.Request.RawUrl)"
+                Body   = $reader.ReadToEnd()
+            })
+            $ctx.Response.StatusCode = 200
+            $ctx.Response.OutputStream.Close()
+        }
+    } catch {
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+    @{ Records = @($records) } | ConvertTo-Json -Depth 5 -Compress |
+        Set-Content -Path $Fixture -Encoding UTF8
+}
+try {
+    $null = Wait-ForListener -Port $escPort
+    $escCmd = "curl -X PATCH http://localhost:$escPort/api/tasks/42/complete -H `"Authorization: Bearer tok`""
+    $escJson = @{ tool_input = @{ command = $escCmd } } | ConvertTo-Json -Compress
+    $r5 = Invoke-HookScript -InputJson $escJson -Phase 'post' -ProjectDir $escProj
+    Assert-Exit "7e5: an escaped-name refusal is still non-fatal to the hook" 0 $r5.ExitCode
+    Wait-Job $escJob -Timeout 20 | Out-Null
+    Stop-Job $escJob -ErrorAction SilentlyContinue
+    Remove-Job $escJob -Force -ErrorAction SilentlyContinue
+    $escPut = $null
+    if (Test-Path $escFixture) {
+        $rec5 = Get-Content -Raw -Path $escFixture | ConvertFrom-Json
+        foreach ($entry in @($rec5.Records)) {
+            if ($null -eq $entry) { continue }
+            if ("$($entry.Method)" -eq 'PUT' -and "$($entry.Url)" -match '/changed_files') {
+                $escPut = $entry
+                break
+            }
+        }
+    }
+    Assert-Eq "7e5: a JSON-escaped credential name is refused too" "True" "$($null -eq $escPut)"
+    Assert-Eq "7e5: the escaped-name refusal is reported on stderr" "True" "$($r5.Stderr -match 'upload REFUSED')"
+} finally {
+    if ($escJob -and $escJob.State -eq 'Running') {
+        Stop-Job $escJob -ErrorAction SilentlyContinue
+        Remove-Job $escJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # 7g (D54): variable-based completion command + .stride_auth.md. The documented
 # curl uses $STRIDE_API_URL / $STRIDE_API_TOKEN, so $Command has no literal
 # URL/token; the hook must resolve them from .stride_auth.md, preferring the

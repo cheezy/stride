@@ -3633,6 +3633,53 @@ function Resolve-TaskSnapshotBase {
     return @{ Refused = $false; Base = $shared }
 }
 
+# (D290) The hard-name exclusions shared by the two UPLOAD-side consumers, so
+# the filter in Invoke-ChangedFilesUpload and the fail-closed re-check in its
+# catch cannot drift apart on which names must never reach the listener.
+# Deliberately NOT the whole story: Build-ChangedFilesSnapshot's $selfNames
+# below restates the same five names for the capture side — the PRIMARY control,
+# which keeps them out of the snapshot as it is BUILT — because that function is
+# AST-extracted against a fixed dependency list by test 31d and the bash suite's
+# 7ff. The comment there says the same thing from the other side. An edit adding
+# an artifact must touch BOTH lists. Names only — no secret value appears here.
+function Get-ChangedFilesHardExcludedNames {
+    return @(
+        '.stride-diff-upload-state',
+        '.stride-changed-files.json',
+        '.stride-dirty-baseline',
+        '.stride.md',
+        '.stride_auth.md'
+    )
+}
+
+# (D290) Does RAW snapshot text name a hard-excluded artifact in a `path`
+# position? Invoke-ChangedFilesUpload's catch uses this to decide whether the
+# PUT must be refused when the structured filter threw part-way and there is no
+# parsed entry list left to inspect.
+#
+# Tests the JSON-decoded spelling as well as the literal one. The structured
+# filter compares paths ConvertFrom-Json has ALREADY unescaped, so a snapshot
+# spelling the name with JSON escapes — "\u002estride_auth.md" decodes to
+# '.stride_auth.md' — would slip an exact-name regex run over raw text while
+# still being the excluded path. Unescaping is best-effort: a malformed escape
+# throws, and the literal form is still tested.
+function Test-ChangedFilesTextNamesHardExcluded {
+    param([string]$Text)
+    if (-not $Text) { return $false }
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $candidates.Add($Text)
+    try { $candidates.Add([System.Text.RegularExpressions.Regex]::Unescape($Text)) } catch { }
+    foreach ($candidate in $candidates) {
+        foreach ($hardName in (Get-ChangedFilesHardExcludedNames)) {
+            if ($candidate -match ('"path"\s*:\s*"' + [regex]::Escape($hardName) + '"')) { return $true }
+        }
+        # (W1609) The root .stride/ state directory, matched as a prefix,
+        # mirroring the prefix arm of the structured filter.
+        if ($candidate -match '"path"\s*:\s*"\.stride/') { return $true }
+    }
+    return $false
+}
+
 # Build the per-file diff snapshot. Mirror of stride-hook.sh's
 # capture_changed_files. Returns a JSON array STRING; never throws, never
 # returns $null, and degrades to the literal '[]' rather than to nothing —
@@ -3709,6 +3756,13 @@ function Build-ChangedFilesSnapshot {
         # Self-exclusion: the hook's own root artifacts, and the whole root
         # .stride/ directory. Root-anchored only — sub/.stride-changed-files.json
         # is a user file and must survive.
+        # (D290) These five names are deliberately restated here rather than
+        # read from Get-ChangedFilesHardExcludedNames: 31d and the bash suite's
+        # 7ff extract this function by AST against a FIXED dependency list, so a
+        # call to a sixth function makes the extracted harness throw and yields
+        # a vacuous '[]'. Unifying the two lists is worth doing, but it means
+        # updating both extraction lists and belongs in its own change. Keep
+        # this list and the shared one in step by hand until then.
         $selfNames = @('.stride-diff-upload-state', '.stride-changed-files.json',
                        '.stride-dirty-baseline', '.stride.md', '.stride_auth.md')
         $seen = @{}
@@ -3915,11 +3969,23 @@ function Get-WebExceptionStatus {
 # Returns the HTTP status code as a string ('000' on transport failure),
 # warns on stderr for non-2xx, and never throws. Mirror of stride-hook.sh's
 # upload_changed_files_snapshot (W1094) — shared by Invoke-FinalizeAfterDoing
-# and the before_review self-heal.
+# and the before_review self-heal. (D290) The mirror is partial by design, and
+# saying so here stops the next reader inferring cover that does not exist: the
+# transport, the '000' fallback and the non-2xx warning match the bash twin
+# line for line, but the defensive filter block below has NO bash counterpart.
+# stride-hook.sh uploads the on-disk snapshot verbatim and relies wholly on its
+# capture-side exclusion (stride-hook.sh: the `.stride_auth.md` case arm in the
+# candidate loop), so it has no recovering catch that could fail open — the
+# D290 shape is ps1-only.
 function Invoke-ChangedFilesUpload {
     param([string]$TaskId, [string]$ApiBase, [string]$Token)
     $snapshotPath = Join-Path $ProjectDir '.stride-changed-files.json'
     $httpCode = '000'
+    # (D290) Set by the filter's catch when the raw snapshot cannot be proven
+    # free of a hard-excluded artifact. Leaving $httpCode at '000' routes the
+    # refusal through the existing non-2xx warning below rather than inventing
+    # a second reporting path.
+    $refuseUpload = $false
     try {
         $bytes = [System.IO.File]::ReadAllBytes($snapshotPath)
         # D67: defensively strip the hook's OWN root artifacts from the snapshot
@@ -3981,12 +4047,13 @@ function Invoke-ChangedFilesUpload {
                     $committedRange = @()
                 }
             }
+            $hardExcluded = Get-ChangedFilesHardExcludedNames
             $filtered = @($entries | Where-Object {
-                if ($_.path -eq '.stride-diff-upload-state' -or
-                    $_.path -eq '.stride-changed-files.json' -or
-                    $_.path -eq '.stride-dirty-baseline' -or
-                    $_.path -eq '.stride.md' -or
-                    $_.path -eq '.stride_auth.md') { return $false }
+                # (D290) The same list the catch re-checks against. The property
+                # access stays exactly where it was: under StrictMode an entry
+                # carrying no `path` still throws right here, and the catch now
+                # answers that throw by refusing rather than by widening.
+                if ($hardExcluded -contains $_.path) { return $false }
                 # (W1609) Hard-exclude the whole root .stride/ state directory
                 # (orchestrator marker, the .last-api-response.json capture) —
                 # mirrors stride-hook.sh's `$0 !~ /^\.stride\//`.
@@ -4043,22 +4110,65 @@ function Invoke-ChangedFilesUpload {
             }
         } catch {
             # Snapshot not parseable as the expected array — keep the raw bytes.
+            #
+            # (D290) But prove that is safe first. This catch spans the WHOLE
+            # filter, so it also swallows a throw raised INSIDE it — under
+            # Set-StrictMode -Version Latest an entry carrying no `path`
+            # property throws at the comparison above — and "recovering" with
+            # the raw bytes then uploads precisely what the filter existed to
+            # strip. That is a fail-OPEN, and the same shape W2100 closed for
+            # its one named cause (ConvertTo-Json -AsArray on 5.1) while leaving
+            # the shape itself in place. The capture half of this file,
+            # Build-ChangedFilesSnapshot, already fails CLOSED with '[]', so the
+            # two halves disagreed about which direction is safe; this makes
+            # them agree.
+            #
+            # Re-run only the CHEAP exact-name check, against the undecoded
+            # text, and REFUSE the PUT when a hard-excluded artifact appears in
+            # a `path` position. The refusal is reported by the existing non-2xx
+            # warning path below, not by a new one. This is a deliberate
+            # behaviour change and a narrow one: an unparseable snapshot that
+            # names none of those artifacts still uploads raw, exactly as
+            # before, which is the case the raw-bytes path is genuinely for.
+            $rawText = $null
+            try { $rawText = [System.Text.Encoding]::UTF8.GetString($bytes) } catch { $rawText = $null }
+            if ($null -eq $rawText) {
+                # A decode that fails leaves nothing to prove the snapshot clean
+                # WITH, so it refuses. Defaulting to '' here would match no name
+                # and upload the raw bytes — an inner catch quietly converting a
+                # fail-closed outcome into the fail-open one this change exists
+                # to invert. Unreachable in practice (this UTF8 encoder
+                # substitutes rather than throwing, and $bytes is non-null by
+                # the time we are here), which is exactly why it must not be
+                # written the unsafe way and left to be inherited later.
+                $refuseUpload = $true
+            } elseif (Test-ChangedFilesTextNamesHardExcluded -Text $rawText) {
+                $refuseUpload = $true
+            }
+            if ($refuseUpload) {
+                # Name the artifact CLASS, never the entry or its contents — a
+                # refusal message must not become the disclosure it prevented.
+                [Console]::Error.WriteLine(
+                    "stride-hook: changed_files upload REFUSED for task $TaskId - the snapshot filter failed and the raw snapshot names a hard-excluded artifact")
+            }
         }
-        $b64 = [System.Convert]::ToBase64String($bytes)
-        $body = @{ changed_files = @{ encoding = 'base64'; data = $b64 } } |
-            ConvertTo-Json -Depth 5 -Compress
-        # (D277) No -SkipHttpErrorCheck: it is 7.0+ and did not bind on the
-        # shipping 5.1 host, where the ParameterBindingException was then
-        # misread as a transport failure. A non-2xx now throws on both hosts and
-        # the status is recovered from the exception.
-        $resp = Invoke-WebRequest `
-            -Uri "$ApiBase/api/tasks/$TaskId/changed_files" `
-            -Method Put `
-            -Body $body `
-            -ContentType 'application/json' `
-            -Headers @{ Authorization = "Bearer $Token" } `
-            -UseBasicParsing -TimeoutSec 10
-        $httpCode = "$([int]$resp.StatusCode)"
+        if (-not $refuseUpload) {
+            $b64 = [System.Convert]::ToBase64String($bytes)
+            $body = @{ changed_files = @{ encoding = 'base64'; data = $b64 } } |
+                ConvertTo-Json -Depth 5 -Compress
+            # (D277) No -SkipHttpErrorCheck: it is 7.0+ and did not bind on the
+            # shipping 5.1 host, where the ParameterBindingException was then
+            # misread as a transport failure. A non-2xx now throws on both hosts
+            # and the status is recovered from the exception.
+            $resp = Invoke-WebRequest `
+                -Uri "$ApiBase/api/tasks/$TaskId/changed_files" `
+                -Method Put `
+                -Body $body `
+                -ContentType 'application/json' `
+                -Headers @{ Authorization = "Bearer $Token" } `
+                -UseBasicParsing -TimeoutSec 10
+            $httpCode = "$([int]$resp.StatusCode)"
+        }
     } catch {
         # An HTTP error carries a response and yields its real code; a genuine
         # transport failure (refused, DNS, timeout) has none and yields '000',

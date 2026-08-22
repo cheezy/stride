@@ -5471,7 +5471,11 @@ $g22Want = @(
     'Set-TaskNarrowedRecord', 'Set-TaskHeadRefRecord', 'Set-TaskBaseAtRecord',
     'Write-EnvCache', 'ConvertTo-PrintableForLog',
     'ConvertTo-CacheByteString', 'ConvertFrom-CacheByteString',
-    'Get-EnvCacheRawByte', 'Test-EnvCacheUnchanged'
+    'Get-EnvCacheRawByte', 'Test-EnvCacheUnchanged',
+    # (D289) Set-TaskRecord's compare-and-swap retry moved into this shared
+    # helper, so it is a dependency of the record layer now. The harness count
+    # below is derived from this list, so adding a name here is the whole edit.
+    'Invoke-EnvCacheRewrite'
 )
 $g22Ast = [System.Management.Automation.Language.Parser]::ParseFile($HookScript, [ref]$null, [ref]$null)
 $g22Fns = $g22Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
@@ -6360,6 +6364,132 @@ Assert-Contains "22t-b (D282): the concurrent claim's TASK_ID survives the inter
 Assert-Contains "22t-b (D282): and its TASK_IDENTIFIER survives too" "TASK_IDENTIFIER='W999'" $g22Inter
 Assert-Eq "22t-b (D282): and the record write landed alongside it" "yes" `
     "$((Get-TaskNarrowedRecord -TaskId '9').Value)"
+
+# 22t-g (D289): the SHARED guard, exercised through Invoke-EnvCacheRewrite
+# itself. D282 gave the compare-and-swap to Set-TaskRecord alone; D289 moved the
+# retry into this helper and routed the other five Write-EnvCache callers
+# through it, so this is now the one mechanism every rewrite on this side
+# depends on. Pinning it here pins all six.
+#
+# Same injection point and the same reason as 22t-b: the concurrent write must
+# land AFTER the Build has read, or the staged line set is never stale and the
+# swap has nothing to catch. Shadowing Get-EnvCacheRawByte would put it before
+# the splitter and the case would pass with the guard deleted.
+#
+# MUTATION-TESTED, not merely observed green: with `-CompareAndSwap` removed
+# from the helper's Write-EnvCache call, the two survival assertions below go
+# red (the concurrent claim's lines are gone from the committed cache), and with
+# the retry `continue` replaced by a `return $false` the retry-fired assertion
+# goes red as well. Both were confirmed before this case was trusted.
+$null = New-RecordFixture -Name 'casguard'
+[System.IO.File]::WriteAllText($script:EnvCache, "BOARD_ID='55'`nTASK_OWNED_7='mine'`n", (New-Object System.Text.UTF8Encoding($false)))
+$script:g22CasInjected = 0
+$script:g22CasBuilds = 0
+$g22CasRealSplit = ${function:Split-EnvCacheRecord}
+function Split-EnvCacheRecord {
+    $recs = & $g22CasRealSplit
+    if ($script:g22CasInjected -eq 0) {
+        $script:g22CasInjected = 1
+        # A second agent's claim commits here - after this Build has read the
+        # records it is about to stage, before the rename it will attempt.
+        [System.IO.File]::WriteAllText($script:EnvCache,
+            "BOARD_ID='55'`nTASK_OWNED_7='mine'`nTASK_ID='4242'`nTASK_IDENTIFIER='W4242'`n",
+            [System.Text.Encoding]::GetEncoding(28591))
+    }
+    return $recs
+}
+# A Build in the shape every real caller uses: read through the splitter, drop
+# one key, append a replacement.
+$g22CasRc = Invoke-EnvCacheRewrite -What 'the 22t-g probe' -Build {
+    param($before)
+    $script:g22CasBuilds++
+    $recs = Split-EnvCacheRecord
+    if (-not $recs.Ok) { throw 'env cache ends inside a quoted value' }
+    $kept = @($recs.Records | Where-Object { $_ -notmatch '^BOARD_NAME=' })
+    return @(@($kept) + @("BOARD_NAME='probe'"))
+}
+${function:Split-EnvCacheRecord} = $g22CasRealSplit
+Assert-Eq "22t-g (D289): the interleave actually fired" "1" "$($script:g22CasInjected)"
+Assert-Eq "22t-g (D289): the swap detected it and the Build ran a second time" "2" "$($script:g22CasBuilds)"
+Assert-Eq "22t-g (D289): the guarded rewrite still reports success" "True" "$g22CasRc"
+$g22CasOut = (Get-EnvCacheLine) -join '|'
+Assert-Contains "22t-g (D289): the concurrent claim's TASK_ID survives the rewrite" "TASK_ID='4242'" $g22CasOut
+Assert-Contains "22t-g (D289): and its TASK_IDENTIFIER survives too" "TASK_IDENTIFIER='W4242'" $g22CasOut
+Assert-Contains "22t-g (D289): and the rewrite's own line landed alongside it" "BOARD_NAME='probe'" $g22CasOut
+
+# 22t-h (D289): a Build that refuses aborts the write outright - no attempt, no
+# partial commit, previous cache intact. This is the path every caller's
+# `throw 'env cache ends inside a quoted value'` takes, and before D289 those
+# throws reached an enclosing catch instead; the helper must preserve the same
+# outcome rather than committing whatever the failed filter produced.
+$null = New-RecordFixture -Name 'casrefuse'
+[System.IO.File]::WriteAllText($script:EnvCache, "BOARD_ID='55'`n", (New-Object System.Text.UTF8Encoding($false)))
+$g22RefuseRc = Invoke-EnvCacheRewrite -What 'the 22t-h probe' -Build { param($before) throw 'nope' }
+Assert-Eq "22t-h (D289): a Build that throws reports failure" "False" "$g22RefuseRc"
+Assert-Eq "22t-h (D289): and the previous cache is untouched" "BOARD_ID='55'" "$((Get-EnvCacheLine) -join '|')"
+# Returning nothing is NOT a refusal - it is an empty line set, and it must
+# commit. PowerShell unrolls @() to $null on the way out of a scriptblock, so
+# reading "returned nothing" as "refused" would have made the claim block's
+# delete-on-empty branch unreachable. Throwing is the only refusal.
+$g22NullRc = Invoke-EnvCacheRewrite -What 'the 22t-h empty probe' -Build { param($before) return @() }
+Assert-Eq "22t-h (D289): a Build returning an empty set commits, it does not refuse" "True" "$g22NullRc"
+Assert-Eq "22t-h (D289): and the cache is now empty rather than untouched" "" "$((Get-EnvCacheLine) -join '|')"
+
+# 22t-i (D289): -DeleteWhenEmpty, the claim block's preserve-or-delete branch.
+# An empty result means "remove the cache" there, and an unguarded Remove-Item
+# discards a concurrent write more completely than any rewrite does - so the
+# delete is fingerprint-checked too.
+$null = New-RecordFixture -Name 'casdelete'
+[System.IO.File]::WriteAllText($script:EnvCache, "BOARD_ID='55'`n", (New-Object System.Text.UTF8Encoding($false)))
+$g22DelRc = Invoke-EnvCacheRewrite -What 'the 22t-i probe' -DeleteWhenEmpty -Build { param($before) return @() }
+Assert-Eq "22t-i (D289): an empty result with -DeleteWhenEmpty removes the cache" "True" "$g22DelRc"
+Assert-Eq "22t-i (D289): and the cache is gone" "False" "$(Test-Path $script:EnvCache)"
+# The same empty result WITHOUT the switch writes an empty cache instead of
+# deleting it - the distinction the other four callers rely on.
+[System.IO.File]::WriteAllText($script:EnvCache, "BOARD_ID='55'`n", (New-Object System.Text.UTF8Encoding($false)))
+$g22NoDelRc = Invoke-EnvCacheRewrite -What 'the 22t-i keep probe' -Build { param($before) return @() }
+Assert-Eq "22t-i (D289): without the switch an empty result still commits" "True" "$g22NoDelRc"
+Assert-Eq "22t-i (D289): and the cache survives as a file" "True" "$(Test-Path $script:EnvCache)"
+
+# 22t-j (D289): the DELETE half of -DeleteWhenEmpty under contention, which is
+# the assertion 22t-i above does not make. An empty result means "remove the
+# cache", and a bare Remove-Item discards a concurrent write more completely
+# than any rewrite does - so the delete is fingerprint-checked, and a write that
+# landed after our read must send the Build round again rather than be deleted.
+#
+# The second attempt is the whole point: the real caller's Build re-reads, finds
+# the concurrent writer's preservable records, and returns THEM - so the branch
+# writes instead of deleting. That is the end-to-end behaviour, not just "the
+# delete was skipped".
+#
+# MUTATION-TESTED: with the fingerprint re-check before Remove-Item deleted, the
+# cache is removed on attempt 1 and both survival assertions below go red.
+$null = New-RecordFixture -Name 'casdelrace'
+[System.IO.File]::WriteAllText($script:EnvCache, "BOARD_ID='55'`n", (New-Object System.Text.UTF8Encoding($false)))
+$script:g22DelAttempt = 0
+$g22DelRaceRc = Invoke-EnvCacheRewrite -What 'the 22t-j probe' -DeleteWhenEmpty -Build {
+    param($before)
+    $script:g22DelAttempt++
+    if ($script:g22DelAttempt -eq 1) {
+        # A second agent's claim lands after we read and decided "nothing to
+        # preserve" - its records are exactly what must not be deleted.
+        [System.IO.File]::WriteAllText($script:EnvCache,
+            "BOARD_ID='55'`nTASK_ID='777'`nTASK_IDENTIFIER='W777'`n",
+            [System.Text.Encoding]::GetEncoding(28591))
+        return @()
+    }
+    # Attempt 2 re-reads and finds the concurrent writer's records.
+    $recs = Split-EnvCacheRecord
+    if (-not $recs.Ok) { throw 'env cache ends inside a quoted value' }
+    return @($recs.Records)
+}
+Assert-Eq "22t-j (D289): the delete-path race actually fired" "2" "$($script:g22DelAttempt)"
+Assert-Eq "22t-j (D289): the rewrite reports success" "True" "$g22DelRaceRc"
+Assert-Eq "22t-j (D289): the cache was NOT deleted out from under the concurrent write" "True" `
+    "$(Test-Path $script:EnvCache)"
+$g22DelOut = (Get-EnvCacheLine) -join '|'
+Assert-Contains "22t-j (D289): the concurrent claim's TASK_ID survives the delete branch" "TASK_ID='777'" $g22DelOut
+Assert-Contains "22t-j (D289): and its TASK_IDENTIFIER survives too" "TASK_IDENTIFIER='W777'" $g22DelOut
 
 # 22t-c: helper semantics, including the zero-byte case that used to read as
 # absent. PowerShell unrolls a returned array, so a 0-byte cache came back as
@@ -7575,8 +7705,23 @@ $g23CodeLines = @(Get-Content -Path $HookScript | Where-Object { $_.TrimStart() 
 $g23WriteRefs = @($g23CodeLines | Where-Object { $_ -match 'Write-EnvCache' }).Count
 $g23WriteDefs = @($g23CodeLines | Where-Object { $_ -match 'function\s+Write-EnvCache' }).Count
 Assert-Eq "23f: Write-EnvCache is defined exactly once" "1" "$g23WriteDefs"
-Assert-Eq "23f: Write-EnvCache still has exactly 6 call sites (tripwire on new writers)" "6" `
+# (D289) The count moved from 6 to 1, and the tripwire got STRONGER rather than
+# weaker. Every rewrite now goes through Invoke-EnvCacheRewrite, which owns the
+# compare-and-swap retry, so Write-EnvCache has exactly ONE caller: the helper
+# itself. Any new DIRECT call is therefore a writer that skipped the guard, and
+# this fires on the first one instead of on the seventh. Do not bump this to 2
+# to make a new direct writer pass - route the writer through the helper, or
+# read the site and record at it why it cannot be.
+Assert-Eq "23f: Write-EnvCache has exactly 1 call site - the guard (tripwire on unguarded writers)" "1" `
     "$($g23WriteRefs - $g23WriteDefs)"
+# The completeness property the count above used to carry now lives here: these
+# are the rewrites, and a new one has to appear in this count. Same rule - go
+# read the new site and confirm its values are escaped before bumping.
+$g23CasRefs = @($g23CodeLines | Where-Object { $_ -match 'Invoke-EnvCacheRewrite' }).Count
+$g23CasDefs = @($g23CodeLines | Where-Object { $_ -match 'function\s+Invoke-EnvCacheRewrite' }).Count
+Assert-Eq "23f: Invoke-EnvCacheRewrite is defined exactly once" "1" "$g23CasDefs"
+Assert-Eq "23f: Invoke-EnvCacheRewrite still has exactly 5 call sites (tripwire on new writers)" "5" `
+    "$($g23CasRefs - $g23CasDefs)"
 
 }
 

@@ -288,6 +288,90 @@ function Write-EnvCache {
         return $false
     }
 }
+# (D289) The compare-and-swap RETRY, generalized out of Set-TaskRecord.
+#
+# D282 gave Set-TaskRecord this loop and left the other five Write-EnvCache
+# callers committing a whole-file replace against whatever they read whenever
+# they happened to read it. That closed one direction of the race and left the
+# reverse open: a claim-side or finalize-side rewrite could still discard a
+# record write committed inside ITS window. The loop is the same either way,
+# so it lives here once rather than being copied five more times - the drift
+# cost of copied guards is the lesson D288 wrote down two defects ago.
+#
+# $Build is invoked once per attempt with the fingerprint of the cache as it
+# was read for THAT attempt, and must return the complete replacement line set.
+# Re-invoking it is what makes a retry a fix rather than a repeat: the second
+# attempt re-reads and re-applies its filter against the CONCURRENT writer's
+# content, not against our stale snapshot.
+#
+# A $Build REFUSES BY THROWING, never by returning nothing. That is not a style
+# choice: PowerShell unrolls a returned array, so a Build returning @() arrives
+# here as $null, indistinguishable from a Build that returned nothing on
+# purpose - and one of the callers is the claim branch whose EMPTY result means
+# "delete the cache". Reading that as a refusal would have made the delete
+# unreachable. Throwing is also what the callers already did before D289, each
+# with its own `throw 'env cache ends inside a quoted value'` landing in an
+# enclosing catch, so the contract is the one they were written against.
+#
+# -DeleteWhenEmpty is for the one caller whose empty result means "remove the
+# cache" rather than "write nothing": the claim block's unparseable-response
+# branch. That delete is fingerprint-checked here rather than left bare, since
+# an unguarded Remove-Item discards a concurrent write more completely than any
+# rewrite does.
+function Invoke-EnvCacheRewrite {
+    param(
+        [scriptblock]$Build,
+        [string]$What = 'the env cache',
+        [switch]$DeleteWhenEmpty
+    )
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        $before = Get-EnvCacheRawByte
+        if ($before -is [string]) {
+            # 'unreadable' - the file exists but could not be read. Refuse
+            # rather than treat it as absent, for the reason Set-TaskRecord
+            # states at length: both executors rewrite the WHOLE file, so
+            # reading an unreadable cache as empty drops every other record.
+            [Console]::Error.WriteLine("stride-hook: could not read the env cache to rewrite $What; leaving the cache untouched")
+            return $false
+        }
+        $newArr = $null
+        try {
+            $built = & $Build $before
+            $newArr = @($built)
+        } catch {
+            # The Build's own guard said no. Refuse the write outright: no
+            # further attempts, previous cache untouched.
+            return $false
+        }
+        if ($DeleteWhenEmpty -and $newArr.Count -eq 0) {
+            $nowBytes = Get-EnvCacheRawByte
+            if (-not (Test-EnvCacheUnchanged -Expected $before -Actual $nowBytes)) {
+                if ($attempt -ge 3) {
+                    [Console]::Error.WriteLine("stride-hook: the env cache changed under $What on every attempt; leaving the concurrent write in place")
+                    return $false
+                }
+                continue
+            }
+            Remove-Item -Force -LiteralPath $EnvCache -ErrorAction SilentlyContinue
+            return $true
+        }
+        $rc = Write-EnvCache -Lines $newArr -ExpectBytes $before -CompareAndSwap
+        if ($rc -is [string] -and $rc -eq 'changed') {
+            if ($attempt -ge 3) {
+                # Refuse rather than clobber - three collisions is a writer we
+                # cannot keep up with, and overwriting its work is the exact
+                # loss this defect is about.
+                [Console]::Error.WriteLine("stride-hook: the env cache changed under $What on every attempt; leaving the concurrent write in place")
+                return $false
+            }
+            continue
+        }
+        return [bool]$rc
+    }
+}
+
 # ============================================================================
 # (W2101) The PER-TASK RECORD layer — the data half of the window/attribution
 # subsystem. Five families: TASK_BASE_REF, TASK_HEAD_REF, TASK_OWNED,
@@ -775,56 +859,31 @@ function Set-TaskRecord {
     # Each attempt re-reads, so a retry re-applies the delete-and-append against
     # the CONCURRENT writer's content rather than against our stale snapshot.
     # That is what makes the loop a fix and not just a repeat.
-    $attempt = 0
-    while ($true) {
-        $attempt++
-        $before = Get-EnvCacheRawByte
-        if ($before -is [string]) {
-            # 'unreadable' — the file exists but could not be read. Refuse, do
-            # not treat it as absent: bash's `grep -v ... || true` degrades to
-            # an empty set here, and since BOTH executors rewrite the whole file
-            # (see the D282 note in Invoke-FinalizeAfterDoing — the older claim
-            # that bash appends is false and was retracted), that degradation
-            # would silently drop every other record on either side.
-            [Console]::Error.WriteLine("stride-hook: could not read the env cache to record $Key; leaving the cache untouched")
-            return $false
-        }
+    # (D289) The retry loop D282 introduced here now lives in
+    # Invoke-EnvCacheRewrite, because D289 needed the same guard at four more
+    # sites and a sixth copy would have been the drift D288 spent a round on.
+    # The guarantee is unchanged: each attempt re-reads, so a retry re-applies
+    # the delete-and-append against the CONCURRENT writer's content rather than
+    # against our stale snapshot.
+    return (Invoke-EnvCacheRewrite -What $Key -Build {
+        param($before)
         $kept = @()
         if ($null -ne $before) {
-            try {
-                # (W2101) Read through the SAME byte-faithful splitter the reader
-                # uses. Get-Content here would re-terminate a CRLF line as LF and
-                # split a CR-bearing value, so a write would change what the reader
-                # — and bash — consider a record. Dropping the key is bash's
-                # `grep -v '^KEY='`: prefix match, so a CRLF-terminated line for
-                # this key goes too, exactly as it does there.
-                # (D280 r3) RECORD-aware, not line-aware: dropping this key must
-                # not dismember a multi-line record belonging to another key.
-                # The retention rule still governs: records are re-emitted through
-                # the splitter, never copied as raw lines.
-                $recs = Split-EnvCacheRecord
-                if (-not $recs.Ok) { throw 'env cache ends inside a quoted value' }
-                $kept = @($recs.Records |
-                    Where-Object { $_ -notmatch ('^' + [regex]::Escape($Key) + '=') })
-            } catch {
-                [Console]::Error.WriteLine("stride-hook: could not read the env cache to record $Key; leaving the cache untouched")
-                return $false
-            }
+            # (W2101) Read through the SAME byte-faithful splitter the reader
+            # uses. Get-Content here would re-terminate a CRLF line as LF and
+            # split a CR-bearing value, so a write would change what the reader
+            # - and bash - consider a record. Dropping the key is bash's
+            # `grep -v '^KEY='`: prefix match, so a CRLF-terminated line for
+            # this key goes too, exactly as it does there.
+            # (D280 r3) RECORD-aware, not line-aware: dropping this key must
+            # not dismember a multi-line record belonging to another key.
+            $recs = Split-EnvCacheRecord
+            if (-not $recs.Ok) { throw 'env cache ends inside a quoted value' }
+            $kept = @($recs.Records |
+                Where-Object { $_ -notmatch ('^' + [regex]::Escape($Key) + '=') })
         }
-        $new = @($kept) + @($Key + '=' + (ConvertTo-ShSingleQuoted -Value $Value))
-        $rc = Write-EnvCache -Lines $new -ExpectBytes $before -CompareAndSwap
-        if ($rc -is [string] -and $rc -eq 'changed') {
-            if ($attempt -ge 3) {
-                # Refuse rather than clobber. Three collisions is not contention,
-                # it is a writer we cannot keep up with, and overwriting its work
-                # is the exact loss this defect is about.
-                [Console]::Error.WriteLine("stride-hook: the env cache changed under $Key on every attempt; leaving the concurrent write in place")
-                return $false
-            }
-            continue
-        }
-        return [bool]$rc
-    }
+        return @(@($kept) + @($Key + '=' + (ConvertTo-ShSingleQuoted -Value $Value)))
+    })
 }
 
 # The four writers. Guards mirror bash exactly, including which families have
@@ -2126,8 +2185,17 @@ if ($HookName -eq 'before_doing') {
             # an attacker's fragment into a genuine cache line that bash sources.
             # Flattening our own writes does not help: this path never authored
             # the value. Every reader of this file must agree on what a line is.
+            # (D289) Under the compare-and-swap, and this is the direction the
+            # defect is named for: the read below and the write at the end of
+            # this branch used to be separated by the whole identity build, so a
+            # record write committed inside that window was discarded wholesale
+            # by the rename. Re-reading on retry is what makes it a fix - the
+            # second attempt re-runs the selector against the concurrent
+            # writer's cache, so its records are carried rather than replaced.
+            Invoke-EnvCacheRewrite -What 'the claim identity block' -Build {
+            param($before)
             $keptBaseRecords = @()
-            if (Test-Path $EnvCache) {
+            if ($null -ne $before) {
                 try {
                 # (W2103/D268+D274) Per-window eviction, replacing the
                 # tail-20 cap. No reserved key here: this branch appends no
@@ -2186,7 +2254,8 @@ if ($HookName -eq 'before_doing') {
             # the attribution engine's head/owned/base_at/narrowed records
             # survive a nested claim instead of dying at the next one.
             # -ExcludeTaskId drops THIS claim's own stale verdict, as bash does.
-            Write-EnvCache -Lines $cacheLines | Out-Null
+            return @($cacheLines)
+            } | Out-Null
         } elseif (Test-Path $EnvCache) {
             # (W1086/D142) No parseable response and no usable persisted
             # file: keep the existing TASK_ identity lines (a later
@@ -2243,6 +2312,14 @@ if ($HookName -eq 'before_doing') {
             # the re-emit lands.
             # (D280 r2) Pass-through re-emit — Get-EnvCacheLine for the same
             # reason as the claim block above: a CR must not manufacture a line.
+            # (D289) Guarded, and the delete half matters more than the
+            # rewrite half: an unguarded Remove-Item discards a concurrent
+            # write more completely than any rewrite does. -DeleteWhenEmpty
+            # fingerprint-checks immediately before removing, so the cache is
+            # only deleted if nothing landed since the read that found it
+            # empty of preservable records.
+            Invoke-EnvCacheRewrite -What 'the claim preserve-or-delete branch' -DeleteWhenEmpty -Build {
+            param($before)
             $g280recsU = Split-EnvCacheRecord
             # The same fail-closed guard the other five callers use, and it
             # matters MORE here: with Records empty this branch falls through to
@@ -2256,11 +2333,10 @@ if ($HookName -eq 'before_doing') {
                 ($_ -match '^TASK_(BASE_REF|HEAD_REF|OWNED|BASE_AT|NARROWED)_[A-Za-z0-9_]+=' -and
                  $_ -notmatch '^TASK_BASE_REF_(TRUSTED|OWNER|UNPROVEN)=')
             })
-            if ($preserved.Count -gt 0) {
-                Write-EnvCache -Lines $preserved | Out-Null
-            } else {
-                Remove-Item -Force $EnvCache -ErrorAction SilentlyContinue
-            }
+            # An empty result here means "remove the cache", which the helper
+            # performs under -DeleteWhenEmpty rather than leaving it bare.
+            return @($preserved)
+            } | Out-Null
         }
 
     } catch {
@@ -2726,7 +2802,10 @@ function Resolve-SectionBudget {
 # involves no shell parsing, so crafted values have no injection surface
 # here. Never echoes values to stdout/stderr.
 function Set-HookEnv {
-    param($EnvMap)
+    # (D289) -AlsoDropPattern lets a caller fold ITS own key drop into this
+    # function's single write, instead of making a second rewrite of its own.
+    # See the note in the filter below, and Set-AfterGoalEnv, its one user.
+    param($EnvMap, [string]$AlsoDropPattern)
 
     if ($null -eq $EnvMap -or $EnvMap.Count -eq 0) { return }
 
@@ -2772,21 +2851,38 @@ function Set-HookEnv {
     # newline flattening above means a cache line on this side is always a
     # whole record. Best-effort throughout: on any failure the export has
     # already succeeded and the previous cache is left intact.
+    # (D289) Under the compare-and-swap. This is the busiest unguarded caller -
+    # every one of the five hooks reaches it - so it is the one most likely to
+    # be the writer that discards a concurrent record write.
     try {
         $written = @($EnvMap.Keys)
-        $kept = @()
-        if (Test-Path $EnvCache) {
-            # (D280 r2) Pass-through re-emit — Get-EnvCacheLine, not
-            # Get-Content, so a CR-bearing line authored elsewhere cannot be
-            # split into fragments this filter then keeps and promotes.
-            $g280recsH = Split-EnvCacheRecord
-            if (-not $g280recsH.Ok) { throw 'env cache ends inside a quoted value' }
-            $kept = @($g280recsH.Records | Where-Object {
-                $idx = $_.IndexOf('=')
-                $idx -lt 1 -or ($written -notcontains $_.Substring(0, $idx))
-            })
-        }
-        Write-EnvCache -Lines ($kept + $cacheLines) | Out-Null
+        Invoke-EnvCacheRewrite -What 'the hook env' -Build {
+            param($before)
+            $kept = @()
+            if ($null -ne $before) {
+                # (D280 r2) Pass-through re-emit — Get-EnvCacheLine, not
+                # Get-Content, so a CR-bearing line authored elsewhere cannot be
+                # split into fragments this filter then keeps and promotes.
+                $g280recsH = Split-EnvCacheRecord
+                if (-not $g280recsH.Ok) { throw 'env cache ends inside a quoted value' }
+                $kept = @($g280recsH.Records | Where-Object {
+                    $idx = $_.IndexOf('=')
+                    if ($idx -lt 1) { return $true }
+                    $k = $_.Substring(0, $idx)
+                    if ($written -contains $k) { return $false }
+                    # (D289) The caller's own extra drop, applied in the SAME
+                    # filter as this one so the two become a single write under
+                    # a single compare-and-swap. Set-AfterGoalEnv used to make
+                    # its GOAL_* drop as a separate rewrite immediately before
+                    # calling here; guarding those two independently would have
+                    # been worse than leaving them alone, because a collision on
+                    # either half would abandon that half on its own.
+                    if ($AlsoDropPattern -and $k -match $AlsoDropPattern) { return $false }
+                    return $true
+                })
+            }
+            return @(@($kept) + @($cacheLines))
+        } | Out-Null
     } catch {
         # Best-effort cache write — export already succeeded.
     }
@@ -2879,23 +2975,20 @@ function Set-AfterGoalEnv {
     # records to a kill, which is a far worse outcome than the duplicate this
     # is cleaning up. The bash twin routes through write_env_cache for the
     # same reason.
-    if (Test-Path $EnvCache) {
-        try {
-            # (D280 r2) Pass-through re-emit — Get-EnvCacheLine, not Get-Content.
-            $g280recsG = Split-EnvCacheRecord
-            if (-not $g280recsG.Ok) { throw 'env cache ends inside a quoted value' }
-            $kept = @($g280recsG.Records |
-                Where-Object { $_ -notmatch '^(GOAL_ID|GOAL_IDENTIFIER|GOAL_TITLE|GOAL_DESCRIPTION)=' })
-            Write-EnvCache -Lines $kept | Out-Null
-        } catch {
-            # Best-effort: a failed filter leaves the prior lines in place,
-            # which over-reports duplicates but never corrupts a value.
-            # (D260) Set-HookEnv's own collapse still runs afterwards, so even
-            # this degraded path ends with one record per GOAL_* key.
-        }
-    }
-
-    Set-HookEnv -EnvMap $envMap
+    # (D289) This used to be a SEPARATE rewrite of its own, immediately before
+    # the Set-HookEnv call below - two whole-file replaces back to back, each
+    # reading the cache afresh. Guarding them independently would have made
+    # things worse rather than better: a collision on the first would abandon
+    # the GOAL_* drop while the second still committed, and a collision on the
+    # second would abandon the export while the drop had already landed. So the
+    # two are now ONE write under ONE compare-and-swap, with this function's
+    # drop expressed as an argument to the write that was already happening.
+    #
+    # The D257 guarantee this local guard exists to hold is unchanged, and so
+    # is the reason it is stated HERE rather than left to Set-HookEnv's own
+    # collapse: the pattern is named at this site, so a later refactor that
+    # narrowed the shared function would still have to come past this line.
+    Set-HookEnv -EnvMap $envMap -AlsoDropPattern '^(GOAL_ID|GOAL_IDENTIFIER|GOAL_TITLE|GOAL_DESCRIPTION)$'
 }
 
 # (W1453) Forward the server-supplied hook env for the routed hook. Applied
@@ -4627,9 +4720,17 @@ function Invoke-FinalizeBeforeDoing {
             }
             if (-not $ownerKey) { $owner = '' }
         }
+        # (D289) Under the compare-and-swap. This read and the write at the end
+        # of the block are separated by the whole preserve/evict/re-emit build,
+        # and Invoke-FinalizeBeforeDoing runs at claim time - exactly when a
+        # second agent's record write is most likely to land. Retrying re-runs
+        # the selector against the concurrent writer's cache, so its records are
+        # carried across the rebuild rather than replaced by it.
+        Invoke-EnvCacheRewrite -What 'the claim base-ref capture' -Build {
+        param($before)
         $preserved = @()
         $records = @()
-        if (Test-Path $EnvCache) {
+        if ($null -ne $before) {
             # (D280 r2) Pass-through re-emit — Get-EnvCacheLine, not Get-Content.
             $g280recsF = Split-EnvCacheRecord
             if (-not $g280recsF.Ok) { throw 'env cache ends inside a quoted value' }
@@ -4712,7 +4813,8 @@ function Invoke-FinalizeBeforeDoing {
             # (D280) Quoted, like the twin's `echo "TASK_BASE_REF_UNPROVEN='1'"`.
             $newLines = $newLines + ("TASK_BASE_REF_UNPROVEN=" + (ConvertTo-ShSingleQuoted -Value '1'))
         }
-        Write-EnvCache -Lines $newLines | Out-Null
+        return @($newLines)
+        } | Out-Null
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF', $baseRef, 'Process')
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_TRUSTED', '1', 'Process')
         if ($ownerKey) {

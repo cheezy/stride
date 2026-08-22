@@ -61,8 +61,24 @@ same byte**:
 
 A developer machine's ambient locale is a UTF-8 one. Swapping grep for a *regex*
 awk would have reproduced the defect exactly — same empty stdout, same swallowed
-exit code, new tool. Every cache filter is therefore written with `index`/`substr`
-only, and matches on the ASCII key before the first `=`, never on the value.
+exit code, new tool.
+
+**The precise rule, stated precisely because an absolute here would be wrong:**
+no cache filter matches a regex against `$0` or against a value. Matching is
+done with `index`/`substr` on the ASCII key before the first `=`. A regex
+applied to that *already-extracted* key is safe and two filters legitimately do
+it — the family test in `cache_record_start_lines` and the loader's charset gate,
+both of which need a regex to say what a well-formed key is. Verified rather
+than assumed:
+
+```sh
+awk '{ if (index($0,"=")>1) { key=substr($0,1,index($0,"=")-1);
+       if (key ~ /^[A-Za-z_][A-Za-z0-9_]*$/) printf "%s,", key } }' <cache>
+```
+
+returns every key, rc 0, under both `LC_ALL=C` and a UTF-8 locale, on a cache
+holding a byte >= 0x80 — because the subject of the match is the ASCII key, not
+the line. It is the subject that has to be clean, not the tool.
 
 ## The decision
 
@@ -208,3 +224,13 @@ an atomic `mv` — so the trigger is historical, not reachable from here. The
 refusal message names the cache path and says to remove that file, because the
 operator-visible symptom (attribution quietly refusing on every task) does not
 otherwise point at the cache.
+
+**Refused writes are not only record writes**, and this is the part an operator
+would otherwise be surprised by. The claim block's strip of
+`TASK_BASE_REF`/`_TRUSTED`/`_OWNER` also goes through `write_env_cache`, so on
+an unbalanced legacy cache that strip is refused too and the PREVIOUS window's
+shared base survives the claim. That is new: before the shape gate became
+unconditional, that write committed. It degrades to an attribution refusal via
+the owner stamp rather than to a wrong diff — the safe direction — but "the
+stale base was left behind" is a different symptom from "the write was refused",
+and both follow from the same unbalanced file.

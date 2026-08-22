@@ -1378,14 +1378,23 @@ task_id_from_command() {
 #
 # So swapping grep for a REGEX awk would have moved the defect rather than
 # fixed it: same silent-empty stdout, same exit-code-swallowing `|| true`, new
-# tool. Every cache filter below therefore matches with index/substr only.
+# tool. No cache filter below matches a regex against $0 or against a value;
+# matching is index/substr on the ASCII key before the first "=". A regex on an
+# already-EXTRACTED key is safe and two filters elsewhere legitimately use one
+# (the family test in cache_record_start_lines, and the loader charset gate) -
+# it is the subject of the match that has to be clean, not the tool.
 # LC_ALL=C would also make awk byte-oriented, and is deliberately NOT used:
 # D288 pitfall 1 rules it out, and index/substr needs no locale assumption at
 # all, which is the stronger property.
 drop_cache_key() {
   local _k="${1:-}"
   [ -n "$_k" ] || { cat "$ENV_CACHE" 2>/dev/null || true; return 0; }
-  awk -v k="$_k" 'substr($0, 1, length(k) + 1) != k "="' "$ENV_CACHE" 2>/dev/null || true
+  # (D288) Absent cache: a clean empty result. Present-but-unreadable: awk
+  # exits non-zero and that status PROPAGATES, exactly as in the two filters
+  # below. The `|| true` this used to end in made those two cases identical,
+  # and the count gate could not tell them apart either.
+  [ -f "$ENV_CACHE" ] || return 0
+  awk -v k="$_k" 'substr($0, 1, length(k) + 1) != k "="' "$ENV_CACHE" 2>/dev/null
 }
 
 # (D288) The key of a cache line, or "" when the line does not begin one.
@@ -1550,8 +1559,23 @@ write_env_cache() {
   if [ "$_floor" = 1 ] && [ -s "$ENV_CACHE" ]; then
     _prev=$(count_cache_records "$ENV_CACHE")
     _staged=$(count_cache_records "$_tmp")
-    if [ -n "$_prev" ] && [ -n "$_staged" ] && [ "$_prev" -gt 0 ] \
-       && [ "$_staged" -lt $((_prev - 1)) ]; then
+    # (D288) Refuse when the gate cannot JUDGE, not only when it judges
+    # against. A cache that exists but cannot be READ - root-owned, mode 000,
+    # an ACL, or unlinked mid-run - makes the filter ahead of this return
+    # nothing AND makes this count come back empty, and `[ -s ]` is satisfied
+    # by stat alone while `mv` still succeeds into a writable directory. An
+    # abstention here therefore committed the one-record cache the filter had
+    # produced, silently, at exit 0: the exact shape this gate exists to close,
+    # surviving at the one site the first fix did not reach. This strands no
+    # legacy cache - an unbalanced one is passed through by the filter and
+    # already refused by the shape gate above, before reaching here.
+    if [ -z "$_prev" ] || [ -z "$_staged" ]; then
+      rm -f "$_tmp" 2>/dev/null || true
+      printf 'stride-hook: REFUSING an env-cache write whose record counts could not be established; keeping the previous cache (%s)\n' \
+        "$ENV_CACHE" >&2
+      return 1
+    fi
+    if [ "$_prev" -gt 0 ] && [ "$_staged" -lt $((_prev - 1)) ]; then
       rm -f "$_tmp" 2>/dev/null || true
       printf 'stride-hook: REFUSING an env-cache write that would drop %s of %s records; keeping the previous cache\n' \
         "$((_prev - _staged))" "$_prev" >&2

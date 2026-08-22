@@ -2959,6 +2959,23 @@ d288_probe() {
         } > "$ENV_CACHE"
         printf 'kept=%s' "$(drop_shared_base_records | awk '{ p = index($0, "="); if (p > 1) printf "%s,", substr($0, 1, p - 1) }')"
         ;;
+      unreadable-cache)
+        # (D288 r2) The cache EXISTS but cannot be read. Both the filter and
+        # the count come back empty, `[ -s ]` is satisfied by stat alone, and
+        # `mv` would succeed into a writable directory — so an abstaining count
+        # gate committed a one-record cache over a populated one, silently, at
+        # exit 0. The previous cache must survive byte-for-byte.
+        d288_seed
+        d288_before=$(od -An -tx1 < "$ENV_CACHE" | tr -d ' \n')
+        chmod 000 "$ENV_CACHE" 2>/dev/null
+        { drop_cache_key "TASK_OWNED_9"
+          printf "TASK_OWNED_9='fresh'\n"; } | write_env_cache --preserve-from-cache 2>/dev/null
+        d288_rc=$?
+        chmod 644 "$ENV_CACHE" 2>/dev/null
+        d288_after=$(od -An -tx1 < "$ENV_CACHE" | tr -d ' \n')
+        if [ "$d288_before" = "$d288_after" ]; then d288_same=same; else d288_same=CHANGED; fi
+        printf 'rc=%s cache=%s' "$d288_rc" "$d288_same"
+        ;;
       filter-status)
         # The filters must PROPAGATE failure rather than returning empty at
         # exit 0 — the distinction the rebuild sites depend on to tell "this
@@ -3008,6 +3025,9 @@ assert_eq "7ij (D288): drop_task_window_records drops all five per-task families
 D288_R=$(d288_probe shared-filter)
 assert_eq "7ij (D288): drop_shared_base_records keeps every per-task window record" \
   "kept=AGENT_NAME,BOARD_NAME,TASK_BASE_REF_9,TASK_OWNED_9," "$D288_R"
+D288_R=$(d288_probe unreadable-cache)
+assert_eq "7ij (D288): an unreadable cache refuses the write and survives byte-for-byte" \
+  "rc=1 cache=same" "$D288_R"
 D288_R=$(d288_probe filter-status)
 assert_eq "7ij (D288): absent cache is a clean empty result; an unreadable one reports failure" \
   "missing_rc=0 unreadable_rc=nonzero" "$D288_R"

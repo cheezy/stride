@@ -1361,9 +1361,10 @@ task_id_from_command() {
 # so the fix is to stop asking grep. GNU grep on Linux remains unmeasured; with
 # grep out of this path that is no longer load-bearing here.
 #
-# A literal prefix comparison, not a regex, so a key never has to be escaped -
-# and deliberately NOT quote-aware, because the grep it replaces was not
-# either: this is a byte-for-byte behaviour swap, not a semantic change.
+# A literal prefix comparison, not a regex, so a key never has to be escaped.
+# (It was also NOT quote-aware at first, on the theory that a byte-for-byte
+# swap for the grep was the conservative choice. Round 3 showed that theory was
+# wrong - see the note above the filter itself - so it is quote-aware now.)
 #
 # REGEX-FREE ON PURPOSE, and this is the sharp edge of the whole fix. awk is
 # immune to grep's binary refusal; awk's REGEX engine is not immune to the same
@@ -1632,8 +1633,10 @@ write_env_cache() {
     # abstention here therefore committed the one-record cache the filter had
     # produced, silently, at exit 0: the exact shape this gate exists to close,
     # surviving at the one site the first fix did not reach. This strands no
-    # legacy cache - an unbalanced one is passed through by the filter and
-    # already refused by the shape gate above, before reaching here.
+    # legacy cache. Since r3 the filters are quote-aware and EXIT 1 on an
+    # unbalanced cache rather than passing it through, so a record write bails
+    # at its own source check and never arrives here; a rebuild site routes the
+    # same failure into _rebuild_ok. Either way the previous cache stands.
     if [ -z "$_prev" ] || [ -z "$_staged" ]; then
       rm -f "$_tmp" 2>/dev/null || true
       printf 'stride-hook: REFUSING an env-cache write whose record counts could not be established; keeping the previous cache (%s)\n' \
@@ -1778,7 +1781,15 @@ record_task_head_ref() {
   # only because awk happens to treat an unopenable input as fatal. Checking
   # here does not depend on that.
   local _body
-  _body=$(drop_cache_key "$_key") || return 0
+  # The bail is diagnosed, not silent. Bailing here skips write_env_cache
+  # entirely, so the sink gates' messages are unreachable from this site and a
+  # refusal would otherwise produce no stderr at all - which is the failure
+  # mode this whole defect is about, in miniature.
+  _body=$(drop_cache_key "$_key") || {
+    printf 'stride-hook: could not filter the env cache for %s; keeping the previous cache (%s)\n' \
+      "$_key" "$ENV_CACHE" >&2
+    return 0
+  }
   {
     [ -n "$_body" ] && printf '%s\n' "$_body"
     printf "%s='%s'\n" "$_key" "$_head"
@@ -1884,7 +1895,15 @@ record_task_owned() {
   # (D288 r3) Filter status consumed here, not left to the sink — see
   # record_task_head_ref.
   local _body
-  _body=$(drop_cache_key "$_key") || return 0
+  # The bail is diagnosed, not silent. Bailing here skips write_env_cache
+  # entirely, so the sink gates' messages are unreachable from this site and a
+  # refusal would otherwise produce no stderr at all - which is the failure
+  # mode this whole defect is about, in miniature.
+  _body=$(drop_cache_key "$_key") || {
+    printf 'stride-hook: could not filter the env cache for %s; keeping the previous cache (%s)\n' \
+      "$_key" "$ENV_CACHE" >&2
+    return 0
+  }
   {
     [ -n "$_body" ] && printf '%s\n' "$_body"
     printf "%s=%s\n" "$_key" "$(sq_escape "$_val")"
@@ -1933,15 +1952,21 @@ record_task_owned() {
 # The quote/escape state machine is `scan()`, byte-identical to the one in
 # apply_env_lines. Stated plainly because the first version of this comment
 # claimed it was "one idiom, three call sites", which it is not: awk has no
-# include, so this is a COPY, and it takes the number of byte-identical copies
-# of `scan()` in this file from four to six. That is a real cost — a fix to the
-# state machine has to land in six places — and it is accepted here rather than
-# hidden, because the alternative on offer was a second, differently-worded
-# scanner, which is the thing that actually goes wrong. Anyone changing one copy
-# must change all six; count them with `grep -c '^ *function scan(s,'`, which is
-# anchored so it does not match this sentence — an unanchored count returns
-# seven and the seventh is this comment. Saying otherwise would be the same
-# species of false comment this change corrects above read_task_record.
+# include, so this is a COPY. That is a real cost — a fix to the state machine
+# has to land in every copy — and it is accepted here rather than hidden,
+# because the alternative on offer was a second, differently-worded scanner,
+# which is the thing that actually goes wrong.
+#
+# (D288) The count was four, then six, and is now ELEVEN: D288 added five more
+# — the shape gate and count_cache_records in its first pass, and the three
+# quote-aware cache filters in its third. This comment used to name the number
+# and instruct "change all six", which had quietly become a trap that would
+# have left five sites behind. Do not trust a number written here: COUNT them,
+# with `grep -c '^ *function scan(s,'`, anchored so it does not match this
+# sentence. The right fix is to fold scan() into CACHE_KEY_AWK_FNS, which
+# already exists to stop exactly this drift and which five of these copies sit
+# immediately after loading — deliberately left as a separate change rather
+# than folded into a defect about grep, and named here so it is not lost.
 #
 # This is the property stride-hook.ps1 has carried since D280 via
 # Split-EnvCacheRecord, which groups physical lines into records before any regex
@@ -2642,7 +2667,15 @@ record_task_narrowed() {
   # (D288 r3) Filter status consumed here, not left to the sink — see
   # record_task_head_ref.
   local _body
-  _body=$(drop_cache_key "$_key") || return 0
+  # The bail is diagnosed, not silent. Bailing here skips write_env_cache
+  # entirely, so the sink gates' messages are unreachable from this site and a
+  # refusal would otherwise produce no stderr at all - which is the failure
+  # mode this whole defect is about, in miniature.
+  _body=$(drop_cache_key "$_key") || {
+    printf 'stride-hook: could not filter the env cache for %s; keeping the previous cache (%s)\n' \
+      "$_key" "$ENV_CACHE" >&2
+    return 0
+  }
   {
     [ -n "$_body" ] && printf '%s\n' "$_body"
     printf "%s=%s\n" "$_key" "$(sq_escape "$_val")"

@@ -2984,6 +2984,25 @@ d288_probe() {
         awk "/^TASK_OWNED_9='fresh'/{f=1} END{exit !f}" "$ENV_CACHE" 2>/dev/null && d288_fresh=yes
         printf 'rc=%s desc=%s stale=%s fresh=%s' "$d288_rc" "$d288_desc" "$d288_stale" "$d288_fresh"
         ;;
+      writer-source-bail)
+        # (D288 r4) Pins the SOURCE-side status check in the record writers,
+        # which nothing else covers: unreadable-cache below drives the pipeline
+        # by hand and so exercises the sink gates instead. Reverting
+        # `_body=$(drop_cache_key ...) || return 0` to a bare call would leave
+        # that probe green. record_task_narrowed is used because it has no
+        # base-ref precondition to satisfy first.
+        d288_seed
+        d288_before=$(od -An -tx1 < "$ENV_CACHE" | tr -d ' \n')
+        chmod 000 "$ENV_CACHE" 2>/dev/null
+        record_task_narrowed 9 yes > /dev/null 2>"$d288_dir/err"
+        d288_rc=$?
+        chmod 644 "$ENV_CACHE" 2>/dev/null
+        d288_after=$(od -An -tx1 < "$ENV_CACHE" | tr -d ' \n')
+        if [ "$d288_before" = "$d288_after" ]; then d288_same=same; else d288_same=CHANGED; fi
+        d288_warned=no
+        [ -s "$d288_dir/err" ] && d288_warned=yes
+        printf 'rc=%s cache=%s warned=%s' "$d288_rc" "$d288_same" "$d288_warned"
+        ;;
       unreadable-cache)
         # (D288 r2) The cache EXISTS but cannot be read. Both the filter and
         # the count come back empty, `[ -s ]` is satisfied by stat alone, and
@@ -3050,6 +3069,9 @@ assert_eq "7ij (D288): drop_task_window_records drops all five per-task families
 D288_R=$(d288_probe shared-filter)
 assert_eq "7ij (D288): drop_shared_base_records keeps every per-task window record" \
   "kept=AGENT_NAME,BOARD_NAME,TASK_BASE_REF_9,TASK_OWNED_9," "$D288_R"
+D288_R=$(d288_probe writer-source-bail)
+assert_eq "7ij (D288): a record writer skips the write and warns when its filter cannot read the cache" \
+  "rc=0 cache=same warned=yes" "$D288_R"
 D288_R=$(d288_probe crafted-description)
 assert_eq "7ij (D288): a crafted description cannot suppress a legitimate record write" \
   "rc=0 desc=yes stale=no fresh=yes" "$D288_R"

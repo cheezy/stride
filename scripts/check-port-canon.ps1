@@ -109,6 +109,17 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# (W2107 r2) $IsWindows was introduced in PowerShell Core 6. Under
+# Set-StrictMode -Version Latest a reference to it on Windows PowerShell 5.1 --
+# the host stride-hook.sh actually execs -- is a TERMINATING error, so the
+# self-test would abort at its first platform-conditional block instead of
+# printing the skip reasons this file promises. Nothing would be falsely green,
+# but the coverage ledger would never print on the one host the HONEST LIMITS
+# section says matters most. check-ps1-compat.sh gates 7-only SYNTAX and CMDLET
+# names by AST and cannot see an automatic variable, so this had to be caught
+# by reading rather than by the gate.
+$script:OnWindows = ([System.IO.Path]::DirectorySeparatorChar -ceq '\')
+
 $script:Self = $PSCommandPath
 $script:RepoRoot = Split-Path -Parent (Split-Path -Parent $script:Self)
 
@@ -131,8 +142,26 @@ $PortsSet = $false
 for ($i = 0; $i -lt $args.Count; $i++) {
     $a = [string]$args[$i]
     switch -CaseSensitive -Regex ($a) {
-        '^(-Canon|--canon)$'             { $i++; $Canon = [string]$args[$i]; $CanonSet = $true; break }
-        '^(-PortsParent|--ports-parent)$' { $i++; $PortsParent = [string]$args[$i]; $PortsSet = $true; break }
+        # (W2107 r2) The arity guard the bash half has and this did not. As the
+        # LAST argument, `-Canon` incremented past the end and indexed $args --
+        # which under Set-StrictMode -Version Latest is a TERMINATING error, so
+        # the process exited 1 with a PowerShell stack trace instead of 2 with
+        # this half's message. In this contract exit 1 means "drift found", so a
+        # mistyped command line reported drift.
+        '^(-Canon|--canon)$' {
+            if ($i + 1 -ge $args.Count) {
+                [Console]::Error.WriteLine('GATE ERROR: --canon needs a path')
+                exit 2
+            }
+            $i++; $Canon = [string]$args[$i]; $CanonSet = $true; break
+        }
+        '^(-PortsParent|--ports-parent)$' {
+            if ($i + 1 -ge $args.Count) {
+                [Console]::Error.WriteLine('GATE ERROR: --ports-parent needs a directory')
+                exit 2
+            }
+            $i++; $PortsParent = [string]$args[$i]; $PortsSet = $true; break
+        }
         '^(-SelfTest|--self-test)$'      { $SelfTest = $true; break }
         '^(-h|-Help|--help)$'            { $ShowHelp = $true; break }
         default {
@@ -213,6 +242,23 @@ function Split-CanonLines {
 # applicable to my implementation" would be exactly the kind of local reasoning
 # that makes a pair stop being a pair.
 # --------------------------------------------------------------------------
+# (W2107 r2) A KNOWN GAP, recorded rather than closed here, because closing it
+# in one half would BREAK the pair. The refusal covers tab and newline -- the
+# bash half's record separators -- and not the rest of the control range, so a
+# canon string carrying ESC or a bare CR passes both halves and is printed
+# verbatim into a terminal report. A value shaped like "alpha<ESC>[1A<ESC>[2K"
+# can overwrite the line above it, and the lines above are where "verdict:
+# NEEDS WORK" and "GATE ERROR" are emitted: the drift a reviewer is reading the
+# report to find can be erased from the screen while the exit code still says 1.
+#
+# Widening this refusal to [\x00-\x1F\x7F-\x9F] is the right fix and it must
+# land in BOTH halves in one change. Doing it here alone would make a canon
+# carrying ESC halt this half at exit 2 while the bash half scanned it and
+# exited 0 or 1 -- a real input on which the pair disagrees, which is exactly
+# what acceptance criterion 1 forbids and what W2107's own cross-verification
+# would catch. W2107's pitfall 4 also forbids changing the .sh half's
+# behaviour while pairing it. So: filed as the follow-up it is, not smuggled in
+# as a one-sided hardening.
 function Assert-SafeCanonString {
     param([string]$Value, [string]$What)
     if ($Value -cmatch "[`t`n]") {
@@ -262,6 +308,51 @@ $script:SupportedSchema = 1
 $script:EntryKeys = @('id','version','status','superseded_by','provenance','defects','check','check_hint','applies_to')
 $script:VariantVocabulary = @('','four-section-keys','five-section-keys','lib-matrix')
 
+# (W2107 r2) The text the BASH half compares against. Its awk tokenizer keeps
+# a json literal as its source text, so `"exists": false` reaches its test as
+# the four characters `false`. ConvertFrom-Json gives a [bool] instead, and
+# [string]$false is "False" -- so a direct string compare against 'false' would
+# never match, and the exists:false branch would be unreachable. Mapping the
+# boolean back to its literal text keeps the two halves comparing the same
+# thing; every other value is passed through unchanged, so a malformed "yes"
+# or a quoted "False" still lands on the same branch in both halves.
+function ConvertTo-CanonTokenText {
+    param($Value)
+    if ($Value -is [bool]) {
+        if ($Value) { return 'true' }
+        return 'false'
+    }
+    return [string]$Value
+}
+
+# (W2107 r2) CASE-SENSITIVE KEY RETRIEVAL. PowerShell member access -- $p.id --
+# is case-insensitive by construction, so a registry writing "ID"/"DIR"/
+# "EXISTS" produced a full clean fleet report at exit 0 where the bash half's
+# awk tokenizer keys on the literal text ports.0.id, finds it absent, and halts
+# at exit 2. The entry-level keys were already guarded this way; the registry
+# ports and applies_to rows were not, and those carry exactly the port ids and
+# row statuses the header's case-sensitivity claim is about. The claim guarded
+# their COMPARISON and not their RETRIEVAL, which is the more dangerous half.
+#
+# Returns $null when the key is absent in its exact spelling, so a caller can
+# tell "absent" from "present and empty" -- the same distinction the rest of
+# this file keeps everywhere else.
+function Get-JsonMember {
+    param($Object, [string]$Name)
+    foreach ($prop in $Object.psobject.Properties) {
+        if ($prop.Name -ceq $Name) { return $prop.Value }
+    }
+    return $null
+}
+
+function Test-JsonMember {
+    param($Object, [string]$Name)
+    foreach ($prop in $Object.psobject.Properties) {
+        if ($prop.Name -ceq $Name) { return $true }
+    }
+    return $false
+}
+
 function ConvertFrom-Canon {
     param([string]$Path)
 
@@ -283,7 +374,7 @@ function ConvertFrom-Canon {
     for ($n = 0; $n -lt $lines.Count; $n++) {
         $raw = $lines[$n]
         $line = $raw -replace '^[ \t]+', ''
-        if ($line.StartsWith('```')) {
+        if ($line.StartsWith('```', [System.StringComparison]::Ordinal)) {
             $run = 0
             $rest = $line
             while ($rest.Length -gt 0 -and $rest[0] -ceq '`') { $rest = $rest.Substring(1); $run++ }
@@ -309,7 +400,11 @@ function ConvertFrom-Canon {
             }
         }
         if ($inJson) { $null = $blob.Append($raw).Append("`n") }
-        if (-not $inFence -and $raw -match $anchorDef) { $nDefs++ }
+        # -cmatch. This is the one production pattern carrying letters
+        # (canon:, v), and a case-insensitive match counted a prose line like
+        # <!-- CANON:example V9 --> that awk's ~ operator in the bash half does
+        # not -- tripping the anchor-count backstop at exit 2 on one side only.
+        if (-not $inFence -and $raw -cmatch $anchorDef) { $nDefs++ }
     }
     if ($inFence) { Stop-Gate 'unclosed fence at end of canon' }
 
@@ -335,17 +430,24 @@ function ConvertFrom-Canon {
             if ($b.Num -ne 1) {
                 Stop-Gate ("registry block found at position " + $b.Num + "; the registry must be the first json block")
             }
-            if ([string]$obj.canon_schema_version -cne [string]$script:SupportedSchema) {
-                Stop-Gate ("canon_schema_version " + $obj.canon_schema_version + " is not the schema this checker understands (" + $script:SupportedSchema + "); refusing to parse optimistically")
+            $schemaVal = [string](Get-JsonMember -Object $obj -Name 'canon_schema_version')
+            if ($schemaVal -cne [string]$script:SupportedSchema) {
+                Stop-Gate ("canon_schema_version " + $schemaVal + " is not the schema this checker understands (" + $script:SupportedSchema + "); refusing to parse optimistically")
             }
-            $ports = @($obj.ports)
+            # Get-JsonMember returns $null for an absent key rather than
+            # throwing, so a registry block carrying canon_schema_version and no
+            # ports key halts here with the bash half's message instead of
+            # dying on a StrictMode non-existent-property access.
+            $portsRaw = Get-JsonMember -Object $obj -Name 'ports'
+            $ports = @()
+            if ($null -ne $portsRaw) { $ports = @($portsRaw) }
             if ($ports.Count -eq 0) { Stop-Gate 'registry carries no ports' }
             $plist = New-Object System.Collections.Generic.List[object]
             for ($i = 0; $i -lt $ports.Count; $i++) {
                 $p = $ports[$i]
-                $portId = [string]$p.id
+                $portId = [string](Get-JsonMember -Object $p -Name 'id')
                 if (-not $portId) { Stop-Gate ("registry port " + $i + " has no id") }
-                $pdir = [string]$p.dir
+                $pdir = [string](Get-JsonMember -Object $p -Name 'dir')
                 if ($pdir -cnotmatch '^[A-Za-z0-9._-]+$') {
                     Stop-Gate ("registry port ""$portId"" has dir ""$pdir"" which is not a single path segment matching ^[A-Za-z0-9._-]+$")
                 }
@@ -356,12 +458,18 @@ function ConvertFrom-Canon {
                     Stop-Gate ("registry port ""$portId"" has dir ""$pdir"", which is a directory traversal rather than a port directory")
                 }
                 Assert-SafeCanonString -Value $portId -What 'port id'
-                Assert-SafeCanonString -Value ([string]$p.family) -What 'port family'
+                Assert-SafeCanonString -Value ([string](Get-JsonMember -Object $p -Name 'family')) -What 'port family'
                 Assert-SafeCanonString -Value $pdir -What 'port dir'
                 $plist.Add([pscustomobject]@{
-                    Id = $portId; Family = [string]$p.family; Dir = $pdir
-                    Exists = ([string]$p.exists -ceq 'True' -or [string]$p.exists -ceq 'true')
-                    Note = [string]$p.note
+                    Id = $portId; Family = [string](Get-JsonMember -Object $p -Name 'family'); Dir = $pdir
+                    # (W2107 r2) NEGATIVE, matching `[ "$pexists" = "false" ]`
+                    # in the bash half. Testing positively for true/True sent a
+                    # malformed value such as "yes" -- or the string "False" --
+                    # down the opposite branch from the bash half at both the
+                    # exists/status consistency halt and the
+                    # deferred-because-unscaffolded path.
+                    Exists = (-not ((ConvertTo-CanonTokenText -Value (Get-JsonMember -Object $p -Name 'exists')) -ceq 'false'))
+                    Note = [string](Get-JsonMember -Object $p -Name 'note')
                 })
             }
             $registry = $plist
@@ -373,50 +481,50 @@ function ConvertFrom-Canon {
                 Stop-Gate 'first json block carries an id but no canon_schema_version; the registry must come first'
             }
             if ($null -eq $registry) { Stop-Gate 'no registry block found in the canon' }
-            $eid = [string]$obj.id
+            $eid = [string](Get-JsonMember -Object $obj -Name 'id')
             if ($eid -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]*$') {
                 Stop-Gate ("entry id ""$eid"" is outside the anchor charset ^[A-Za-z0-9][A-Za-z0-9_-]`$; an id that cannot appear in an anchor is meaningless to the canon")
             }
             foreach ($k in $script:EntryKeys) {
-                $present = $false
-                foreach ($nm in $names) { if ($nm -ceq $k) { $present = $true } }
-                if (-not $present) { Stop-Gate ("entry ""$eid"" is missing required key ""$k""") }
+                if (-not (Test-JsonMember -Object $obj -Name $k)) {
+                    Stop-Gate ("entry ""$eid"" is missing required key ""$k""")
+                }
             }
-            $status = [string]$obj.status
+            $status = [string](Get-JsonMember -Object $obj -Name 'status')
             if ($status -cne 'active' -and $status -cne 'superseded') {
                 Stop-Gate ("entry ""$eid"" has status ""$status"" outside the closed vocabulary active|superseded")
             }
-            $prov = [string]$obj.provenance
+            $prov = [string](Get-JsonMember -Object $obj -Name 'provenance')
             if ($prov -cne 'quoted' -and $prov -cne 'synthesized-from-shipped-fixes') {
                 Stop-Gate ("entry ""$eid"" has provenance ""$prov"" outside its closed vocabulary")
             }
-            $check = [string]$obj.check
+            $check = [string](Get-JsonMember -Object $obj -Name 'check')
             if ($check -cne 'anchor' -and $check -cne 'property') {
                 Stop-Gate ("entry ""$eid"" has check ""$check"" outside the closed vocabulary anchor|property")
             }
-            $ver = [string]$obj.version
+            $ver = [string](Get-JsonMember -Object $obj -Name 'version')
             if ($ver -cnotmatch '^[0-9]+$') { Stop-Gate ("entry ""$eid"" has non-integer version ""$ver""") }
-            if (@($obj.defects).Count -eq 0) { Stop-Gate ("entry ""$eid"" has an empty defects array") }
+            if (@(Get-JsonMember -Object $obj -Name 'defects').Count -eq 0) { Stop-Gate ("entry ""$eid"" has an empty defects array") }
             Assert-SafeCanonString -Value $eid -What 'entry id'
             Assert-SafeCanonString -Value $ver -What 'entry version'
-            Assert-SafeCanonString -Value ([string]$obj.check_hint) -What 'check_hint'
+            Assert-SafeCanonString -Value ([string](Get-JsonMember -Object $obj -Name 'check_hint')) -What 'check_hint'
 
-            $rows = @($obj.applies_to)
+            $rows = @(Get-JsonMember -Object $obj -Name 'applies_to')
             if ($rows.Count -ne $registry.Count) {
                 Stop-Gate ("entry ""$eid"" lists " + $rows.Count + " applies_to rows but the registry has " + $registry.Count + " ports; every entry must list all ports in registry order")
             }
             $applies = New-Object System.Collections.Generic.List[object]
             for ($i = 0; $i -lt $rows.Count; $i++) {
                 $r = $rows[$i]
-                $rp = [string]$r.port
+                $rp = [string](Get-JsonMember -Object $r -Name 'port')
                 if ($rp -cne $registry[$i].Id) {
                     Stop-Gate ("entry ""$eid"" applies_to row " + $i + " names port ""$rp"" but registry position " + $i + " is """ + $registry[$i].Id + """; rows must follow registry order")
                 }
-                $rs = [string]$r.status
+                $rs = [string](Get-JsonMember -Object $r -Name 'status')
                 if ($rs -cne 'required' -and $rs -cne 'not_applicable' -and $rs -cne 'deferred') {
                     Stop-Gate ("entry ""$eid"" row ""$rp"" has status ""$rs"" outside the closed vocabulary required|not_applicable|deferred")
                 }
-                $rv = [string]$r.variant
+                $rv = [string](Get-JsonMember -Object $r -Name 'variant')
                 $variantOk = $false
                 foreach ($v in $script:VariantVocabulary) { if ($rv -ceq $v) { $variantOk = $true } }
                 if (-not $variantOk) {
@@ -435,7 +543,7 @@ function ConvertFrom-Canon {
             }
             $entries.Add([pscustomobject]@{
                 Id = $eid; Version = [int]$ver; Status = $status; Provenance = $prov
-                Check = $check; CheckHint = [string]$obj.check_hint; AppliesTo = $applies
+                Check = $check; CheckHint = [string](Get-JsonMember -Object $obj -Name 'check_hint'); AppliesTo = $applies
             })
             continue
         }
@@ -495,6 +603,23 @@ function Get-PortMarkdown {
         }
     }
 
+    # (W2107 r2) WALK ORDER IS UNSPECIFIED IN BOTH HALVES, and that is a shared
+    # latent divergence rather than one this port introduced. This drives a LIFO
+    # stack over Get-ChildItem (name-ordered per directory); the bash half
+    # consumes find's readdir order. Neither sorts. Where a port anchors ONE
+    # rule id in more than one file, or more than one file carries a fence
+    # defect, "first hit" and the order of the joined defect list can differ
+    # between the halves -- and between two runs of the bash half on different
+    # filesystems.
+    #
+    # Not fixed here, deliberately: sorting this side would make it
+    # deterministic but no closer to the other side, and W2107 pitfall 4 forbids
+    # changing the bash half while pairing it. Sorting BOTH is the real fix and
+    # is one change touching both files -- the third such follow-up this task
+    # found, with the control-character refusal and the .md case-sensitivity.
+    # Today's canon anchors each id once per port, so it is unreachable on the
+    # real fleet; it is written down because "unreachable today" is a fact about
+    # the canon, not about this code.
     $stack = New-Object System.Collections.Generic.Stack[string]
     $stack.Push($startPath)
     while ($stack.Count -gt 0) {
@@ -503,14 +628,35 @@ function Get-PortMarkdown {
         try { $kids = @(Get-ChildItem -LiteralPath $dir -Force) } catch { $result.Ok = $false; continue }
         foreach ($k in $kids) {
             $rel = $k.FullName
-            if ($rel.StartsWith($startPath)) { $rel = $rel.Substring($startPath.Length).TrimStart([char]'/', [char]'\') }
+            if ($rel.StartsWith($startPath, [System.StringComparison]::Ordinal)) { $rel = $rel.Substring($startPath.Length).TrimStart([char]'/', [char]'\') }
             # A path carrying a tab or newline cannot be reported safely, and
             # the bash half refuses the whole port on it rather than printing a
             # row that could be misread as two.
             if ($rel -cmatch "[`t`n]") { $result.Unrepresentable = $true; $result.Ok = $false; continue }
             $isLink = [bool]($k.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
             $isDir = [bool]($k.PSIsContainer)
-            $isMd = $k.Name.EndsWith('.md')
+            # (W2107 r2) ORDINAL and CASE-SENSITIVE, matching the bash half
+            # exactly -- and this is a case where the obviously-safer-looking
+            # change is the wrong one, so the reasoning is recorded rather than
+            # the conclusion.
+            #
+            # A security pass argued for OrdinalIgnoreCase: NOTES.MD is markdown
+            # to every renderer and every human, so an ordinal test makes an
+            # UNEXPECTED anchor parked in it invisible. That is a REAL gap. It
+            # was implemented, and then reverted, because it is a gap in BOTH
+            # halves and closing it in one breaks the pair. Measured, not
+            # assumed: `find -H <dir> -type f -name '*.md'` does not match
+            # NOTES.MD even on a case-insensitive macOS volume, because fnmatch
+            # is case-sensitive regardless of the filesystem. So an
+            # OrdinalIgnoreCase test here scans a file the bash half never sees
+            # -- the two disagree on a real input, which is precisely what
+            # acceptance criterion 1 forbids, and W2107 pitfall 4 forbids fixing
+            # it by changing the bash half while pairing it.
+            #
+            # Filed as a joint follow-up, alongside the control-character gap
+            # above Assert-SafeCanonString. Both need one change touching both
+            # halves; neither is a one-sided hardening.
+            $isMd = $k.Name.EndsWith('.md', [System.StringComparison]::Ordinal)
             if ($isLink) {
                 if ($isDir -or $isMd) {
                     $result.Items.Add([pscustomobject]@{ Full = $k.FullName; Rel = $rel; Disposition = 'refuse' })
@@ -520,7 +666,22 @@ function Get-PortMarkdown {
                 continue
             }
             if ($isDir) {
-                if ($k.Name -ceq 'node_modules') { continue }
+                # (W2107 r2) All FOUR of the bash half's prunes, not just this
+                # one. It excludes '*/.git/*', '*/node_modules/*', '*/deps/*'
+                # and '*/_build/*'; pruning only node_modules meant any .md
+                # under .git, deps or _build was scanned by this half and
+                # invisible to that one -- a dependency README carrying an
+                # anchor becomes ok or UNEXPECTED here and MISSING there, the
+                # walked-file count differs, and a fence defect in a vendored
+                # README exits 1 here and 0 there. Latent on today's fleet,
+                # which is exactly why the fleet-scan diff could not catch it.
+                #
+                # Case-SENSITIVE, for the same measured reason as the .md
+                # test: the bash half's `-not -path '*/node_modules/*'` does not
+                # prune Node_Modules, so pruning it here would make this half
+                # skip a tree the other one walks.
+                if ($k.Name -ceq 'node_modules' -or $k.Name -ceq '.git' -or
+                    $k.Name -ceq 'deps' -or $k.Name -ceq '_build') { continue }
                 $stack.Push($k.FullName)
                 continue
             }
@@ -594,8 +755,8 @@ function Test-FenceDefect {
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $stripped = $lines[$i] -replace '^[ \t]+', ''
         $fchar = ''
-        if ($stripped.StartsWith('```')) { $fchar = '`' }
-        elseif ($stripped.StartsWith('~~~')) { $fchar = '~' }
+        if ($stripped.StartsWith('```', [System.StringComparison]::Ordinal)) { $fchar = '`' }
+        elseif ($stripped.StartsWith('~~~', [System.StringComparison]::Ordinal)) { $fchar = '~' }
         else { continue }
         $rest = $stripped
         $run = 0
@@ -665,7 +826,17 @@ function Get-AnchorLiteral {
     return "<!-- canon:$Id v$Version -->"
 }
 
-$script:PropertyImpl = @{ 'fence-nesting' = '1' }
+# (W2107 r2) An ORDINAL-comparer dictionary, not @{}. A PowerShell hashtable
+# literal compares keys case-INSENSITIVELY, and the key looked up here is a
+# canon-controlled rule id whose validator admits ^[A-Za-z0-9][A-Za-z0-9_-]*$ --
+# so "Fence-Nesting" is a legal id that resolved to the fence-nesting
+# implementation and reported "property verified across N markdown files" at
+# exit 0, where the bash half's case-based lookup finds nothing and reports
+# UNVERIFIABLE at exit 1. A false green, in the exact direction this file
+# exists to prevent, reached through the container rather than the comparison:
+# the -cne guarding the version below is correct and was simply never reached.
+$script:PropertyImpl = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+$script:PropertyImpl.Add('fence-nesting', '1')
 
 $script:Catalogs = @(
     'stride-codex-marketplace/plugins/stride-codex',
@@ -1254,14 +1425,15 @@ function Invoke-SelfTestBody {
     St-Refute "a leading-dash anchor id never reaches grep as an option" "No such file or directory" $r.Output
 
     # --- an unreadable tree must be UNVERIFIABLE, never "property verified"
-    if ($IsWindows) {
+    if ($script:OnWindows) {
         St-Skip "an unreadable subtree is never reported as property verified" "chmod has no Windows equivalent here"
     } else {
         New-StDir @("$Tmp/perm/alpha/locked", "$Tmp/perm/beta")
         Set-StFile -Path "$Tmp/perm/beta/b.md" -Text "clean`n"
-        & chmod 000 "$Tmp/perm/alpha/locked" 2>$null
-        $r = Invoke-StRun -Canon "$Tmp/pg.md" -PortsParent "$Tmp/perm"
-        & chmod 755 "$Tmp/perm/alpha/locked" 2>$null
+        try {
+            & chmod 000 "$Tmp/perm/alpha/locked" 2>$null
+            $r = Invoke-StRun -Canon "$Tmp/pg.md" -PortsParent "$Tmp/perm"
+        } finally { & chmod 755 "$Tmp/perm/alpha/locked" 2>$null }
         $alphaOnly = Get-StPortSection -Output $r.Output -Port 'alpha'
         St-Refute "an unreadable subtree is never reported as property verified" "ok: fence-nesting" $alphaOnly
     }
@@ -1292,7 +1464,7 @@ function Invoke-SelfTestBody {
 
     # --- an unreadable subtree must make the ANCHOR pass unverifiable too, not
     # --- only the property pass: a short file list hides UNEXPECTED anchors.
-    if ($IsWindows) {
+    if ($script:OnWindows) {
         St-Skip "an unreadable subtree makes the anchor pass UNVERIFIABLE" "chmod has no Windows equivalent here"
         St-Skip "a partially-enumerated port is never reported clean" "chmod has no Windows equivalent here"
     } else {
@@ -1300,9 +1472,10 @@ function Invoke-SelfTestBody {
         Set-StFile -Path "$Tmp/aperm/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n"
         Set-StFile -Path "$Tmp/aperm/beta/b.md"  -Text "<!-- canon:rule-one v1 -->`n"
         Set-StFile -Path "$Tmp/aperm/alpha/locked/hidden.md" -Text "<!-- canon:ghost v1 -->`n"
-        & chmod 000 "$Tmp/aperm/alpha/locked" 2>$null
-        $r = Invoke-StRun -Canon "$Tmp/k.md" -PortsParent "$Tmp/aperm"
-        & chmod 755 "$Tmp/aperm/alpha/locked" 2>$null
+        try {
+            & chmod 000 "$Tmp/aperm/alpha/locked" 2>$null
+            $r = Invoke-StRun -Canon "$Tmp/k.md" -PortsParent "$Tmp/aperm"
+        } finally { & chmod 755 "$Tmp/aperm/alpha/locked" 2>$null }
         St-Assert "an unreadable subtree makes the anchor pass UNVERIFIABLE" 1 $r.ExitCode "refusing to judge anchors on a partial file list" $r.Output
         St-Refute "a partially-enumerated port is never reported clean" "verdict: clean" (Get-StPortSection -Output $r.Output -Port 'alpha')
     }
@@ -1343,6 +1516,7 @@ function Invoke-SelfTestBody {
     $r = Invoke-StRun -Canon "$Tmp/k.md" -PortsParent "$Tmp/odd"
     St-Assert "odd but representable filenames are scanned, not refused" 0 $r.ExitCode "ok: rule-one v1 at -e.md" $r.Output
 
+
     # ======================================================================
     # ROUND 5 (W2108). One root shape behind all of these: enumeration
     # SUCCEEDING was read as "the tree was examined", so every read failure
@@ -1354,7 +1528,7 @@ function Invoke-SelfTestBody {
 
     # --- a port owing NOTHING still owes an UNEXPECTED sweep, so an
     # --- unenumerable tree must refuse even when no entry is required.
-    if ($IsWindows) {
+    if ($script:OnWindows) {
         St-Skip "an unenumerable port with no required rule still fails the gate" "chmod has no Windows equivalent here"
         St-Skip "an unenumerable port never exits clean for want of a required rule" "chmod has no Windows equivalent here"
     } else {
@@ -1362,15 +1536,16 @@ function Invoke-SelfTestBody {
         New-StDir @("$Tmp/nax/alpha", "$Tmp/nax/beta/locked")
         Set-StFile -Path "$Tmp/nax/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n"
         Set-StFile -Path "$Tmp/nax/beta/locked/hidden.md" -Text "<!-- canon:rule-one v1 -->`n"
-        & chmod 000 "$Tmp/nax/beta/locked" 2>$null
-        $r = Invoke-StRun -Canon "$Tmp/na.md" -PortsParent "$Tmp/nax"
-        & chmod 755 "$Tmp/nax/beta/locked" 2>$null
+        try {
+            & chmod 000 "$Tmp/nax/beta/locked" 2>$null
+            $r = Invoke-StRun -Canon "$Tmp/na.md" -PortsParent "$Tmp/nax"
+        } finally { & chmod 755 "$Tmp/nax/beta/locked" 2>$null }
         St-Assert "an unenumerable port with no required rule still fails the gate" 1 $r.ExitCode "refusing to judge any cell on a partial file list" $r.Output
         St-Refute "an unenumerable port never exits clean for want of a required rule" "(?m)^clean repos:.*beta" $r.Output
     }
 
     # --- an unreadable FILE is not a clean file.
-    if ($IsWindows) {
+    if ($script:OnWindows) {
         St-Skip "an unreadable file is never counted as property verified" "chmod has no Windows equivalent here"
         St-Skip "an unreadable file never yields a property-verified cell" "chmod has no Windows equivalent here"
         St-Skip "an unreadable file makes the anchor pass UNVERIFIABLE" "chmod has no Windows equivalent here"
@@ -1380,9 +1555,10 @@ function Invoke-SelfTestBody {
         New-StDir @("$Tmp/pu/alpha", "$Tmp/pu/beta")
         Set-StFile -Path "$Tmp/pu/beta/b.md" -Text "clean`n"
         Set-StFile -Path "$Tmp/pu/alpha/bad.md" -Text "# t`n`n${f3}markdown`n## s`n`n${f3}json`n{}`n$f3`n`n$f3`n"
-        & chmod 000 "$Tmp/pu/alpha/bad.md" 2>$null
-        $r = Invoke-StRun -Canon "$Tmp/pu.md" -PortsParent "$Tmp/pu"
-        & chmod 644 "$Tmp/pu/alpha/bad.md" 2>$null
+        try {
+            & chmod 000 "$Tmp/pu/alpha/bad.md" 2>$null
+            $r = Invoke-StRun -Canon "$Tmp/pu.md" -PortsParent "$Tmp/pu"
+        } finally { & chmod 644 "$Tmp/pu/alpha/bad.md" 2>$null }
         St-Assert "an unreadable file is never counted as property verified" 1 $r.ExitCode "UNVERIFIABLE" $r.Output
         St-Refute "an unreadable file never yields a property-verified cell" "ok: fence-nesting" (Get-StPortSection -Output $r.Output -Port 'alpha')
 
@@ -1390,9 +1566,10 @@ function Invoke-SelfTestBody {
         Set-StFile -Path "$Tmp/au/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n"
         Set-StFile -Path "$Tmp/au/beta/b.md"  -Text "<!-- canon:rule-one v1 -->`n"
         Set-StFile -Path "$Tmp/au/alpha/secret.md" -Text "<!-- canon:ghost-rule v1 -->`n"
-        & chmod 000 "$Tmp/au/alpha/secret.md" 2>$null
-        $r = Invoke-StRun -Canon "$Tmp/k.md" -PortsParent "$Tmp/au"
-        & chmod 644 "$Tmp/au/alpha/secret.md" 2>$null
+        try {
+            & chmod 000 "$Tmp/au/alpha/secret.md" 2>$null
+            $r = Invoke-StRun -Canon "$Tmp/k.md" -PortsParent "$Tmp/au"
+        } finally { & chmod 644 "$Tmp/au/alpha/secret.md" 2>$null }
         St-Assert "an unreadable file makes the anchor pass UNVERIFIABLE" 1 $r.ExitCode "partial file list" $r.Output
         St-Refute "an unreadable file never leaves a port reported clean" "clean repos:.*alpha" $r.Output
     }
@@ -1643,6 +1820,15 @@ function Test-StCanSymlink {
 
 function New-StLink {
     param([string]$Link, [string]$Target)
+    # (W2107 r2) Windows PowerShell 5.1's Remove-Item -Recurse deletes through a
+    # directory symlink into its TARGET, where pwsh 6.2+ removes only the link.
+    # Every fixture here targets a path under the sandbox, so the difference is
+    # inert -- but "inert by fixture discipline" is a property a future case can
+    # break silently, and the teardown is what would do the damage. Asserted so
+    # it stays inert by construction.
+    if (-not $Target.StartsWith($script:StSandbox, [System.StringComparison]::Ordinal)) {
+        throw "self-test fixture error: symlink target $Target is outside the sandbox $($script:StSandbox)"
+    }
     $dir = Split-Path -Parent $Link
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     New-Item -ItemType SymbolicLink -Path $Link -Target $Target -ErrorAction Stop | Out-Null
@@ -1699,12 +1885,22 @@ function Invoke-SelfTest {
     $script:StSkip = 0
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("port-canon-selftest-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $script:StSandbox = $tmp
     try {
         Invoke-SelfTestBody -Tmp $tmp
     } finally {
-        try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        Remove-StSandbox -Path $tmp
     }
     [Console]::Out.WriteLine('')
+    # (W2107 r2) The skip count is REPORTED. St-Skip increments StPass so a
+    # platform-conditional case is counted rather than silently absent -- but
+    # that made "100 passed, 0 failed" identical on a host that ran every case
+    # and one that skipped a dozen, and both suites normalize the per-case
+    # suffix away before comparing. Printed on its own line so the tally line
+    # the suites match on keeps its exact shape.
+    if ($script:StSkip -gt 0) {
+        [Console]::Out.WriteLine("self-test: $($script:StSkip) case(s) skipped on this host -- fixtures it cannot create; see the [skipped on this host] lines above")
+    }
     [Console]::Out.WriteLine("self-test: $($script:StPass) passed, $($script:StFail) failed")
     if ($script:StFail -ne 0) { return 1 }
     return 0
@@ -1713,6 +1909,33 @@ function Invoke-SelfTest {
 $script:F3 = '```'
 
 # st_canon's six positional arguments, same defaults.
+# (W2107 r2) The teardown reports its own failure instead of swallowing it
+# twice. It used to be `Remove-Item -ErrorAction SilentlyContinue` inside an
+# empty catch: a mode-000 fixture left behind by an exception mid-run cannot be
+# enumerated, so the removal failed partially and said nothing -- a cleanup that
+# cannot report its own failure is the same shape as the read failures the rest
+# of this file is built to refuse. The chmod restore is now exception-safe at
+# each site as well, so this is the second line of defence rather than the first.
+function Remove-StSandbox {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        return
+    } catch { }
+    # A directory the run left unreadable is the one thing that can block this.
+    if (-not $script:OnWindows) {
+        try {
+            & chmod -R u+rwX $Path 2>$null
+        } catch { }
+    }
+    try {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    } catch {
+        [Console]::Out.WriteLine("SELF-TEST WARNING: sandbox $Path could not be removed")
+    }
+}
+
 function New-StCanon {
     param(
         [string]$Path, [int]$Schema = 1, [string]$BetaStatus = 'required',

@@ -10379,11 +10379,14 @@ if ($g31Missing.Count -gt 0) {
 # The mirror of sh Group 30. Same rule: the SELF-TEST, never the fleet scan,
 # whose correct result today is exit 1.
 #
-# 32c is the fixture-tree cross-verification, modelled on Group 28b: both
-# halves are run against ONE tree and their reports compared. 28b compares the
-# clean path only and says so; this compares all three EXIT TIERS, because the
-# tiers are where the two halves could most easily disagree without either
-# looking wrong on its own.
+# 32c compares the two halves' CASE-NAME SETS. 32d is the fixture-tree
+# cross-verification, modelled on Group 28b: both halves are run against one
+# tree and their reports compared. 28b compares the clean path only and says
+# so; 32d compares all three EXIT TIERS plus a fourth fixture built to reach
+# the VERDICT SPACE -- a stale anchor, an unknown-id anchor, an uppercase .MD,
+# and vendored content under all four pruned directory names -- because the
+# tiers alone exercise exit codes rather than the places two independent
+# implementations actually drift.
 Write-Host ""
 Write-Host "=== Test Group 32: W2107 port-canon drift check ==="
 
@@ -10394,7 +10397,7 @@ $g32Out = (& pwsh -NoProfile -File $g32Ps1 -SelfTest 2>&1 | Out-String)
 $g32Rc = $LASTEXITCODE
 # The tally line, not just the exit code: a self-test that ran zero cases also
 # exits 0, and "0 passed, 0 failed" is what a broken harness prints.
-if ($g32Rc -eq 0 -and $g32Out -cmatch '(?m)^self-test: [0-9]+ passed, 0 failed$') {
+if ($g32Rc -eq 0 -and $g32Out -cmatch '(?m)^self-test: [1-9][0-9]* passed, 0 failed$') {
     $script:PASS++
     Write-Host "  PASS: 32a: the PowerShell half's self-test is clean" -ForegroundColor Green
 } else {
@@ -10406,7 +10409,7 @@ if ($g32Rc -eq 0 -and $g32Out -cmatch '(?m)^self-test: [0-9]+ passed, 0 failed$'
 if (Get-Command bash -ErrorAction SilentlyContinue) {
     $g32ShOut = (& bash $g32Sh --self-test 2>&1 | Out-String)
     $g32ShRc = $LASTEXITCODE
-    if ($g32ShRc -eq 0 -and $g32ShOut -cmatch '(?m)^self-test: [0-9]+ passed, 0 failed$') {
+    if ($g32ShRc -eq 0 -and $g32ShOut -cmatch '(?m)^self-test: [1-9][0-9]* passed, 0 failed$') {
         $script:PASS++
         Write-Host "  PASS: 32b: the bash half's self-test is clean" -ForegroundColor Green
     } else {
@@ -10422,7 +10425,7 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
         (($t -split "`n") |
             Where-Object { $_ -clike 'ok: *' } |
             ForEach-Object { $_.TrimEnd("`r") -replace ' \[skipped on this host:.*\]$', '' } |
-            Where-Object { $_ -cnotlike 'ok: \[ps1-only\]*' } |
+            Where-Object { -not $_.StartsWith('ok: [ps1-only]', [System.StringComparison]::Ordinal) } |
             Sort-Object) -join "`n"
     }
     $g32A = & $g32Names $g32ShOut
@@ -10485,10 +10488,34 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
             Where-Object { $_ -cnotlike '  canon:*' -and $_ -cnotlike '  ports parent:*' } |
             ForEach-Object { $_ -replace 'check-port-canon\.(sh|ps1)', 'check-port-canon.<impl>' }) -join "`n"
     }
+    # (W2107 r2) A FOURTH fixture, and the review that asked for it was right
+    # that the first three do not close criterion 1. Tiers 0-2 exercise the exit
+    # codes; they do not exercise the verdict space where two independent
+    # implementations actually drift. This tree carries, in one walk: a STALE
+    # anchor, an UNEXPECTED unknown-id anchor, an uppercase .MD file (which both
+    # halves must IGNORE -- the case-sensitivity parity this task deliberately
+    # preserved rather than fixed one-sidedly), a vendored .md under each of the
+    # four pruned directory names, and a second anchor in a subdirectory. If the
+    # halves disagree on any of those, this goes red where the tier fixtures and
+    # the fleet-scan diff would both stay green -- the fleet is all-MISSING
+    # today, so that diff largely compares two MISSING sweeps.
+    New-Item -ItemType Directory -Path (Join-Path $g32Tmp 'rich/alpha/sub') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $g32Tmp 'rich/beta') -Force | Out-Null
+    foreach ($pruned in @('.git', 'node_modules', 'deps', '_build')) {
+        $pd = Join-Path (Join-Path $g32Tmp 'rich/alpha') $pruned
+        New-Item -ItemType Directory -Path $pd -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $pd 'vendored.md'), "<!-- canon:rule-one v1 -->`n<!-- canon:vendored-ghost v3 -->`n")
+    }
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'rich/alpha/a.md'), "<!-- canon:rule-one v0 -->`n")
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'rich/alpha/NOTES.MD'), "<!-- canon:upper-ghost v9 -->`n")
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'rich/alpha/sub/s.md'), "<!-- canon:sub-ghost v2 -->`n")
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'rich/beta/b.md'),  "<!-- canon:rule-one v1 -->`n")
+
     $g32Tiers = @(
         @{ Name = 'tier 0 (all clean)';   Canon = 'ok.md';  Tree = 'clean'; Want = 0 },
         @{ Name = 'tier 1 (drift found)'; Canon = 'ok.md';  Tree = 'miss';  Want = 1 },
-        @{ Name = 'tier 2 (no verdict)';  Canon = 'bad.md'; Tree = 'clean'; Want = 2 }
+        @{ Name = 'tier 2 (no verdict)';  Canon = 'bad.md'; Tree = 'clean'; Want = 2 },
+        @{ Name = 'verdict space (stale, unknown-id, pruned dirs, uppercase ext)'; Canon = 'ok.md'; Tree = 'rich'; Want = 1 }
     )
     foreach ($t in $g32Tiers) {
         $cp = Join-Path $g32Tmp $t.Canon

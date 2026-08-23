@@ -83,9 +83,19 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
     Trimming cases to fit the old number was the alternative and is the wrong
     trade: the count is the coverage.
   - Documented in README alongside its siblings, including that the fleet scan
-    remains ungated and why. The bash suite's stale claim that Group 28 is
-    bash-only "as with Group 29" — which W2105 could not correct from the ps1
-    side and recorded here instead — is now corrected in place.
+    remains ungated and why. The Group 29 banner's trailing "as with Group 28",
+    stale since W2105 gave Group 28 a ps1 counterpart — which W2105 could not
+    correct because `test-stride-hook.sh` was read-only to it, and recorded here
+    instead — is now corrected in place.
+  - **Three gaps found during review are recorded in the code rather than
+    closed, because each needs ONE change touching BOTH halves and pitfall 4
+    forbids changing the bash half while pairing it:** the safe-string refusal
+    covers only tab and newline, so an ESC in a canon value can rewrite the
+    terminal report; `find -name '*.md'` is case-sensitive even on a
+    case-insensitive volume, so `NOTES.MD` is invisible to both halves; and
+    neither half sorts its walk, so a port anchoring one rule id in two files
+    can differ. Closing any of them on one side alone would break the pair —
+    which the new cross-verification would then catch, correctly.
 
 ## [1.70.0] - 2026-08-21
 

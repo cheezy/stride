@@ -10484,7 +10484,7 @@ echo "=== Test Group 30: W2107 port-canon drift check (self-test, never the flee
 
 W2107_SH_OUT=$(bash "$SCRIPT_DIR/../scripts/check-port-canon.sh" --self-test 2>&1)
 W2107_SH_RC=$?
-if [ "$W2107_SH_RC" -eq 0 ] && printf '%s\n' "$W2107_SH_OUT" | grep -q '^self-test: [0-9]* passed, 0 failed$'; then
+if [ "$W2107_SH_RC" -eq 0 ] && printf '%s\n' "$W2107_SH_OUT" | grep -q '^self-test: [1-9][0-9]* passed, 0 failed$'; then
   # Asserting the TALLY LINE, not just the exit code: a self-test that ran zero
   # cases also exits 0, and "0 passed, 0 failed" is the shape a broken harness
   # produces. The count is not pinned here on purpose -- the suites assert that
@@ -10503,7 +10503,7 @@ if command -v pwsh > /dev/null 2>&1; then
   W2107_PS_OUT=$(pwsh -NoProfile -File "$SCRIPT_DIR/../scripts/check-port-canon.ps1" -SelfTest 2>&1)
   W2107_PS_RC=$?
   W2107_PS_RAN=1
-  if [ "$W2107_PS_RC" -eq 0 ] && printf '%s\n' "$W2107_PS_OUT" | grep -q '^self-test: [0-9]* passed, 0 failed$'; then
+  if [ "$W2107_PS_RC" -eq 0 ] && printf '%s\n' "$W2107_PS_OUT" | grep -q '^self-test: [1-9][0-9]* passed, 0 failed$'; then
     echo -e "  ${GREEN}PASS${RESET}: 30b: the PowerShell half's self-test is clean ($(printf '%s\n' "$W2107_PS_OUT" | grep '^self-test:'))"
     PASS=$((PASS + 1))
   else

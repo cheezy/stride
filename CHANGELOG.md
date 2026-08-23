@@ -25,79 +25,134 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [1.71.0] - 2026-08-23
 
+**All four follow-ups filed at the 1.70.0 release are closed here** — D286,
+D288, D289 and D290 — together with D287 and one paired gate, W2107. Five of
+the six are the same shape, and it is the shape 1.70.0 was also about: a
+failure that produced a success. An unreadable file read as clean, a refusing
+tool read as "nothing found", a discarded write read as a completed one, a
+forged line read as a real record. In every case the exit code said fine.
+
+Suites: bash 825 → 872 assertions, PowerShell 1053 → 1142.
+
+### Fixed
+
+- **A task title could forge another task's snapshot anchor (D287).** D275
+  closed the KEY channel into the env cache; the VALUE channel on an allowed
+  key stayed open. A server-supplied `TASK_TITLE` or `TASK_DESCRIPTION` reaches
+  the cache with its newlines intact, so a title carrying
+  `<LF>TASK_BASE_REF_99='<sha>'<LF>` lands as a record-shaped line *inside* a
+  quoted value. Sourcing it is safe; grepping it is not — four line-oriented
+  readers matched that interior line, and `select_kept_window_records`, whose
+  output is written back, promoted it into a standalone record. After that
+  rebuild it is genuine, because D273's shape check no longer applies to a line
+  that is no longer a continuation. Reproduced end to end. Records are now
+  identified by where they *begin* — outside a quoted value — with a second
+  shape gate for a line a pre-fix hook already promoted.
+
+- **The Windows pre-existing-edit filter was inert for non-ASCII paths
+  (D286).** D278 fixed `record_dirty_baseline` on the bash side and left the
+  PowerShell twin listing without `-z`, so it recorded git's octal-escaped
+  display spelling while its own capture recorded the raw one. The two could
+  never match for a non-ASCII path, which made the W1457 filter silently do
+  nothing for exactly those files, on Windows only — quiet because the failure
+  direction is over-reporting. The same quoted spelling also defeated the hash,
+  producing an `absent` sentinel where the capture filter skips only
+  `unhashable`.
+
+- **The credential filter failed OPEN (D290).** The upload-side filter that
+  strips `.stride_auth.md` from a `changed_files` snapshot ran inside a `try`
+  whose `catch` recovered by uploading the **raw, unfiltered** bytes. Under
+  `Set-StrictMode -Version Latest` an entry lacking a `path` property throws at
+  the comparison itself, so any such snapshot uploaded precisely what the filter
+  existed to strip. W2100 had closed this fail-open for its one named cause and
+  left its shape. Measured against the pre-fix tree: the body naming the
+  credential file genuinely reached a test listener. The catch now re-checks the
+  raw text and refuses the PUT, routed through the existing non-2xx warning; an
+  unparseable snapshot naming none of the hard-excluded artifacts still uploads
+  raw, which is what that path is for.
+
+- **A contributor's `grep` could silently empty the env cache (D288).** Every
+  bash record writer piped `grep -v` into a sink that commits whatever reaches
+  its stdin, so a `grep` that declines to read the cache left only the line
+  being added — every other record gone, at exit 0. Measured on a real refusing
+  grep rather than a shim, in two shapes: `ugrep -I` emits nothing at exit 1,
+  and ugrep's **default** prints `Binary file <path> matches` to *stdout* at
+  exit 0, which is not empty and therefore defeats the emptiness test this
+  defect was filed proposing as the remedy. Locale changed nothing in any
+  measurement, so `LC_ALL=C` is not the fix either.
+
+  The load-bearing discovery is that **awk's regex engine is not immune to the
+  same byte**: on a UTF-8 locale it aborts with `towc: multibyte conversion
+  failure`, producing the identical silent-empty stdout. Swapping grep for a
+  regex awk would have moved the defect into a new tool. Every cache filter now
+  matches with `index`/`substr` on the ASCII key before the first `=`, needing
+  no locale assumption; the filters are quote-aware so a crafted description
+  cannot tear a record apart; they propagate their exit status instead of
+  collapsing "could not read" into "nothing to preserve"; and the sink gained a
+  shape gate and an opt-in count gate that keep the previous cache and warn.
+
+- **A claim could discard a record write committed inside its window (D289).**
+  D282 gave `Set-TaskRecord` a compare-and-swap and closed one direction of the
+  race. Five other `Write-EnvCache` callers still committed a whole-file replace
+  against whatever they read whenever they read it, so a claim-side or
+  finalize-side rewrite could discard a record write committed inside its own
+  window — reverting the identity lines to a previous task. The retry moved into
+  one shared helper rather than being copied five more times, and all six
+  callers go through it. `Set-AfterGoalEnv`'s two sequential rewrites became
+  **one** write under one swap: guarding them independently would have been
+  worse than leaving them alone, since a collision on either half would abandon
+  that half while the other committed. The claim block's bare `Remove-Item` is
+  guarded too — deleting the cache discards a concurrent write more completely
+  than replacing it does.
+
 ### Added
 
 - **`scripts/check-port-canon.ps1` — the PowerShell half of the port-canon
-  drift check, and the two halves are now cross-verified against each other
-  (W2107).** `check-port-canon.sh` shipped without a counterpart, so Windows
-  users had no drift check at all and nothing in either suite proved the
-  checker still worked. The new half is an **independent implementation**, not
-  a transliteration: the bash half tokenises the canon's json with `awk`, this
-  one builds an object graph with `ConvertFrom-Json`. Two readings of one
-  document that reach the same verdict are worth more than one reading run
-  twice, and the suites hold them to it.
+  drift check, cross-verified against the bash half (W2107).** The checker
+  shipped without a counterpart, so Windows users had no drift check at all and
+  nothing in either suite proved the checker still worked. This is an
+  **independent implementation**, not a transliteration: the bash half tokenises
+  the canon's json with `awk`, this one builds an object graph with
+  `ConvertFrom-Json`. Two readings of one document that reach the same verdict
+  are worth more than one reading run twice.
 
-  - **Gated as a self-test, never as the fleet scan.** The fleet scan's correct
-    result today is exit 1, so registering it would have installed a
-    permanently-red group, which teaches people to ignore the suite. Both
-    halves' self-tests now run as bash Test Group 30 and PowerShell Test
-    Group 32, in both suites.
-  - **The cross-verification is the point.** `30c`/`32c` compare the two
-    halves' case-name sets, so a case renamed or lost on one side goes red —
-    which neither half's own tally can see, each being internally consistent
-    while disagreeing with the other. `32d` runs both against one fixture tree —
-    the three exit tiers, plus the verdict space and the property path,
-    including the case-varied rule id and case-varied registry keys that a
-    review found the two halves disagreeing on — and compares exit codes, tally
-    counts, verdict lines and work lists. Both halves also agree line for line over the real
-    fleet; that is the strongest evidence available and is precisely what
-    cannot be a test group, because it is red by design.
-  - **100 self-test cases, mirrored by outcome rather than by mechanism.**
-    Including the ones that exist only because of `awk`/`grep` mechanics this
-    half does not have — the tab/newline record-forgery pair, the entry-id
-    charset refusal. A refusal is a verdict: a canon that halts the bash half
-    at exit 2 has to halt this one too, or the pair disagrees on a real input.
-    The task specification said the bash half had 37 cases; it has 100, which
-    is what was mirrored.
-  - **The seven false-green classes W2108 closed in the bash half are closed
-    here on their own terms**, because PowerShell reaches that shape more
-    easily than bash does rather than less: `-ErrorAction SilentlyContinue`
-    turns any read failure into `$null`, which is falsy, which reads as clean.
-    Files are read as bytes in `try`/`catch` with an `unreadable` sentinel
-    distinguishable from an empty file; a NUL byte refuses the file; decoding
-    is ISO-8859-1 rather than UTF-8, following D281's decided answer, because
-    `UTF8.GetString` maps invalid bytes to U+FFFD and can vanish content; the
-    tree is enumerated ONCE and both passes consume that one walk with its
-    status carried alongside.
-  - **Three failure modes that are PowerShell's alone**, which fidelity to the
-    bash half would not have caught. `-eq`/`-match` are case-INSENSITIVE by
-    default, so `"Required"` and `"ANCHOR"` would sail past a closed-vocabulary
-    check the bash half refuses — every id, status, variant, check, provenance
-    and schema comparison uses `-ceq`/`-cmatch`, and the self-test harness had
-    the same bug, caught live when a refutation for `/MISSING/` matched
-    `missing 0` in the tally. Without `Set-StrictMode` a missing json key reads
-    as `$null`, indistinguishable from a key legitimately holding null, so key
-    presence is tested through `psobject.Properties`. And a CRLF checkout stops
-    an end-of-line anchor matching, so lines are trimmed of `\r` on split.
-  - **`SUITE_WALL_BASELINE_S` raised from 100 to 175.** The two self-tests add
-    about a minute per suite — roughly 9s for the bash half and 55s for the
-    PowerShell half, which re-execs its own script once per case group.
-    Trimming cases to fit the old number was the alternative and is the wrong
-    trade: the count is the coverage.
-  - Documented in README alongside its siblings, including that the fleet scan
-    remains ungated and why. The Group 29 banner's trailing "as with Group 28",
-    stale since W2105 gave Group 28 a ps1 counterpart — which W2105 could not
-    correct because `test-stride-hook.sh` was read-only to it, and recorded here
-    instead — is now corrected in place.
-  - **Three gaps found during review are recorded in the code rather than
-    closed, because each needs ONE change touching BOTH halves and pitfall 4
-    forbids changing the bash half while pairing it:** the safe-string refusal
-    covers only tab and newline, so an ESC in a canon value can rewrite the
-    terminal report; `find -name '*.md'` is case-sensitive even on a
-    case-insensitive volume, so `NOTES.MD` is invisible to both halves; and
-    neither half sorts its walk, so a port anchoring one rule id in two files
-    can differ. Closing any of them on one side alone would break the pair —
-    which the new cross-verification would then catch, correctly.
+  - Both halves' **self-tests** run as bash Test Group 30 and PowerShell Test
+    Group 32 — never the fleet scan, whose correct result today is exit 1, and a
+    permanently-red group teaches people to ignore the suite.
+  - `30c`/`32c` compare the two halves' **case-name sets**, so a case renamed or
+    lost on one side goes red — something neither half's own tally can see.
+    `32d` runs both against one fixture tree spanning the three exit tiers, the
+    verdict space, the property path, a case-varied rule id and case-varied
+    registry keys.
+  - 100 self-test cases, mirrored **by outcome**. Including the ones that exist
+    only because of `awk`/`grep` mechanics this half does not have: a refusal is
+    a verdict, so a canon that halts one half must halt the other.
+  - The review found **three divergences invisible to a fleet-wide diff**,
+    because all three are latent on today's fleet: a `@{}` hashtable's
+    case-insensitive comparer let a rule id of `Fence-Nesting` report a verified
+    pass where the bash half reports UNVERIFIABLE; PowerShell member access being
+    case-insensitive let a canon written `"ID"`/`"DIR"` report a clean fleet
+    where the bash half halts; and only one of the four vendored directory names
+    was pruned.
+  - **Three gaps are recorded in the code rather than closed**, each needing one
+    change touching *both* halves: the safe-string refusal covers only tab and
+    newline, so an ESC in a canon value can rewrite the terminal report;
+    `find -name '*.md'` is case-sensitive even on a case-insensitive volume, so
+    `NOTES.MD` is invisible to both halves; and neither half sorts its walk.
+    Closing any of them on one side alone would break the pair — which the new
+    cross-verification would then catch, correctly.
+  - `SUITE_WALL_BASELINE_S` raised 100 → 175. The two self-tests add about a
+    minute per suite. Trimming cases to fit the old number was the alternative
+    and is the wrong trade: the count is the coverage.
+
+### Known limits
+
+- Nothing in this repository has yet **executed** the hook under
+  `powershell.exe` 5.1, which is the interpreter `stride-hook.sh` execs on
+  Windows (D237). `scripts/check-ps1-compat.sh` gates that subset by AST and the
+  new `.ps1` passes it, but a gate that reads is not a run. Stated here for the
+  same reason the last two releases stated it: "Windows works now" would be the
+  overstatement those entries were careful to avoid.
 
 ## [1.70.0] - 2026-08-21
 

@@ -318,6 +318,13 @@ function Write-EnvCache {
 # branch. That delete is fingerprint-checked here rather than left bare, since
 # an unguarded Remove-Item discards a concurrent write more completely than any
 # rewrite does.
+#
+# One unguarded Remove-Item REMAINS, and saying so here keeps the sentence
+# above from overclaiming: the after_review lifecycle cleanup removes the cache
+# outright. It is deliberately left alone - it yields an ABSENT cache rather
+# than an older task's identity, both cache-TASK_ID consumers no-op when
+# TASK_ID is unset, and an in-flight claim carries its own swap - so it is not
+# a reversion vector. Named rather than silently excepted.
 function Invoke-EnvCacheRewrite {
     param(
         [scriptblock]$Build,
@@ -339,10 +346,21 @@ function Invoke-EnvCacheRewrite {
         $newArr = $null
         try {
             $built = & $Build $before
-            $newArr = @($built)
+            # (D289) Explicit, not `@($built)` alone. A scriptblock that emits
+            # nothing yields $null here, and @($null) is a ONE-element array
+            # holding $null on some hosts - which would make -DeleteWhenEmpty
+            # never fire and write a blank cache where the claim branch means to
+            # remove the file. Nothing executes this script under
+            # powershell.exe 5.1 (the shipping host, per pitfall 3), so the
+            # semantic is not one to take on trust from a pwsh 7 green run.
+            if ($null -eq $built) { $newArr = @() } else { $newArr = @($built) }
         } catch {
             # The Build's own guard said no. Refuse the write outright: no
             # further attempts, previous cache untouched.
+            # (D289) Diagnosed, not silent. Set-TaskRecord's own catch warned
+            # here before the loop moved, and a refusal nobody can see is the
+            # shape these defects keep being about.
+            [Console]::Error.WriteLine("stride-hook: could not build the env-cache rewrite for $What; leaving the cache untouched")
             return $false
         }
         if ($DeleteWhenEmpty -and $newArr.Count -eq 0) {
@@ -2325,8 +2343,13 @@ if ($HookName -eq 'before_doing') {
             # matters MORE here: with Records empty this branch falls through to
             # Remove-Item and DESTROYS the cache, where every other site merely
             # skips its rewrite. The bash twin over-preserves on this condition
-            # deliberately; throwing here lands in the enclosing catch, so the
-            # branch skips both the rewrite and the delete.
+            # deliberately.
+            # (D289) This throw now lands in Invoke-EnvCacheRewrite's catch
+            # rather than the enclosing one. The OUTCOME is unchanged - the
+            # helper returns false, so neither the rewrite nor the delete
+            # happens, and nothing follows inside this try - but the mechanism
+            # the previous sentence named no longer exists, so it is corrected
+            # rather than left to mislead the next reader.
             if (-not $g280recsU.Ok) { throw 'env cache ends inside a quoted value' }
             $preserved = @($g280recsU.Records | Where-Object {
                 $_ -match '^TASK_(ID|IDENTIFIER|TITLE|STATUS|COMPLEXITY|PRIORITY)=' -or
@@ -2807,6 +2830,13 @@ function Set-HookEnv {
     # See the note in the filter below, and Set-AfterGoalEnv, its one user.
     param($EnvMap, [string]$AlsoDropPattern)
 
+    # (D289) NOTE FOR -AlsoDropPattern CALLERS: this early return skips the
+    # cache write entirely, so a caller folding its own drop into this one gets
+    # NO drop when the map is empty. Set-AfterGoalEnv, its only user, is safe
+    # because its defaults loop puts all four GOAL_* keys into the map before
+    # calling - Count is never below 4 there. A future caller passing a pattern
+    # with a possibly-empty map would silently lose its drop; the coupling is
+    # recorded here and at that call site rather than left to be rediscovered.
     if ($null -eq $EnvMap -or $EnvMap.Count -eq 0) { return }
 
     $cacheLines = @()
@@ -2988,6 +3018,12 @@ function Set-AfterGoalEnv {
     # is the reason it is stated HERE rather than left to Set-HookEnv's own
     # collapse: the pattern is named at this site, so a later refactor that
     # narrowed the shared function would still have to come past this line.
+    #
+    # (D289) This depends on $envMap being non-empty: Set-HookEnv early-returns
+    # on an empty map and would then apply no drop at all. Safe here because the
+    # defaults loop above puts all four GOAL_* keys in unconditionally, so the
+    # count is never below four - stated because it is a real coupling and the
+    # early return is three hundred lines away.
     Set-HookEnv -EnvMap $envMap -AlsoDropPattern '^(GOAL_ID|GOAL_IDENTIFIER|GOAL_TITLE|GOAL_DESCRIPTION)$'
 }
 
@@ -4726,7 +4762,7 @@ function Invoke-FinalizeBeforeDoing {
         # second agent's record write is most likely to land. Retrying re-runs
         # the selector against the concurrent writer's cache, so its records are
         # carried across the rebuild rather than replaced by it.
-        Invoke-EnvCacheRewrite -What 'the claim base-ref capture' -Build {
+        $finalizeWrote = Invoke-EnvCacheRewrite -What 'the claim base-ref capture' -Build {
         param($before)
         $preserved = @()
         $records = @()
@@ -4814,7 +4850,27 @@ function Invoke-FinalizeBeforeDoing {
             $newLines = $newLines + ("TASK_BASE_REF_UNPROVEN=" + (ConvertTo-ShSingleQuoted -Value '1'))
         }
         return @($newLines)
-        } | Out-Null
+        }
+        # (D289) GATED ON THE WRITE, and this is a control-flow regression the
+        # refactor introduced rather than a new nicety. Before D289 the
+        # splitter's `throw 'env cache ends inside a quoted value'` propagated
+        # to this function's catch and skipped BOTH the exports below and the
+        # dirty baseline; the helper now swallows that throw, so without this
+        # gate execution would continue and assert a TRUSTED, OWNED base into
+        # the process environment that was never persisted - while the cache
+        # still holds the concurrent writer's anchor, or the previous window's.
+        # The same applies to the two refusal outcomes the helper added: swap
+        # exhaustion and an unreadable cache.
+        #
+        # Downstream this failed closed rather than open (Resolve-TaskSnapshotBase
+        # refuses on an owner mismatch or an UNPROVEN marker, so the loser gets
+        # an empty snapshot rather than another task's diff), which is why it is
+        # a low finding and not a high one. It is still a process asserting a
+        # base it did not write, and the gate costs one branch.
+        if (-not $finalizeWrote) {
+            [Console]::Error.WriteLine('stride-hook: the env-cache base capture did not commit; not exporting a trusted base for this process')
+            return
+        }
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF', $baseRef, 'Process')
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_TRUSTED', '1', 'Process')
         if ($ownerKey) {
@@ -5683,6 +5739,19 @@ if ($HookName -eq 'after_review') {
     # (W1453) Keep the env cache when after_goal rode this response — the
     # agent still needs GOAL_ID from it for the follow-up
     # PATCH /api/tasks/:goal_id/after_goal. The next claim rewrites the cache.
+    # (D289) THE ONE ENV-CACHE MUTATION THAT DOES NOT GO THROUGH THE GUARD, and
+    # it is named here rather than left as a silent exception, because D289's
+    # own reasoning ("an unguarded Remove-Item discards a concurrent write more
+    # completely than any rewrite does") reaches it verbatim.
+    #
+    # Left unguarded deliberately. What it produces is an ABSENT cache, not an
+    # older task's identity, so it is not the reversion vector the defect is
+    # about: both cache-TASK_ID consumers no-op when TASK_ID is unset, and a
+    # claim landing concurrently carries its own compare-and-swap, so it either
+    # commits after this delete or is refused - never silently reverted. This is
+    # also the lifecycle END of a task, where a cache is meant to stop existing.
+    # A guard here would have to answer "unchanged since WHAT read?", and this
+    # site performs no read to compare against.
     if (-not $afterGoalRouted) {
         Remove-Item -Force $EnvCache -ErrorAction SilentlyContinue
     }

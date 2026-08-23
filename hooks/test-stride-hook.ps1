@@ -5475,7 +5475,12 @@ $g22Want = @(
     # (D289) Set-TaskRecord's compare-and-swap retry moved into this shared
     # helper, so it is a dependency of the record layer now. The harness count
     # below is derived from this list, so adding a name here is the whole edit.
-    'Invoke-EnvCacheRewrite'
+    'Invoke-EnvCacheRewrite',
+    # (D289 r2) Set-HookEnv and its flattener, so 22t-k can drive a NEWLY-guarded
+    # CALLER rather than only the shared helper. Review round 1 was right that
+    # nine red cases under mutation all drove either the helper or
+    # Set-TaskRecord, leaving the four new callers' own re-entrancy unpinned.
+    'Set-HookEnv', 'ConvertTo-FlatEnvValue'
 )
 $g22Ast = [System.Management.Automation.Language.Parser]::ParseFile($HookScript, [ref]$null, [ref]$null)
 $g22Fns = $g22Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
@@ -6490,6 +6495,69 @@ Assert-Eq "22t-j (D289): the cache was NOT deleted out from under the concurrent
 $g22DelOut = (Get-EnvCacheLine) -join '|'
 Assert-Contains "22t-j (D289): the concurrent claim's TASK_ID survives the delete branch" "TASK_ID='777'" $g22DelOut
 Assert-Contains "22t-j (D289): and its TASK_IDENTIFIER survives too" "TASK_IDENTIFIER='W777'" $g22DelOut
+
+# 22t-k (D289): a NEWLY-GUARDED CALLER, end to end, rather than the shared
+# helper on its own. Review round 1 observed that every case going red under the
+# guard-neutered build drove either Invoke-EnvCacheRewrite directly or
+# Set-TaskRecord - so nothing pinned that a new caller's own $Build is
+# re-entrant across a retry. Set-HookEnv is the one chosen because it is the
+# busiest (all five hooks reach it) and because it is callable in isolation.
+#
+# The property under test is exactly the criterion's: a rewrite must not discard
+# a record write committed inside its window. Injection point per the task's
+# pitfall - shadow Split-EnvCacheRecord, not Get-EnvCacheRawByte, so the write
+# lands after the Build has read and the staged set is genuinely stale.
+#
+# MUTATION-TESTED: with -CompareAndSwap removed from the helper, the two
+# survival assertions below go red - Set-HookEnv's own rebuild is what carries
+# the concurrent record across the retry, which is the thing this case adds
+# over 22t-g.
+# Set-HookEnv tracks which keys the server sent as empty in a SCRIPT-scope
+# variable the real hook initialises at load (stride-hook.ps1:1367). The group
+# 22 harness extracts functions only, so seed it here or the first call fails
+# with "cannot be retrieved because it has not been set".
+$script:StrideEmptyEnvKeys = @()
+$null = New-RecordFixture -Name 'hookenvrace'
+[System.IO.File]::WriteAllText($script:EnvCache, "BOARD_ID='55'`n", (New-Object System.Text.UTF8Encoding($false)))
+$script:g22HookInjected = 0
+$script:g22HookBuilds = 0
+$g22HookRealSplit = ${function:Split-EnvCacheRecord}
+function Split-EnvCacheRecord {
+    $recs = & $g22HookRealSplit
+    $script:g22HookBuilds++
+    if ($script:g22HookInjected -eq 0) {
+        $script:g22HookInjected = 1
+        # A second agent's record write commits here - after Set-HookEnv has
+        # read the records it is about to re-stage.
+        [System.IO.File]::WriteAllText($script:EnvCache,
+            "BOARD_ID='55'`nTASK_OWNED_31='theirs'`n",
+            [System.Text.Encoding]::GetEncoding(28591))
+    }
+    return $recs
+}
+Set-HookEnv -EnvMap @{ 'TASK_ID' = '31'; 'TASK_IDENTIFIER' = 'W31' }
+${function:Split-EnvCacheRecord} = $g22HookRealSplit
+Assert-Eq "22t-k (D289): the interleave actually fired" "1" "$($script:g22HookInjected)"
+Assert-Eq "22t-k (D289): Set-HookEnv rebuilt on a second attempt" "2" "$($script:g22HookBuilds)"
+$g22HookOut = (Get-EnvCacheLine) -join '|'
+Assert-Contains "22t-k (D289): the concurrent record write survives Set-HookEnv's rewrite" "TASK_OWNED_31='theirs'" $g22HookOut
+Assert-Contains "22t-k (D289): and Set-HookEnv's own keys landed" "TASK_ID='31'" $g22HookOut
+Assert-Contains "22t-k (D289): and the pre-existing record survived too" "BOARD_ID='55'" $g22HookOut
+
+# 22t-l (D289): -AlsoDropPattern, the argument Set-AfterGoalEnv now passes
+# instead of making a second rewrite of its own. The pattern must drop exactly
+# the keys it names and nothing adjacent - GOAL_IDX is the trap the anchor
+# exists to avoid.
+$null = New-RecordFixture -Name 'alsodrop'
+[System.IO.File]::WriteAllText($script:EnvCache,
+    "BOARD_ID='55'`nGOAL_ID='7'`nGOAL_TITLE='old'`nGOAL_IDX='keep'`n",
+    (New-Object System.Text.UTF8Encoding($false)))
+Set-HookEnv -EnvMap @{ 'GOAL_ID' = '9' } -AlsoDropPattern '^(GOAL_ID|GOAL_IDENTIFIER|GOAL_TITLE|GOAL_DESCRIPTION)$'
+$g22DropOut = (Get-EnvCacheLine) -join '|'
+Assert-Contains "22t-l (D289): -AlsoDropPattern drops a stale GOAL_TITLE the map does not carry" "BOARD_ID='55'" $g22DropOut
+Assert-Eq "22t-l (D289): the stale GOAL_TITLE is gone" "False" "$($g22DropOut -match ""GOAL_TITLE='old'"")"
+Assert-Contains "22t-l (D289): the map's own GOAL_ID landed" "GOAL_ID='9'" $g22DropOut
+Assert-Contains "22t-l (D289): and an adjacent key the anchor excludes survives" "GOAL_IDX='keep'" $g22DropOut
 
 # 22t-c: helper semantics, including the zero-byte case that used to read as
 # absent. PowerShell unrolls a returned array, so a 0-byte cache came back as

@@ -304,6 +304,16 @@ function Write-EnvCache {
 # attempt re-reads and re-applies its filter against the CONCURRENT writer's
 # content, not against our stale snapshot.
 #
+# THE $Build IS AN UNBOUND SCRIPTBLOCK, so its free variables resolve up the
+# DYNAMIC chain - through THIS function's frame before reaching the caller's.
+# A local added here can therefore silently capture a name a Build reads. It is
+# correct as written: no Build reads any of $attempt, $before, $newArr, $built,
+# $rc, $nowBytes, $What, $Build or $DeleteWhenEmpty as a free variable. The
+# exposed names are the read-only free reads - $Key/$Value, $taskJson,
+# $written/$cacheLines/$AlsoDropPattern, and $baseRef/$owner/$ownerKey - and NOT
+# $kept/$records/$preserved, which every Build assigns before use and so
+# shadows. Before adding a local here, check that list.
+#
 # A $Build REFUSES BY THROWING, never by returning nothing. That is not a style
 # choice: PowerShell unrolls a returned array, so a Build returning @() arrives
 # here as $null, indistinguishable from a Build that returned nothing on
@@ -2281,6 +2291,13 @@ if ($HookName -eq 'before_doing') {
             # TASK_BASE_REF (and its trust marker) NOW — even if this process
             # dies before Invoke-FinalizeBeforeDoing rewrites it, a base from
             # a previous task or session must never survive a claim.
+            # (D289) That last sentence now has ONE named exception: three
+            # consecutive swap collisions make the rewrite refuse, so neither
+            # the strip nor the delete happens and the inherited base stays.
+            # Named rather than left as a silent hole - and it stays fail-closed
+            # downstream, because the surviving OWNER names another task, so
+            # Resolve-TaskSnapshotBase refuses and this claim uploads an empty
+            # snapshot rather than another task's diff.
             # (D226) TASK_BASE_REF_OWNER goes with the base it stamps; the
             # per-task TASK_BASE_REF_<id> records are kept, since they belong
             # to tasks other than this claim.
@@ -4702,6 +4719,15 @@ function Invoke-FinalizeAfterDoing {
 #         has been doing this job.
 #       - refused_base=yes, unported at both write sites (see the parity note
 #         in test-stride-hook.ps1's Group 24 ledger). Diagnostic only.
+#       - (D289) THE POST-WRITE EXPORTS ARE GATED HERE AND UNCONDITIONAL IN
+#         BASH. This side skips the five TASK_BASE_REF* process exports and
+#         Write-DirtyBaseline when the rewrite does not commit; bash pipes into
+#         `write_env_cache || true` and exports regardless. For the splitter
+#         throw the two agree - bash returns early on _rebuild_ok=0 - so the
+#         divergence is the plain write-failure and swap-refusal cases only, and
+#         it runs FAIL-CLOSED: this side declines to assert a trusted, owned
+#         base it did not persist, where bash asserts one. Listed because the
+#         instruction below is to list, not because the direction is in doubt.
 # Keep this list honest and specific. Every blanket parity claim this comment
 # has ever made was false within one release.
 function Invoke-FinalizeBeforeDoing {

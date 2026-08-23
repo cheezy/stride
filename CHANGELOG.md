@@ -45,9 +45,11 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
   - **The cross-verification is the point.** `30c`/`32c` compare the two
     halves' case-name sets, so a case renamed or lost on one side goes red —
     which neither half's own tally can see, each being internally consistent
-    while disagreeing with the other. `32d` runs both against one fixture tree
-    across all three exit tiers and compares exit codes, tally counts, verdict
-    lines and work lists. Both halves also agree line for line over the real
+    while disagreeing with the other. `32d` runs both against one fixture tree —
+    the three exit tiers, plus the verdict space and the property path,
+    including the case-varied rule id and case-varied registry keys that a
+    review found the two halves disagreeing on — and compares exit codes, tally
+    counts, verdict lines and work lists. Both halves also agree line for line over the real
     fleet; that is the strongest evidence available and is precisely what
     cannot be a test group, because it is red by design.
   - **100 self-test cases, mirrored by outcome rather than by mechanism.**

@@ -9701,8 +9701,10 @@ if ($g29Missing.Count -gt 0) {
 #
 #   (W2107) sh 30 port-canon drift check      -> ps1 Group 32 (NEW). Both
 #         halves' SELF-TESTS run in both suites, and 32d cross-verifies them
-#         against one fixture tree across all three exit tiers -- 0 all-clean,
-#         1 drift-found, 2 no-verdict-possible -- comparing exit codes, tally
+#         against one fixture tree spanning the three exit tiers -- 0 all-clean,
+#         1 drift-found, 2 no-verdict-possible -- plus the verdict space, the
+#         property path, a case-varied rule id and case-varied registry keys,
+#         comparing exit codes, tally
 #         counts, verdict body lines and work lists, with the two absolute-path
 #         header lines and the script's self-reference normalized out. NOT
 #         compared: the full verdict space. DEFECT, STALE, the UNVERIFIABLE
@@ -10472,6 +10474,71 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
     }
     & $g32Canon (Join-Path $g32Tmp 'ok.md') 1
     & $g32Canon (Join-Path $g32Tmp 'bad.md') 99
+
+    # (W2107 r3) Two canons that reach where the round-1 criticals actually
+    # lived. The four fixtures above are all check: "anchor" with lowercase
+    # identifiers, so none of them touches the property dispatch or a
+    # case-varied key -- and criticals #1 (a case-insensitive property-impl
+    # lookup reporting a verified pass) and #2 (case-insensitive key retrieval
+    # reporting a clean fleet) both needed exactly that. A fixture set that
+    # cannot reach the defect it was written in response to is a regression lock
+    # in name only.
+    $g32PropCanon = {
+        param($Path, $RuleId, $Version)
+        $lines = @(
+            '# canon'
+            "${f3}json"
+            '{ "canon_schema_version": 1,'
+            '  "ports": ['
+            '    {"id": "alpha", "family": "f", "dir": "alpha", "exists": true, "note": ""},'
+            '    {"id": "beta",  "family": "f", "dir": "beta",  "exists": true, "note": ""}'
+            '  ] }'
+            "$f3"
+            '### r'
+            "<!-- canon:$RuleId v$Version -->"
+            "${f3}json"
+            "{ ""id"": ""$RuleId"", ""version"": $Version, ""status"": ""active"", ""superseded_by"": null,"
+            '  "provenance": "quoted", "defects": ["D1"], "check": "property", "check_hint": "h",'
+            '  "applies_to": ['
+            '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
+            '    {"port": "beta", "status": "required", "variant": "", "reason": "r"} ] }'
+            "$f3"
+        )
+        [System.IO.File]::WriteAllText($Path, (($lines -join "`n") + "`n"))
+    }
+    # The implemented property at its implemented version: both halves must
+    # walk the tree and report a verified pass.
+    & $g32PropCanon (Join-Path $g32Tmp 'prop.md') 'fence-nesting' 1
+    # THE CRITICAL #1 SHAPE: a case-varied rule id. A case-insensitive
+    # container resolves it to the fence-nesting implementation and reports a
+    # verified pass at exit 0; both halves must instead report UNVERIFIABLE.
+    & $g32PropCanon (Join-Path $g32Tmp 'propcase.md') 'Fence-Nesting' 1
+    # THE CRITICAL #2 SHAPE: registry keys in a different case. Case-insensitive
+    # member access reads them and reports a clean fleet; both halves must halt.
+    $g32UpperLines = @(
+        '# canon'
+        "${f3}json"
+        '{ "canon_schema_version": 1,'
+        '  "ports": ['
+        '    {"ID": "alpha", "FAMILY": "f", "DIR": "alpha", "EXISTS": true, "NOTE": ""},'
+        '    {"ID": "beta",  "FAMILY": "f", "DIR": "beta",  "EXISTS": true, "NOTE": ""}'
+        '  ] }'
+        "$f3"
+        '### r'
+        '<!-- canon:rule-one v1 -->'
+        "${f3}json"
+        '{ "id": "rule-one", "version": 1, "status": "active", "superseded_by": null,'
+        '  "provenance": "quoted", "defects": ["D1"], "check": "anchor", "check_hint": "h",'
+        '  "applies_to": ['
+        '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
+        '    {"port": "beta", "status": "required", "variant": "", "reason": "r"} ] }'
+        "$f3"
+    )
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'upperkeys.md'), (($g32UpperLines -join "`n") + "`n"))
+    New-Item -ItemType Directory -Path (Join-Path $g32Tmp 'prop/alpha') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $g32Tmp 'prop/beta') -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'prop/alpha/a.md'), "# t`n`n${f3}bash`necho hi`n$f3`n")
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'prop/beta/b.md'),  "# t`n`n${f3}bash`necho hi`n$f3`n")
     New-Item -ItemType Directory -Path (Join-Path $g32Tmp 'clean/alpha') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $g32Tmp 'clean/beta') -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'clean/alpha/a.md'), "x`n<!-- canon:rule-one v1 -->`n")
@@ -10515,7 +10582,10 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
         @{ Name = 'tier 0 (all clean)';   Canon = 'ok.md';  Tree = 'clean'; Want = 0 },
         @{ Name = 'tier 1 (drift found)'; Canon = 'ok.md';  Tree = 'miss';  Want = 1 },
         @{ Name = 'tier 2 (no verdict)';  Canon = 'bad.md'; Tree = 'clean'; Want = 2 },
-        @{ Name = 'verdict space (stale, unknown-id, pruned dirs, uppercase ext)'; Canon = 'ok.md'; Tree = 'rich'; Want = 1 }
+        @{ Name = 'verdict space (stale, unknown-id, pruned dirs, uppercase ext)'; Canon = 'ok.md'; Tree = 'rich'; Want = 1 },
+        @{ Name = 'property path (implemented rule, verified pass)'; Canon = 'prop.md'; Tree = 'prop'; Want = 0 },
+        @{ Name = 'property path with a case-varied rule id (critical #1 shape)'; Canon = 'propcase.md'; Tree = 'prop'; Want = 1 },
+        @{ Name = 'registry keys in a different case (critical #2 shape)'; Canon = 'upperkeys.md'; Tree = 'clean'; Want = 2 }
     )
     foreach ($t in $g32Tiers) {
         $cp = Join-Path $g32Tmp $t.Canon

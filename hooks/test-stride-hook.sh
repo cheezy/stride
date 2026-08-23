@@ -10490,7 +10490,7 @@ if [ "$W2107_SH_RC" -eq 0 ] && printf '%s\n' "$W2107_SH_OUT" | grep -q '^self-te
   # produces. The count is not pinned here on purpose -- the suites assert that
   # it is non-zero and clean, and the two halves assert it against EACH OTHER
   # in 30c, which is the check that actually catches a lost case.
-  echo -e "  ${GREEN}PASS${RESET}: 30a: the bash half's self-test is clean ($(printf '%s\n' "$W2107_SH_OUT" | grep '^self-test:'))"
+  echo -e "  ${GREEN}PASS${RESET}: 30a: the bash half's self-test is clean ($(printf '%s\n' "$W2107_SH_OUT" | grep '^self-test: [0-9]' | tail -1))"
   PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${RESET}: 30a: the bash half's self-test did not pass cleanly (rc=$W2107_SH_RC)"
@@ -10504,7 +10504,7 @@ if command -v pwsh > /dev/null 2>&1; then
   W2107_PS_RC=$?
   W2107_PS_RAN=1
   if [ "$W2107_PS_RC" -eq 0 ] && printf '%s\n' "$W2107_PS_OUT" | grep -q '^self-test: [1-9][0-9]* passed, 0 failed$'; then
-    echo -e "  ${GREEN}PASS${RESET}: 30b: the PowerShell half's self-test is clean ($(printf '%s\n' "$W2107_PS_OUT" | grep '^self-test:'))"
+    echo -e "  ${GREEN}PASS${RESET}: 30b: the PowerShell half's self-test is clean ($(printf '%s\n' "$W2107_PS_OUT" | grep '^self-test: [0-9]' | tail -1))"
     PASS=$((PASS + 1))
   else
     echo -e "  ${RED}FAIL${RESET}: 30b: the PowerShell half's self-test did not pass cleanly (rc=$W2107_PS_RC)"
@@ -10519,6 +10519,15 @@ else
   echo "        (set STRIDE_PS1_GATE_REQUIRED=1 to make this a failure instead)"
 fi
 
+# WHAT THIS GROUP DOES NOT DO, said here rather than left to be discovered: it
+# has no counterpart to ps1 Group 32d, the fixture-tree comparison that runs
+# both halves over one canon and diffs their REPORTS. A developer or a Unix CI
+# runner executing only this suite therefore gets case-name equality (30c) but
+# not report-level agreement, even with pwsh installed. Criterion 5 asks for the
+# cross-verification once and the ps1 parity ledger records Group 32 as its
+# home; this note exists so the asymmetry is a stated choice rather than a gap
+# someone finds by grepping.
+#
 # 30c: the two halves must agree about WHICH CASES EXIST. Comparing the ok:
 # name sets catches a case renamed or lost on one side, which neither half's
 # own tally can see -- each is internally consistent while disagreeing with the

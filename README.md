@@ -344,9 +344,12 @@ The cross-verification is what makes the pair worth having. `30c`/`32c` compare
 the two halves' **case-name sets**, so a case renamed or lost on one side goes
 red — something neither half's own tally can see, since each stays internally
 consistent while disagreeing with the other. `32d` then runs both halves
-against **one fixture tree across all three exit tiers** (0 all-clean, 1
-drift-found, 2 no-verdict-possible) and compares exit codes, tally counts,
-verdict lines and work lists, normalizing only the two absolute-path header
+against **one fixture tree** — the three exit tiers (0 all-clean, 1
+drift-found, 2 no-verdict-possible), plus fixtures that reach the verdict space
+(a stale anchor, an unknown-id anchor, vendored content under each pruned
+directory) and the property path (including a case-varied rule id and a
+case-varied registry key, the two shapes where the halves were found to
+diverge) — and compares exit codes, tally counts, verdict lines and work lists, normalizing only the two absolute-path header
 lines and each script's reference to its own filename. Both halves also agree
 line for line over the real fleet, which is stronger evidence than any of these
 — and is exactly what cannot be a test group, because it is red by design.

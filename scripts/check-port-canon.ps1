@@ -322,7 +322,28 @@ function ConvertTo-CanonTokenText {
         if ($Value) { return 'true' }
         return 'false'
     }
+    # (W2107 r3) A present JSON null reads as the four characters `null`, for
+    # the same reason as the boolean: the bash tokenizer keeps the literal as
+    # its source text. Without this, [string]$null is "" and three divergences
+    # follow -- `"variant": null` became a legal empty variant here while
+    # halting the bash half, and a registry `"id": null` halted here while the
+    # bash half accepted the literal id "null".
+    if ($null -eq $Value) { return 'null' }
     return [string]$Value
+}
+
+# (W2107 r3) The bash token text of a field, with ABSENT and PRESENT-NULL kept
+# apart. The bash tokenizer has no key at all for an absent field -- its `in V`
+# test is false -- while a present `null` is stored as the literal text. Mapping
+# both to "null" made an absent registry `id` read as the id "null", so the
+# no-id halt stopped firing and a canon with uppercase keys took a different
+# halt from the bash half. Absent is '' here; present-null is 'null'.
+function Get-CanonField {
+    param($Object, [string]$Name)
+    foreach ($prop in $Object.psobject.Properties) {
+        if ($prop.Name -ceq $Name) { return (ConvertTo-CanonTokenText -Value $prop.Value) }
+    }
+    return ''
 }
 
 # (W2107 r2) CASE-SENSITIVE KEY RETRIEVAL. PowerShell member access -- $p.id --
@@ -430,7 +451,7 @@ function ConvertFrom-Canon {
             if ($b.Num -ne 1) {
                 Stop-Gate ("registry block found at position " + $b.Num + "; the registry must be the first json block")
             }
-            $schemaVal = [string](Get-JsonMember -Object $obj -Name 'canon_schema_version')
+            $schemaVal = Get-CanonField -Object $obj -Name 'canon_schema_version'
             if ($schemaVal -cne [string]$script:SupportedSchema) {
                 Stop-Gate ("canon_schema_version " + $schemaVal + " is not the schema this checker understands (" + $script:SupportedSchema + "); refusing to parse optimistically")
             }
@@ -445,9 +466,9 @@ function ConvertFrom-Canon {
             $plist = New-Object System.Collections.Generic.List[object]
             for ($i = 0; $i -lt $ports.Count; $i++) {
                 $p = $ports[$i]
-                $portId = [string](Get-JsonMember -Object $p -Name 'id')
+                $portId = Get-CanonField -Object $p -Name 'id'
                 if (-not $portId) { Stop-Gate ("registry port " + $i + " has no id") }
-                $pdir = [string](Get-JsonMember -Object $p -Name 'dir')
+                $pdir = Get-CanonField -Object $p -Name 'dir'
                 if ($pdir -cnotmatch '^[A-Za-z0-9._-]+$') {
                     Stop-Gate ("registry port ""$portId"" has dir ""$pdir"" which is not a single path segment matching ^[A-Za-z0-9._-]+$")
                 }
@@ -458,18 +479,18 @@ function ConvertFrom-Canon {
                     Stop-Gate ("registry port ""$portId"" has dir ""$pdir"", which is a directory traversal rather than a port directory")
                 }
                 Assert-SafeCanonString -Value $portId -What 'port id'
-                Assert-SafeCanonString -Value ([string](Get-JsonMember -Object $p -Name 'family')) -What 'port family'
+                Assert-SafeCanonString -Value (Get-CanonField -Object $p -Name 'family') -What 'port family'
                 Assert-SafeCanonString -Value $pdir -What 'port dir'
                 $plist.Add([pscustomobject]@{
-                    Id = $portId; Family = [string](Get-JsonMember -Object $p -Name 'family'); Dir = $pdir
+                    Id = $portId; Family = (Get-CanonField -Object $p -Name 'family'); Dir = $pdir
                     # (W2107 r2) NEGATIVE, matching `[ "$pexists" = "false" ]`
                     # in the bash half. Testing positively for true/True sent a
                     # malformed value such as "yes" -- or the string "False" --
                     # down the opposite branch from the bash half at both the
                     # exists/status consistency halt and the
                     # deferred-because-unscaffolded path.
-                    Exists = (-not ((ConvertTo-CanonTokenText -Value (Get-JsonMember -Object $p -Name 'exists')) -ceq 'false'))
-                    Note = [string](Get-JsonMember -Object $p -Name 'note')
+                    Exists = (-not ((Get-CanonField -Object $p -Name 'exists') -ceq 'false'))
+                    Note = (Get-CanonField -Object $p -Name 'note')
                 })
             }
             $registry = $plist
@@ -481,7 +502,7 @@ function ConvertFrom-Canon {
                 Stop-Gate 'first json block carries an id but no canon_schema_version; the registry must come first'
             }
             if ($null -eq $registry) { Stop-Gate 'no registry block found in the canon' }
-            $eid = [string](Get-JsonMember -Object $obj -Name 'id')
+            $eid = Get-CanonField -Object $obj -Name 'id'
             if ($eid -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]*$') {
                 Stop-Gate ("entry id ""$eid"" is outside the anchor charset ^[A-Za-z0-9][A-Za-z0-9_-]`$; an id that cannot appear in an anchor is meaningless to the canon")
             }
@@ -490,24 +511,29 @@ function ConvertFrom-Canon {
                     Stop-Gate ("entry ""$eid"" is missing required key ""$k""")
                 }
             }
-            $status = [string](Get-JsonMember -Object $obj -Name 'status')
+            $status = Get-CanonField -Object $obj -Name 'status'
             if ($status -cne 'active' -and $status -cne 'superseded') {
                 Stop-Gate ("entry ""$eid"" has status ""$status"" outside the closed vocabulary active|superseded")
             }
-            $prov = [string](Get-JsonMember -Object $obj -Name 'provenance')
+            $prov = Get-CanonField -Object $obj -Name 'provenance'
             if ($prov -cne 'quoted' -and $prov -cne 'synthesized-from-shipped-fixes') {
                 Stop-Gate ("entry ""$eid"" has provenance ""$prov"" outside its closed vocabulary")
             }
-            $check = [string](Get-JsonMember -Object $obj -Name 'check')
+            $check = Get-CanonField -Object $obj -Name 'check'
             if ($check -cne 'anchor' -and $check -cne 'property') {
                 Stop-Gate ("entry ""$eid"" has check ""$check"" outside the closed vocabulary anchor|property")
             }
-            $ver = [string](Get-JsonMember -Object $obj -Name 'version')
+            $ver = Get-CanonField -Object $obj -Name 'version'
             if ($ver -cnotmatch '^[0-9]+$') { Stop-Gate ("entry ""$eid"" has non-integer version ""$ver""") }
-            if (@(Get-JsonMember -Object $obj -Name 'defects').Count -eq 0) { Stop-Gate ("entry ""$eid"" has an empty defects array") }
+            # A present `"defects": null` has no .__len in the bash tokenizer
+            # and halts there; @($null).Count is 1 here, which accepted it.
+            $defectsVal = Get-JsonMember -Object $obj -Name 'defects'
+            $defectsCount = 0
+            if ($null -ne $defectsVal) { $defectsCount = @($defectsVal).Count }
+            if ($defectsCount -eq 0) { Stop-Gate ("entry ""$eid"" has an empty defects array") }
             Assert-SafeCanonString -Value $eid -What 'entry id'
             Assert-SafeCanonString -Value $ver -What 'entry version'
-            Assert-SafeCanonString -Value ([string](Get-JsonMember -Object $obj -Name 'check_hint')) -What 'check_hint'
+            Assert-SafeCanonString -Value (Get-CanonField -Object $obj -Name 'check_hint') -What 'check_hint'
 
             $rows = @(Get-JsonMember -Object $obj -Name 'applies_to')
             if ($rows.Count -ne $registry.Count) {
@@ -516,15 +542,15 @@ function ConvertFrom-Canon {
             $applies = New-Object System.Collections.Generic.List[object]
             for ($i = 0; $i -lt $rows.Count; $i++) {
                 $r = $rows[$i]
-                $rp = [string](Get-JsonMember -Object $r -Name 'port')
+                $rp = Get-CanonField -Object $r -Name 'port'
                 if ($rp -cne $registry[$i].Id) {
                     Stop-Gate ("entry ""$eid"" applies_to row " + $i + " names port ""$rp"" but registry position " + $i + " is """ + $registry[$i].Id + """; rows must follow registry order")
                 }
-                $rs = [string](Get-JsonMember -Object $r -Name 'status')
+                $rs = Get-CanonField -Object $r -Name 'status'
                 if ($rs -cne 'required' -and $rs -cne 'not_applicable' -and $rs -cne 'deferred') {
                     Stop-Gate ("entry ""$eid"" row ""$rp"" has status ""$rs"" outside the closed vocabulary required|not_applicable|deferred")
                 }
-                $rv = [string](Get-JsonMember -Object $r -Name 'variant')
+                $rv = Get-CanonField -Object $r -Name 'variant'
                 $variantOk = $false
                 foreach ($v in $script:VariantVocabulary) { if ($rv -ceq $v) { $variantOk = $true } }
                 if (-not $variantOk) {
@@ -543,7 +569,7 @@ function ConvertFrom-Canon {
             }
             $entries.Add([pscustomobject]@{
                 Id = $eid; Version = [int]$ver; Status = $status; Provenance = $prov
-                Check = $check; CheckHint = [string](Get-JsonMember -Object $obj -Name 'check_hint'); AppliesTo = $applies
+                Check = $check; CheckHint = (Get-CanonField -Object $obj -Name 'check_hint'); AppliesTo = $applies
             })
             continue
         }

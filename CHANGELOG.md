@@ -23,6 +23,70 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.71.0] - 2026-08-23
+
+### Added
+
+- **`scripts/check-port-canon.ps1` — the PowerShell half of the port-canon
+  drift check, and the two halves are now cross-verified against each other
+  (W2107).** `check-port-canon.sh` shipped without a counterpart, so Windows
+  users had no drift check at all and nothing in either suite proved the
+  checker still worked. The new half is an **independent implementation**, not
+  a transliteration: the bash half tokenises the canon's json with `awk`, this
+  one builds an object graph with `ConvertFrom-Json`. Two readings of one
+  document that reach the same verdict are worth more than one reading run
+  twice, and the suites hold them to it.
+
+  - **Gated as a self-test, never as the fleet scan.** The fleet scan's correct
+    result today is exit 1, so registering it would have installed a
+    permanently-red group, which teaches people to ignore the suite. Both
+    halves' self-tests now run as bash Test Group 30 and PowerShell Test
+    Group 32, in both suites.
+  - **The cross-verification is the point.** `30c`/`32c` compare the two
+    halves' case-name sets, so a case renamed or lost on one side goes red —
+    which neither half's own tally can see, each being internally consistent
+    while disagreeing with the other. `32d` runs both against one fixture tree
+    across all three exit tiers and compares exit codes, tally counts, verdict
+    lines and work lists. Both halves also agree line for line over the real
+    fleet; that is the strongest evidence available and is precisely what
+    cannot be a test group, because it is red by design.
+  - **100 self-test cases, mirrored by outcome rather than by mechanism.**
+    Including the ones that exist only because of `awk`/`grep` mechanics this
+    half does not have — the tab/newline record-forgery pair, the entry-id
+    charset refusal. A refusal is a verdict: a canon that halts the bash half
+    at exit 2 has to halt this one too, or the pair disagrees on a real input.
+    The task specification said the bash half had 37 cases; it has 100, which
+    is what was mirrored.
+  - **The seven false-green classes W2108 closed in the bash half are closed
+    here on their own terms**, because PowerShell reaches that shape more
+    easily than bash does rather than less: `-ErrorAction SilentlyContinue`
+    turns any read failure into `$null`, which is falsy, which reads as clean.
+    Files are read as bytes in `try`/`catch` with an `unreadable` sentinel
+    distinguishable from an empty file; a NUL byte refuses the file; decoding
+    is ISO-8859-1 rather than UTF-8, following D281's decided answer, because
+    `UTF8.GetString` maps invalid bytes to U+FFFD and can vanish content; the
+    tree is enumerated ONCE and both passes consume that one walk with its
+    status carried alongside.
+  - **Three failure modes that are PowerShell's alone**, which fidelity to the
+    bash half would not have caught. `-eq`/`-match` are case-INSENSITIVE by
+    default, so `"Required"` and `"ANCHOR"` would sail past a closed-vocabulary
+    check the bash half refuses — every id, status, variant, check, provenance
+    and schema comparison uses `-ceq`/`-cmatch`, and the self-test harness had
+    the same bug, caught live when a refutation for `/MISSING/` matched
+    `missing 0` in the tally. Without `Set-StrictMode` a missing json key reads
+    as `$null`, indistinguishable from a key legitimately holding null, so key
+    presence is tested through `psobject.Properties`. And a CRLF checkout stops
+    an end-of-line anchor matching, so lines are trimmed of `\r` on split.
+  - **`SUITE_WALL_BASELINE_S` raised from 100 to 175.** The two self-tests add
+    about a minute per suite — roughly 9s for the bash half and 55s for the
+    PowerShell half, which re-execs its own script once per case group.
+    Trimming cases to fit the old number was the alternative and is the wrong
+    trade: the count is the coverage.
+  - Documented in README alongside its siblings, including that the fleet scan
+    remains ungated and why. The bash suite's stale claim that Group 28 is
+    bash-only "as with Group 29" — which W2105 could not correct from the ps1
+    side and recorded here instead — is now corrected in place.
+
 ## [1.70.0] - 2026-08-21
 
 A hook-executor correctness window: six defects, four of them silent data-loss

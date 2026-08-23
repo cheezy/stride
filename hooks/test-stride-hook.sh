@@ -244,7 +244,14 @@ SUITE_LOAD_BASELINE_MS=250   # idle measures 130-175ms; 250 leaves room for jitt
 # so quote the range rather than one run). Used only for the 2x warning threshold,
 # where a mid-range figure is the honest choice — 90 understated it and 110
 # overstated a genuinely quiet run.
-SUITE_WALL_BASELINE_S=100
+# (W2107) Raised from 100 to 175. Test Group 30 adds both halves of the
+# port-canon self-test: the bash half costs ~8s, the PowerShell half ~55s,
+# because it re-execs its own script once per case group and PowerShell
+# re-parses the whole file on every invocation. The alternative was cutting
+# cases to hit the old number, which is the wrong trade -- the count is the
+# coverage. Measured on the machine W2107 was written on: ~100s before, ~165s
+# after.
+SUITE_WALL_BASELINE_S=175
 
 suite_now_ms() {
   if command -v perl > /dev/null 2>&1; then
@@ -10364,8 +10371,17 @@ fi
 # suite on machines without it would just train people to ignore reds, which
 # is the exact failure this whole gate exists to prevent.
 #
-# The ps1 twin suite has no Group 29: host-agnostic repo gates live in the
-# bash suite only, as with Group 28.
+# The ps1 twin suite has no Group 29: this gate analyses hooks/*.ps1 and
+# scripts/*.ps1 from OUTSIDE, and a ps1 suite gating itself would certify its
+# own host.
+#
+# (W2107) The trailing clause here used to read "as with Group 28", which
+# stopped being true when W2105 gave Group 28 a ps1 counterpart. W2105 could
+# not correct it -- test-stride-hook.sh was read-only for that task -- and
+# recorded the staleness in CHANGELOG.md instead; W2107 touches this file, so
+# it is corrected here rather than left as a second-hand note. Group 30 below
+# is likewise mirrored, as ps1 Group 32. Group 29 is now the only bash-only
+# group, and for the reason just stated rather than by convention.
 echo ""
 echo "=== Test Group 29: W2099 PowerShell 5.1 static-compatibility gate ==="
 W2099_OUT=$(bash "$SCRIPT_DIR/../scripts/check-ps1-compat.sh" 2>&1)
@@ -10437,6 +10453,92 @@ PROBE
     FAIL=$((FAIL + 1))
   fi
   rm -rf "$W2099_PROBE_DIR"
+fi
+
+# ============================================================
+# Test Group 30: W2107 -- the port-canon drift check, both halves
+# ============================================================
+# Runs the SELF-TEST of check-port-canon.sh and check-port-canon.ps1, and
+# cross-checks the two against each other.
+#
+# NEVER the fleet scan. Its correct result today is exit 1 -- the fleet has not
+# adopted the anchor contract yet -- so registering it here would install a
+# permanently-red group, and a permanently-red group trains people to ignore
+# the suite. The fleet scan stays an ungated release-time step, exactly as
+# README describes it.
+#
+# TWO DIFFERENT REASONS A LEG CAN NOT RUN, and they are deliberately not the
+# same thing:
+#
+#   exit 2 from either half is a FAIL. Neither half has a machine-fault tier --
+#   the bash half shells only awk and grep, and the ps1 half's ConvertFrom-Json
+#   ships inside every PowerShell that could run it. A 2 therefore means "no
+#   verdict was possible" about the CANON, which is a real failure.
+#
+#   pwsh being absent is a SKIP for the ps1 leg only. That is a statement about
+#   this machine, not about the canon. STRIDE_PS1_GATE_REQUIRED=1 turns it into
+#   a failure, following Group 29's opt-in enforcement -- a runner without pwsh
+#   otherwise reports a fully green suite while half the pair never ran.
+echo ""
+echo "=== Test Group 30: W2107 port-canon drift check (self-test, never the fleet scan) ==="
+
+W2107_SH_OUT=$(bash "$SCRIPT_DIR/../scripts/check-port-canon.sh" --self-test 2>&1)
+W2107_SH_RC=$?
+if [ "$W2107_SH_RC" -eq 0 ] && printf '%s\n' "$W2107_SH_OUT" | grep -q '^self-test: [0-9]* passed, 0 failed$'; then
+  # Asserting the TALLY LINE, not just the exit code: a self-test that ran zero
+  # cases also exits 0, and "0 passed, 0 failed" is the shape a broken harness
+  # produces. The count is not pinned here on purpose -- the suites assert that
+  # it is non-zero and clean, and the two halves assert it against EACH OTHER
+  # in 30c, which is the check that actually catches a lost case.
+  echo -e "  ${GREEN}PASS${RESET}: 30a: the bash half's self-test is clean ($(printf '%s\n' "$W2107_SH_OUT" | grep '^self-test:'))"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 30a: the bash half's self-test did not pass cleanly (rc=$W2107_SH_RC)"
+  printf '%s\n' "$W2107_SH_OUT" | tail -20
+  FAIL=$((FAIL + 1))
+fi
+
+W2107_PS_RAN=0
+if command -v pwsh > /dev/null 2>&1; then
+  W2107_PS_OUT=$(pwsh -NoProfile -File "$SCRIPT_DIR/../scripts/check-port-canon.ps1" -SelfTest 2>&1)
+  W2107_PS_RC=$?
+  W2107_PS_RAN=1
+  if [ "$W2107_PS_RC" -eq 0 ] && printf '%s\n' "$W2107_PS_OUT" | grep -q '^self-test: [0-9]* passed, 0 failed$'; then
+    echo -e "  ${GREEN}PASS${RESET}: 30b: the PowerShell half's self-test is clean ($(printf '%s\n' "$W2107_PS_OUT" | grep '^self-test:'))"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 30b: the PowerShell half's self-test did not pass cleanly (rc=$W2107_PS_RC)"
+    printf '%s\n' "$W2107_PS_OUT" | tail -20
+    FAIL=$((FAIL + 1))
+  fi
+elif [ "${STRIDE_PS1_GATE_REQUIRED:-0}" = "1" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 30b: STRIDE_PS1_GATE_REQUIRED=1 but pwsh is not installed"
+  FAIL=$((FAIL + 1))
+else
+  echo "  SKIP: 30b: pwsh not installed -- the PowerShell half cannot run here"
+  echo "        (set STRIDE_PS1_GATE_REQUIRED=1 to make this a failure instead)"
+fi
+
+# 30c: the two halves must agree about WHICH CASES EXIST. Comparing the ok:
+# name sets catches a case renamed or lost on one side, which neither half's
+# own tally can see -- each is internally consistent while disagreeing with the
+# other. The [ps1-only] prefix and the skipped-with-reason suffix are the two
+# sanctioned asymmetries and are normalized out; anything else is a divergence.
+if [ "$W2107_PS_RAN" -eq 1 ]; then
+  W2107_SH_NAMES=$(printf '%s\n' "$W2107_SH_OUT" | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | sort)
+  W2107_PS_NAMES=$(printf '%s\n' "$W2107_PS_OUT" | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | sort)
+  if [ -z "$W2107_SH_NAMES" ]; then
+    # Non-vacuity: two empty sets compare equal forever.
+    echo -e "  ${RED}FAIL${RESET}: 30c: the bash half emitted no ok: lines, so the cross-check would pass vacuously"
+    FAIL=$((FAIL + 1))
+  elif [ "$W2107_SH_NAMES" = "$W2107_PS_NAMES" ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 30c: both halves ran the same $(printf '%s\n' "$W2107_SH_NAMES" | wc -l | tr -d ' ') named cases"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 30c: the two halves disagree about which cases exist"
+    diff <(printf '%s\n' "$W2107_SH_NAMES") <(printf '%s\n' "$W2107_PS_NAMES") | head -20
+    FAIL=$((FAIL + 1))
+  fi
 fi
 
 # ============================================================

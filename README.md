@@ -335,6 +335,28 @@ firing, so a misconfigured settings file cannot pass as a clean run. The group
 skips — loudly, printing the install command — when pwsh or the analyzer is
 absent.
 
+**(v1.71.0+)** bash Group 30 and PowerShell Group 32 run the **self-test** of
+both halves of the port-canon drift check, in both suites, and cross-verify the
+two against each other. They never run the fleet scan: its correct result today
+is exit 1, and a permanently-red group teaches people to ignore the suite.
+
+The cross-verification is what makes the pair worth having. `30c`/`32c` compare
+the two halves' **case-name sets**, so a case renamed or lost on one side goes
+red — something neither half's own tally can see, since each stays internally
+consistent while disagreeing with the other. `32d` then runs both halves
+against **one fixture tree across all three exit tiers** (0 all-clean, 1
+drift-found, 2 no-verdict-possible) and compares exit codes, tally counts,
+verdict lines and work lists, normalizing only the two absolute-path header
+lines and each script's reference to its own filename. Both halves also agree
+line for line over the real fleet, which is stronger evidence than any of these
+— and is exactly what cannot be a test group, because it is red by design.
+
+Adding both halves' self-tests costs roughly a minute of wall clock in each
+suite (about 9s for the bash half, about 55s for the PowerShell half, which
+re-execs its own script once per case group). `SUITE_WALL_BASELINE_S` in
+`hooks/test-stride-hook.sh` was raised from 100 to 175 to match, rather than
+trimming cases to fit the old number.
+
 ```
 bash hooks/test-stride-hook.sh
 pwsh hooks/test-stride-hook.ps1
@@ -476,16 +498,29 @@ What it does catch, also verified by execution: `? :`, `??`, `??=`,
 
 ### The cross-port canon drift check
 
-`scripts/check-port-canon.sh` compares every port repo and vendored catalog
-copy against the rules registered in `docs/port-canon.md`, reporting per rule
-and per port whether the port's anchor is present, stale, unexpected, or
-missing. Unlike the gates above it is **not** part of any hook-suite group and
-nothing runs it for you — it is a **release-time** step, and the release
-documentation is what makes it happen.
+`scripts/check-port-canon.sh` and `scripts/check-port-canon.ps1` compare every
+port repo and vendored catalog copy against the rules registered in
+`docs/port-canon.md`, reporting per rule and per port whether the port's anchor
+is present, stale, unexpected, or missing.
+
+The two halves are **independent implementations**, not a script and its
+transliteration: the bash half tokenises the canon's json with `awk`, the
+PowerShell half builds an object graph with `ConvertFrom-Json`. That is
+deliberate — two readings of one document that reach the same verdict are worth
+more than one reading run twice — and the suites hold them to it (below).
+
+**The FLEET SCAN is still a release-time step that nothing runs for you.** Its
+correct result today is exit 1, because the fleet has not adopted the anchor
+contract yet, so it cannot be a pass/fail suite group without installing a
+permanently-red one. **The SELF-TEST is different and is now gated**: both
+halves run as bash Test Group 30 and PowerShell Test Group 32, and those groups
+also cross-verify the two halves against each other.
 
 ```
-bash scripts/check-port-canon.sh              # scan the fleet against the canon
-bash scripts/check-port-canon.sh --self-test  # prove the gate still detects drift
+bash scripts/check-port-canon.sh                 # scan the fleet against the canon
+pwsh scripts/check-port-canon.ps1                # the same scan, the other half
+bash scripts/check-port-canon.sh --self-test     # prove the gate still detects drift
+pwsh scripts/check-port-canon.ps1 -SelfTest      # the same 100 cases, the other half
 ```
 
 Exit codes: `0` every applicable cell reports ok, `1` at least one cell reports
@@ -496,9 +531,11 @@ wrong. Under `--self-test` the same codes mean all cases passed, at least one
 failed, and the temp dir or the flag combination was wrong.
 
 **Treat `2` as red, not as silence.** It does not mean a missing machine
-dependency the way it does in `check-ps1-compat.sh` — this script shells out to
-nothing but `awk` and `grep`. It means the run proved nothing, so its lack of
-findings is not a pass.
+dependency the way it does in `check-ps1-compat.sh` — the bash half shells out
+to nothing but `awk` and `grep`, and the PowerShell half's `ConvertFrom-Json`
+ships inside every PowerShell that could run it at all. Neither half has a
+machine-fault tier, so in both a `2` means the run proved nothing, and its lack
+of findings is not a pass.
 
 **Fix a red result by placing the anchor, never by editing the canon.** A
 MISSING cell means the port does not carry the rule's marker beside its own

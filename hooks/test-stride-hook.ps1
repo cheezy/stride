@@ -9699,6 +9699,20 @@ if ($g29Missing.Count -gt 0) {
 #         the bash script on the CLEAN path (the over-budget and missing-file
 #         branches are not exercised by the cross-check).
 #
+#   (W2107) sh 30 port-canon drift check      -> ps1 Group 32 (NEW). Both
+#         halves' SELF-TESTS run in both suites, and 32d cross-verifies them
+#         against one fixture tree across all three exit tiers -- 0 all-clean,
+#         1 drift-found, 2 no-verdict-possible -- comparing exit codes, tally
+#         counts, verdict body lines and work lists, with the two absolute-path
+#         header lines and the script's self-reference normalized out. NOT
+#         compared: the full verdict space. DEFECT, STALE, the UNVERIFIABLE
+#         refusal classes and the catalog rows are each covered by both halves'
+#         own 100 self-test cases and by the case-name equality in 32c, but no
+#         group runs them through the fixture-tree diff. The evidence that the
+#         two halves agree across the WHOLE space is the fleet-scan diff, and
+#         that cannot be a test group because its correct result today is red.
+#         The fleet scan is never registered anywhere, in either suite.
+#
 # STILL BASH-ONLY, with the reason:
 #   sh 29 W2099 ps1 5.1 static gate. Deliberate: the gate analyses hooks/*.ps1
 #         from outside, and a ps1 suite gating itself would certify its own
@@ -10357,6 +10371,142 @@ if ($g31Missing.Count -gt 0) {
             }
         }
     }
+}
+
+# ============================================================
+# Test Group 32: W2107 — the port-canon drift check, both halves
+# ============================================================
+# The mirror of sh Group 30. Same rule: the SELF-TEST, never the fleet scan,
+# whose correct result today is exit 1.
+#
+# 32c is the fixture-tree cross-verification, modelled on Group 28b: both
+# halves are run against ONE tree and their reports compared. 28b compares the
+# clean path only and says so; this compares all three EXIT TIERS, because the
+# tiers are where the two halves could most easily disagree without either
+# looking wrong on its own.
+Write-Host ""
+Write-Host "=== Test Group 32: W2107 port-canon drift check ==="
+
+$g32Ps1 = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'scripts/check-port-canon.ps1'
+$g32Sh  = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'scripts/check-port-canon.sh'
+
+$g32Out = (& pwsh -NoProfile -File $g32Ps1 -SelfTest 2>&1 | Out-String)
+$g32Rc = $LASTEXITCODE
+# The tally line, not just the exit code: a self-test that ran zero cases also
+# exits 0, and "0 passed, 0 failed" is what a broken harness prints.
+if ($g32Rc -eq 0 -and $g32Out -cmatch '(?m)^self-test: [0-9]+ passed, 0 failed$') {
+    $script:PASS++
+    Write-Host "  PASS: 32a: the PowerShell half's self-test is clean" -ForegroundColor Green
+} else {
+    $script:FAIL++
+    Write-Host "  FAIL: 32a: the PowerShell half's self-test did not pass cleanly (rc=$g32Rc)" -ForegroundColor Red
+    Write-Host (($g32Out -split "`n" | Select-Object -Last 20) -join "`n")
+}
+
+if (Get-Command bash -ErrorAction SilentlyContinue) {
+    $g32ShOut = (& bash $g32Sh --self-test 2>&1 | Out-String)
+    $g32ShRc = $LASTEXITCODE
+    if ($g32ShRc -eq 0 -and $g32ShOut -cmatch '(?m)^self-test: [0-9]+ passed, 0 failed$') {
+        $script:PASS++
+        Write-Host "  PASS: 32b: the bash half's self-test is clean" -ForegroundColor Green
+    } else {
+        $script:FAIL++
+        Write-Host "  FAIL: 32b: the bash half's self-test did not pass cleanly (rc=$g32ShRc)" -ForegroundColor Red
+    }
+
+    # The case-name sets must match. Each half's own tally is internally
+    # consistent while disagreeing with the other, so only this sees a case
+    # renamed or lost on one side.
+    $g32Names = {
+        param($t)
+        (($t -split "`n") |
+            Where-Object { $_ -clike 'ok: *' } |
+            ForEach-Object { $_.TrimEnd("`r") -replace ' \[skipped on this host:.*\]$', '' } |
+            Where-Object { $_ -cnotlike 'ok: \[ps1-only\]*' } |
+            Sort-Object) -join "`n"
+    }
+    $g32A = & $g32Names $g32ShOut
+    $g32B = & $g32Names $g32Out
+    if (-not $g32A) {
+        $script:FAIL++
+        Write-Host "  FAIL: 32c: the bash half emitted no ok: lines, so the comparison would pass vacuously" -ForegroundColor Red
+    } else {
+        Assert-Eq "32c: both halves ran the same named cases" $g32A $g32B
+    }
+
+    # 32d: THE FIXTURE-TREE CROSS-VERIFICATION. One canon, one tree, both
+    # halves, all three exit tiers. What is compared: the exit code, the tally
+    # counts, every verdict body line, and the work list. What is normalized:
+    # the two header lines carrying absolute paths, and the script's own name
+    # where a report refers to itself -- an UNVERIFIABLE work item names the
+    # checker, and that difference is cosmetic, exactly the self-reference 28b
+    # normalizes out for the same reason.
+    $g32Tmp = Join-Path $TmpDir 'w2107-xverify'
+    New-Item -ItemType Directory -Path $g32Tmp -Force | Out-Null
+    $f3 = '```'
+    $g32Canon = {
+        param($Path, $Schema)
+        $lines = @(
+            '# canon'
+            "${f3}json"
+            "{ ""canon_schema_version"": $Schema,"
+            '  "ports": ['
+            '    {"id": "alpha", "family": "f", "dir": "alpha", "exists": true, "note": ""},'
+            '    {"id": "beta",  "family": "f", "dir": "beta",  "exists": true, "note": ""}'
+            '  ] }'
+            "$f3"
+            '### r'
+            '<!-- canon:rule-one v1 -->'
+            "${f3}json"
+            '{ "id": "rule-one", "version": 1, "status": "active", "superseded_by": null,'
+            '  "provenance": "quoted", "defects": ["D1"], "check": "anchor", "check_hint": "h",'
+            '  "applies_to": ['
+            '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
+            '    {"port": "beta", "status": "required", "variant": "", "reason": "r"} ] }'
+            "$f3"
+        )
+        [System.IO.File]::WriteAllText($Path, (($lines -join "`n") + "`n"))
+    }
+    & $g32Canon (Join-Path $g32Tmp 'ok.md') 1
+    & $g32Canon (Join-Path $g32Tmp 'bad.md') 99
+    New-Item -ItemType Directory -Path (Join-Path $g32Tmp 'clean/alpha') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $g32Tmp 'clean/beta') -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'clean/alpha/a.md'), "x`n<!-- canon:rule-one v1 -->`n")
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'clean/beta/b.md'),  "x`n<!-- canon:rule-one v1 -->`n")
+    New-Item -ItemType Directory -Path (Join-Path $g32Tmp 'miss/alpha') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $g32Tmp 'miss/beta') -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'miss/alpha/a.md'), "x`n")
+    [System.IO.File]::WriteAllText((Join-Path $g32Tmp 'miss/beta/b.md'),  "x`n")
+
+    $g32Norm = {
+        param($t)
+        (($t -split "`n") |
+            ForEach-Object { $_.TrimEnd("`r") } |
+            Where-Object { $_ -cnotlike '  canon:*' -and $_ -cnotlike '  ports parent:*' } |
+            ForEach-Object { $_ -replace 'check-port-canon\.(sh|ps1)', 'check-port-canon.<impl>' }) -join "`n"
+    }
+    $g32Tiers = @(
+        @{ Name = 'tier 0 (all clean)';   Canon = 'ok.md';  Tree = 'clean'; Want = 0 },
+        @{ Name = 'tier 1 (drift found)'; Canon = 'ok.md';  Tree = 'miss';  Want = 1 },
+        @{ Name = 'tier 2 (no verdict)';  Canon = 'bad.md'; Tree = 'clean'; Want = 2 }
+    )
+    foreach ($t in $g32Tiers) {
+        $cp = Join-Path $g32Tmp $t.Canon
+        $tp = Join-Path $g32Tmp $t.Tree
+        $shO = (& bash $g32Sh --canon $cp --ports-parent $tp 2>&1 | Out-String); $shR = $LASTEXITCODE
+        $psO = (& pwsh -NoProfile -File $g32Ps1 -Canon $cp -PortsParent $tp 2>&1 | Out-String); $psR = $LASTEXITCODE
+        Assert-Eq "32d: $($t.Name) — both halves exit $($t.Want)" "$($t.Want)/$($t.Want)" "$shR/$psR"
+        $a = & $g32Norm $shO
+        $b = & $g32Norm $psO
+        if ($t.Want -ne 2 -and -not ($a -cmatch '\S')) {
+            $script:FAIL++
+            Write-Host "  FAIL: 32d: $($t.Name) — the bash half produced no comparable output" -ForegroundColor Red
+        } else {
+            Assert-Eq "32d: $($t.Name) — both halves report identically" $a $b
+        }
+    }
+} else {
+    Write-Host "  SKIP: 32b/32c/32d: cross-check needs bash" -ForegroundColor Yellow
 }
 
 # ============================================================

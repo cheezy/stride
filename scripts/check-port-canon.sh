@@ -117,6 +117,10 @@
 # The suite grew from 72 cases to 100. No existing case was modified, and the
 # fleet result is byte-identical before and after (exit 1; ok 4, missing 44,
 # defect 4) -- the changes only ever move a cell toward refusal.
+# (Both figures in this paragraph are W2108's record, not today's: the suite
+# is now at 104 and the fleet at ok 51 / missing 1. D285 annotated the tally
+# and left the count unannotated, which was the same misreading hazard half
+# done; this note closes it. Read the whole paragraph as that round's log.)
 #
 # Two findings were recorded and deliberately NOT fixed, because both are
 # judgement calls about intent rather than defects: head -1 collapses multiple
@@ -126,6 +130,59 @@
 # vendored copy of the canon inside a port would credit that port with every
 # anchor. Both are filed rather than patched under time pressure: this file
 # has twice had a fix introduce the next round's defect.
+#
+# D285 -- DISPOSITION OF THE DEFERRED FINDINGS
+#
+# One fixed, three declined. The decline is a decision with a reason, not a
+# deferral repeated: each names what would have to change for it to be taken
+# up, so the next reader inherits the argument rather than the backlog.
+#
+#   FIXED -- finding 3, the grep -I readable-as-text decision.
+#      LC_ALL=C pinned the locale axis; -I still let grep's own heuristic
+#      decide, and a heuristic broader than "contains a NUL" skips a NUL-free
+#      file and exits 1, which is byte-identical to "no anchors here". The
+#      scan now passes -a instead, so readable-as-text is decided by the
+#      byte-count guard from the file's own content and by nothing else. The
+#      reasoning and the measurement are at the call site in emit_anchors.
+#      Two self-test cases cover it; both fail against the pre-fix script
+#      (measured: pre-fix 100 passed / 2 failed, post-fix 102 / 0).
+#      A LOCALE-axis pair was added afterwards, when an exploratory session
+#      showed LC_ALL=C could be deleted from the scan with the suite still
+#      reporting every case passing, while a not-owed anchor went back to
+#      reading clean. Measured with the prefix deleted: 102 passed / 2 failed,
+#      the two new cases. The three axes -- NUL, implementation, locale -- now
+#      each have a case, which is the state that makes "the record matches the
+#      code" checkable rather than asserted.
+#      This finding was bash-only -- the PowerShell twin reads raw bytes via
+#      .NET and never shells out to grep -- so fixing it CONVERGES the pair.
+#
+#   DECLINED -- finding 1 (head -1), finding 2a (exact-path self-exclusion)
+#   and finding 2b (a canon copy inside a port tree satisfies every anchor).
+#      Not declined on their merits. Findings 1 and 2a exist in
+#      check-port-canon.ps1 in the same shape (its first-match lookup, and its
+#      -ceq path comparison), and its own header makes a one-sided behaviour
+#      change a defect in itself: the two halves' verdicts must agree on every
+#      real input. Finding 2b is the same context-free anchor match on both
+#      sides. So each of the three is a PAIRED change -- bash and PowerShell
+#      together, with matching cases in both suites and a cross-verified run
+#      of the pair -- which is a different and larger piece of work than the
+#      one-sided edit the fault site invites. Fixing either half alone here
+#      would manufacture exactly the disagreement class this pair is designed
+#      to prevent, which is why "small and obvious" is the wrong reading of
+#      these three.
+#      Taking them up means doing all three across both halves in one change,
+#      on a machine with pwsh, with the cross-verification run. Filed as D293
+#      rather than done, and the .ps1 twin carries the mirror of this note.
+#      Note the .ps1 declines finding 1 by pointing at the bash half, and this
+#      file previously declined it without pointing anywhere -- so the two
+#      notes together read as a loop. The loop is what the paired task breaks.
+#
+# The suite is at 104 cases. The current fleet baseline is exit 1 with
+# ok 51, missing 1, stale 0, unexpected 0, defect 0, unverifiable 0 and 5
+# deferred, unchanged by this work -- and note it is nothing like the
+# "ok 4, missing 44, defect 4" recorded above, which was true when W2108 ran
+# and has been overtaken by the fleet adopting anchors. Read that figure as
+# that round's record, not as today's expected result.
 #
 # Anchors are searched per port DIRECTORY, never at a fixed path: ports keep
 # these rules in structurally different places, and a fixed-path search finds
@@ -147,10 +204,11 @@
 #   Under --self-test the codes mean: 0 every case passed, 1 at least one case
 #   failed, 2 the temp dir could not be created or the flags were combined
 #   wrongly. Note the gate's own correct result against the real fleet today is
-#   exit 1 -- every anchor is MISSING because no port has adopted one yet --
-#   which is why this script is deliberately NOT wired into the pass/fail hook
-#   suite the way its siblings are. Run --self-test to prove the gate; run it
-#   bare to see the fleet's drift.
+#   exit 1 -- one anchor is still MISSING (D285 corrected this line, which said
+#   every anchor was missing because no port had adopted one; 51 cells now
+#   report ok) -- which is why this script is deliberately NOT wired into the
+#   pass/fail hook suite the way its siblings are. Run --self-test to prove
+#   the gate; run it bare to see the fleet's drift.
 #
 #   Note 2 does NOT mean what it means in check-ps1-compat.sh, where it is
 #   reserved for the machine lacking pwsh. This script shells out to nothing
@@ -755,8 +813,10 @@ planted.md"
     pass=$((pass + 1)); pass=$((pass + 1)); pass=$((pass + 1)); pass=$((pass + 1))
   fi
 
-  # --- grep -I skips a file it judges binary and exits 1: byte-identical, to
-  # --- the caller, to "this file holds no anchors". No stderr line either.
+  # --- a file the scan declines is byte-identical, to the caller, to "this
+  # --- file holds no anchors" -- exit 1, no stderr line. (Pre-D285 that
+  # --- decline was grep -I's binary heuristic; it is now the byte-count
+  # --- guard, which refuses the NUL-bearing fixture below on its own bytes.)
   mkdir -p "$tmp/bin/alpha" "$tmp/bin/beta"
   printf '<!-- canon:rule-one v1 -->\n' > "$tmp/bin/alpha/a.md"
   printf '<!-- canon:rule-one v1 -->\n' > "$tmp/bin/beta/b.md"
@@ -922,6 +982,81 @@ planted.md"
   out="$(st_run "$tmp/tl.md" "$tmp/m" 2>&1)"; rc=$?
   st_assert "an entry that never reached the parser is caught by the anchor count" 2 "$rc" \
     "did not reach this parser" "$out"
+
+  # --- D285 finding 3: readable-as-text must not depend on grep's heuristic
+  #
+  # The point of this case is that it does NOT depend on which grep happens to
+  # be on PATH. Asserting against the ambient grep would prove nothing here,
+  # because /usr/bin/grep -I already scans the fixture correctly -- the bug was
+  # only ever reachable through a grep whose binary heuristic is broader. So
+  # the case SUPPLIES that grep: a stub that refuses any file carrying a byte
+  # outside printable ASCII whenever -I is requested, and delegates otherwise.
+  # That is the whole property under test -- the scan must not ask grep to
+  # decide readable-as-text -- rather than a statement about this machine.
+  #
+  # Pre-fix (grep -EIno) the stub fires, the file is skipped, the not-owed
+  # anchor in it is never seen, and beta reports na: a false green. Post-fix
+  # (grep -Eano) no -I is requested, the stub delegates, and the anchor is
+  # seen and reported UNEXPECTED. The fixture is NUL-free by construction, so
+  # the byte-count guard above lets it through to grep in both cases -- this
+  # case tests the grep axis alone, not the NUL guard.
+  mkdir -p "$tmp/f3/beta" "$tmp/f3/alpha" "$tmp/f3bin"
+  {
+    printf '# beta\n'
+    printf 'a \377 byte, no NUL\n'
+    printf '<!-- canon:rule-one v1 -->\n'
+  } > "$tmp/f3/beta/notes.md"
+  # A grep whose binary heuristic is broader than "contains a NUL".
+  {
+    echo '#!/bin/sh'
+    echo 'for _a in "$@"; do'
+    echo '  case "$_a" in'
+    echo '    -*I*)'
+    echo '      for _last in "$@"; do :; done'
+    echo '      if [ -f "$_last" ] && LC_ALL=C /usr/bin/grep -q "[^[:print:][:space:]]" "$_last" 2>/dev/null; then'
+    echo '        exit 1'
+    echo '      fi'
+    echo '      ;;'
+    echo '  esac'
+    echo 'done'
+    echo 'exec /usr/bin/grep "$@"'
+  } > "$tmp/f3bin/grep"
+  chmod +x "$tmp/f3bin/grep"
+  # beta is not_applicable for rule-one, so an anchor found there is UNEXPECTED.
+  st_canon "$tmp/f3-canon.md" 1 not_applicable 1 anchor rule-one
+  out="$(PATH="$tmp/f3bin:$PATH" bash "$SELF" --canon "$tmp/f3-canon.md" --ports-parent "$tmp/f3" 2>&1)"; rc=$?
+  st_assert "a broader-heuristic grep cannot hide an anchor from the scan (D285 finding 3)" \
+    1 "$rc" "UNEXPECTED" "$out"
+  st_refute "a NUL-free non-ASCII file is not silently skipped (D285 finding 3)" \
+    "verdict: clean" "$out"
+
+  # --- D285 r2: the LOCALE axis, which nothing covered until this case
+  #
+  # The suite covered the NUL axis and (above) the grep-IMPLEMENTATION axis,
+  # and covered the LOCALE axis nowhere -- so LC_ALL=C on the scan could be
+  # deleted and the suite would still report every case passing, while a port
+  # carrying an anchor it does not owe went back to reporting clean. An
+  # exploratory session demonstrated exactly that. This case closes it.
+  #
+  # The fixture puts an invalid multibyte byte on the SAME LINE as a not-owed
+  # anchor. Under a UTF-8 locale that makes the MATCH fail -- no binary
+  # heuristic is involved -- so grep exits 1 and the anchor is never seen.
+  # Putting the byte on its own line does not reproduce it, which is why the
+  # fixture above (whose 0xFF is on a separate line) does not cover this.
+  #
+  # The case runs the scan with a UTF-8 locale EXPORTED into its environment.
+  # That is the whole point: it proves the scan's own LC_ALL=C prefix wins
+  # over a hostile ambient locale. Remove that prefix from the scan and this
+  # case fails; keep it and the locale below cannot reach the match.
+  mkdir -p "$tmp/loc/beta" "$tmp/loc/alpha"
+  printf 'x \377 <!-- canon:rule-one v1 -->\n' > "$tmp/loc/beta/notes.md"
+  st_canon "$tmp/loc-canon.md" 1 not_applicable 1 anchor rule-one
+  out="$(LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 bash "$SELF" \
+          --canon "$tmp/loc-canon.md" --ports-parent "$tmp/loc" 2>&1)"; rc=$?
+  st_assert "an invalid multibyte sequence on the anchor's line cannot hide it" \
+    1 "$rc" "UNEXPECTED" "$out"
+  st_refute "a hostile ambient locale cannot make a not-owed anchor read clean" \
+    "verdict: clean" "$out"
 
   # --- CLI surface
   out="$(bash "$SELF" --help 2>&1)"; rc=$?
@@ -1446,9 +1581,11 @@ scan_anchors() {
 # Emit every anchor in one file as "id<TAB>version<TAB>relpath:line".
 # Returns 1 when the file could not be scanned, so the caller can refuse the
 # port instead of judging it on a list that is short by exactly the files that
-# failed. grep exits 1 both for "no match" and for a file its -I heuristic
-# classifies as binary, and exits 2 on a read error -- three outcomes the
-# caller previously received as one empty stream. A short anchor list is fatal
+# failed. grep exits 1 both for "no match" and for a file it declines to scan,
+# and exits 2 on a read error -- three outcomes the caller previously received
+# as one empty stream. (Until D285 the decline was grep's own -I binary
+# heuristic; -I is gone, and the byte-count guard below now makes that call
+# from the file's own content.) A short anchor list is fatal
 # for the UNEXPECTED sweep specifically: it can only fire on anchors it sees,
 # so a NOT-owed anchor sitting in an unreadable or NUL-bearing .md made the
 # port report clean.
@@ -1474,23 +1611,48 @@ emit_anchors() {
     # dropped rather than emitted.
     # grep's status is captured rather than discarded: 0 match, 1 no match,
     # >1 a real error. Only the first two are a scan that happened.
-    # LC_ALL=C pins the -I heuristic to a byte-oriented locale, where the ONLY
-    # thing that makes grep call a file binary is a NUL -- which the byte-count
-    # test above has already refused. Without it, "binary" also covers invalid
-    # multibyte sequences under the ambient locale, and the two would not be
-    # the same set: a NUL-free .md could still be skipped and exit 1, folding
-    # back into "no anchors here".
+    # LC_ALL=C IS STILL LOAD-BEARING, and D285 changed what it is load-bearing
+    # FOR. It used to be justified as pinning grep's -I binary heuristic to a
+    # byte-oriented locale; -I is gone, so read that job as finished and this
+    # one as the live one: under a UTF-8 locale an invalid multibyte sequence
+    # makes the MATCH ITSELF fail, with no binary heuristic involved anywhere.
+    # An anchor sharing its line with such a byte is then not found, grep exits
+    # 1, and that folds back into "no anchors here" -- the same false green,
+    # reached by a different route. Measured: with 0xFF on the anchor's own
+    # line, LC_ALL=C grep -Eano matches and LC_ALL=en_US.UTF-8 grep -Eano exits
+    # 1 empty. (With the byte on a DIFFERENT line both locales match, which is
+    # why a fixture has to put it on the same line to see this at all.)
+    # DO NOT DELETE THIS PREFIX. The self-test case named
+    # "an invalid multibyte sequence on the anchor's line cannot hide it"
+    # fails without it -- added by D285 because nothing covered the locale
+    # axis, and its absence is how a comment describing a removed flag could
+    # have licensed removing a guard that still matters.
     #
-    # This pins the LOCALE axis only, and does not pin the IMPLEMENTATION:
-    # a grep whose binary heuristic is broader than "contains a NUL" can still
-    # skip a NUL-free file and exit 1, and LC_ALL=C does not stop it. Measured
-    # under review: /usr/bin/grep scans a lone-0xFF file correctly with and
-    # without the prefix, while ugrep skips it under both. The script runs
-    # non-interactively, where grep is /usr/bin/grep, so the exposure is a
-    # machine whose PATH puts a broader-heuristic grep first. Closing that
-    # axis properly means not relying on -I at all -- deferred rather than
-    # done here, because it is a change to how every file is read.
-    out="$(LC_ALL=C grep -EIno '<!--[[:space:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:space:]]+v[0-9]+[[:space:]]*-->' "$f")"
+    # LC_ALL=C pinned the LOCALE axis; -a pins the IMPLEMENTATION axis, and
+    # together with the byte-count test above they close D285 finding 3.
+    # -I asked grep to decide readable-as-text by its own heuristic, and a
+    # heuristic broader than "contains a NUL" skips a NUL-free file and exits
+    # 1 -- byte-identical to "this file holds no anchors". That is fatal for
+    # the UNEXPECTED sweep specifically, which can only fire on anchors it
+    # sees, so a NOT-owed anchor in such a file made the port report clean.
+    # Measured: against a NUL-free file whose only non-ASCII byte is 0xFF,
+    # /usr/bin/grep -EIno finds the anchor, while ugrep -EIno exits 1 with no
+    # output; -Eano finds it under both. The script runs non-interactively,
+    # where grep is /usr/bin/grep, so this was latent here and live on a
+    # machine whose PATH puts a broader-heuristic grep first.
+    #
+    # -a is safe precisely BECAUSE the byte-count test runs first: every file
+    # reaching this line is already proven NUL-free from its own bytes, so
+    # forcing text treatment cannot make grep read something the guard would
+    # have refused. Readable-as-text is now decided by the file's content, not
+    # by whichever grep is on PATH -- the same principle the NUL guard states.
+    # Do NOT restore -I to "be safe": that reinstates the false green.
+    #
+    # This also CONVERGES the two halves rather than diverging them. The
+    # PowerShell twin reads raw bytes via .NET and never shells out to grep,
+    # so it never had this axis to pin; before this change the pair could
+    # disagree on exactly such a file, and now they agree.
+    out="$(LC_ALL=C grep -Eano '<!--[[:space:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:space:]]+v[0-9]+[[:space:]]*-->' "$f")"
     gst=$?
     [ "$gst" -le 1 ] || return 1
     printf '%s\n' "$out" \

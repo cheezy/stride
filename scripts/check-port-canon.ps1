@@ -60,13 +60,23 @@
 #   * Files are read as BYTES in try/catch. Any failure yields an 'unreadable'
 #     sentinel that is distinguishable from an empty file at the type level --
 #     never an empty string, which is what a clean empty file also produces.
-#   * A NUL byte refuses the file, mirroring the bash half's grep -I refusal.
+#   * A NUL byte refuses the file, mirroring the bash half's byte-count
+#     refusal. (Until D285 the bash half also leaned on grep -I here; it
+#     now passes -a, so both halves decide readable-as-text from the
+#     file's own bytes and neither defers to a tool's heuristic.)
 #   * Decoding is ISO-8859-1 (code page 28591), not UTF-8. UTF8.GetString maps
 #     invalid bytes to U+FFFD and can merge or vanish content -- the exact
 #     failure D281 filed against stride-hook.ps1, whose decided answer was this
 #     same bijective Latin-1 projection. The anchor and fence patterns are pure
 #     ASCII, so Latin-1 scanning is exact, and it removes the locale dependency
-#     the bash half could only pin rather than close.
+#     the bash half could only pin rather than close. D285 closed the
+#     remaining implementation axis on that side too, so the pair can no
+#     longer disagree on a NUL-free file carrying a non-ASCII byte. State
+#     that as a possibility removed, not an event observed: the divergence
+#     needed a grep with a broader binary heuristic ahead of /usr/bin/grep on
+#     PATH, and measured on the fleet the two halves returned the SAME verdict
+#     on exactly such a file. The bash half words this conditionally for the
+#     same reason; a mirror should not be the stronger of the two claims.
 #   * Enumeration happens ONCE and both passes consume its result, with the
 #     status carried alongside. The bash half walks the tree twice and its own
 #     header records that as the shape it kept being defeated by.
@@ -88,6 +98,31 @@
 #     through psobject.Properties, never through $null-ness.
 #   * A CRLF checkout ends every line with \r, which stops an end-of-line
 #     anchor and a fence closer matching. Lines are trimmed of \r on split.
+#
+# ---------------------------------------------------------------------------
+# D285 -- THE THREE PAIRED FINDINGS THIS HALF SHARES, AND WHY THEY ARE OPEN
+# ---------------------------------------------------------------------------
+#
+# D285 disposed of four findings deferred from W2108's round 5. It fixed the
+# grep -I one, which was bash-only and is described above. It DECLINED three,
+# and the reason is this pair rather than their merits:
+#
+#   * head -1 collapsing multiple anchors for one id -- this half's
+#     first-match lookup is the same shape (see the walk-order note below,
+#     which already declines it by pointing at the bash half).
+#   * the canon self-exclusion being an exact path comparison -- this half's
+#     -ceq compare is the same shape.
+#   * a copy of the canon inside a port tree satisfying every anchor rule --
+#     the anchor match is context-free on both sides.
+#
+# Each is a PAIRED change: fixing one half alone manufactures exactly the
+# verdict disagreement acceptance criterion 1 and pitfall 4 exist to prevent.
+# So they are open as one piece of work across both halves, with matching
+# cases in both suites and a cross-verified run -- not as three small edits.
+# Filed as D293.
+# Note this half's walk-order note declines by pointing at the bash half, and
+# the bash half declined without pointing anywhere; read together they were a
+# loop. Breaking the loop is the point of doing them together.
 #
 # ---------------------------------------------------------------------------
 # HONEST LIMITS

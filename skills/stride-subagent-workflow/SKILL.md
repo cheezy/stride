@@ -66,7 +66,7 @@ Invoke this skill **after claiming a task** (via `stride-claiming-tasks`) and **
 
 Use this matrix to determine which subagents to dispatch based on task attributes.
 
-**This table is a MIRROR of the decision matrix in `stride-workflow` Step 3, restricted to the subagent columns. It must agree with that matrix row for row, and where the two diverge, `stride-workflow` Step 3 is authoritative.** Read its **Row precedence** rule too — more than one row can match (a `medium` defect matches both `medium (any)` and `Defect type`), and that ordering lives there rather than being restated here. Do not state an independent trigger for any column in this file; that was defect D221.
+**This table is a MIRROR of the decision matrix in `stride-workflow` Step 3, restricted to the subagent columns. It must agree with that matrix row for row, and where the two diverge, `stride-workflow` Step 3 is authoritative.** Read its **Row precedence** rule too — more than one row can match (a `medium` defect matches both `medium (any)` and `Defect type`), and that ordering lives there rather than being restated here. Do not state an independent trigger for any column in this file; that was defect D221. Both the matrix and its row precedence are canon-governed — entries `decision-matrix-authority` and `row-precedence` in `stride/docs/port-canon.md` — so a change to either rule's substance owes a version bump there before the next release.
 
 | Task Attributes | stride:task-decomposer | stride:task-explorer | Plan Agent | stride:task-reviewer |
 |---|---|---|---|---|

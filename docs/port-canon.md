@@ -528,32 +528,86 @@ ship a file that trips its own rule.
 
 ## Discovery — how a maintainer reaches this file
 
-**This is the one mechanism the canon specifies and does not yet install, and it
-is recorded here rather than left to be discovered.** The gap is narrower than it
-was and it is still the one that matters. Three things now point here: the
-repository README, which names the release gate that reads this file; the
-changelog entry recording that gate; and one port, `stride-lite`, whose workflow
-skill cites this document by path and rule id where it explains why it defers
-`reason-code-vocabulary`. What still does not exist is a back-reference at an
-**edit site** — none of the four source files whose rules this document governs
-mentions it beside the governed rule, which is the direction that would actually
-catch a maintainer mid-edit. The canon reaches its sources; its sources, at the
-point of editing, do not reach back.
+**The edit-site back-reference is installed (D283), and this section records
+what now points here so the next maintainer does not have to rediscover it.**
+Read the groups below as a description to re-verify, not a tally to trust: the
+previous version of this section led with a count and asserted something false
+about its own fleet, and any figure here is true only of the day it was
+written. Routes fall into three groups.
 
-That matters most for the versioning rule below, which requires a version bump
-when a rule's **substance** changes. Substance changes in the source file, not
-here, so without a pointer at the edit site a maintainer editing (say) the Step 3
-matrix in `stride/skills/stride-workflow/SKILL.md` gets no signal that the edit
-crosses port boundaries. The canon keeps saying `v1`, every port keeps its `v1`
-anchor, and the drift check reports green over a fleet that has drifted — **the
-failure looks exactly like success**, which is the one shape a safeguard must not
-have.
+**Inside this repository.** The README names the release gate that reads this
+file; the changelog records that gate and this mechanism;
+`scripts/check-port-canon.sh` and its PowerShell twin name it because they parse
+it, and the hook suite exercises them.
 
-**What is owed:** each file cited in an entry's Provenance carries a back-
-reference to this document beside the governed rule, so that editing the rule
-surfaces the obligation. Until that lands, treat the versioning discipline as
-**maintainer-enforced rather than mechanism-enforced**, and say so when handing
-work to someone who has not read this section.
+**Across the fleet.** Two ports cite this document by path and rule id where
+they record why they defer `reason-code-vocabulary` — `stride-lite` and
+`stride-opencode-lite`. `stride-copilot` and `stride-gemini` name it in their
+changelogs.
+
+> **The `stride-opencode-lite` citation contradicts this file's own registry,
+> which still carries `"exists": false` for that port and defers it on every
+> entry.** The repository is scaffolded and tagged `v0.1.0`, so the registry row
+> is stale — and because the drift check skips a port it believes absent, that
+> port is currently printed among the clean repos without being examined. The
+> registry transition described under "Versioning and supersession" is owed and
+> is tracked as **D291**; it is out of scope for the change that added this
+> paragraph, and is recorded here so the contradiction is not read as a claim.
+
+**At the edit site — the direction that was missing.** Each source file in this
+repository that states or restates a governed rule now carries a back-reference
+beside it, naming this file by path and the entry id, so that editing the rule
+surfaces the obligation without the editor having to already know this document
+exists.
+
+That direction is the one that matters for the versioning rule below, which
+requires a version bump when a rule's **substance** changes. Substance changes
+in the source file, not here. Without a pointer at the edit site, a maintainer
+editing (say) the Step 3 matrix in `stride/skills/stride-workflow/SKILL.md` got
+no signal that the edit crossed port boundaries: the canon kept saying `v1`,
+every port kept its `v1` anchor, and the drift check reported green over a fleet
+that had drifted — **the failure looked exactly like success**, which is the one
+shape a safeguard must not have. That was D283, and the back-references are its
+fix.
+
+**What the back-references are, and what they are deliberately not.** Each one
+names this file and the entry id it is governed by, and states that a substance
+change owes a version bump here. **None restates the governed rule** — a second
+copy of the substance is precisely the drift the Scope note above forbids, so
+the back-reference points at the obligation and stops. Each is voiced in its own
+file's idiom rather than in one imported form, per the D240 per-port shaping
+precedent.
+
+**Which files carry one, and why each.** Two are this repository's Provenance
+sources: `stride/agents/task-reviewer.md` for `verdict-note`, and
+`stride/skills/stride-workflow/SKILL.md` for the other three entries, at three
+separate sites. A third, `stride/skills/stride-completing-tasks/SKILL.md`, is
+named by the Scope note above as a source of record and restates two of the
+governed rules. The fourth, `stride/skills/stride-subagent-workflow/SKILL.md`,
+is neither a Provenance source nor named in the Scope note — it holds the
+decision-matrix mirror, which the `row-precedence` entry's Port-side anchor
+addresses by name. `fence-nesting` has no site here at all: it is provenanced to
+`stride-lite` and its Port-side anchor is `None`, so there is nothing in this
+repository to install a back-reference beside.
+
+**The test actually applied was per-file, over those four files — and it is
+narrower than the ideal.** The ideal test is *every site in this repository that
+states or restates a governed rule*, and the two do not yet coincide: `README.md`
+restates the whole six-value `reason_code` vocabulary and the `matrix_deviation`
+clause, and carries no back-reference. That gap is known, is tracked as **D292**,
+and is stated here rather than papered over — a section whose subject is
+one-way references must not itself claim a coverage it does not have. Treat the
+site-based test as the direction of travel and the four files as where it has
+been applied so far.
+
+**What remains maintainer-enforced.** The back-reference surfaces the obligation
+at the edit site; it does not enforce it. Nothing fails a build when a substance
+change lands without a version bump — `scripts/check-port-canon.sh` compares
+anchors against entries and cannot see that a rule's *meaning* moved underneath
+an unchanged version. So the discipline is now **prompted rather than silent**,
+which is the improvement D283 bought, and it is still a human who must act on
+the prompt. Say that when handing work to someone who has not read this
+section.
 
 ## Versioning and supersession
 

@@ -284,6 +284,13 @@ The `hooks.json` PostToolUse handler automatically executes `.stride.md` `## bef
 | Defect type | Skip | YES | Skip (unless large) | YES | YES |
 | Complexity absent or unrecognised | Skip | YES | YES | YES | YES |
 
+**Canon-governed — the rows above belong to entry `row-precedence`, not to
+`decision-matrix-authority`.** Both entries live in `stride/docs/port-canon.md`
+and both are anchored below, but they govern different things: editing a row's
+content is a substance change to `row-precedence`, whose Provenance quotes the
+`Complexity absent or unrecognised` row verbatim. Read that entry's
+back-reference below before changing any row here.
+
 <!-- canon:decision-matrix-authority v1 -->
 **This matrix is the SOLE decision point for every column it carries** —
 Decompose, Explore, Plan, Review and Isolate. **Nothing anywhere may state a
@@ -294,6 +301,12 @@ appears to give an independent trigger, the matrix wins.** That ambiguity was
 defect D221, and this rule is its fix. `stride-subagent-workflow` carries a
 mirror of this table for the subagent columns: it must agree row for row, and
 **where it diverges, this matrix is authoritative.**
+
+**Canon-governed — entry `decision-matrix-authority` in
+`stride/docs/port-canon.md`.** That entry registers this rule as one every port
+must carry. A change to its substance owes a version bump in **two** places
+before the next release: that entry in the canon, and this file's own
+`<!-- canon:decision-matrix-authority ... -->` anchor above.
 
 <!-- canon:row-precedence v1 -->
 **Row precedence — more than one row can match, so read them in this order.**
@@ -323,6 +336,12 @@ flip Explore, Review and Isolate to YES for every small one-file defect, which
 would silently contradict Branch B and falsify the Isolate derivation's premise
 below. Resolving an ambiguity should not change behaviour, and this order is the
 one that does not.
+
+**Canon-governed — entry `row-precedence` in `stride/docs/port-canon.md`.** That
+entry registers this precedence order — and the matrix rows it orders — as one
+every port must carry. A change to its substance owes a version bump in **two**
+places before the next release: that entry in the canon, and this file's own
+`<!-- canon:row-precedence ... -->` anchor above.
 
 **The Isolate column is read only in dispatcher mode** (Step 1.5); when that gate
 has not fired there is nothing to isolate and the column is inert. **Inline means
@@ -761,6 +780,8 @@ Each element of `workflow_steps` is an object with these keys:
 | `matrix_deviation` | The matrix called for this step and it was deliberately not run |
 
 The vocabulary was derived by classifying the skip reasons actually persisted on the production board, so every code names a skip that really happens. `matrix_deviation` is the one that records **non-compliance**, and that is exactly why it exists: when the matrix called for a step you did not run, say so with that code rather than reaching for `decision_matrix_skip`, which would dress a deviation up as a sanctioned skip. The prose in `reason` then explains what drove it.
+
+**Canon-governed — entry `reason-code-vocabulary` in `stride/docs/port-canon.md`.** That entry registers this vocabulary as one every port must carry. A change to its substance owes a version bump in **two** places before the next release: that entry in the canon, and this file's own `<!-- canon:reason-code-vocabulary ... -->` anchor above.
 
 `name` is deliberately **not** constrained to the six values — persisted data carries a second step vocabulary from another runtime, and rejecting it would `422` that runtime's completions. Use the canonical six anyway; an invented name aggregates as its own row.
 

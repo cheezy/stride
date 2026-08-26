@@ -9709,7 +9709,7 @@ if ($g29Missing.Count -gt 0) {
 #         header lines and the script's self-reference normalized out. NOT
 #         compared: the full verdict space. DEFECT, STALE, the UNVERIFIABLE
 #         refusal classes and the catalog rows are each covered by both halves'
-#         own 100 self-test cases and by the case-name equality in 32c, but no
+#         own self-test suites and by the case-name equality in 32c, but no
 #         group runs them through the fixture-tree diff. The evidence that the
 #         two halves agree across the WHOLE space is the fleet-scan diff, and
 #         that cannot be a test group because its correct result today is red.
@@ -10428,6 +10428,7 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
             Where-Object { $_ -clike 'ok: *' } |
             ForEach-Object { $_.TrimEnd("`r") -replace ' \[skipped on this host:.*\]$', '' } |
             Where-Object { -not $_.StartsWith('ok: [ps1-only]', [System.StringComparison]::Ordinal) } |
+            Where-Object { -not $_.StartsWith('ok: [bash-only]', [System.StringComparison]::Ordinal) } |
             Sort-Object) -join "`n"
     }
     $g32A = & $g32Names $g32ShOut

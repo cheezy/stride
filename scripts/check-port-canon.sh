@@ -153,10 +153,15 @@
 #      code" checkable rather than asserted.
 #      This finding was bash-only -- the PowerShell twin reads raw bytes via
 #      .NET and never shells out to grep -- so fixing it CONVERGES the pair.
-#      Note the four cases it added exist ONLY in this half and carry no
-#      [ps1-only] marker, which is what makes the hook suite's case-name
-#      cross-check (Group 30c / ps1 Group 32c) read red. That is filed as D294
-#      and is a suite-parity question, not a checker behaviour one.
+#      Note the four cases it added existed ONLY in this half and carried no
+#      marker, which made the hook suite's case-name cross-check (Group 30c /
+#      ps1 Group 32c) read red -- both halves internally green while disagreeing
+#      with each other, the exact state 30c exists to see through. D294 closed
+#      it, and split the four on whether the other half CAN have the hazard:
+#      the locale pair was PORTED (that half owes the same outcome, and now
+#      pins it), and the grep-stub pair is MARKED [bash-only] (this half shells
+#      out to grep; that half invokes none, so there is nothing to stub). The
+#      marker was added in the same change, symmetrically, to both normalizers.
 #
 # D293 -- THE THREE PAIRED FINDINGS, NOW CLOSED IN BOTH HALVES
 #
@@ -192,7 +197,9 @@
 #
 #      Ten cases were added to each suite, with byte-identical names on both
 #      sides. Measured: bash pre-fix 106 passed / 8 failed, post-fix 123 / 0;
-#      PowerShell pre-fix 100 / 10, post-fix 119 / 0. (The bash finding-1 trio
+#      PowerShell pre-fix 100 / 10, post-fix 119 / 0 -- D294 later took that
+#      half to 121, so read these as D293's record rather than today's figures.
+#      (The bash finding-1 trio
 #      is order-dependent pre-fix by construction -- whichever single anchor
 #      head -1 returned, at least one of the three fails.) Both halves' bare
 #      fleet runs stay byte-identical to each other and to the pre-change
@@ -1186,9 +1193,17 @@ planted.md"
   # beta is not_applicable for rule-one, so an anchor found there is UNEXPECTED.
   st_canon "$tmp/f3-canon.md" 1 not_applicable 1 anchor rule-one
   out="$(PATH="$tmp/f3bin:$PATH" bash "$SELF" --canon "$tmp/f3-canon.md" --ports-parent "$tmp/f3" 2>&1)"; rc=$?
-  st_assert "a broader-heuristic grep cannot hide an anchor from the scan (D285 finding 3)" \
+  # D294: marked [bash-only], and the marker is a claim about the HAZARD, not a
+  # convenience. This pair pins the behaviour of a grep THIS half shells out to;
+  # the PowerShell half invokes no grep anywhere (it reads bytes through .NET),
+  # so there is no stub to install and no heuristic to defeat. A case whose
+  # hazard the other half cannot have is marked; a case testing an outcome both
+  # halves owe is PORTED instead -- which is what happened to the locale pair
+  # below. Both hook suites filter this prefix out of the case-name comparison,
+  # and neither will do so unless the other does.
+  st_assert "[bash-only] a broader-heuristic grep cannot hide an anchor from the scan (D285 finding 3)" \
     1 "$rc" "UNEXPECTED" "$out"
-  st_refute "a NUL-free non-ASCII file is not silently skipped (D285 finding 3)" \
+  st_refute "[bash-only] a NUL-free non-ASCII file is not silently skipped (D285 finding 3)" \
     "verdict: clean" "$out"
 
   # --- D285 r2: the LOCALE axis, which nothing covered until this case

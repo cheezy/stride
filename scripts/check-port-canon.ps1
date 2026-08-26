@@ -130,7 +130,8 @@
 #
 # Cases were added to each suite with byte-identical names on both sides.
 # Measured: this half pre-fix 100 passed / 10 failed, post-fix 119 / 0; the
-# bash half pre-fix 106 / 8, post-fix 123 / 0. Both halves' bare fleet runs are
+# bash half pre-fix 106 / 8, post-fix 123 / 0. (D294 later ported two cases
+# into this half, taking it to 121; read these as D293's record, not today's.) Both halves' bare fleet runs are
 # byte-identical to each other and to the pre-change baseline.
 #
 # Neither half points at the other any more. The walk-order note below is a
@@ -830,6 +831,29 @@ function Resolve-PhysicalPath {
     return $full
 }
 
+# D294 -- WHY NO SELF-TEST CASE PINS THE ISO-8859-1 DECODE, AND WHY THAT IS
+# NOT A GAP SOMEONE SHOULD CLOSE BY TRYING HARDER.
+#
+# The header above claims the ISO-8859-1 decode as the guard that closes the
+# encoding axis on this side. D294 tried to pin it with a self-test case and
+# established that no ANCHOR case can: swapping GetEncoding(28591) for UTF8 in
+# Read-CanonBytes leaves every anchor case passing.
+#
+# The reason is structural, not a shortfall in the fixture. .NET's UTF8 decoder
+# with replacement fallback emits U+FFFD for an invalid sequence and then
+# resumes at the next byte; it can only ever CONSUME bytes in 0x80-0xBF as
+# continuations, and every byte of an anchor is ASCII, 0x00-0x7F. The two
+# ranges are disjoint, so no byte sequence placed around an anchor can make a
+# UTF8 decode swallow it. Measured, not reasoned: 1280 two-byte prefixes
+# (every lead byte 0x00-0xFF against five following bytes) in front of a real
+# anchor, decoded as UTF8 -- the anchor stayed matchable in all 1280.
+#
+# So the decode's "merge or vanish" risk is real for non-ASCII CONTENT and is
+# unreachable through anchor visibility, which is the only thing these suites
+# assert. The locale pair ported from the bash half in D294 pins the shared
+# OUTCOME -- a non-ASCII byte on the anchor's line does not hide it -- and is
+# honest about not pinning the decode itself. If you want the decode pinned,
+# it needs a case about decoded CONTENT, not about whether an anchor is found.
 $script:AnchorPattern = '<!--[ \t]*canon:([A-Za-z0-9][A-Za-z0-9_-]*)[ \t]+v([0-9]+)[ \t]*-->'
 
 # Every anchor in one file. Returns Ok=$false when the file could not be
@@ -1937,6 +1961,40 @@ function Invoke-SelfTestBody {
     $r = Invoke-StRun -Canon "$Tmp/k.md" -PortsParent "$Tmp/bin"
     St-Assert "a NUL-bearing .md is refused, not read as anchor-free" 1 $r.ExitCode "partial file list" $r.Output
     St-Refute "a NUL-bearing .md never leaves a port reported clean" "clean repos:.*alpha" $r.Output
+
+    # --- D294: the LOCALE axis, ported from the bash half so both suites pin
+    # --- the same OUTCOME. The hazard itself is bash-specific -- that half
+    # --- shells out to grep, whose match fails on an invalid multibyte
+    # --- sequence under a UTF-8 locale, so a not-owed anchor sharing a line
+    # --- with such a byte went unseen and the port read clean. This half
+    # --- cannot fail that way: Read-CanonBytes decodes ISO-8859-1, a
+    # --- byte-for-byte bijection in which no sequence is invalid, and the
+    # --- match is .NET regex with no locale sensitivity at all. That is
+    # --- why the case is worth having HERE: it pins the OUTCOME both halves
+    # --- owe, so the pair agrees about this input rather than one half merely
+    # --- asserting it. Be precise about what it does NOT do: it does not
+    # --- discriminate the ISO-8859-1 decode. Swapping GetEncoding(28591) for
+    # --- UTF8 leaves this case passing, because a UTF8 decode cannot hide an
+    # --- ASCII anchor -- see the header note above for the measurement.
+    # ---
+    # --- The byte is on the SAME LINE as the anchor, which is what the bash
+    # --- half needed to reproduce it, and the run is made with a hostile
+    # --- UTF-8 locale exported into the child process's environment.
+    New-StDir @("$Tmp/loc/beta", "$Tmp/loc/alpha")
+    Set-StFile -Path "$Tmp/loc/beta/notes.md" -Text ("x " + [char]255 + " <!-- canon:rule-one v1 -->`n")
+    New-StCanon -Path "$Tmp/loc-canon.md" -Schema 1 -BetaStatus 'not_applicable' -Version '1' -Check 'anchor' -Id 'rule-one'
+    $prevLcAll = $env:LC_ALL
+    $prevLang  = $env:LANG
+    try {
+        $env:LC_ALL = 'en_US.UTF-8'
+        $env:LANG   = 'en_US.UTF-8'
+        $r = Invoke-StRun -Canon "$Tmp/loc-canon.md" -PortsParent "$Tmp/loc"
+    } finally {
+        $env:LC_ALL = $prevLcAll
+        $env:LANG   = $prevLang
+    }
+    St-Assert "an invalid multibyte sequence on the anchor's line cannot hide it" 1 $r.ExitCode "UNEXPECTED" $r.Output
+    St-Refute "a hostile ambient locale cannot make a not-owed anchor read clean" "verdict: clean" $r.Output
 
     # --- symlink classes. New-Item -ItemType SymbolicLink needs Developer Mode
     # --- or admin on Windows, so the whole block reports its reason there.

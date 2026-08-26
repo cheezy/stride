@@ -528,22 +528,30 @@ bash scripts/check-port-canon.sh --self-test     # prove the gate still detects 
 pwsh scripts/check-port-canon.ps1 -SelfTest      # the other half's own suite
 ```
 
-The two suites do **not** currently cover the same cases. Both pass, but the
-bash tally reads 104 and the PowerShell tally 100, and the difference is four
-named cases present only in the bash half — the D285 encoding and locale
-robustness cases (a broader-heuristic grep, a hostile ambient locale, a NUL-free
-non-ASCII file, an invalid multibyte sequence). They are not `[ps1-only]`
-asymmetries, so `hooks/test-stride-hook.sh` Group **30c** — the check whose whole
-job is to compare the two halves' case-name sets — reports the divergence rather
-than passing it. Reproduce with the normalization 30c itself uses:
+The two suites cover the same cases apart from the sanctioned asymmetries
+described below, and `hooks/test-stride-hook.sh` Group
+**30c** (with its PowerShell mirror, Group 32c) is what holds them to it: each
+compares the two halves' case-name SETS, which catches a case renamed or lost on
+one side — something neither half's own tally can see, since each stays
+internally consistent while disagreeing with the other. The two tallies are not
+expected to be equal; what must be equal is the set of names left after the
+sanctioned asymmetries are filtered out. Reproduce with the normalization 30c
+itself uses:
 
 ```
-diff <(bash scripts/check-port-canon.sh --self-test | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | sort) \
-     <(pwsh -NoProfile -File scripts/check-port-canon.ps1 -SelfTest | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | sort)
+diff <(bash scripts/check-port-canon.sh --self-test | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -Ev '^ok: \[(ps1|bash)-only\]' | sort) \
+     <(pwsh -NoProfile -File scripts/check-port-canon.ps1 -SelfTest | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -Ev '^ok: \[(ps1|bash)-only\]' | sort)
 ```
 
-Until those four land in the PowerShell half, run the bash suite for encoding and
-locale coverage; a Windows-only runner does not exercise it.
+**Three sanctioned asymmetries, and what each one claims.** A ` [skipped on this
+host: …]` suffix means the case exists on both sides but could not run here. A
+`[ps1-only]` or `[bash-only]` prefix means the HAZARD does not exist in the other
+half at all — not that porting the case was inconvenient. The live example is the
+grep-stub pair, marked `[bash-only]`: it pins the behaviour of a grep the bash
+half shells out to, and the PowerShell half invokes no grep anywhere. A case
+testing an outcome BOTH halves owe is ported instead, which is what happened to
+the locale pair. Marking a case that the other half could have run would turn
+these groups into the false green they exist to prevent.
 
 Exit codes: `0` every applicable cell reports ok, `1` at least one cell reports
 MISSING, STALE, UNEXPECTED, DEFECT or UNVERIFIABLE and the drift is listed

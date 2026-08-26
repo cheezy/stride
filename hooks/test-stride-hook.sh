@@ -10531,11 +10531,24 @@ fi
 # 30c: the two halves must agree about WHICH CASES EXIST. Comparing the ok:
 # name sets catches a case renamed or lost on one side, which neither half's
 # own tally can see -- each is internally consistent while disagreeing with the
-# other. The [ps1-only] prefix and the skipped-with-reason suffix are the two
-# sanctioned asymmetries and are normalized out; anything else is a divergence.
+# other. The [ps1-only] and [bash-only] prefixes and the skipped-with-reason
+# suffix are the three sanctioned asymmetries and are normalized out; anything
+# else is a divergence. ([bash-only] was added by D294 -- see below.)
 if [ "$W2107_PS_RAN" -eq 1 ]; then
-  W2107_SH_NAMES=$(printf '%s\n' "$W2107_SH_OUT" | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | sort)
-  W2107_PS_NAMES=$(printf '%s\n' "$W2107_PS_OUT" | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | sort)
+  # Three sanctioned asymmetries now, not two. [bash-only] is the mirror of
+  # [ps1-only], added by D294 for a case whose HAZARD cannot exist in the other
+  # half -- the grep-stub pair, which pins behaviour of a grep this half shells
+  # out to and the PowerShell half never invokes. Both markers are filtered
+  # from BOTH lists, so a marked case is out of the comparison whichever side
+  # it lives on. Marking is not a way to silence a divergence: a case is marked
+  # only when the other half CANNOT have the hazard, and a case testing an
+  # outcome both halves owe gets ported instead. The non-vacuity guard below
+  # still sees every unmarked case -- all but the marked lines -- so filtering
+  # cannot empty the list while real cases remain. No count is pinned here on
+  # purpose: a figure in a comment is the drift this very group exists to
+  # catch, and D294 removed one of those from the ps1 suite in the same change.
+  W2107_SH_NAMES=$(printf '%s\n' "$W2107_SH_OUT" | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | grep -v '^ok: \[bash-only\]' | sort)
+  W2107_PS_NAMES=$(printf '%s\n' "$W2107_PS_OUT" | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | grep -v '^ok: \[bash-only\]' | sort)
   if [ -z "$W2107_SH_NAMES" ]; then
     # Non-vacuity: two empty sets compare equal forever.
     echo -e "  ${RED}FAIL${RESET}: 30c: the bash half emitted no ok: lines, so the cross-check would pass vacuously"

@@ -112,13 +112,16 @@ which owe these rules. The registry therefore names **nine** ports explicitly
 rather than relying on "five" as an integer, which is what the acceptance
 criterion asks for: the matrix names the ports it covers.
 
-**`stride-opencode-lite` is in the registry and out of scope, deliberately.** Its
-repository is unscaffolded — G403 has not shipped and every child task is Backlog
-or blocked — so it carries `"exists": false` and every entry gives it
-`"status": "deferred"`. It is recorded present-with-a-status rather than omitted,
-so that the day G403 ships it becomes in scope by flipping two fields, with no
-rework of the matrix or of any anchor audit that read it. Omitting it silently
-would make "not yet built" indistinguishable from "never considered".
+**`stride-opencode-lite` was in the registry and out of scope, and is now in
+scope.** While G403 was unshipped its repository was unscaffolded, so it carried
+`"exists": false` and every entry gave it `"status": "deferred"`. It was recorded
+present-with-a-status rather than omitted, so that the day G403 shipped it would
+become in scope by flipping fields rather than by reworking the matrix or any
+anchor audit that had read it — and that is exactly how the transition was
+performed, in D291, once the port shipped at `v0.1.0`. Omitting it silently would
+have made "not yet built" indistinguishable from "never considered"; keeping the
+row is also what made the staleness visible, because a deferred row that outlives
+its reason is a row someone can find.
 
 ```json
 {
@@ -132,28 +135,38 @@ would make "not yet built" indistinguishable from "never considered".
     {"id": "stride-lite",         "family": "claude",   "dir": "stride-lite",         "exists": true,  "note": "Lite variant; carries its decision matrix in lib/select_workflow_branch.md, not skills/."},
     {"id": "stride-opencode",     "family": "opencode", "dir": "stride-opencode",     "exists": true,  "note": "Full port."},
     {"id": "stride-pi",           "family": "pi",       "dir": "stride-pi",           "exists": true,  "note": "Full port. Its reviewer agent is nested at extensions/subagent-dispatch/agents/stride-task-reviewer.md, not at a top-level agents/ directory; skills/stride-workflow/SKILL.md carries only a fallback self-review checklist for when custom agents are unavailable."},
-    {"id": "stride-opencode-lite","family": "opencode", "dir": "stride-opencode-lite","exists": false, "note": "Not scaffolded; G403 has not shipped. Deferred on every entry until it does."}
+    {"id": "stride-opencode-lite","family": "opencode", "dir": "stride-opencode-lite","exists": true,  "note": "Lite variant. Deferred on every entry while G403 was unshipped; scaffolded and tagged v0.1.0, and brought into scope by D291. Unlike the other lite variants it carries its decision matrix in skills/stride-opencode-lite-workflow/SKILL.md, not lib/, so it takes the unqualified variant on the matrix entries."}
   ]
 }
 ```
 
-**The first drift run is red in every anchor cell, and that is expected.** No
-port carries any anchor for any rule today — the anchor contract is introduced by
-this file, so it necessarily postdates every port. With five entries against
-eight existing ports, **all forty non-deferred cells report MISSING on the first
-run**, including entries whose rule every port already carries in substance
-(`verdict-note` is the clearest case: D240 ported it fleet-wide, and it will
-still report MISSING everywhere until the anchors are placed). Read the first
-report as a work list, not as a verdict on the fleet or on the checker. **The
-correct response is to place anchors, never to edit `applies_to` to make the
-report green** — which this file forbids twice, and means both times.
+**The first drift run was red in every anchor cell, and that was expected.** No
+port carried any anchor for any rule at the time: the anchor contract is
+introduced by this file, so it necessarily postdated every port. With five
+entries against the ports then in scope, every non-deferred cell reported MISSING
+on that first run, including entries whose rule the port already carried in
+substance (`verdict-note` was the clearest case: D240 ported it fleet-wide, and
+it still reported MISSING everywhere until the anchors were placed). That first
+report was a work list, not a verdict on the fleet or on the checker, and it has
+since been largely worked off — **do not read the passage above as current fleet
+state.** The live run is the only authority on that; take the tally from
+`scripts/check-port-canon.sh`, never from a sentence in this file. **The correct
+response to a MISSING cell is to place the anchor, never to edit `applies_to` to
+make the report green** — which this file forbids twice, and means both times.
 
 **Anchors are checked per port directory, not per file.** Ports keep these rules
 in structurally different places — full ports in `skills/stride-workflow/` and
-`skills/stride-subagent-workflow/`, lite variants in `lib/`, and `stride-pi` in a
-self-review checklist because it ships no `agents/` directory. A check that
-expects a fixed path finds nothing in three of the nine and reports false
-misses.
+`skills/stride-subagent-workflow/`; `stride-copilot-lite` and `stride-lite` in
+`lib/select_workflow_branch.md`; `stride-opencode-lite` in
+`skills/stride-opencode-lite-workflow/`, so "lite variant" does **not** imply
+`lib/`; and `stride-pi` splitting them — three at the ordinary
+`skills/stride-workflow/` path, but its reviewer anchor nested under
+`extensions/subagent-dispatch/agents/`, because it ships no top-level `agents/`
+directory. A check that expects a fixed path finds nothing in several of the nine
+and reports false misses — which is why the checker searches the port directory
+instead of a path, and why this passage names shapes rather than a count. Take
+the actual anchor sites from a live run, which prints the file and line it
+matched for every cell.
 
 ## Rules
 
@@ -214,7 +227,7 @@ source's five is real and is recorded here rather than smoothed over — see the
     {"port": "stride-lite",         "status": "required",       "variant": "four-section-keys",             "reason": "No behaviour_test_matrix anywhere in the tree, so the reviewer enumerates four section verdicts."},
     {"port": "stride-opencode",     "status": "required",       "variant": "five-section-keys",             "reason": ""},
     {"port": "stride-pi",           "status": "required",       "variant": "four-section-keys",             "reason": "Reviewer agent is nested at extensions/subagent-dispatch/agents/stride-task-reviewer.md, not a top-level agents/; it enumerates four section tiles and carries no behaviour_test_matrix key."},
-    {"port": "stride-opencode-lite","status": "deferred",       "variant": "",                              "reason": "Repository not scaffolded; G403 has not shipped."}
+    {"port": "stride-opencode-lite","status": "required",       "variant": "four-section-keys",             "reason": "No behaviour_test_matrix anywhere in the tree, so the reviewer enumerates four section verdicts."}
   ]
 }
 ```
@@ -245,9 +258,13 @@ recurring in a second column).
 **Port-side anchor.** Beside the port's Step 3 decision matrix, next to its own
 statement of the sole-decision-point rule.
 
-**Applicability.** Required everywhere, including both lite variants: they carry
-a decision matrix in `lib/select_workflow_branch.md`, so a competing trigger can
-arise there exactly as it can in a full port.
+**Applicability.** Required everywhere, the lite variants included: each carries
+a decision matrix of its own, so a competing trigger can arise there exactly as it
+can in a full port. Where that matrix lives differs — `stride-copilot-lite` and
+`stride-lite` keep it in `lib/select_workflow_branch.md`, while
+`stride-opencode-lite` keeps it in `skills/stride-opencode-lite-workflow/` — which
+is why the two carry the `lib-matrix` variant on their rows below and the third
+does not.
 
 ```json
 {
@@ -268,7 +285,7 @@ arise there exactly as it can in a full port.
     {"port": "stride-lite",         "status": "required", "variant": "lib-matrix", "reason": "Matrix lives in lib/select_workflow_branch.md rather than skills/stride-workflow/."},
     {"port": "stride-opencode",     "status": "required", "variant": "",           "reason": ""},
     {"port": "stride-pi",           "status": "required", "variant": "",           "reason": ""},
-    {"port": "stride-opencode-lite","status": "deferred", "variant": "",           "reason": "Repository not scaffolded; G403 has not shipped."}
+    {"port": "stride-opencode-lite","status": "required", "variant": "",           "reason": ""}
   ]
 }
 ```
@@ -319,22 +336,25 @@ addressed, relocated from the prose *around* the matrix to the rows *inside* it.
 statement of the precedence order. The subagent-workflow mirror does not carry a
 second anchor; one anchor per port directory.
 
-**Applicability.** Required everywhere. **This entry is expected to report
-MISSING for every port on the drift check's first run.** Be precise about why,
-because the two halves of that sentence rest on different facts: the **rule** is
-present in exactly one of the nine ports — `stride`, the source, which carries
-the `Complexity absent or unrecognised` row and the precedence list that this
-entry quotes — and absent from the other seven that exist. The **anchor** is
+**Applicability.** Required everywhere. **This entry reported MISSING for every
+port on the drift check's first run**, and it is worth keeping why on the record,
+because the two halves of that sentence rested on different facts: the **rule**
+was present in exactly one of the nine ports — `stride`, the source, which
+carries the `Complexity absent or unrecognised` row and the precedence list that
+this entry quotes — and absent from the others that existed. The **anchor** was
 present in none of them, `stride` included. `check: "anchor"` tests the anchor,
-so every existing port reports MISSING on the first run, and `stride` reports
-MISSING while carrying the rule. That is not a reason to soften the entry: the
-rule IS enforced canonically in the source, and the ports are what drifted.
+so every port reported MISSING on that run, and `stride` reported MISSING while
+carrying the rule. That was never a reason to soften the entry: the rule IS
+enforced canonically in the source, and the ports are what drifted. The anchors
+have since been placed across the fleet; consult a live run for which cells are
+outstanding today.
 
-**Delivery note.** D253 would hand-port this rule to ten tables across five port
-repositories — each port's Step 3 matrix plus its subagent-workflow mirror. It is
-seeded here instead and delivered by the sync task in this goal, so those tables
-are edited once rather than twice; D253 is closed by that sync rather than worked
-separately.
+**Delivery note (historical).** D253 would have hand-ported this rule to ten
+tables across the port repositories then in scope — each port's Step 3 matrix plus
+its subagent-workflow mirror. It was seeded here instead and delivered by the sync
+task, so those tables were edited once rather than twice. The anchors have since
+landed; whether D253 itself is recorded closed is a board question, not one this
+file can answer — check the board rather than reading closure out of this note.
 
 ```json
 {
@@ -345,7 +365,7 @@ separately.
   "provenance": "quoted",
   "defects": ["D253", "D221", "D232"],
   "check": "anchor",
-  "check_hint": "One anchor per port directory, beside its Step 3 matrix. The subagent-workflow mirror carries no second anchor. Expected MISSING everywhere on the first run.",
+  "check_hint": "One anchor per port directory, beside its Step 3 matrix. The subagent-workflow mirror carries no second anchor.",
   "applies_to": [
     {"port": "stride",              "status": "required", "variant": "",           "reason": ""},
     {"port": "stride-codex",        "status": "required", "variant": "",           "reason": ""},
@@ -355,7 +375,7 @@ separately.
     {"port": "stride-lite",         "status": "required", "variant": "lib-matrix", "reason": "Matrix lives in lib/select_workflow_branch.md rather than skills/stride-workflow/."},
     {"port": "stride-opencode",     "status": "required", "variant": "",           "reason": ""},
     {"port": "stride-pi",           "status": "required", "variant": "",           "reason": ""},
-    {"port": "stride-opencode-lite","status": "deferred", "variant": "",           "reason": "Repository not scaffolded; G403 has not shipped."}
+    {"port": "stride-opencode-lite","status": "required", "variant": "",           "reason": ""}
   ]
 }
 ```
@@ -396,9 +416,20 @@ speculation.
 **Port-side anchor.** Beside the port's own `reason_code` table or list, wherever
 it documents `workflow_steps` skips.
 
-**Applicability.** Required everywhere — every port emits `workflow_steps`. Today
-only the source carries the vocabulary, so this entry is expected to report
-MISSING for the other eight.
+**Applicability.** Required wherever a port emits `workflow_steps`. Read the
+`applies_to` rows below for who that is today rather than taking a count from this
+sentence. `stride-opencode-lite` is recorded `not_applicable` with its reason: it
+emits no `workflow_steps` object and has no completion endpoint, so a closed set
+of rejection codes has nothing to reject against. **`stride-lite` states the same
+structural fact about itself** and is nonetheless still carried as `required`,
+which is why it is the fleet's remaining MISSING cell on this entry. That
+inconsistency is real and is left standing deliberately: resolving it is a policy
+decision about `stride-lite`, not a side effect of registering another port, and
+narrowing its row would green a gate result rather than answer the question. That is the one
+sanctioned shape of a narrowed cell — a structural fact about the port, recorded
+with its reason — and not the forbidden move of narrowing applicability to green
+a report. On the first run only the source carried the vocabulary; consult a live
+run for which cells are outstanding today.
 
 ```json
 {
@@ -419,7 +450,7 @@ MISSING for the other eight.
     {"port": "stride-lite",         "status": "required", "variant": "", "reason": ""},
     {"port": "stride-opencode",     "status": "required", "variant": "", "reason": ""},
     {"port": "stride-pi",           "status": "required", "variant": "", "reason": ""},
-    {"port": "stride-opencode-lite","status": "deferred", "variant": "", "reason": "Repository not scaffolded; G403 has not shipped."}
+    {"port": "stride-opencode-lite","status": "not_applicable", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint: its telemetry is a bare array in a committed markdown file, so a closed reason_code set has nothing to reject against. Four of the six codes name conditions its loop cannot reach, and the remaining two would restate its own two-value skip table in imported spelling. The port records this reasoning itself in skills/stride-opencode-lite-workflow/SKILL.md and names this row as the thing to correct; reopen if a completion API ever lands there."}
   ]
 }
 ```
@@ -482,8 +513,11 @@ and its citations are its whole evidentiary basis.
   directly: *a nested fence is legitimate only when the outer one is wider*.
 
 **That walker is the reference implementation of this entry's property check**,
-and it is the artifact to read before writing another one — it is the only one
-in the fleet, and only two of the nine ports have a `test/smoke.sh` at all.
+and it is the artifact to read before writing another one — it is still the only
+one in the fleet, and only a minority of the nine ports carry a `test/smoke.sh`
+at all. Enumerate that minority from the tree rather than from this sentence: it
+grew by one when `stride-opencode-lite` came into scope, and a count written here
+goes stale the next time a port gains a suite.
 
 **Port-side anchor.** None. This is a prohibition on file structure, not a rule
 with a host paragraph to sit beside, so there is nowhere in a port for an anchor
@@ -519,7 +553,7 @@ ship a file that trips its own rule.
     {"port": "stride-lite",         "status": "required", "variant": "", "reason": ""},
     {"port": "stride-opencode",     "status": "required", "variant": "", "reason": ""},
     {"port": "stride-pi",           "status": "required", "variant": "", "reason": ""},
-    {"port": "stride-opencode-lite","status": "deferred", "variant": "", "reason": "Repository not scaffolded; G403 has not shipped."}
+    {"port": "stride-opencode-lite","status": "required", "variant": "", "reason": ""}
   ]
 }
 ```
@@ -540,19 +574,23 @@ file; the changelog records that gate and this mechanism;
 `scripts/check-port-canon.sh` and its PowerShell twin name it because they parse
 it, and the hook suite exercises them.
 
-**Across the fleet.** Two ports cite this document by path and rule id where
-they record why they defer `reason-code-vocabulary` — `stride-lite` and
-`stride-opencode-lite`. `stride-copilot` and `stride-gemini` name it in their
-changelogs.
+**Across the fleet.** Two ports cite this document by path and rule id where they
+record why they have not adopted `reason-code-vocabulary` — `stride-lite` and
+`stride-opencode-lite`. Read "not adopted" as plain English, **not** as the
+`deferred` status value: neither row is `deferred`, and a live run reports zero
+deferred cells. `stride-copilot` and `stride-gemini` name it in their changelogs.
 
-> **The `stride-opencode-lite` citation contradicts this file's own registry,
-> which still carries `"exists": false` for that port and defers it on every
-> entry.** The repository is scaffolded and tagged `v0.1.0`, so the registry row
-> is stale — and because the drift check skips a port it believes absent, that
-> port is currently printed among the clean repos without being examined. The
-> registry transition described under "Versioning and supersession" is owed and
-> is tracked as **D291**; it is out of scope for the change that added this
-> paragraph, and is recorded here so the contradiction is not read as a claim.
+> **The `stride-opencode-lite` citation once contradicted this file's own
+> registry, and no longer does.** The registry carried `"exists": false` for that
+> port and deferred it on every entry after the repository had already been
+> scaffolded and tagged `v0.1.0` — and because the drift check skips a port it
+> believes absent, that port was printed among the clean repos without a single
+> rule cell being examined. **D291** performed the registry transition described
+> under "Changing this file": `exists` is now `true`, four entries carry
+> an applicable status and `reason-code-vocabulary` carries `not_applicable` with
+> its reason, and the port is examined on every run. The episode is kept here
+> because it is the failure mode this file most wants a reader to recognise — a
+> gate reporting a subject clean that it never looked at.
 
 **At the edit site — the direction that was missing.** Each source file in this
 repository that states or restates a governed rule now carries a back-reference
@@ -661,13 +699,18 @@ Every seed entry is `v1`, `"status": "active"`, `"superseded_by": null`.
   port needs a registry row **and** a new `applies_to` element in **every** entry,
   at the registry's position — that is five edits today, and it grows with the
   canon. Retiring one is the same edit in reverse. `stride-opencode-lite` is the
-  case this will first bite: when G403 ships, set its registry `exists` to `true`
-  and change its `status` from `deferred` on each entry it then owes — one
-  registry field plus one field per entry, never a row added to only some.
+  worked example: when G403 shipped, D291 set its registry `exists` to `true` and
+  changed its `status` from `deferred` on each entry it then owed — one registry
+  field plus one field per entry, never a row added to only some. Note what that
+  transition is **not** licence to do: a port coming into scope owes an
+  applicable status on each entry, and `not_applicable` is available only where a
+  structural fact about the port makes the rule unreachable, recorded with its
+  reason.
 - **When an entry's anchor has nowhere to sit, say so rather than improvising.**
   A `check_hint` locates a host paragraph, and for a rule a port has not adopted
-  yet that paragraph does not exist — true today for `row-precedence` in seven
-  ports and `reason-code-vocabulary` in seven. The anchor goes in **only when the
-  port's own voicing of the rule does**, and the two land in the same change. An
+  yet that paragraph does not exist — the case that seeded this rule, when
+  `row-precedence` and `reason-code-vocabulary` had a host paragraph in almost no
+  port. The anchor goes in **only when the port's own voicing of the rule does**,
+  and the two land in the same change. An
   anchor placed beside nothing makes the drift check report a compliance the port
   does not have, which is worse than the MISSING it replaced.

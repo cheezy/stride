@@ -118,7 +118,8 @@
 # fleet result is byte-identical before and after (exit 1; ok 4, missing 44,
 # defect 4) -- the changes only ever move a cell toward refusal.
 # (Both figures in this paragraph are W2108's record, not today's: the suite
-# is now at 104 and the fleet at ok 51 / missing 1. D285 annotated the tally
+# is now at 104, and the fleet moved again under D291 -- see the baseline note
+# below, which is the one place a figure is maintained. D285 annotated the tally
 # and left the count unannotated, which was the same misreading hazard half
 # done; this note closes it. Read the whole paragraph as that round's log.)
 #
@@ -178,15 +179,22 @@
 #      notes together read as a loop. The loop is what the paired task breaks.
 #
 # The suite is at 104 cases. The current fleet baseline is exit 1 with
-# ok 51, missing 1, stale 0, unexpected 0, defect 0, unverifiable 0 and 5
-# deferred, unchanged by this work -- and note it is nothing like the
+# ok 53, missing 3, stale 0, unexpected 0, defect 0, unverifiable 0, 1 cell
+# not applicable and 0 deferred. (D291 moved it there by bringing
+# stride-opencode-lite into scope: the port had been skipped as absent while
+# still being printed among the clean repos, so its cells were never counted.
+# The prior record was ok 51, missing 1 and 5 deferred.) Note it is nothing
+# like the
 # "ok 4, missing 44, defect 4" recorded above, which was true when W2108 ran
 # and has been overtaken by the fleet adopting anchors. Read that figure as
 # that round's record, not as today's expected result.
 #
 # Anchors are searched per port DIRECTORY, never at a fixed path: ports keep
-# these rules in structurally different places, and a fixed-path search finds
-# nothing in three of the nine and reports false MISSING.
+# these rules in structurally different places -- lib/ for two lite variants,
+# skills/<port>-workflow/ for another, and a nested extensions/ path for
+# stride-pi's reviewer -- and a fixed-path search finds nothing in several of
+# the nine and reports false MISSING. Take the real sites from a bare run,
+# which prints the file and line it matched for every cell.
 #
 # The canon file itself is excluded from the anchor search. It is where every
 # anchor is DEFINED, and it lives inside the "stride" port's own directory, so
@@ -204,9 +212,9 @@
 #   Under --self-test the codes mean: 0 every case passed, 1 at least one case
 #   failed, 2 the temp dir could not be created or the flags were combined
 #   wrongly. Note the gate's own correct result against the real fleet today is
-#   exit 1 -- one anchor is still MISSING (D285 corrected this line, which said
-#   every anchor was missing because no port had adopted one; 51 cells now
-#   report ok) -- which is why this script is deliberately NOT wired into the
+#   exit 1 -- anchors are still MISSING (D285 corrected this line, which said
+#   every anchor was missing because no port had adopted one; D291 moved the
+#   figure again -- see the baseline note above rather than repeating it) -- which is why this script is deliberately NOT wired into the
 #   pass/fail hook suite the way its siblings are. Run --self-test to prove
 #   the gate; run it bare to see the fleet's drift.
 #

@@ -163,6 +163,24 @@
 #      out to grep; that half invokes none, so there is nothing to stub). The
 #      marker was added in the same change, symmetrically, to both normalizers.
 #
+#
+# D298 -- WHAT COUNTS AS SCANNABLE CONTENT, stated in both halves.
+#
+# Only REGULAR files. This half has always had that rule for free, because
+# `find -type f` yields nothing else; the PowerShell half treated any name
+# ending in .md as content whatever kind of object it was, and the two
+# consequences were not symmetric. A named pipe made it BLOCK in open(2)
+# forever -- no report, no exit code, no output, the one failure an exit-code
+# contract cannot express -- while this half exited 0 clean. A unix socket made
+# it refuse the whole port at exit 1 while this half reported it clean.
+#
+# The disposition for a non-regular *.md is IGNORE, not refuse, and that is a
+# deliberate choice rather than the lazy one: refusing would have been a
+# one-sided behaviour change, and matching what this half already does is the
+# entire point of the pair. The same rule now governs the canon itself -- a
+# named pipe passes `-r`, so `-f` was added beside it, and the PowerShell half
+# makes the identical test before reading a byte.
+#
 # D293 -- THE THREE PAIRED FINDINGS, NOW CLOSED IN BOTH HALVES
 #
 # D285 declined findings 1, 2a and 2b, and not on their merits: each existed in
@@ -660,6 +678,34 @@ self_test() {
   out="$(st_run "$tmp/ffvt.md" "$tmp/ffvt")"; rc=$?
   st_assert "a form feed inside the anchor comment is not counted" 1 "$rc" "MISSING: rule-one v1" "$out"
   st_refute "a vertical tab between the id and the version is not counted" "ok: rule-one v1 at vt.md" "$out"
+
+  # --- D298: NON-REGULAR objects named *.md. This half has always been immune,
+  # --- because find -type f never yields them; the cases exist so the pair pins
+  # --- the same inputs under the same names now that the other half agrees.
+  # --- A named pipe HUNG that half indefinitely -- no report, no exit code, no
+  # --- output -- and a unix socket inverted its verdict.
+  mkdir -p "$tmp/nonreg/alpha" "$tmp/nonreg/beta"
+  st_canon "$tmp/nonreg.md" 1
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nonreg/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nonreg/beta/b.md"
+  if mkfifo "$tmp/nonreg/alpha/fifo.md" 2>/dev/null; then
+    out="$(st_run "$tmp/nonreg.md" "$tmp/nonreg")"; rc=$?
+    st_assert "a named pipe named .md is ignored, not read" 0 "$rc" "ok: rule-one v1 at a.md" "$out"
+    st_refute "a named pipe named .md never costs the run its report" "GATE ERROR" "$out"
+  else
+    pass=$((pass + 2))
+    echo "ok: a named pipe named .md is ignored, not read [skipped on this host: mkfifo unavailable]"
+    echo "ok: a named pipe named .md never costs the run its report [skipped on this host: mkfifo unavailable]"
+  fi
+
+  # --- and the canon ITSELF as a named pipe: refused, never read.
+  if mkfifo "$tmp/nonreg-canon.md" 2>/dev/null; then
+    out="$(bash "$SELF" --canon "$tmp/nonreg-canon.md" --ports-parent "$tmp/nonreg" 2>&1)"; rc=$?
+    st_assert "a named pipe handed in as the canon is refused, not read" 2 "$rc" "canon not readable" "$out"
+  else
+    pass=$((pass + 1))
+    echo "ok: a named pipe handed in as the canon is refused, not read [skipped on this host: mkfifo unavailable]"
+  fi
 
   # --- D295: the ports parent reached through a ROOT-LEVEL symlink. This is
   # --- the shape that regressed after D293: the physical-path resolution gave
@@ -1411,7 +1457,13 @@ if [ -d "$PORTS_PARENT" ]; then
   PORTS_PARENT="$(cd -P "$PORTS_PARENT" && pwd -P)"
 fi
 
-if [ ! -r "$CANON" ]; then
+# D298: -f as well as -r. A named pipe is READABLE by -r, so a FIFO handed in
+# as --canon reached the read and blocked in open(2) waiting for a writer that
+# never came: no report, no exit code, no output -- the one failure an exit-code
+# contract cannot express. -f admits only regular files, which is the same rule
+# the port walk applies to port content, so the canon and the tree now agree
+# about what a readable document is.
+if [ ! -r "$CANON" ] || [ ! -f "$CANON" ]; then
   echo "GATE ERROR: canon not readable at $CANON" >&2
   exit 2
 fi

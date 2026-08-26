@@ -100,6 +100,20 @@
 #     anchor and a fence closer matching. Lines are trimmed of \r on split.
 #
 # ---------------------------------------------------------------------------
+# D298 -- WHAT COUNTS AS SCANNABLE CONTENT, stated in both halves.
+#
+# Only REGULAR files, which is what the bash half's `find -type f` has always
+# given it. This walker treated any name ending in .md as content whatever kind
+# of object it was: a named pipe made it BLOCK in open(2) forever -- no report,
+# no exit code, no output at all, the one failure an exit-code contract cannot
+# express and the top-level trap cannot catch, because blocking is not a
+# terminating error -- and a unix socket made it refuse a whole port the bash
+# half reported clean.
+#
+# The disposition for a non-regular *.md is IGNORE, not refuse: refusing would
+# be a one-sided behaviour change, and matching the bash half is the point. The
+# same rule governs the canon itself, tested before a byte is read.
+#
 # D293 -- THE THREE PAIRED FINDINGS THIS HALF SHARED, NOW CLOSED
 # ---------------------------------------------------------------------------
 #
@@ -814,6 +828,40 @@ function Get-PortMarkdown {
             # above Assert-SafeCanonString. Both need one change touching both
             # halves; neither is a one-sided hardening.
             $isMd = $k.Name.EndsWith('.md', [System.StringComparison]::Ordinal)
+            # D298: admit only REGULAR files, which is what the bash half's
+            # `find -type f` has always given it. This walker treated anything
+            # named *.md as content whatever kind of object it was, and the two
+            # consequences were not symmetric:
+            #
+            #   a NAMED PIPE  -- ReadAllBytes blocks in open(2) waiting for a
+            #     writer that never comes, so this half HUNG: no report, no exit
+            #     code, no output at all, while the bash half exited 0 clean. A
+            #     hang is the one failure an exit-code contract cannot express,
+            #     and the top-level trap cannot catch it because blocking is not
+            #     a terminating error.
+            #   a UNIX SOCKET -- readable-but-not, so this half refused the whole
+            #     port at exit 1 while the bash half reported it clean: one tree,
+            #     two verdicts, and a work list pointing at a directory that was
+            #     already readable.
+            #
+            # A non-regular object is IGNORED rather than refused, and that is
+            # the deliberate half of this: it is what the bash half does, and
+            # matching it is the whole point. Refusing instead would be a
+            # one-sided behaviour change, which is the defect class this pair
+            # exists to prevent. Directories and symlinks are classified below
+            # exactly as before -- this guard sits ahead of neither.
+            #
+            # UnixStat.ItemType is PowerShell's own stat, so no shell-out and no
+            # P/Invoke. It is absent on Windows, where none of these object
+            # types can appear in a checkout, so an absent value means "treat it
+            # as a regular file" and Windows behaviour is unchanged.
+            if (-not $isDir -and -not $isLink -and
+                $k.PSObject.Properties['UnixStat'] -and $k.UnixStat -and
+                $k.UnixStat.ItemType -and
+                "$($k.UnixStat.ItemType)" -cne 'File') {
+                $result.Items.Add([pscustomobject]@{ Full = $k.FullName; Rel = $rel; Disposition = 'ignore' })
+                continue
+            }
             if ($isLink) {
                 if ($isDir -or $isMd) {
                     # D296 follow-up: NAME the file, as the bash half does. Both
@@ -1759,6 +1807,44 @@ function Invoke-SelfTestBody {
     $r = Invoke-StRun -Canon "$Tmp/ffvt.md" -PortsParent "$Tmp/ffvt"
     St-Assert "a form feed inside the anchor comment is not counted" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
     St-Refute "a vertical tab between the id and the version is not counted" "ok: rule-one v1 at vt.md" $r.Output
+
+    # --- D298: NON-REGULAR objects named *.md. A named pipe HUNG this half
+    # --- indefinitely -- ReadAllBytes blocks in open(2) on a FIFO with no
+    # --- writer -- producing no report, no exit code and no output, which is
+    # --- the one failure the exit-code contract cannot express and the trap
+    # --- cannot catch, because blocking is not a terminating error. The walker
+    # --- now admits only regular files, as find -type f always did.
+    New-StDir @("$Tmp/nonreg/alpha", "$Tmp/nonreg/beta")
+    New-StCanon -Path "$Tmp/nonreg.md" -Schema 1
+    Set-StFile -Path "$Tmp/nonreg/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/nonreg/beta/b.md" -Text "<!-- canon:rule-one v1 -->`n"
+    $fifoOk = $false
+    if (Get-Command mkfifo -ErrorAction SilentlyContinue) {
+        & mkfifo (Join-Path "$Tmp/nonreg/alpha" 'fifo.md') 2>$null
+        $fifoOk = Test-Path -LiteralPath (Join-Path "$Tmp/nonreg/alpha" 'fifo.md')
+    }
+    if ($fifoOk) {
+        $r = Invoke-StRun -Canon "$Tmp/nonreg.md" -PortsParent "$Tmp/nonreg"
+        St-Assert "a named pipe named .md is ignored, not read" 0 $r.ExitCode "ok: rule-one v1 at a.md" $r.Output
+        St-Refute "a named pipe named .md never costs the run its report" "GATE ERROR" $r.Output
+    } else {
+        $script:StPass += 2
+        [Console]::Out.WriteLine("ok: a named pipe named .md is ignored, not read [skipped on this host: mkfifo unavailable]")
+        [Console]::Out.WriteLine("ok: a named pipe named .md never costs the run its report [skipped on this host: mkfifo unavailable]")
+    }
+
+    $fifoCanonOk = $false
+    if (Get-Command mkfifo -ErrorAction SilentlyContinue) {
+        & mkfifo (Join-Path $Tmp 'nonreg-canon.md') 2>$null
+        $fifoCanonOk = Test-Path -LiteralPath (Join-Path $Tmp 'nonreg-canon.md')
+    }
+    if ($fifoCanonOk) {
+        $r = Invoke-StRun -Canon (Join-Path $Tmp 'nonreg-canon.md') -PortsParent "$Tmp/nonreg"
+        St-Assert "a named pipe handed in as the canon is refused, not read" 2 $r.ExitCode "canon not readable" $r.Output
+    } else {
+        $script:StPass += 1
+        [Console]::Out.WriteLine("ok: a named pipe handed in as the canon is refused, not read [skipped on this host: mkfifo unavailable]")
+    }
 
     # --- D295: the ports parent reached through a ROOT-LEVEL symlink. This is
     # --- the shape that regressed after D293: Resolve-PhysicalPath gave up when
@@ -2749,10 +2835,23 @@ if (Test-Path -LiteralPath $PortsParent -PathType Container) {
     $PortsParent = Resolve-PhysicalPath -Path (Resolve-Path -LiteralPath $PortsParent).Path
 }
 
+# D298: establish the canon is a REGULAR file BEFORE reading a byte of it. A
+# named pipe passes Test-Path -PathType Leaf, so a FIFO handed in as -Canon
+# reached Read-CanonBytes and blocked in open(2) forever. Same discriminator and
+# same disposition as the port walk, and the same message as the bash half's
+# `-f` test, so the pair refuses the identical input identically.
 $canonReadable = $false
 if (Test-Path -LiteralPath $Canon -PathType Leaf) {
-    $probe = Read-CanonBytes -Path $Canon
-    if ($probe.Ok) { $canonReadable = $true }
+    $canonRegular = $true
+    $canonItem = Get-Item -LiteralPath $Canon -Force -ErrorAction SilentlyContinue
+    if ($canonItem -and $canonItem.PSObject.Properties['UnixStat'] -and $canonItem.UnixStat -and
+        $canonItem.UnixStat.ItemType -and "$($canonItem.UnixStat.ItemType)" -cne 'File') {
+        $canonRegular = $false
+    }
+    if ($canonRegular) {
+        $probe = Read-CanonBytes -Path $Canon
+        if ($probe.Ok) { $canonReadable = $true }
+    }
 }
 if (-not $canonReadable) { Stop-Gate "canon not readable at $Canon" }
 if (-not (Test-Path -LiteralPath $PortsParent -PathType Container)) {

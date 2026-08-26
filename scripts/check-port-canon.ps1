@@ -170,7 +170,16 @@ $ErrorActionPreference = 'Stop'
 # error rather than swallowing it -- refusing loudly, never sanitizing.
 trap {
     [Console]::Error.WriteLine("GATE ERROR: the checker stopped on an unhandled error and produced no verdict: $($_.Exception.Message)")
+    # The position line is kept deliberately. Converting a crash into a tidy
+    # refusal would otherwise cost a developer exactly the information that
+    # diagnosed D295 -- the original report named the failing line. Refusing
+    # loudly means the exit code is honest AND the site is still named.
+    if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
+        [Console]::Error.WriteLine($_.InvocationInfo.PositionMessage)
+    }
     [Console]::Error.WriteLine('GATE ERROR: no verdict is possible; this run proved nothing')
+    # Note the self-test sandbox is NOT leaked by this exit: measured, the
+    # try/finally around the sandbox runs BEFORE the trap's exit.
     exit 2
 }
 
@@ -418,6 +427,9 @@ function ConvertTo-CanonTokenText {
 # halt from the bash half. Absent is '' here; present-null is 'null'.
 function Get-CanonField {
     param($Object, [string]$Name)
+    # D295 (second site): see Get-JsonMember above -- a JSON null must reach a
+    # named refusal, not a terminating .psobject dereference.
+    if ($null -eq $Object) { return '' }
     foreach ($prop in $Object.psobject.Properties) {
         if ($prop.Name -ceq $Name) { return (ConvertTo-CanonTokenText -Value $prop.Value) }
     }
@@ -436,8 +448,23 @@ function Get-CanonField {
 # Returns $null when the key is absent in its exact spelling, so a caller can
 # tell "absent" from "present and empty" -- the same distinction the rest of
 # this file keeps everywhere else.
+# D295 (second site). These three dereference .psobject on whatever the JSON
+# parser handed back, and a JSON `null` -- `"ports": [null]`, or an applies_to
+# row of `null` -- arrives as $null, on which .psobject.Properties is a
+# TERMINATING error under Set-StrictMode. That is the same "the checker dies
+# instead of refusing" shape D295 fixed in the line splitter, at a site the
+# unary comma never touched: before the top-level trap existed it exited 1 with
+# a stack trace and no report, i.e. a malformed canon reported as drift.
+#
+# The trap now makes that honest (exit 2), but honest is not the same as good:
+# the bash half NAMES the fault -- "entry X applies_to row 0 names port ..." --
+# while the trap can only say an unhandled error occurred. A foreseeable canon
+# edit should reach a named refusal, not the backstop. Returning the absent
+# answer here lets the existing key-and-shape checks produce their own message,
+# which is what restores parity with the bash half.
 function Get-JsonMember {
     param($Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
     foreach ($prop in $Object.psobject.Properties) {
         if ($prop.Name -ceq $Name) { return $prop.Value }
     }
@@ -446,6 +473,7 @@ function Get-JsonMember {
 
 function Test-JsonMember {
     param($Object, [string]$Name)
+    if ($null -eq $Object) { return $false }
     foreach ($prop in $Object.psobject.Properties) {
         if ($prop.Name -ceq $Name) { return $true }
     }
@@ -861,6 +889,13 @@ function Resolve-PhysicalPath {
         $item = $next
         $guard++
     }
+    # D295: if the hop bound was exhausted we are standing on an INTERMEDIATE
+    # link, not on the physical file. Returning it would hand the caller a
+    # third identity -- neither the path it gave nor the file on disk -- and the
+    # report would then print that link as the canon it read. The comment above
+    # promises a failed resolution leaves the comparison where it was, so keep
+    # that promise literally and hand back the original path.
+    if ($guard -ge 40 -and $item.LinkType) { return $Path }
     $full = $item.FullName
     $parent = Split-Path -Parent $full
     if ($parent -and $parent -cne $full) {
@@ -1596,7 +1631,7 @@ function Invoke-SelfTestBody {
     St-Assert "duplicate anchor rows sort byte-ordinally, uppercase before lowercase" 1 $r.ExitCode "B.md:1 carries v7" $firstStaleLine
 
     # --- D295: a markdown file containing NO NEWLINE at all. Three shapes,
-    # --- each of which independently killed this half: a zero-byte file, a
+    # --- each MEASURED to kill this half independently: a zero-byte file, a
     # --- single line with no trailing newline, and CR-only terminators.
     # --- Split-CanonLines returned a List, PowerShell unrolled a one-element
     # --- list to a scalar on return, and .Count on a scalar is terminating
@@ -1604,16 +1639,63 @@ function Invoke-SelfTestBody {
     # --- in this gate's contract means "drift found and listed above" with
     # --- nothing listed above. Empty markdown files are ordinary in real
     # --- repositories, and the bash half reported them correctly throughout.
+    # ---
+    # --- The ANCHOR LIVES IN THE NEWLINE-FREE FILES, deliberately. A fixture
+    # --- whose newline-free files were all inert would prove only that the
+    # --- scan survived them; it would still pass if the splitter were "fixed"
+    # --- to return one empty line and skip their content entirely. Crediting
+    # --- an anchor AT noeol.md and at cronly.md is what proves they were read.
     New-StDir @("$Tmp/nl/alpha", "$Tmp/nl/beta")
     New-StCanon -Path "$Tmp/nl.md" -Schema 1
-    Set-StFile -Path "$Tmp/nl/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/nl/alpha/noeol.md" -Text "<!-- canon:rule-one v1 -->"
     Set-StFile -Path "$Tmp/nl/alpha/empty.md" -Text ""
-    Set-StFile -Path "$Tmp/nl/alpha/oneline.md" -Text "one line, no trailing newline"
-    Set-StFile -Path "$Tmp/nl/alpha/cronly.md" -Text "cr only terminator`r"
-    Set-StFile -Path "$Tmp/nl/beta/b.md" -Text "<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/nl/alpha/inert.md" -Text "one line, no trailing newline"
+    Set-StFile -Path "$Tmp/nl/beta/cronly.md" -Text "<!-- canon:rule-one v1 -->`r"
     $r = Invoke-StRun -Canon "$Tmp/nl.md" -PortsParent "$Tmp/nl"
-    St-Assert "a newline-free markdown file does not stop the scan" 0 $r.ExitCode "ok: rule-one v1 at a.md" $r.Output
+    St-Assert "an anchor in a file with no trailing newline is still found" 0 $r.ExitCode "ok: rule-one v1 at noeol.md:1" $r.Output
+    St-Assert "an anchor in a CR-only terminated file is still found" 0 $r.ExitCode "ok: rule-one v1 at cronly.md:1" $r.Output
     St-Refute "a newline-free markdown file never costs the run its report" "GATE ERROR" $r.Output
+
+    # --- D295: the same shapes through the PROPERTY path. The shared fix is in
+    # --- the line splitter, so Test-FenceDefect had the identical exposure --
+    # --- but the case above never reaches it, because an anchor canon does not
+    # --- run a property check.
+    New-StDir @("$Tmp/nlp/alpha", "$Tmp/nlp/beta")
+    New-StCanon -Path "$Tmp/nlp.md" -Schema 1 -BetaStatus 'required' -Version '1' -Check 'property' -Id 'fence-nesting'
+    Set-StFile -Path "$Tmp/nlp/alpha/ok.md" -Text "x`n"
+    Set-StFile -Path "$Tmp/nlp/alpha/empty.md" -Text ""
+    Set-StFile -Path "$Tmp/nlp/alpha/noeol.md" -Text "no newline at all"
+    Set-StFile -Path "$Tmp/nlp/beta/b.md" -Text "y`n"
+    $r = Invoke-StRun -Canon "$Tmp/nlp.md" -PortsParent "$Tmp/nlp"
+    St-Assert "a newline-free file does not stop the property check either" 0 $r.ExitCode "property verified across" $r.Output
+
+    # --- D295: the ports parent reached through a ROOT-LEVEL symlink. This is
+    # --- the shape that regressed after D293: Resolve-PhysicalPath gave up when
+    # --- Split-Path -Parent returned empty, which is exactly what it returns
+    # --- for a link at the filesystem root, so this half left the tree
+    # --- unresolved while the bash half resolved it -- two identities for one
+    # --- file, and the canon self-exclusion could stop matching. The sandbox
+    # --- already sits under one (/var -> /private/var on macOS), so the
+    # --- fixture needs no write outside it.
+    $nlPhys = ''
+    $rootLink = Get-Item -LiteralPath ([System.IO.Path]::GetPathRoot($Tmp) + (($Tmp -replace '^[/\\]+', '') -split '[/\\]')[0]) -Force -ErrorAction SilentlyContinue
+    if ($rootLink -and $rootLink.LinkType -and $rootLink.Target) {
+        $t = @($rootLink.Target)[0]
+        if (-not [System.IO.Path]::IsPathRooted($t)) { $t = [System.IO.Path]::GetPathRoot($Tmp) + $t }
+        $nlPhys = $Tmp -replace [regex]::Escape($rootLink.FullName), $t
+    }
+    if ($nlPhys -and $nlPhys -cne $Tmp -and (Test-Path -LiteralPath $nlPhys)) {
+        New-StDir @("$Tmp/rootlink/alpha/docs", "$Tmp/rootlink/beta")
+        New-StCanon -Path "$Tmp/rootlink/alpha/docs/port-canon.md" -Schema 1 -BetaStatus 'not_applicable'
+        Set-StFile -Path "$Tmp/rootlink/beta/b.md" -Text "x`n"
+        $r = Invoke-StRun -Canon "$nlPhys/rootlink/alpha/docs/port-canon.md" -PortsParent "$Tmp/rootlink"
+        St-Assert "a ports parent reached through a root-level symlink still excludes the canon" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
+        St-Refute "a root-level symlink does not credit the canon as an adoption site" "ok: rule-one v1 at docs/port-canon.md" $r.Output
+    } else {
+        $script:StPass += 2
+        [Console]::Out.WriteLine("ok: a ports parent reached through a root-level symlink still excludes the canon [skipped on this host: no root-level symlink above the sandbox]")
+        [Console]::Out.WriteLine("ok: a root-level symlink does not credit the canon as an adoption site [skipped on this host: no root-level symlink above the sandbox]")
+    }
 
     # --- a registered, exists:true port whose directory is absent is a gate
     # --- fault, and a gate fault must not be downgraded by an ordinary finding

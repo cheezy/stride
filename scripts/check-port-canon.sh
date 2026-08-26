@@ -589,24 +589,66 @@ self_test() {
   st_assert "duplicate anchor rows sort byte-ordinally, uppercase before lowercase" 1 "$rc" "B.md:1 carries v7" "$first_stale"
 
   # --- D295: a markdown file containing NO NEWLINE at all. Three shapes, each
-  # --- of which independently killed the PowerShell half: a zero-byte file, a
-  # --- single line with no trailing newline, and CR-only terminators. That
-  # --- half split lines into a List, PowerShell unrolled a one-element list to
-  # --- a scalar on return, and .Count on a scalar is terminating under
+  # --- MEASURED to kill the PowerShell half independently: a zero-byte file, a
+  # --- single line with no trailing newline, and CR-only terminators. That half
+  # --- split lines into a List, PowerShell unrolled a one-element list to a
+  # --- scalar on return, and .Count on a scalar is terminating under
   # --- StrictMode -- so the run died with no report and exit 1, which in this
-  # --- gate means "drift found and listed above". This half was never affected
-  # --- and reported correctly throughout; the case exists here as the parity
-  # --- twin, so the pair pins the same input under the same name.
+  # --- gate means "drift found and listed above". This half was never affected;
+  # --- the cases exist here as the parity twins, under the same names.
+  # ---
+  # --- The ANCHOR LIVES IN THE NEWLINE-FREE FILES, deliberately. A fixture
+  # --- whose newline-free files were all inert would prove only that the scan
+  # --- survived them; it would still pass if the splitter were "fixed" to
+  # --- return one empty line and skip their content entirely. Crediting an
+  # --- anchor AT noeol.md and at cronly.md is what proves they were read.
   mkdir -p "$tmp/nl/alpha" "$tmp/nl/beta"
   st_canon "$tmp/nl.md" 1
-  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nl/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->' > "$tmp/nl/alpha/noeol.md"
   : > "$tmp/nl/alpha/empty.md"
-  printf 'one line, no trailing newline' > "$tmp/nl/alpha/oneline.md"
-  printf 'cr only terminator\r' > "$tmp/nl/alpha/cronly.md"
-  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nl/beta/b.md"
+  printf 'one line, no trailing newline' > "$tmp/nl/alpha/inert.md"
+  printf '<!-- canon:rule-one v1 -->\r' > "$tmp/nl/beta/cronly.md"
   out="$(st_run "$tmp/nl.md" "$tmp/nl")"; rc=$?
-  st_assert "a newline-free markdown file does not stop the scan" 0 "$rc" "ok: rule-one v1 at a.md" "$out"
+  st_assert "an anchor in a file with no trailing newline is still found" 0 "$rc" "ok: rule-one v1 at noeol.md:1" "$out"
+  st_assert "an anchor in a CR-only terminated file is still found" 0 "$rc" "ok: rule-one v1 at cronly.md:1" "$out"
   st_refute "a newline-free markdown file never costs the run its report" "GATE ERROR" "$out"
+
+  # --- D295: the same shapes through the PROPERTY path. The shared fix is in
+  # --- the line splitter, so Test-FenceDefect had the identical exposure --
+  # --- but the case above never reaches it, because an anchor canon does not
+  # --- run a property check. Without this, a change that reintroduced the
+  # --- unroll on the property path alone would go unnoticed.
+  mkdir -p "$tmp/nlp/alpha" "$tmp/nlp/beta"
+  st_canon "$tmp/nlp.md" 1 required 1 property fence-nesting
+  printf 'x\n' > "$tmp/nlp/alpha/ok.md"
+  : > "$tmp/nlp/alpha/empty.md"
+  printf 'no newline at all' > "$tmp/nlp/alpha/noeol.md"
+  printf 'y\n' > "$tmp/nlp/beta/b.md"
+  out="$(st_run "$tmp/nlp.md" "$tmp/nlp")"; rc=$?
+  st_assert "a newline-free file does not stop the property check either" 0 "$rc" "property verified across" "$out"
+
+  # --- D295: the ports parent reached through a ROOT-LEVEL symlink. This is
+  # --- the shape that regressed after D293: the physical-path resolution gave
+  # --- up when the link had no parent directory, so one half resolved the tree
+  # --- and the other did not, and the canon self-exclusion could stop matching
+  # --- -- the false green D293 finding 2a exists to close. The sandbox already
+  # --- sits under one (/var is a symlink to /private/var on macOS), so the
+  # --- fixture needs no write outside it: spell the canon physically and the
+  # --- ports parent logically, and the two must still name one file.
+  nl_phys="$(cd -P "$tmp" 2>/dev/null && pwd -P)"
+  if [ -n "$nl_phys" ] && [ "$nl_phys" != "$tmp" ]; then
+    mkdir -p "$tmp/rootlink/alpha/docs" "$tmp/rootlink/beta"
+    st_canon "$tmp/rootlink/alpha/docs/port-canon.md" 1 not_applicable
+    printf 'x\n' > "$tmp/rootlink/beta/b.md"
+    out="$(bash "$SELF" --canon "$nl_phys/rootlink/alpha/docs/port-canon.md" \
+            --ports-parent "$tmp/rootlink" 2>&1)"; rc=$?
+    st_assert "a ports parent reached through a root-level symlink still excludes the canon" 1 "$rc" "MISSING: rule-one v1" "$out"
+    st_refute "a root-level symlink does not credit the canon as an adoption site" "ok: rule-one v1 at docs/port-canon.md" "$out"
+  else
+    pass=$((pass + 2))
+    echo "ok: a ports parent reached through a root-level symlink still excludes the canon [skipped on this host: no root-level symlink above the sandbox]"
+    echo "ok: a root-level symlink does not credit the canon as an adoption site [skipped on this host: no root-level symlink above the sandbox]"
+  fi
 
   # --- a registered, exists:true port whose directory is absent is a gate
   # --- fault, and a gate fault must not be downgraded by an ordinary finding

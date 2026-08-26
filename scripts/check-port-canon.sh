@@ -643,6 +643,21 @@ self_test() {
   st_assert "an anchor carrying a CR inside the comment is not counted" 1 "$rc" "MISSING: rule-one v1" "$out"
   st_refute "a CR-bearing anchor is never credited as an adoption site" "ok: rule-one v1 at a.md" "$out"
 
+  # --- D296: the OTHER control characters and the OTHER positions. The
+  # --- [[:blank:]] change is precisely about FF and VT -- [[:space:]] admitted
+  # --- them under LC_ALL=C and [[:blank:]] does not -- and the CR case above
+  # --- covers only the third position, immediately before "-->". These cover a
+  # --- FF after "<!--" and a VT between the id and the version, which is where
+  # --- a control character would actually change which entry an anchor names.
+  mkdir -p "$tmp/ffvt/alpha" "$tmp/ffvt/beta"
+  st_canon "$tmp/ffvt.md" 1
+  printf '<!--\014canon:rule-one v1 -->\n' > "$tmp/ffvt/alpha/ff.md"
+  printf '<!-- canon:rule-one\013v1 -->\n' > "$tmp/ffvt/alpha/vt.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/ffvt/beta/b.md"
+  out="$(st_run "$tmp/ffvt.md" "$tmp/ffvt")"; rc=$?
+  st_assert "a form feed inside the anchor comment is not counted" 1 "$rc" "MISSING: rule-one v1" "$out"
+  st_refute "a vertical tab between the id and the version is not counted" "ok: rule-one v1 at vt.md" "$out"
+
   # --- D295: the ports parent reached through a ROOT-LEVEL symlink. This is
   # --- the shape that regressed after D293: the physical-path resolution gave
   # --- up when the link had no parent directory, so one half resolved the tree
@@ -1706,7 +1721,23 @@ fence_defect() {
   [ -r "$file" ] || { printf 'unreadable'; return 0; }
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
-    stripped="${line#"${line%%[![:space:]]*}"}"
+    # D296 follow-up: [:blank:], not [:space:]. This is the SAME character-class
+    # divergence D296 fixed in the anchor grep, one site over -- and it was the
+    # sharper one, because it inverted an exit code rather than a report row.
+    # [[:space:]] admits VT, FF and CR, so a fence marker indented with a
+    # control byte was a fence to this half and not to the PowerShell half,
+    # whose strip is `-replace '^[ \t]+'`: bash exited 1 with a DEFECT and pwsh
+    # exited 0 clean, on one tree.
+    #
+    # The strict reading wins for the same reason it did for the anchor, and it
+    # is also what a markdown renderer does: a fence opener may be indented by
+    # spaces, and a line beginning with a control byte does not open a fence at
+    # all. Direction, stated rather than left to be found: this moves a cell
+    # from DEFECT toward ok, which is AWAY from refusal. Accepted on the same
+    # grounds as the anchor case -- the alternative is for this half to keep
+    # reporting a defect the renderer, the other half, and the spec all say is
+    # not there. Space and tab are unaffected and continue to agree.
+    stripped="${line#"${line%%[![:blank:]]*}"}"
     case "$stripped" in
       '```'*) fchar='`' ;;
       '~~~'*) fchar='~' ;;
@@ -1726,7 +1757,10 @@ fence_defect() {
       fi
       open=1; open_len="$run"; open_line="$lineno"; open_char="$fchar"
     elif [ "$fchar" = "$open_char" ]; then
-      rest="${rest#"${rest%%[![:space:]]*}"}"
+      # Same class, same reason as the opener strip above: the closer side must
+      # spell whitespace the way the PowerShell half's `-replace '^[ \t]+'`
+      # does, or the two halves disagree about where a fence ends.
+      rest="${rest#"${rest%%[![:blank:]]*}"}"
       if [ -z "$rest" ] && [ "$run" -ge "$open_len" ]; then
         open=0; open_len=0; open_line=0; open_char=""
       elif [ -n "$rest" ] && [ "$run" -eq "$open_len" ]; then
@@ -2011,13 +2045,29 @@ emit_anchors() {
     # CR-bearing anchor was matched here and then sometimes dropped there. It is
     # also the spelling anchor_literal() emits and the one the canon documents.
     #
-    # Weigh the direction honestly, because it is not uniformly toward refusal.
-    # For a REQUIRED cell a CR-bearing anchor now reads MISSING rather than ok,
-    # which is toward refusal. For a NOT_APPLICABLE cell it now reads na rather
-    # than UNEXPECTED, which is away from it. That is accepted deliberately: a
-    # comment carrying a control character inside it is not a well-formed
-    # anchor, so it claims no adoption in either tier, and a CRLF checkout puts
-    # its CR after "-->" where no pattern here looks anyway.
+    # Weigh the direction honestly, because it is not uniformly toward refusal,
+    # and enumerate EVERY tier -- an earlier version of this note named two of
+    # the four and an exploratory session found the other two, which is exactly
+    # how an unintended regression gets mistaken for an accepted trade.
+    #
+    #   REQUIRED, no other anchor     ok      -> MISSING     toward refusal
+    #   NOT_APPLICABLE                UNEXPECTED -> na        AWAY from refusal
+    #   unknown id (the sweep)        UNEXPECTED -> nothing   AWAY from refusal
+    #   REQUIRED, stale + current     STALE   -> ok           AWAY from refusal
+    #
+    # Three of the four move away from refusal, and the last is the one to look
+    # hardest at: a port carrying a current anchor AND a control-byte-bearing
+    # stale one now reports plain ok, which is the whole-tier suppression D293
+    # finding 1 removed -- reintroduced, narrowly, for anchors nobody can read.
+    #
+    # Accepted anyway, on one consistent principle: a comment carrying a control
+    # character inside it is NOT an anchor. It therefore claims no adoption in
+    # any tier, is owed by no port, and cannot be stale, because a thing that is
+    # not an anchor has no version. The alternative -- keeping it an anchor for
+    # the tiers where that reads stricter and dropping it for the others -- is
+    # the incoherence that produced the divergence in the first place. A CRLF
+    # checkout is unaffected either way: its CR lands after "-->" where no
+    # pattern here looks.
     out="$(LC_ALL=C grep -Eano '<!--[[:blank:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:blank:]]+v[0-9]+[[:blank:]]*-->' "$f")"
     gst=$?
     [ "$gst" -le 1 ] || return 1
@@ -2283,16 +2333,25 @@ for pline in $PORT_LINES; do
           # WHOLE tree, not about the case the fixture happened to build.
           if [ -L "$pprev" ]; then
             if [ -d "$pprev" ] || [ "${pprev%.md}" != "$pprev" ]; then
-              plinked="$plinked ${pprev#$ptree/}"
+              plinked="$plinked
+${pprev#$ptree/}"
             fi
             pprev="$pf"; phave=1; continue
           fi
           nfiles=$((nfiles + 1))
           d="$(fence_defect "$pprev")"
           if [ "$d" = unreadable ]; then
-            punread="$punread ${pprev#$ptree/}"
+            punread="$punread
+${pprev#$ptree/}"
           elif [ -n "$d" ]; then
-            hits="$hits ${pprev#$ptree/}($d)"
+            # D296: newline-delimited, not space-delimited. A .md path may
+            # contain a SPACE -- the walker refuses only tabs and newlines --
+            # and a space-tokenised sort tore such an entry into pieces and
+            # ordered the pieces, which diverged from the PowerShell half's
+            # whole-string sort. The emitted format is unchanged; only the
+            # accumulator's separator is, so each entry stays one sort key.
+            hits="$hits
+${pprev#$ptree/}($d)"
           fi
         fi
         pprev="$pf"; phave=1
@@ -2334,7 +2393,16 @@ for pline in $PORT_LINES; do
         # each carrying a fence defect produced the same findings in reversed
         # order. Elements here are bare " rel(reason:line)" strings rather than
         # anchor records, so this is a plain ordinal sort, not the record one.
-        hits="$(printf '%s' "$hits" | tr ' ' '\n' | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
+        # D296: the same ordinal sort is applied to all three lists this walk
+        # accumulates, not only the defect one. plinked and punread are built in
+        # the same raw walk order and feed UNVERIFIABLE rows, so two sibling
+        # subdirectories each holding a symlinked or unreadable .md reproduced
+        # the identical reversed-order divergence one tier over. Outside what
+        # the task asked for, but it is the same defect two sites further on and
+        # cheaper to close now than to rediscover.
+        hits="$(printf '%s' "$hits" | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
+        plinked="$(printf '%s' "$plinked" | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
+        punread="$(printf '%s' "$punread" | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
         record DEFECT "  " "$eid --$hits" \
           "$pid: fix the $eid violations listed in the body above"
       else

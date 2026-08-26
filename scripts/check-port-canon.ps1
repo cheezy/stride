@@ -791,6 +791,19 @@ function Get-PortMarkdown {
             $isMd = $k.Name.EndsWith('.md', [System.StringComparison]::Ordinal)
             if ($isLink) {
                 if ($isDir -or $isMd) {
+                    # D296 follow-up: NAME the file, as the bash half does. Both
+                    # halves already refused the port identically on stdout and
+                    # at the exit code -- but only one of them said WHICH file
+                    # caused it, so an operator on this half got an unexplained
+                    # UNVERIFIABLE while their colleague got the filename. Both
+                    # headers make "the same message substrings" part of the
+                    # pair contract, and a refusal that does not say what to fix
+                    # is the diagnostic-quality debt this walker exists to
+                    # prevent. The wording is the bash half's, byte for byte.
+                    # $startPath, not the current walk directory: the bash half
+                    # names the PORT TREE root here, and the substring has to be
+                    # the same or the pair still diverges on the text.
+                    [Console]::Error.WriteLine("GATE ERROR: $rel under $startPath is a symbolic link; this checker does not follow symlinked markdown")
                     $result.Items.Add([pscustomobject]@{ Full = $k.FullName; Rel = $rel; Disposition = 'refuse' })
                 } else {
                     $result.Items.Add([pscustomobject]@{ Full = $k.FullName; Rel = $rel; Disposition = 'ignore' })
@@ -848,6 +861,22 @@ function Sort-HitsOrdinal {
             ($y.Id + "`t" + $y.Version + "`t" + $y.Where))
     }
     $list.Sort($cmp)
+    return $list.ToArray()
+}
+
+# D296: one ordinal sort for every list this walk accumulates. The defect list,
+# the symlinked list and the unreadable list are all built in raw walk order,
+# and the two halves walk in opposite directions, so any of them with two
+# entries from sibling subdirectories produced the same findings reversed.
+# Elements are bare " rel(...)" strings rather than anchor records, so this is a
+# plain ordinal comparer and not Sort-HitsOrdinal.
+function Sort-StringsOrdinal {
+    param($Items)
+    $arr = @($Items)
+    if ($arr.Count -le 1) { return $arr }
+    $list = [System.Collections.Generic.List[string]]::new()
+    foreach ($i in $arr) { $list.Add([string]$i) }
+    $list.Sort([System.StringComparer]::Ordinal)
     return $list.ToArray()
 }
 
@@ -1232,14 +1261,14 @@ function Invoke-CanonCheck {
                 }
                 if ($linked.Count -gt 0) {
                     Add-Record -Kind 'UNVERIFIABLE' -Indent '  ' `
-                        -Message "$($e.Id) -- refusing to follow symlinked markdown:$($linked -join ''); its target can resolve outside $ptree" `
-                        -Work "$($p.Id): replace the symlink(s)$($linked -join '') with real files, or remove them from the port tree"
+                        -Message "$($e.Id) -- refusing to follow symlinked markdown:$((Sort-StringsOrdinal $linked) -join ''); its target can resolve outside $ptree" `
+                        -Work "$($p.Id): replace the symlink(s)$((Sort-StringsOrdinal $linked) -join '') with real files, or remove them from the port tree"
                     continue
                 }
                 if ($unread.Count -gt 0) {
                     Add-Record -Kind 'UNVERIFIABLE' -Indent '  ' `
-                        -Message "$($e.Id) -- could not read$($unread -join ''); refusing to report a property verified over files that were never opened" `
-                        -Work "$($p.Id): make$($unread -join '') readable so the $($e.Id) property check can run"
+                        -Message "$($e.Id) -- could not read$((Sort-StringsOrdinal $unread) -join ''); refusing to report a property verified over files that were never opened" `
+                        -Work "$($p.Id): make$((Sort-StringsOrdinal $unread) -join '') readable so the $($e.Id) property check can run"
                     continue
                 }
                 if (-not $walk.Ok) {
@@ -1262,13 +1291,7 @@ function Invoke-CanonCheck {
                     # here are bare " rel(reason:line)" strings, not anchor
                     # records, so this is a plain ordinal sort rather than
                     # Sort-HitsOrdinal.
-                    $hitsArr = @($hits)
-                    if ($hitsArr.Count -gt 1) {
-                        $hitsList = [System.Collections.Generic.List[string]]::new()
-                        foreach ($hh in $hitsArr) { $hitsList.Add([string]$hh) }
-                        $hitsList.Sort([System.StringComparer]::Ordinal)
-                        $hitsArr = $hitsList.ToArray()
-                    }
+                    $hitsArr = Sort-StringsOrdinal $hits
                     Add-Record -Kind 'DEFECT' -Indent '  ' -Message "$($e.Id) --$($hitsArr -join '')" `
                         -Work "$($p.Id): fix the $($e.Id) violations listed in the body above"
                 } else {
@@ -1698,6 +1721,19 @@ function Invoke-SelfTestBody {
     $r = Invoke-StRun -Canon "$Tmp/cr.md" -PortsParent "$Tmp/cr"
     St-Assert "an anchor carrying a CR inside the comment is not counted" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
     St-Refute "a CR-bearing anchor is never credited as an adoption site" "ok: rule-one v1 at a.md" $r.Output
+
+    # --- D296: the OTHER control characters and the OTHER positions. This half
+    # --- always matched [ \t] only, so these have always been rejected here;
+    # --- the cases exist so the pair pins the same inputs under the same names
+    # --- now that the bash half agrees.
+    New-StDir @("$Tmp/ffvt/alpha", "$Tmp/ffvt/beta")
+    New-StCanon -Path "$Tmp/ffvt.md" -Schema 1
+    Set-StFile -Path "$Tmp/ffvt/alpha/ff.md" -Text ("<!--" + [char]12 + "canon:rule-one v1 -->`n")
+    Set-StFile -Path "$Tmp/ffvt/alpha/vt.md" -Text ("<!-- canon:rule-one" + [char]11 + "v1 -->`n")
+    Set-StFile -Path "$Tmp/ffvt/beta/b.md" -Text "<!-- canon:rule-one v1 -->`n"
+    $r = Invoke-StRun -Canon "$Tmp/ffvt.md" -PortsParent "$Tmp/ffvt"
+    St-Assert "a form feed inside the anchor comment is not counted" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
+    St-Refute "a vertical tab between the id and the version is not counted" "ok: rule-one v1 at vt.md" $r.Output
 
     # --- D295: the ports parent reached through a ROOT-LEVEL symlink. This is
     # --- the shape that regressed after D293: Resolve-PhysicalPath gave up when

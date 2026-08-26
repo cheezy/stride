@@ -10525,14 +10525,13 @@ else
   echo "        (set STRIDE_PS1_GATE_REQUIRED=1 to make this a failure instead)"
 fi
 
-# WHAT THIS GROUP DOES NOT DO, said here rather than left to be discovered: it
-# has no counterpart to ps1 Group 32d, the fixture-tree comparison that runs
-# both halves over one canon and diffs their REPORTS. A developer or a Unix CI
-# runner executing only this suite therefore gets case-name equality (30c) but
-# not report-level agreement, even with pwsh installed. Criterion 5 asks for the
-# cross-verification once and the ps1 parity ledger records Group 32 as its
-# home; this note exists so the asymmetry is a stated choice rather than a gap
-# someone finds by grepping.
+# WHAT THIS GROUP DOES NOT DO, and where it is now done instead: this group
+# compares case NAMES only. Report-level agreement -- both halves over one
+# canon, diffing what they actually produced -- was for a long time ps1 Group
+# 32d's alone, so a developer or a Unix CI runner executing only this suite got
+# case-name equality here and nothing report-level. **D296 closed that: Group
+# 31 below is this suite's counterpart**, and it is where a report-body or
+# stderr divergence is caught. Do not add a second one.
 #
 # 30c: the two halves must agree about WHICH CASES EXIST. Comparing the ok:
 # name sets catches a case renamed or lost on one side, which neither half's
@@ -10640,12 +10639,26 @@ else
     } > "$1"
   }
 
-  # Strip only what is legitimately different: the two absolute-path header
-  # lines, and each half naming its own file.
-  d296_norm() {
-    sed -e 's|^  canon:.*|  canon:        <normalized>|' \
-        -e 's|^  ports parent:.*|  ports parent: <normalized>|' \
-        -e 's|check-port-canon\.\(sh\|ps1\)|check-port-canon.<impl>|g'
+  # Normalize ONE thing, and side-affinely: each half's reference to its OWN
+  # filename. An UNVERIFIABLE work item names the checker, and that difference
+  # is cosmetic -- but mapping BOTH names on BOTH sides would also normalize a
+  # half that named the OTHER half's file, which is a genuine bug, so each
+  # capture strips only its own.
+  #
+  # The absolute-path header lines are deliberately NOT normalized. They used
+  # to be, and that hid the class this pair has actually regressed on: D295
+  # found the two halves resolving one tree to two different physical paths,
+  # visible in exactly those lines. Since that fix they agree, so comparing
+  # them costs nothing and a future divergence surfaces instead of hiding.
+  # Measured: all cases below pass with the header lines compared verbatim.
+  #
+  # -E is deliberate too. BSD sed (macOS /usr/bin/sed) reads \| in a BRE as a
+  # LITERAL pipe, so an alternation written the BRE way silently never fires
+  # here while firing on a GNU-sed runner -- a harness that normalized
+  # differently per platform, which is the exact divergence class this group
+  # exists to catch. Case 7 below is what exercises this rule.
+  d296_norm() { # $1 = this half's own script extension
+    sed -E -e "s#check-port-canon\.$1#check-port-canon.<impl>#g"
   }
 
   d296_case() { # $1=name $2=canon $3=ports-parent
@@ -10655,16 +10668,28 @@ else
     # the normalizer's status, not the checker's -- and each half must run
     # exactly once, or a fixture whose result depends on prior state would be
     # compared against a different run than the one whose code was recorded.
-    _so="$(bash "$SCRIPT_DIR/../scripts/check-port-canon.sh" --canon "$_c" --ports-parent "$_p" 2>&1)"; _sr=$?
-    _po="$(pwsh -NoProfile -File "$SCRIPT_DIR/../scripts/check-port-canon.ps1" -Canon "$_c" -PortsParent "$_p" 2>&1)"; _pr=$?
-    _so="$(printf '%s\n' "$_so" | d296_norm)"
-    _po="$(printf '%s\n' "$_po" | d296_norm)"
+    # stdout and stderr are captured SEPARATELY and compared as two pairs.
+    # Merging them with 2>&1 delivers content but not attribution, and both
+    # halves have parallel GATE ERROR paths on stderr -- so a line moving
+    # between streams is a real divergence that a merged capture reads as equal.
+    local _se="$TMPDIR_TEST/d296.sh.err" _pe="$TMPDIR_TEST/d296.ps.err"
+    _so="$(bash "$SCRIPT_DIR/../scripts/check-port-canon.sh" --canon "$_c" --ports-parent "$_p" 2>"$_se")"; _sr=$?
+    _po="$(pwsh -NoProfile -File "$SCRIPT_DIR/../scripts/check-port-canon.ps1" -Canon "$_c" -PortsParent "$_p" 2>"$_pe")"; _pr=$?
+    _so="$(printf '%s\n' "$_so" | d296_norm sh)"
+    _po="$(printf '%s\n' "$_po" | d296_norm ps1)"
+    local _sev _pev
+    _sev="$(d296_norm sh < "$_se")"
+    _pev="$(d296_norm ps1 < "$_pe")"
     if [ "$_sr" != "$_pr" ]; then
       echo -e "  ${RED}FAIL${RESET}: 31: $_n -- exit codes differ (bash $_sr, pwsh $_pr)"
       FAIL=$((FAIL + 1))
     elif [ "$_so" != "$_po" ]; then
-      echo -e "  ${RED}FAIL${RESET}: 31: $_n -- the two halves produced different output"
+      echo -e "  ${RED}FAIL${RESET}: 31: $_n -- the two halves produced different STDOUT"
       diff <(printf '%s\n' "$_so") <(printf '%s\n' "$_po") | head -12
+      FAIL=$((FAIL + 1))
+    elif [ "$_sev" != "$_pev" ]; then
+      echo -e "  ${RED}FAIL${RESET}: 31: $_n -- the two halves produced different STDERR"
+      diff <(printf '%s\n' "$_sev") <(printf '%s\n' "$_pev") | head -12
       FAIL=$((FAIL + 1))
     else
       echo -e "  ${GREEN}PASS${RESET}: 31: $_n"
@@ -10715,6 +10740,63 @@ else
   printf '# y\n~~~\nunclosed\n' > "$d/p/alpha/sub2/b.md"
   printf 'z\n' > "$d/p/beta/b.md"
   d296_case "two sibling subdirectories with fence defects" "$d/c.md" "$d/p"
+
+  # 6. Two unknown-id anchors in the SAME directory. These agreed even before
+  #    the sort, because a single directory's entries come out in one order --
+  #    so this case exists to keep that true rather than to have caught it.
+  d="$D296_DIR/samedir"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  d296_canon "$d/c.md" anchor rule-one required
+  printf '<!-- canon:rule-one v1 -->\n' > "$d/p/alpha/README.md"
+  printf '<!-- canon:aa-x v1 -->\n' > "$d/p/alpha/aa.md"
+  printf '<!-- canon:zz-x v1 -->\n' > "$d/p/alpha/zz.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$d/p/beta/b.md"
+  d296_case "two unknown-id anchors in the same directory" "$d/c.md" "$d/p"
+
+  # 7. A property entry the checker does not implement. This is the ONLY shape
+  #    that reaches the self-reference in a work item -- "check-port-canon.sh:
+  #    implement the ... property check" -- so it is what actually exercises
+  #    d296_norm's third rule. Without it that rule was never fired by any
+  #    fixture, which is how a sed dialect bug in it stayed invisible.
+  d="$D296_DIR/selfref"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  d296_canon "$d/c.md" property not-a-real-property required
+  printf 'x\n' > "$d/p/alpha/a.md"
+  printf 'y\n' > "$d/p/beta/b.md"
+  d296_case "an unimplemented property check names each half's own script" "$d/c.md" "$d/p"
+
+  # 8. A SPACE in a .md path. The first version of D296's DEFECT-list sort
+  #    re-split the space-joined accumulator on its own delimiter, so one entry
+  #    became two tokens and the row named a real, clean file as the offender.
+  #    Group 31 had no space-bearing fixture, which is how that shipped.
+  d="$D296_DIR/space"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  d296_canon "$d/c.md" property fence-nesting required
+  printf '# clean, no fence at all\n' > "$d/p/alpha/innocent.md"
+  printf '# x\n```\nunclosed\n' > "$d/p/alpha/x innocent.md"
+  printf 'z\n' > "$d/p/beta/b.md"
+  d296_case "a space in a .md path does not shred the defect row" "$d/c.md" "$d/p"
+
+  # 9. A fence marker indented with a control byte. [[:space:]] admitted VT, FF
+  #    and CR and [ \t] did not, so this half called it a fence and the other
+  #    did not -- an EXIT CODE inversion, the sharpest tier there is.
+  d="$D296_DIR/ctlfence"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  d296_canon "$d/c.md" property fence-nesting required
+  printf '\013```\nbody\n' > "$d/p/alpha/vt.md"
+  printf '\014```\nbody\n' > "$d/p/alpha/ff.md"
+  printf 'z\n' > "$d/p/beta/b.md"
+  d296_case "a control-byte-indented fence marker" "$d/c.md" "$d/p"
+
+  # 10. A symlinked .md. Both halves refuse the port identically on stdout, but
+  #     only one of them says WHICH file caused it -- a stderr-only divergence,
+  #     and the case that proves this group really does compare stderr.
+  d="$D296_DIR/symlink"; mkdir -p "$d/p/alpha/s1" "$d/p/beta"
+  d296_canon "$d/c.md" anchor rule-one required
+  printf 'real\n' > "$d/p/alpha/real.md"
+  ln -s ../real.md "$d/p/alpha/s1/aaa.md" 2>/dev/null
+  printf '<!-- canon:rule-one v1 -->\n' > "$d/p/beta/b.md"
+  if [ -L "$d/p/alpha/s1/aaa.md" ]; then
+    d296_case "a symlinked .md is refused with the same diagnostics" "$d/c.md" "$d/p"
+  else
+    echo "  SKIP: 31: a symlinked .md is refused with the same diagnostics (this host cannot create symlinks)"
+  fi
 fi
 
 # ============================================================

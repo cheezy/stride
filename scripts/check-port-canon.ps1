@@ -1256,7 +1256,20 @@ function Invoke-CanonCheck {
                     continue
                 }
                 if ($hits.Count -gt 0) {
-                    Add-Record -Kind 'DEFECT' -Indent '  ' -Message "$($e.Id) --$($hits -join '')" `
+                    # D296: the defect list is sorted before it is joined, for
+                    # the same reason the sweeps are -- built in raw walk order,
+                    # and the two halves walk in opposite directions. Elements
+                    # here are bare " rel(reason:line)" strings, not anchor
+                    # records, so this is a plain ordinal sort rather than
+                    # Sort-HitsOrdinal.
+                    $hitsArr = @($hits)
+                    if ($hitsArr.Count -gt 1) {
+                        $hitsList = [System.Collections.Generic.List[string]]::new()
+                        foreach ($hh in $hitsArr) { $hitsList.Add([string]$hh) }
+                        $hitsList.Sort([System.StringComparer]::Ordinal)
+                        $hitsArr = $hitsList.ToArray()
+                    }
+                    Add-Record -Kind 'DEFECT' -Indent '  ' -Message "$($e.Id) --$($hitsArr -join '')" `
                         -Work "$($p.Id): fix the $($e.Id) violations listed in the body above"
                 } else {
                     Add-Record -Kind 'ok' -Indent '  ' -Message "$($e.Id) (property verified across $nfiles markdown files)"
@@ -1314,7 +1327,12 @@ function Invoke-CanonCheck {
         }
 
         # Anchors for ids the canon does not define at all.
-        foreach ($h in $found.Hits) {
+        # D296: sorted with the SAME comparer the per-id rows use. D293 made
+        # those deterministic and left this sweep on raw walk order -- and the
+        # two halves walk in opposite directions (a LIFO stack over
+        # Get-ChildItem here, find there), so two sibling subdirectories each
+        # carrying an unknown-id anchor produced the same rows reversed.
+        foreach ($h in (Sort-HitsOrdinal $found.Hits)) {
             $known = $false
             foreach ($e in $entries) { if ($e.Id -ceq $h.Id) { $known = $true; break } }
             if (-not $known) {
@@ -1392,7 +1410,8 @@ function Invoke-CanonCheck {
                 }
             }
         }
-        foreach ($h in $cfound.Hits) {
+        # D296: sorted, same comparer and same reason as the port loop above.
+        foreach ($h in (Sort-HitsOrdinal $cfound.Hits)) {
             $known = $false
             foreach ($e in $entries) { if ($e.Id -ceq $h.Id) { $known = $true; break } }
             if (-not $known) {
@@ -1668,6 +1687,17 @@ function Invoke-SelfTestBody {
     Set-StFile -Path "$Tmp/nlp/beta/b.md" -Text "y`n"
     $r = Invoke-StRun -Canon "$Tmp/nlp.md" -PortsParent "$Tmp/nlp"
     St-Assert "a newline-free file does not stop the property check either" 0 $r.ExitCode "property verified across" $r.Output
+
+    # --- D296: a CR (or FF, or VT) INSIDE the anchor comment. The bash half
+    # --- used to match it via [[:space:]] and this half did not, so one input
+    # --- produced two verdicts. Both now read it as not an anchor at all.
+    New-StDir @("$Tmp/cr/alpha", "$Tmp/cr/beta")
+    New-StCanon -Path "$Tmp/cr.md" -Schema 1
+    Set-StFile -Path "$Tmp/cr/alpha/a.md" -Text ("# a`n<!-- canon:rule-one v1 " + [char]13 + "-->`n")
+    Set-StFile -Path "$Tmp/cr/beta/b.md" -Text "<!-- canon:rule-one v1 -->`n"
+    $r = Invoke-StRun -Canon "$Tmp/cr.md" -PortsParent "$Tmp/cr"
+    St-Assert "an anchor carrying a CR inside the comment is not counted" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
+    St-Refute "a CR-bearing anchor is never credited as an adoption site" "ok: rule-one v1 at a.md" $r.Output
 
     # --- D295: the ports parent reached through a ROOT-LEVEL symlink. This is
     # --- the shape that regressed after D293: Resolve-PhysicalPath gave up when

@@ -627,6 +627,22 @@ self_test() {
   out="$(st_run "$tmp/nlp.md" "$tmp/nlp")"; rc=$?
   st_assert "a newline-free file does not stop the property check either" 0 "$rc" "property verified across" "$out"
 
+  # --- D296: a CR (or FF, or VT) INSIDE the anchor comment. This half used to
+  # --- match it and the PowerShell half did not, so one input produced two
+  # --- verdicts. Both now read it as not an anchor at all, in BOTH tiers: a
+  # --- required cell reports MISSING rather than ok, and a not-owed cell
+  # --- reports na rather than UNEXPECTED. The second of those is a move away
+  # --- from refusal and is accepted deliberately -- a comment carrying a
+  # --- control character inside it claims no adoption either way, and a CRLF
+  # --- checkout puts its CR after "-->" where nothing looks.
+  mkdir -p "$tmp/cr/alpha" "$tmp/cr/beta"
+  st_canon "$tmp/cr.md" 1
+  printf '# a\n<!-- canon:rule-one v1 \r-->\n' > "$tmp/cr/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/cr/beta/b.md"
+  out="$(st_run "$tmp/cr.md" "$tmp/cr")"; rc=$?
+  st_assert "an anchor carrying a CR inside the comment is not counted" 1 "$rc" "MISSING: rule-one v1" "$out"
+  st_refute "a CR-bearing anchor is never credited as an adoption site" "ok: rule-one v1 at a.md" "$out"
+
   # --- D295: the ports parent reached through a ROOT-LEVEL symlink. This is
   # --- the shape that regressed after D293: the physical-path resolution gave
   # --- up when the link had no parent directory, so one half resolved the tree
@@ -1982,7 +1998,27 @@ emit_anchors() {
     # PowerShell twin reads raw bytes via .NET and never shells out to grep,
     # so it never had this axis to pin; before this change the pair could
     # disagree on exactly such a file, and now they agree.
-    out="$(LC_ALL=C grep -Eano '<!--[[:space:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:space:]]+v[0-9]+[[:space:]]*-->' "$f")"
+    # D296: [[:blank:]] -- space and tab -- NOT [[:space:]], which under
+    # LC_ALL=C also admits CR, FF and VT. The PowerShell half matches [ \t] in
+    # the same three positions, so a CR inside an anchor comment was seen by
+    # this half and not by that one, flipping ok/MISSING, na/UNEXPECTED and
+    # ok/STALE with the false green landing on a different half in each tier.
+    #
+    # The strict reading is not a coin toss between the halves: it is already
+    # THIS file's answer in two of the three places it decides what an anchor
+    # is. The canon-side anchor counter and the awk filter that extracts the id
+    # and version below both use [ \t]; this grep was the outlier, so a
+    # CR-bearing anchor was matched here and then sometimes dropped there. It is
+    # also the spelling anchor_literal() emits and the one the canon documents.
+    #
+    # Weigh the direction honestly, because it is not uniformly toward refusal.
+    # For a REQUIRED cell a CR-bearing anchor now reads MISSING rather than ok,
+    # which is toward refusal. For a NOT_APPLICABLE cell it now reads na rather
+    # than UNEXPECTED, which is away from it. That is accepted deliberately: a
+    # comment carrying a control character inside it is not a well-formed
+    # anchor, so it claims no adoption in either tier, and a CRLF checkout puts
+    # its CR after "-->" where no pattern here looks anyway.
+    out="$(LC_ALL=C grep -Eano '<!--[[:blank:]]*canon:[A-Za-z0-9][A-Za-z0-9_-]*[[:blank:]]+v[0-9]+[[:blank:]]*-->' "$f")"
     gst=$?
     [ "$gst" -le 1 ] || return 1
     printf '%s\n' "$out" \
@@ -2292,6 +2328,13 @@ for pline in $PORT_LINES; do
         continue
       fi
       if [ -n "$hits" ]; then
+        # D296: the defect list is sorted before it is joined, for the same
+        # reason the sweep above is -- it was built in raw walk order, and the
+        # two halves walk in opposite directions, so two sibling subdirectories
+        # each carrying a fence defect produced the same findings in reversed
+        # order. Elements here are bare " rel(reason:line)" strings rather than
+        # anchor records, so this is a plain ordinal sort, not the record one.
+        hits="$(printf '%s' "$hits" | tr ' ' '\n' | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
         record DEFECT "  " "$eid --$hits" \
           "$pid: fix the $eid violations listed in the body above"
       else
@@ -2351,7 +2394,14 @@ for pline in $PORT_LINES; do
   done
 
   # Anchors for ids the canon does not define at all.
-  for hit in $FOUND; do
+  # D296: sorted. D293 made the per-id anchor rows deterministic and left this
+  # sweep on raw walk order -- and the two halves walk in OPPOSITE directions
+  # (find here, a LIFO stack over Get-ChildItem there), so two sibling
+  # subdirectories each carrying an unknown-id anchor produced the same rows in
+  # reversed order. Same comparer as the per-id rows: byte-ordinal over the
+  # whole tab-joined record, under LC_ALL=C so the collation cannot follow the
+  # caller's locale.
+  for hit in $(echo "$FOUND" | LC_ALL=C sort); do
     hid="$(field "$hit" 1)"
     if ! echo "$ENTRY_LINES" | cut -f3 | grep -qxF -- "$hid"; then
       record UNEXPECTED "  " "canon defines no rule \"$hid\" (found at $(field "$hit" 3))" \
@@ -2453,7 +2503,8 @@ for cat in $CATALOGS; do
       fi
     fi
   done
-  for hit in $CFOUND; do
+  # D296: sorted, same comparer and same reason as the port loop above.
+  for hit in $(echo "$CFOUND" | LC_ALL=C sort); do
     hid="$(field "$hit" 1)"
     if ! echo "$ENTRY_LINES" | cut -f3 | grep -qxF -- "$hid"; then
       record UNEXPECTED "  " "catalog $cat -- canon defines no rule \"$hid\" (found at $(field "$hit" 3))" \

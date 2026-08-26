@@ -251,6 +251,12 @@ SUITE_LOAD_BASELINE_MS=250   # idle measures 130-175ms; 250 leaves room for jitt
 # cases to hit the old number, which is the wrong trade -- the count is the
 # coverage. Measured on the machine W2107 was written on: ~100s before, ~165s
 # after.
+# (D296) Group 31, the cross-half differential, measured ~5s: it runs both
+# halves over five SMALL fixture trees, where the ps1 cost is one process start
+# rather than the per-case-group re-exec that makes Group 30b expensive. The
+# baseline is deliberately NOT raised for it -- 5s is inside the jitter of a
+# threshold that warns at twice this figure, and moving the number for a change
+# that does not threaten it would make the next real regression harder to see.
 SUITE_WALL_BASELINE_S=175
 
 suite_now_ms() {
@@ -10572,6 +10578,143 @@ if [ "$W2107_PS_RAN" -eq 1 ]; then
     diff <(printf '%s\n' "$W2107_SH_NAMES") <(printf '%s\n' "$W2107_PS_NAMES") | head -20
     FAIL=$((FAIL + 1))
   fi
+fi
+
+# ============================================================
+# Test Group 31: D296 -- the cross-half DIFFERENTIAL harness
+# ============================================================
+#
+# Group 30c compares the two halves' self-test case NAMES. That catches a case
+# renamed or lost on one side and nothing else: two cases can share a name and
+# assert different things, and the halves can disagree about a real input while
+# both suites stay fully green. Every divergence D296 fixed was invisible to
+# 30c by construction.
+#
+# This group closes that by running ONE fixture tree through BOTH halves and
+# diffing what they actually produced -- stdout, stderr and the exit code. The
+# ps1 suite has had a report-level diff since W2107 (its Group 32d); the bash
+# suite had no counterpart, so a Unix-only CI runner got name equality and
+# nothing report-level. This is that counterpart.
+#
+# Two things are normalized before comparing, and only two: the header lines
+# carrying absolute paths, and each half's reference to its OWN filename (an
+# UNVERIFIABLE work item names the checker, and that difference is cosmetic).
+# Anything else that differs is a finding.
+echo ""
+echo "=== Test Group 31: D296 cross-half differential (one tree, both halves) ==="
+
+if ! command -v pwsh > /dev/null 2>&1; then
+  # Same disposition as 30b: a missing PowerShell is not a failure of the code
+  # under test, and making it one breaks every Unix-only runner.
+  echo "  SKIP: 31: pwsh not installed -- the differential needs both halves"
+  echo "        (set STRIDE_PS1_GATE_REQUIRED=1 to make this a failure instead)"
+  if [ "${STRIDE_PS1_GATE_REQUIRED:-0}" = "1" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 31: STRIDE_PS1_GATE_REQUIRED=1 but pwsh is not installed"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  D296_DIR="$TMPDIR_TEST/d296-differential"
+  mkdir -p "$D296_DIR"
+
+  # One canon generator, parameterised only by the check kind and rule id, so
+  # the anchor shapes and the property shapes share a fixture builder.
+  d296_canon() { # $1=path $2=check $3=id $4=beta-status
+    {
+      printf '# canon\n'
+      printf '```json\n'
+      printf '{ "canon_schema_version": 1,\n'
+      printf '  "ports": [\n'
+      printf '    {"id": "alpha", "family": "f", "dir": "alpha", "exists": true, "note": ""},\n'
+      printf '    {"id": "beta",  "family": "f", "dir": "beta",  "exists": true, "note": ""}\n'
+      printf '  ] }\n'
+      printf '```\n'
+      printf '### r\n'
+      printf '<!-- canon:%s v1 -->\n' "$3"
+      printf '```json\n'
+      printf '{ "id": "%s", "version": 1, "status": "active", "superseded_by": null,\n' "$3"
+      printf '  "provenance": "quoted", "defects": ["D1"], "check": "%s", "check_hint": "h",\n' "$2"
+      printf '  "applies_to": [\n'
+      printf '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},\n'
+      printf '    {"port": "beta", "status": "%s", "variant": "", "reason": "r"} ] }\n' "$4"
+      printf '```\n'
+    } > "$1"
+  }
+
+  # Strip only what is legitimately different: the two absolute-path header
+  # lines, and each half naming its own file.
+  d296_norm() {
+    sed -e 's|^  canon:.*|  canon:        <normalized>|' \
+        -e 's|^  ports parent:.*|  ports parent: <normalized>|' \
+        -e 's|check-port-canon\.\(sh\|ps1\)|check-port-canon.<impl>|g'
+  }
+
+  d296_case() { # $1=name $2=canon $3=ports-parent
+    local _n="$1" _c="$2" _p="$3" _so _po _sr _pr
+    # Capture the RAW output and the exit code in one run per half, then
+    # normalize. Piping the run straight into the normalizer would make $?
+    # the normalizer's status, not the checker's -- and each half must run
+    # exactly once, or a fixture whose result depends on prior state would be
+    # compared against a different run than the one whose code was recorded.
+    _so="$(bash "$SCRIPT_DIR/../scripts/check-port-canon.sh" --canon "$_c" --ports-parent "$_p" 2>&1)"; _sr=$?
+    _po="$(pwsh -NoProfile -File "$SCRIPT_DIR/../scripts/check-port-canon.ps1" -Canon "$_c" -PortsParent "$_p" 2>&1)"; _pr=$?
+    _so="$(printf '%s\n' "$_so" | d296_norm)"
+    _po="$(printf '%s\n' "$_po" | d296_norm)"
+    if [ "$_sr" != "$_pr" ]; then
+      echo -e "  ${RED}FAIL${RESET}: 31: $_n -- exit codes differ (bash $_sr, pwsh $_pr)"
+      FAIL=$((FAIL + 1))
+    elif [ "$_so" != "$_po" ]; then
+      echo -e "  ${RED}FAIL${RESET}: 31: $_n -- the two halves produced different output"
+      diff <(printf '%s\n' "$_so") <(printf '%s\n' "$_po") | head -12
+      FAIL=$((FAIL + 1))
+    else
+      echo -e "  ${GREEN}PASS${RESET}: 31: $_n"
+      PASS=$((PASS + 1))
+    fi
+  }
+
+  # 1. An anchor carrying a CR inside the comment. Before D296 the bash grep
+  #    admitted [[:space:]] and the ps1 regex did not.
+  d="$D296_DIR/cr"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  d296_canon "$d/c.md" anchor rule-one required
+  printf '# a\n<!-- canon:rule-one v1 \r-->\n' > "$d/p/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$d/p/beta/b.md"
+  d296_case "an anchor carrying a CR" "$d/c.md" "$d/p"
+
+  # 2. An anchor sharing a line with a fence marker. Before D293's follow-up
+  #    the bash fenced-line set excluded the marker line and ps1 skipped it.
+  d="$D296_DIR/fence"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  d296_canon "$d/c.md" anchor rule-one required
+  printf '# t\n``` <!-- canon:rule-one v1 -->\n' > "$d/p/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$d/p/beta/b.md"
+  d296_case "an anchor on a fence marker line" "$d/c.md" "$d/p"
+
+  # 3. Duplicate anchors for one id in mixed-case filenames. Before D293's
+  #    follow-up ps1 sorted case-insensitively and bash byte-ordinally.
+  d="$D296_DIR/dup"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  d296_canon "$d/c.md" anchor rule-one not_applicable
+  printf '<!-- canon:rule-one v7 -->\n' > "$d/p/alpha/B.md"
+  printf '<!-- canon:rule-one v8 -->\n' > "$d/p/alpha/a.md"
+  printf 'x\n' > "$d/p/beta/b.md"
+  d296_case "duplicate anchors in mixed-case filenames" "$d/c.md" "$d/p"
+
+  # 4. Two sibling subdirectories each carrying an unknown-id anchor. The
+  #    halves walk in opposite directions; D296 sorted this sweep.
+  d="$D296_DIR/unknown"; mkdir -p "$d/p/alpha/sub1" "$d/p/alpha/sub2" "$d/p/beta"
+  d296_canon "$d/c.md" anchor rule-one required
+  printf '<!-- canon:rule-one v1 -->\n' > "$d/p/alpha/README.md"
+  printf '<!-- canon:one-x v1 -->\n' > "$d/p/alpha/sub1/a.md"
+  printf '<!-- canon:two-x v1 -->\n' > "$d/p/alpha/sub2/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$d/p/beta/b.md"
+  d296_case "two sibling subdirectories with unknown-id anchors" "$d/c.md" "$d/p"
+
+  # 5. Two sibling subdirectories each carrying a fence defect. Same walk-order
+  #    exposure, on the property path; D296 sorted this list too.
+  d="$D296_DIR/fencedefect"; mkdir -p "$d/p/alpha/sub1" "$d/p/alpha/sub2" "$d/p/beta"
+  d296_canon "$d/c.md" property fence-nesting required
+  printf '# x\n```\nunclosed\n' > "$d/p/alpha/sub1/a.md"
+  printf '# y\n~~~\nunclosed\n' > "$d/p/alpha/sub2/b.md"
+  printf 'z\n' > "$d/p/beta/b.md"
+  d296_case "two sibling subdirectories with fence defects" "$d/c.md" "$d/p"
 fi
 
 # ============================================================

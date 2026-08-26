@@ -125,6 +125,8 @@ The measured problem: **73 skipped entries produced 58 distinct reason strings a
 
 **Supplying it is optional and omitting it is always valid** — `reason` stays required-when-skipped and unconstrained, so an agent that predates this field, on any runtime, completes exactly as before. A `reason_code` outside the list **is** rejected, which is what stops a typo opening its own silent bucket. Use `matrix_deviation` when the decision matrix called for a step you did not run: it is the one code that records non-compliance, and reaching for `decision_matrix_skip` there would launder a deviation into a sanctioned skip. The validator and the aggregation live in the Stride server; emitting a code against a server that predates them is harmless.
 
+**Canon-governed — entry `reason-code-vocabulary` in `docs/port-canon.md`.** That entry registers this vocabulary as one every port must carry, and the list above restates it rather than being its source of record. A change to its substance owes a version bump in two places before the next release: that entry in the canon, and stride's own `reason-code-vocabulary` anchor — which lives beside the picking table in `skills/stride-workflow/SKILL.md`, not in this file. This README deliberately carries no anchor of its own: the canon assigns one per rule per port directory, and stride's is already placed.
+
 ### stride-claiming-tasks
 
 **MANDATORY** before any task claiming or discovery API call. Enforces proper before_doing hook execution, prerequisite verification, and immediate transition to active work. Contains the claim request format including `before_doing_result`.
@@ -523,8 +525,25 @@ also cross-verify the two halves against each other.
 bash scripts/check-port-canon.sh                 # scan the fleet against the canon
 pwsh scripts/check-port-canon.ps1                # the same scan, the other half
 bash scripts/check-port-canon.sh --self-test     # prove the gate still detects drift
-pwsh scripts/check-port-canon.ps1 -SelfTest      # the same 100 cases, the other half
+pwsh scripts/check-port-canon.ps1 -SelfTest      # the other half's own suite
 ```
+
+The two suites do **not** currently cover the same cases. Both pass, but the
+bash tally reads 104 and the PowerShell tally 100, and the difference is four
+named cases present only in the bash half — the D285 encoding and locale
+robustness cases (a broader-heuristic grep, a hostile ambient locale, a NUL-free
+non-ASCII file, an invalid multibyte sequence). They are not `[ps1-only]`
+asymmetries, so `hooks/test-stride-hook.sh` Group **30c** — the check whose whole
+job is to compare the two halves' case-name sets — reports the divergence rather
+than passing it. Reproduce with the normalization 30c itself uses:
+
+```
+diff <(bash scripts/check-port-canon.sh --self-test | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | sort) \
+     <(pwsh -NoProfile -File scripts/check-port-canon.ps1 -SelfTest | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | sort)
+```
+
+Until those four land in the PowerShell half, run the bash suite for encoding and
+locale coverage; a Windows-only runner does not exercise it.
 
 Exit codes: `0` every applicable cell reports ok, `1` at least one cell reports
 MISSING, STALE, UNEXPECTED, DEFECT or UNVERIFIABLE and the drift is listed

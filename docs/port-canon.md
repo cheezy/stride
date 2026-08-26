@@ -624,19 +624,37 @@ named by the Scope note above as a source of record and restates two of the
 governed rules. The fourth, `stride/skills/stride-subagent-workflow/SKILL.md`,
 is neither a Provenance source nor named in the Scope note — it holds the
 decision-matrix mirror, which the `row-precedence` entry's Port-side anchor
-addresses by name. `fence-nesting` has no site here at all: it is provenanced to
+addresses by name. The fifth, `stride/README.md`, is named by neither the
+entries nor the Scope note either; it restates the `reason_code` vocabulary, and
+D292 gave it a back-reference on that ground alone — which is what makes this
+list an application of the site test rather than of the narrower membership one.
+`fence-nesting` has no site here at all: it is provenanced to
 `stride-lite` and its Port-side anchor is `None`, so there is nothing in this
 repository to install a back-reference beside.
 
-**The test actually applied was per-file, over those four files — and it is
-narrower than the ideal.** The ideal test is *every site in this repository that
-states or restates a governed rule*, and the two do not yet coincide: `README.md`
-restates the whole six-value `reason_code` vocabulary and the `matrix_deviation`
-clause, and carries no back-reference. That gap is known, is tracked as **D292**,
-and is stated here rather than papered over — a section whose subject is
-one-way references must not itself claim a coverage it does not have. Treat the
-site-based test as the direction of travel and the four files as where it has
-been applied so far.
+**The test is site-based, and the last known divergence is closed.** The test is
+*every site in this repository that states or restates a governed rule* — not
+merely the files this document happens to cite. D283 applied it per-file over
+four files and recorded the shortfall rather than papering over it: `README.md`
+restates the six-value `reason_code` vocabulary and the `matrix_deviation`
+clause, and carried no back-reference. **D292** closed that site, so the applied
+test and the ideal now coincide, and the claim above is a claim this section can
+make. Two consequences worth keeping: the README back-reference carries **no
+anchor comment**, because this file assigns one anchor per rule per port
+directory and stride's `reason-code-vocabulary` anchor already sits in
+`skills/stride-workflow/SKILL.md`. How either checker behaves when a second is
+added is the script's contract, not this file's — see the Release gate section,
+which stops at the same line and for the same reason. And "no known divergence"
+is not "provably
+none": it rests on a `reason_code` sweep of this repository at a point in time,
+so a new restatement added later owes its own back-reference, and finding one is
+a defect to file rather than evidence the test changed. One carve-out the test
+needs stating, because the sweep does surface it: **`CHANGELOG.md` is not an edit
+site.** It restates governed substance in its historical entries — the D239 entry
+enumerates the whole vocabulary — but a released entry is a record of what
+shipped, not a statement of the current rule, so there is nothing there for a
+back-reference to prompt and editing one to track a rule change would falsify the
+record. Sites are the files a maintainer changes to change the rule.
 
 **What remains maintainer-enforced.** The back-reference surfaces the obligation
 at the edit site; it does not enforce it. Nothing fails a build when a substance

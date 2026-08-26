@@ -588,6 +588,26 @@ self_test() {
   first_stale="$(echo "$out" | grep 'STALE: rule-one at' | head -1)"
   st_assert "duplicate anchor rows sort byte-ordinally, uppercase before lowercase" 1 "$rc" "B.md:1 carries v7" "$first_stale"
 
+  # --- D295: a markdown file containing NO NEWLINE at all. Three shapes, each
+  # --- of which independently killed the PowerShell half: a zero-byte file, a
+  # --- single line with no trailing newline, and CR-only terminators. That
+  # --- half split lines into a List, PowerShell unrolled a one-element list to
+  # --- a scalar on return, and .Count on a scalar is terminating under
+  # --- StrictMode -- so the run died with no report and exit 1, which in this
+  # --- gate means "drift found and listed above". This half was never affected
+  # --- and reported correctly throughout; the case exists here as the parity
+  # --- twin, so the pair pins the same input under the same name.
+  mkdir -p "$tmp/nl/alpha" "$tmp/nl/beta"
+  st_canon "$tmp/nl.md" 1
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nl/alpha/a.md"
+  : > "$tmp/nl/alpha/empty.md"
+  printf 'one line, no trailing newline' > "$tmp/nl/alpha/oneline.md"
+  printf 'cr only terminator\r' > "$tmp/nl/alpha/cronly.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nl/beta/b.md"
+  out="$(st_run "$tmp/nl.md" "$tmp/nl")"; rc=$?
+  st_assert "a newline-free markdown file does not stop the scan" 0 "$rc" "ok: rule-one v1 at a.md" "$out"
+  st_refute "a newline-free markdown file never costs the run its report" "GATE ERROR" "$out"
+
   # --- a registered, exists:true port whose directory is absent is a gate
   # --- fault, and a gate fault must not be downgraded by an ordinary finding
   # --- recorded later. Order matters: the absent port is listed FIRST here.

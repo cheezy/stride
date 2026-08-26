@@ -158,6 +158,22 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# D295: an UNHANDLED terminating error must not be reported as a finding.
+# Stop-Gate exits 2 for every refusal this checker knows how to name, but an
+# error nobody anticipated propagated to the host, and PowerShell exits 1 for
+# that -- which in this gate's contract means "drift exists and is listed
+# above", with nothing listed above. That is the worst possible reading: a CI
+# job treats the corpse of a run as an ordinary red gate, and an operator sees
+# a stack trace where the report should be. The EXIT CODES section reserves 2
+# for "no verdict was possible", and a run that died is exactly that. The trap
+# converts any unhandled terminating error into the honest code, and names the
+# error rather than swallowing it -- refusing loudly, never sanitizing.
+trap {
+    [Console]::Error.WriteLine("GATE ERROR: the checker stopped on an unhandled error and produced no verdict: $($_.Exception.Message)")
+    [Console]::Error.WriteLine('GATE ERROR: no verdict is possible; this run proved nothing')
+    exit 2
+}
+
 # (W2107 r2) $IsWindows was introduced in PowerShell Core 6. Under
 # Set-StrictMode -Version Latest a reference to it on Windows PowerShell 5.1 --
 # the host stride-hook.sh actually execs -- is a TERMINATING error, so the
@@ -275,7 +291,20 @@ function Split-CanonLines {
     $lines = $Text -split "`n"
     $out = New-Object System.Collections.Generic.List[string]
     foreach ($l in $lines) { $out.Add(($l -replace "`r$", '')) }
-    return $out
+    # D295: the comma is load-bearing, not style. PowerShell UNROLLS a
+    # collection on return, and a one-element collection unrolls to a SCALAR --
+    # so a file with no newline in it (a zero-byte file, a single line with no
+    # trailing newline, or CR-only terminators) handed every caller a bare
+    # string. `$lines.Count` on a string is a terminating error under
+    # Set-StrictMode -Version Latest, and $ErrorActionPreference = 'Stop' turned
+    # that into process death: no report, no verdict, and exit 1 -- which in
+    # this gate's contract means "drift exists and is listed above", with
+    # nothing listed above. The unary comma wraps the value so the collection
+    # survives the return intact, which fixes all three callers at once: the
+    # canon parse, Get-FileAnchors, and Test-FenceDefect. Empty markdown files
+    # are ordinary in real repositories, and the bash half reported them
+    # correctly throughout.
+    return ,$out
 }
 
 # --------------------------------------------------------------------------
@@ -811,9 +840,19 @@ function Resolve-PhysicalPath {
         if ([string]::IsNullOrEmpty($t)) { break }
         if (-not [System.IO.Path]::IsPathRooted($t)) {
             # A relative link target is relative to the link's own directory.
-            # When there is no such directory there is nothing to resolve
-            # against, and stopping leaves the comparison where it was.
+            # For a link sitting AT the filesystem root -- /var and /tmp are
+            # both root-level symlinks on macOS -- Split-Path -Parent returns
+            # empty, and an earlier version of this guard treated that as
+            # "nothing to resolve against" and gave up. That silently defeated
+            # the whole point of this function for exactly the paths a temp
+            # tree lives under: `/var/...` stayed `/var/...` while the bash
+            # half resolved it to `/private/var/...`, so the two halves
+            # computed different identities for one file and the canon
+            # self-exclusion could stop matching on this side -- the false
+            # green D293 finding 2a exists to close. Fall back to the path's
+            # root instead, and only give up if even that is empty.
             $base = Split-Path -Parent $item.FullName
+            if ([string]::IsNullOrEmpty($base)) { $base = [System.IO.Path]::GetPathRoot($item.FullName) }
             if ([string]::IsNullOrEmpty($base)) { break }
             $t = [System.IO.Path]::GetFullPath((Join-Path $base $t))
         }
@@ -1555,6 +1594,26 @@ function Invoke-SelfTestBody {
     $firstStale = @($r.Output -split "`n" | Where-Object { $_ -cmatch 'STALE: rule-one at' })
     $firstStaleLine = if ($firstStale.Count -gt 0) { $firstStale[0] } else { '' }
     St-Assert "duplicate anchor rows sort byte-ordinally, uppercase before lowercase" 1 $r.ExitCode "B.md:1 carries v7" $firstStaleLine
+
+    # --- D295: a markdown file containing NO NEWLINE at all. Three shapes,
+    # --- each of which independently killed this half: a zero-byte file, a
+    # --- single line with no trailing newline, and CR-only terminators.
+    # --- Split-CanonLines returned a List, PowerShell unrolled a one-element
+    # --- list to a scalar on return, and .Count on a scalar is terminating
+    # --- under StrictMode -- so the run died with no report at exit 1, which
+    # --- in this gate's contract means "drift found and listed above" with
+    # --- nothing listed above. Empty markdown files are ordinary in real
+    # --- repositories, and the bash half reported them correctly throughout.
+    New-StDir @("$Tmp/nl/alpha", "$Tmp/nl/beta")
+    New-StCanon -Path "$Tmp/nl.md" -Schema 1
+    Set-StFile -Path "$Tmp/nl/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/nl/alpha/empty.md" -Text ""
+    Set-StFile -Path "$Tmp/nl/alpha/oneline.md" -Text "one line, no trailing newline"
+    Set-StFile -Path "$Tmp/nl/alpha/cronly.md" -Text "cr only terminator`r"
+    Set-StFile -Path "$Tmp/nl/beta/b.md" -Text "<!-- canon:rule-one v1 -->`n"
+    $r = Invoke-StRun -Canon "$Tmp/nl.md" -PortsParent "$Tmp/nl"
+    St-Assert "a newline-free markdown file does not stop the scan" 0 $r.ExitCode "ok: rule-one v1 at a.md" $r.Output
+    St-Refute "a newline-free markdown file never costs the run its report" "GATE ERROR" $r.Output
 
     # --- a registered, exists:true port whose directory is absent is a gate
     # --- fault, and a gate fault must not be downgraded by an ordinary finding

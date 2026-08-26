@@ -370,6 +370,18 @@ self_test() {
 
   st_run() { bash "$SELF" --canon "$1" --ports-parent "$2" 2>&1; }
 
+  # ASSERTION-LITERAL CONVENTION, and it is a PAIR contract, not a local one.
+  # This half matches with `grep -q` (POSIX BRE); the PowerShell half matches
+  # with -cmatch (.NET regex). Keep every literal PLAIN TEXT: a literal
+  # containing ( ) | + ? { } means different things to the two engines, so a
+  # case sharing a name across the halves would silently assert two different
+  # things and the case-name cross-check would stay green. Where a pattern
+  # genuinely needs a metacharacter, make it work in BOTH dialects and say so
+  # at the call site.
+  # Note also that an EMPTY pattern skips the substring check entirely (see the
+  # [ -n "$4" ] below, mirrored in St-Assert): that is deliberate for the
+  # exit-code-only cases, but it means a typo that empties a pattern degrades
+  # the case to exit-code-only in silence, on both halves.
   st_assert() { # $1=name $2=want-exit $3=got-exit $4=want-substring $5=output
     local ok=1
     [ "$2" = "$3" ] || ok=0

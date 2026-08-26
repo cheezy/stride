@@ -10533,22 +10533,33 @@ fi
 # own tally can see -- each is internally consistent while disagreeing with the
 # other. The [ps1-only] and [bash-only] prefixes and the skipped-with-reason
 # suffix are the three sanctioned asymmetries and are normalized out; anything
-# else is a divergence. ([bash-only] was added by D294 -- see below.)
+# else is a divergence. ([bash-only] was added by D294 -- see below. Note
+# [ps1-only] currently has NO users in either suite: its filter is reserved
+# rather than in force, which is why the only marked cases today are the two
+# [bash-only] ones.)
 if [ "$W2107_PS_RAN" -eq 1 ]; then
   # Three sanctioned asymmetries now, not two. [bash-only] is the mirror of
   # [ps1-only], added by D294 for a case whose HAZARD cannot exist in the other
   # half -- the grep-stub pair, which pins behaviour of a grep this half shells
-  # out to and the PowerShell half never invokes. Both markers are filtered
-  # from BOTH lists, so a marked case is out of the comparison whichever side
-  # it lives on. Marking is not a way to silence a divergence: a case is marked
-  # only when the other half CANNOT have the hazard, and a case testing an
-  # outcome both halves owe gets ported instead. The non-vacuity guard below
-  # still sees every unmarked case -- all but the marked lines -- so filtering
+  # out to and the PowerShell half never invokes. Marking is not a way to
+  # silence a divergence: a case is marked only when the other half CANNOT have
+  # the hazard, and a case testing an outcome both halves owe gets ported.
+  #
+  # EACH FILTER IS APPLIED TO ITS OWN SIDE ONLY, and that is load-bearing
+  # rather than tidiness. Filtering both markers from both lists made the
+  # marker a general silencer: a BASH case mislabelled [ps1-only] vanished from
+  # the bash list, and one name marked on BOTH sides left the comparison
+  # entirely -- after which the pair could diverge in fixture, assertion and
+  # exit code with this group still green. Side-affine, those mistakes surface
+  # instead: an unexpected marker leaves its line in the list, the sets differ,
+  # and 30c fails. The rule above is then enforced here, not merely asserted.
+  #
+  # The non-vacuity guard below still sees every unmarked case, so filtering
   # cannot empty the list while real cases remain. No count is pinned here on
   # purpose: a figure in a comment is the drift this very group exists to
   # catch, and D294 removed one of those from the ps1 suite in the same change.
-  W2107_SH_NAMES=$(printf '%s\n' "$W2107_SH_OUT" | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | grep -v '^ok: \[bash-only\]' | sort)
-  W2107_PS_NAMES=$(printf '%s\n' "$W2107_PS_OUT" | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | grep -v '^ok: \[bash-only\]' | sort)
+  W2107_SH_NAMES=$(printf '%s\n' "$W2107_SH_OUT" | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[bash-only\]' | sort)
+  W2107_PS_NAMES=$(printf '%s\n' "$W2107_PS_OUT" | grep '^ok: ' | sed 's/ \[skipped on this host:.*\]$//' | grep -v '^ok: \[ps1-only\]' | sort)
   if [ -z "$W2107_SH_NAMES" ]; then
     # Non-vacuity: two empty sets compare equal forever.
     echo -e "  ${RED}FAIL${RESET}: 30c: the bash half emitted no ok: lines, so the cross-check would pass vacuously"

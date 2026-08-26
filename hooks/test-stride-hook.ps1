@@ -10422,17 +10422,23 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
     # The case-name sets must match. Each half's own tally is internally
     # consistent while disagreeing with the other, so only this sees a case
     # renamed or lost on one side.
+    # The marker filter is SIDE-AFFINE: each list drops only its own side's
+    # marker. Dropping both markers from both lists made the marker a general
+    # silencer -- a bash case mislabelled [ps1-only] vanished from the bash
+    # list, and one name marked on both sides left the comparison entirely.
+    # Side-affine, an unexpected marker stays in the list and this check fails,
+    # which is what makes "mark only when the other half cannot have the
+    # hazard" a rule the group enforces rather than one it merely states.
     $g32Names = {
-        param($t)
+        param($t, $DropPrefix)
         (($t -split "`n") |
             Where-Object { $_ -clike 'ok: *' } |
             ForEach-Object { $_.TrimEnd("`r") -replace ' \[skipped on this host:.*\]$', '' } |
-            Where-Object { -not $_.StartsWith('ok: [ps1-only]', [System.StringComparison]::Ordinal) } |
-            Where-Object { -not $_.StartsWith('ok: [bash-only]', [System.StringComparison]::Ordinal) } |
+            Where-Object { -not $_.StartsWith("ok: $DropPrefix", [System.StringComparison]::Ordinal) } |
             Sort-Object) -join "`n"
     }
-    $g32A = & $g32Names $g32ShOut
-    $g32B = & $g32Names $g32Out
+    $g32A = & $g32Names $g32ShOut '[bash-only]'
+    $g32B = & $g32Names $g32Out '[ps1-only]'
     if (-not $g32A) {
         $script:FAIL++
         Write-Host "  FAIL: 32c: the bash half emitted no ok: lines, so the comparison would pass vacuously" -ForegroundColor Red

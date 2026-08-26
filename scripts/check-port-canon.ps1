@@ -553,7 +553,7 @@ function ConvertFrom-Canon {
             if ($null -eq $registry) { Stop-Gate 'no registry block found in the canon' }
             $eid = Get-CanonField -Object $obj -Name 'id'
             if ($eid -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]*$') {
-                Stop-Gate ("entry id ""$eid"" is outside the anchor charset ^[A-Za-z0-9][A-Za-z0-9_-]`$; an id that cannot appear in an anchor is meaningless to the canon")
+                Stop-Gate ("entry id ""$eid"" is outside the anchor charset ^[A-Za-z0-9][A-Za-z0-9_-]*`$; an id that cannot appear in an anchor is meaningless to the canon")
             }
             foreach ($k in $script:EntryKeys) {
                 if (-not (Test-JsonMember -Object $obj -Name $k)) {
@@ -1977,6 +1977,19 @@ function Invoke-SelfTestBody {
     # --- UTF8 leaves this case passing, because a UTF8 decode cannot hide an
     # --- ASCII anchor -- see the header note above for the measurement.
     # ---
+    # --- AND BE HONEST ABOUT THE NAME. The second assertion's name mentions a
+    # --- hostile ambient locale. On the bash half that is the load-bearing
+    # --- half of the case; here it is ceremony, and measurably so: this
+    # --- half's output over this fixture is byte-identical under
+    # --- LC_ALL=en_US.UTF-8, under LC_ALL=C, and with the variable unset.
+    # --- Nothing in the .NET read-and-match path consults a locale. The name
+    # --- is kept anyway because the cross-check compares NAMES and the pair
+    # --- must match, and because the OUTCOME the case pins here is real -- the
+    # --- 0xFF byte is discriminating, verified by mutation: make lines
+    # --- carrying a byte >= 0x80 unmatchable and both cases fail. So read the
+    # --- name as naming the bash hazard and this half as pinning the shared
+    # --- outcome underneath it, not as a claim that this half has a locale.
+    # ---
     # --- The byte is on the SAME LINE as the anchor, which is what the bash
     # --- half needed to reproduce it, and the run is made with a hostile
     # --- UTF-8 locale exported into the child process's environment.
@@ -2419,6 +2432,17 @@ function Invoke-StRaw {
     return @{ Output = (($out | Out-String) -replace "`r`n", "`n"); ExitCode = $LASTEXITCODE }
 }
 
+# ASSERTION-LITERAL CONVENTION, and it is a PAIR contract, not a local one.
+# This half matches with -cmatch (.NET regex); the bash half matches with
+# `grep -q` (POSIX BRE). Keep every literal PLAIN TEXT: a literal containing
+# ( ) | + ? { } means different things to the two engines, so a case sharing a
+# name across the halves would silently assert two different things and the
+# case-name cross-check would stay green. Where a pattern genuinely needs a
+# metacharacter, make it work in BOTH dialects and say so at the call site.
+# Note also that an EMPTY pattern skips the substring check entirely (the
+# `if ($WantMatch ...)` below, mirrored in st_assert): deliberate for the
+# exit-code-only cases, but a typo that empties a pattern degrades the case to
+# exit-code-only in silence, on both halves.
 function St-Assert {
     param([string]$Name, [int]$WantExit, [int]$GotExit, [string]$WantMatch, [string]$Output)
     $ok = $true

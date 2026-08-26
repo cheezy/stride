@@ -155,6 +155,33 @@
 # This script reads local files only. It fetches nothing, sends nothing, and
 # writes nothing outside its own self-test temp directory.
 
+# D297: ONE usage text, documenting the same flags as the bash half in the same
+# order, so the two --help outputs describe the same tool. The wording is this
+# half's own -- the pair contract is that the flag SET and the exit codes agree,
+# not that the prose is copied -- and the one deliberate difference (this half
+# also accepts the bash spellings) is stated here and in the bash usage block.
+$script:UsageText = @'
+usage: check-port-canon.ps1 [-PortsParent DIR] [-Canon PATH] [-SelfTest] [-h|-Help]
+
+  -PortsParent DIR    Directory holding the port checkouts. Each registry
+                      "dir" is resolved as one level below this directory.
+                      Defaults to the parent of the stride repo root, which
+                      is where the ports sit in a normal checkout.
+  -Canon PATH         Canon document to read. Defaults to docs/port-canon.md
+                      inside this repo.
+  -SelfTest           Prove the gate still detects MISSING, STALE, UNEXPECTED,
+                      DEFECT and UNVERIFIABLE -- and still reports a clean tree
+                      as clean -- by running it against synthetic fixtures under
+                      a temp dir, then stop. Scans nothing real.
+  -h, -Help           Print this message.
+
+-PortsParent and -Canon exist so the check can be exercised against a
+synthetic fixture tree. Neither is needed in normal use.
+
+Exit codes: 0 all clear, 1 drift found, 2 no verdict possible.
+The bash spellings --canon / --ports-parent / --self-test are also accepted.
+'@
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -239,24 +266,18 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         '^(-SelfTest|--self-test)$'      { $SelfTest = $true; break }
         '^(-h|-Help|--help)$'            { $ShowHelp = $true; break }
         default {
+            # D297: print the usage block after the error, as the bash half
+            # does. A user who mistypes a flag was helped on one half and left
+            # to go read the script on the other.
             [Console]::Error.WriteLine("GATE ERROR: unknown option ""$a""")
+            [Console]::Error.WriteLine($script:UsageText)
             exit 2
         }
     }
 }
 
 if ($ShowHelp) {
-    Write-Output @'
-check-port-canon.ps1 -- port drift check against docs/port-canon.md.
-
-  -Canon <path>         the canon document (default: docs/port-canon.md)
-  -PortsParent <path>   the directory the port repos live in (default: ..)
-  -SelfTest             prove the checker detects what it claims; scans nothing
-  -h, --help            this text
-
-Exit codes: 0 all clear, 1 drift found, 2 no verdict possible.
-The bash spellings --canon / --ports-parent / --self-test are also accepted.
-'@
+    Write-Output $script:UsageText
     exit 0
 }
 
@@ -349,7 +370,11 @@ function Split-CanonLines {
 function Assert-SafeCanonString {
     param([string]$Value, [string]$What)
     if ($Value -cmatch "[`t`n]") {
-        Stop-Gate "$What contains a tab or newline, which would forge a record boundary; refusing to parse it"
+        # D297: the bash half's wording, byte for byte, including the remedy
+        # clause. This half said "refusing to parse it", which states what the
+        # checker did; the bash half says what the AUTHOR must do about it, and
+        # a refusal that does not say how to fix it is diagnostic-quality debt.
+        Stop-Gate "the value of ""$What"" contains a tab or newline, which would forge a record boundary; canon string values must contain neither"
     }
 }
 

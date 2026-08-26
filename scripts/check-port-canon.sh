@@ -295,6 +295,9 @@ usage: check-port-canon.sh [--ports-parent DIR] [--canon PATH] [-h|--help]
 
 --ports-parent and --canon exist so the check can be exercised against a
 synthetic fixture tree. Neither is needed in normal use.
+
+Exit codes: 0 all clear, 1 drift found, 2 no verdict possible.
+The PowerShell half accepts these same spellings as well as its own.
 USAGE
 }
 

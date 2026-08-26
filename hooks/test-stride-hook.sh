@@ -10797,6 +10797,67 @@ else
   else
     echo "  SKIP: 31: a symlinked .md is refused with the same diagnostics (this host cannot create symlinks)"
   fi
+
+  # 11. A TAB inside a canon string. Both halves refuse at exit 2, but they used
+  #     to word it differently, and only one of them said what the author must
+  #     do about it. ps1 Group 32d never reaches this path -- none of its tiers
+  #     builds a malformed string -- which is why the divergence survived.
+  d="$D296_DIR/tabstring"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  {
+    printf '# canon\n```json\n'
+    printf '{ "canon_schema_version": 1,\n  "ports": [\n'
+    printf '    {"id": "alpha", "family": "f", "dir": "alpha", "exists": true, "note": ""},\n'
+    printf '    {"id": "beta",  "family": "f", "dir": "beta",  "exists": true, "note": ""}\n  ] }\n```\n'
+    printf '### r\n<!-- canon:rule-one v1 -->\n```json\n'
+    printf '{ "id": "rule-one", "version": 1, "status": "active", "superseded_by": null,\n'
+    printf '  "provenance": "quoted", "defects": ["D1"], "check": "anchor", "check_hint": "h\they",\n'
+    printf '  "applies_to": [\n'
+    printf '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},\n'
+    printf '    {"port": "beta", "status": "required", "variant": "", "reason": "r"} ] }\n```\n'
+  } > "$d/c.md"
+  printf 'x\n' > "$d/p/alpha/a.md"
+  printf 'y\n' > "$d/p/beta/b.md"
+  d296_case "a tab in a canon string is refused with the same message" "$d/c.md" "$d/p"
+
+  # 12. An entry id outside the anchor charset. Same story: a shared refusal at
+  #     exit 2 whose TEXT diverged -- this half's message used to omit the `*`
+  #     from the charset it enforces -- and another path 32d does not reach.
+  d="$D296_DIR/charset"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  {
+    printf '# canon\n```json\n'
+    printf '{ "canon_schema_version": 1,\n  "ports": [\n'
+    printf '    {"id": "alpha", "family": "f", "dir": "alpha", "exists": true, "note": ""},\n'
+    printf '    {"id": "beta",  "family": "f", "dir": "beta",  "exists": true, "note": ""}\n  ] }\n```\n'
+    printf '### r\n<!-- canon:a.c v1 -->\n```json\n'
+    printf '{ "id": "a.c", "version": 1, "status": "active", "superseded_by": null,\n'
+    printf '  "provenance": "quoted", "defects": ["D1"], "check": "anchor", "check_hint": "h",\n'
+    printf '  "applies_to": [\n'
+    printf '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},\n'
+    printf '    {"port": "beta", "status": "required", "variant": "", "reason": "r"} ] }\n```\n'
+  } > "$d/c.md"
+  printf 'x\n' > "$d/p/alpha/a.md"
+  printf 'y\n' > "$d/p/beta/b.md"
+  d296_case "an out-of-charset entry id is refused with the same message" "$d/c.md" "$d/p"
+
+  # 13. The CLI surface: an unknown option. Both halves must print the same
+  #     kind of help and the same exit code, not one helping and one not.
+  d="$D296_DIR/cli"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  d296_canon "$d/c.md" anchor rule-one required
+  printf '<!-- canon:rule-one v1 -->\n' > "$d/p/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$d/p/beta/b.md"
+  _cso="$(bash "$SCRIPT_DIR/../scripts/check-port-canon.sh" --bogus 2>&1)"; _csr=$?
+  _cpo="$(pwsh -NoProfile -File "$SCRIPT_DIR/../scripts/check-port-canon.ps1" --bogus 2>&1)"; _cpr=$?
+  if [ "$_csr" != "$_cpr" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 31: an unknown option -- exit codes differ (bash $_csr, pwsh $_cpr)"
+    FAIL=$((FAIL + 1))
+  elif ! printf '%s' "$_cso" | grep -q 'unknown option' || ! printf '%s' "$_cpo" | grep -q 'unknown option' \
+       || ! printf '%s' "$_cso" | grep -q 'ports-parent' || ! printf '%s' "$_cpo" | grep -q 'PortsParent'; then
+    echo -e "  ${RED}FAIL${RESET}: 31: an unknown option -- one half did not name the option or print its usage"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 31: an unknown option names it and prints usage on both halves"
+    PASS=$((PASS + 1))
+  fi
 fi
 
 # ============================================================

@@ -64,6 +64,13 @@
 #     refusal. (Until D285 the bash half also leaned on grep -I here; it
 #     now passes -a, so both halves decide readable-as-text from the
 #     file's own bytes and neither defers to a tool's heuristic.)
+#     D299 made that claim TRUE for the canon as well as for port content.
+#     It had been true only for port files: the bash half applied its
+#     byte-count refusal to what it scanned and not to the document it
+#     parsed, so a NUL-bearing canon was refused here at exit 2 and reported
+#     as a CLEAN FLEET there at exit 0 -- a false green in the half every
+#     other implementation is compared against. Both halves now refuse it,
+#     with the same message and the same exit code.
 #   * Decoding is ISO-8859-1 (code page 28591), not UTF-8. UTF8.GetString maps
 #     invalid bytes to U+FFFD and can merge or vanish content -- the exact
 #     failure D281 filed against stride-hook.ps1, whose decided answer was this
@@ -1841,6 +1848,25 @@ function Invoke-SelfTestBody {
     if ($fifoCanonOk) {
         $r = Invoke-StRun -Canon (Join-Path $Tmp 'nonreg-canon.md') -PortsParent "$Tmp/nonreg"
         St-Assert "a named pipe handed in as the canon is refused, not read" 2 $r.ExitCode "canon not readable" $r.Output
+
+    # --- D299: two canon shapes on which the halves used to return OPPOSITE
+    # --- verdicts. A NUL anywhere in the canon was refused here and parsed into
+    # --- a CLEAN FLEET by the bash half -- a false green in the implementation
+    # --- everything else is compared against. A CRLF canon was the reverse:
+    # --- parsed here, refused there, because that half's fence closer did not
+    # --- admit the CR its own opener already trimmed.
+    New-StDir @("$Tmp/canonshape/alpha", "$Tmp/canonshape/beta")
+    New-StCanon -Path "$Tmp/canonshape.md" -Schema 1
+    Set-StFile -Path "$Tmp/canonshape/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/canonshape/beta/b.md" -Text "<!-- canon:rule-one v1 -->`n"
+    $csBody = [System.IO.File]::ReadAllText("$Tmp/canonshape.md", [System.Text.Encoding]::GetEncoding(28591))
+    Set-StFile -Path "$Tmp/canonshape-nul.md" -Text ("# ca" + [char]0 + "non`n" + $csBody)
+    $r = Invoke-StRun -Canon "$Tmp/canonshape-nul.md" -PortsParent "$Tmp/canonshape"
+    St-Assert "a NUL anywhere in the canon is refused, not parsed" 2 $r.ExitCode "canon not readable" $r.Output
+    St-Refute "a NUL-bearing canon never yields a clean fleet" "clean repos:" $r.Output
+    Set-StFile -Path "$Tmp/canonshape-crlf.md" -Text (($csBody -split "`n" | ForEach-Object { $_ + "`r" }) -join "`n")
+    $r = Invoke-StRun -Canon "$Tmp/canonshape-crlf.md" -PortsParent "$Tmp/canonshape"
+    St-Assert "a CRLF canon parses rather than reading as one unclosed fence" 0 $r.ExitCode "ok: rule-one v1" $r.Output
     } else {
         $script:StPass += 1
         [Console]::Out.WriteLine("ok: a named pipe handed in as the canon is refused, not read [skipped on this host: mkfifo unavailable]")

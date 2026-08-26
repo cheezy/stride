@@ -702,6 +702,25 @@ self_test() {
   if mkfifo "$tmp/nonreg-canon.md" 2>/dev/null; then
     out="$(bash "$SELF" --canon "$tmp/nonreg-canon.md" --ports-parent "$tmp/nonreg" 2>&1)"; rc=$?
     st_assert "a named pipe handed in as the canon is refused, not read" 2 "$rc" "canon not readable" "$out"
+
+  # --- D299: two canon shapes on which the halves used to return OPPOSITE
+  # --- verdicts. A NUL anywhere in the canon: this half parsed it and reported
+  # --- the fleet CLEAN at exit 0 while the other refused it at exit 2 -- a
+  # --- false green in the reference implementation. A CRLF canon: the reverse,
+  # --- because this half's fence CLOSER did not admit the CR its own opener
+  # --- already trimmed, so the registry fence never closed.
+  mkdir -p "$tmp/canonshape/alpha" "$tmp/canonshape/beta"
+  st_canon "$tmp/canonshape.md" 1
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/canonshape/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/canonshape/beta/b.md"
+  printf '# ca\000non\n' > "$tmp/canonshape-nul.md"
+  cat "$tmp/canonshape.md" >> "$tmp/canonshape-nul.md"
+  out="$(bash "$SELF" --canon "$tmp/canonshape-nul.md" --ports-parent "$tmp/canonshape" 2>&1)"; rc=$?
+  st_assert "a NUL anywhere in the canon is refused, not parsed" 2 "$rc" "canon not readable" "$out"
+  st_refute "a NUL-bearing canon never yields a clean fleet" "clean repos:" "$out"
+  awk '{ printf "%s\r\n", $0 }' "$tmp/canonshape.md" > "$tmp/canonshape-crlf.md"
+  out="$(bash "$SELF" --canon "$tmp/canonshape-crlf.md" --ports-parent "$tmp/canonshape" 2>&1)"; rc=$?
+  st_assert "a CRLF canon parses rather than reading as one unclosed fence" 0 "$rc" "ok: rule-one v1" "$out"
   else
     pass=$((pass + 1))
     echo "ok: a named pipe handed in as the canon is refused, not read [skipped on this host: mkfifo unavailable]"
@@ -1467,6 +1486,21 @@ if [ ! -r "$CANON" ] || [ ! -f "$CANON" ]; then
   echo "GATE ERROR: canon not readable at $CANON" >&2
   exit 2
 fi
+# D299: the same byte-count NUL guard this file already applies to PORT content,
+# now applied to the canon it parses. It was not, and the consequence was the
+# worst shape this gate can produce: a canon corrupted mid-file -- a truncated
+# write, a botched encoding conversion -- was parsed anyway and the fleet was
+# reported CLEAN at exit 0, by the very implementation everything else is
+# compared against. The PowerShell half refused the same bytes at exit 2, so its
+# header's claim to mirror this refusal was true for port files and false for
+# the canon. Same message and same exit code as that half, so the pair refuses
+# the identical input identically.
+_cbytes="$(LC_ALL=C wc -c < "$CANON" 2>/dev/null | tr -d '[:space:]')"
+_ctext="$(LC_ALL=C tr -d '\000' < "$CANON" 2>/dev/null | LC_ALL=C wc -c | tr -d '[:space:]')"
+if [ "$_cbytes" != "$_ctext" ]; then
+  echo "GATE ERROR: canon not readable at $CANON" >&2
+  exit 2
+fi
 if [ ! -d "$PORTS_PARENT" ]; then
   echo "GATE ERROR: ports parent directory not found: $PORTS_PARENT" >&2
   exit 2
@@ -1620,7 +1654,14 @@ BEGIN { infence = 0; injson = 0; blocknum = 0; nports = 0; nentries = 0 }
       sub(/[ \t\r]+$/, "", info)
       if (info == "json") { injson = 1; blocknum++; blockline = NR; blob = "" }
       next
-    } else if (run >= fencelen && rest ~ /^[ \t]*$/) {
+    } else if (run >= fencelen && rest ~ /^[ \t\r]*$/) {
+      # D299: \r is admitted here because the OPENER already trims it from the
+      # info string eight lines up. Without it a CRLF checkout ended every line
+      # with a CR, the closer never matched, the registry fence stayed open to
+      # end of file, and this half refused the whole document at exit 2 --
+      # while the PowerShell half, which trims CR on line split, parsed it and
+      # reported the fleet clean. One canon, two opposite verdicts, decided by
+      # the checkout's line endings rather than by the fleet's drift.
       if (injson) { classify() ; injson = 0 }
       infence = 0; fencelen = 0
       next

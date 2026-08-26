@@ -123,20 +123,17 @@
 # and left the count unannotated, which was the same misreading hazard half
 # done; this note closes it. Read the whole paragraph as that round's log.)
 #
-# Two findings were recorded and deliberately NOT fixed, because both are
-# judgement calls about intent rather than defects: head -1 collapses multiple
-# anchors for one id (the informed auditor called it a suppressed STALE tier,
-# the blind auditor independently judged it defensible), and the canon
-# self-exclusion is an exact path string, so an aliased --ports-parent or a
-# vendored copy of the canon inside a port would credit that port with every
-# anchor. Both are filed rather than patched under time pressure: this file
-# has twice had a fix introduce the next round's defect.
+# Two findings were recorded and deliberately NOT fixed at the time, because
+# both were read as judgement calls about intent rather than defects: head -1
+# collapses multiple anchors for one id (the informed auditor called it a
+# suppressed STALE tier, the blind auditor independently judged it defensible),
+# and the canon self-exclusion is an exact path string, so an aliased
+# --ports-parent or a vendored copy of the canon inside a port would credit that
+# port with every anchor. Both were filed rather than patched under time
+# pressure: this file has twice had a fix introduce the next round's defect.
+# All of them are now closed -- see the D293 record below.
 #
 # D285 -- DISPOSITION OF THE DEFERRED FINDINGS
-#
-# One fixed, three declined. The decline is a decision with a reason, not a
-# deferral repeated: each names what would have to change for it to be taken
-# up, so the next reader inherits the argument rather than the backlog.
 #
 #   FIXED -- finding 3, the grep -I readable-as-text decision.
 #      LC_ALL=C pinned the locale axis; -I still let grep's own heuristic
@@ -156,29 +153,52 @@
 #      code" checkable rather than asserted.
 #      This finding was bash-only -- the PowerShell twin reads raw bytes via
 #      .NET and never shells out to grep -- so fixing it CONVERGES the pair.
+#      Note the four cases it added exist ONLY in this half and carry no
+#      [ps1-only] marker, which is what makes the hook suite's case-name
+#      cross-check (Group 30c / ps1 Group 32c) read red. That is filed as D294
+#      and is a suite-parity question, not a checker behaviour one.
 #
-#   DECLINED -- finding 1 (head -1), finding 2a (exact-path self-exclusion)
-#   and finding 2b (a canon copy inside a port tree satisfies every anchor).
-#      Not declined on their merits. Findings 1 and 2a exist in
-#      check-port-canon.ps1 in the same shape (its first-match lookup, and its
-#      -ceq path comparison), and its own header makes a one-sided behaviour
-#      change a defect in itself: the two halves' verdicts must agree on every
-#      real input. Finding 2b is the same context-free anchor match on both
-#      sides. So each of the three is a PAIRED change -- bash and PowerShell
-#      together, with matching cases in both suites and a cross-verified run
-#      of the pair -- which is a different and larger piece of work than the
-#      one-sided edit the fault site invites. Fixing either half alone here
-#      would manufacture exactly the disagreement class this pair is designed
-#      to prevent, which is why "small and obvious" is the wrong reading of
-#      these three.
-#      Taking them up means doing all three across both halves in one change,
-#      on a machine with pwsh, with the cross-verification run. Filed as D293
-#      rather than done, and the .ps1 twin carries the mirror of this note.
-#      Note the .ps1 declines finding 1 by pointing at the bash half, and this
-#      file previously declined it without pointing anywhere -- so the two
-#      notes together read as a loop. The loop is what the paired task breaks.
+# D293 -- THE THREE PAIRED FINDINGS, NOW CLOSED IN BOTH HALVES
 #
-# The suite is at 104 cases. The current fleet baseline is exit 1 with
+# D285 declined findings 1, 2a and 2b, and not on their merits: each existed in
+# check-port-canon.ps1 in the same shape, and a one-sided behaviour change is a
+# defect in itself, because the two halves' verdicts must agree on every real
+# input. So each was a PAIRED change. D293 made all three in one change, in
+# both halves, with matching self-test cases in each suite and a cross-verified
+# fleet run. Neither half points at the other any more; the loop D285 recorded
+# is broken by having done the work rather than by re-describing it.
+#
+#   finding 1 -- head -1 collapsed every anchor for one id into whichever the
+#      walk returned first, so a port carrying a current AND a stale anchor
+#      reported ok and the entire STALE tier for that cell was suppressed --
+#      and which reading you got depended on filesystem enumeration order.
+#      Both loops here (port and vendored catalog) now judge every anchor for
+#      the id and report every offending location, sorted under LC_ALL=C so the
+#      row order is deterministic rather than inherited from find.
+#   finding 2a -- the self-exclusion compared logically-normalised path
+#      strings, so naming one tree through a symlinked alias made $CANON and
+#      the enumerated paths two different strings for one file: the canon was
+#      scanned as port content and its port reported ok off the DEFINITION
+#      site. Both normalisations are now physical (cd -P / pwd -P). The
+#      walker's own symlink disposition is untouched -- it still refuses.
+#   finding 2b -- the anchor scan is context-free, so a COPY of the canon
+#      inside a port tree satisfied every rule at once. emit_anchors now emits
+#      nothing for a file carrying the registry discriminator. The same
+#      context-blindness counted an anchor QUOTED as an example, so anchors
+#      inside a fenced code block are skipped too, by the canon's own
+#      fence-nesting rule. A companion case proves an anchor OUTSIDE a fence in
+#      the same file is still counted, so the guard cannot pass by refusing
+#      everything.
+#
+#      Ten cases were added to each suite, with byte-identical names on both
+#      sides. Measured: bash pre-fix 106 passed / 8 failed, post-fix 123 / 0;
+#      PowerShell pre-fix 100 / 10, post-fix 119 / 0. (The bash finding-1 trio
+#      is order-dependent pre-fix by construction -- whichever single anchor
+#      head -1 returned, at least one of the three fails.) Both halves' bare
+#      fleet runs stay byte-identical to each other and to the pre-change
+#      baseline.
+#
+# The suite is at 123 cases. The current fleet baseline is exit 1 with
 # ok 53, missing 3, stale 0, unexpected 0, defect 0, unverifiable 0, 1 cell
 # not applicable and 0 deferred. (D291 moved it there by bringing
 # stride-opencode-lite into scope: the port had been skipped as absent while
@@ -415,6 +435,139 @@ self_test() {
   st_refute "canon is never reported as an adoption site" "ok: rule-one v1 at docs/port-canon.md" "$out"
   out="$(cd "$tmp/e" && bash "$SELF" --canon alpha/docs/port-canon.md --ports-parent . 2>&1)"; rc=$?
   st_assert "relative --canon still excludes the canon" 1 "$rc" "MISSING: rule-one v1" "$out"
+
+  # --- D293 finding 1: every anchor for an id is judged, not the first.
+  # --- Three anchors for one id, two of them stale at DIFFERENT versions, so
+  # --- no enumeration order can satisfy these cases pre-fix: whichever single
+  # --- anchor `head -1` returned, at least one assertion below fails.
+  mkdir -p "$tmp/d1/alpha" "$tmp/d1/beta"
+  st_canon "$tmp/d1.md" 1 not_applicable 3
+  printf '<!-- canon:rule-one v3 -->\n' > "$tmp/d1/alpha/a-current.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/d1/alpha/y-old.md"
+  printf '<!-- canon:rule-one v2 -->\n' > "$tmp/d1/alpha/z-old.md"
+  printf 'x\n' > "$tmp/d1/beta/b.md"
+  out="$(st_run "$tmp/d1.md" "$tmp/d1")"; rc=$?
+  st_assert "every stale anchor for one id is reported, not just the first" 1 "$rc" "carries v1, canon is at v3" "$out"
+  st_assert "a second stale anchor for the same id is also reported" 1 "$rc" "carries v2, canon is at v3" "$out"
+  st_refute "a current anchor does not suppress a stale one for the same id" "ok: rule-one v3 at" "$out"
+
+  # --- D293 finding 2a: the self-exclusion compares physical identity, so
+  # --- naming the ports parent through a symlinked alias while the canon is
+  # --- named by its real path cannot make the two stop matching. Pre-fix the
+  # --- canon was scanned as port content and alpha reported ok off the
+  # --- DEFINITION site.
+  mkdir -p "$tmp/alias/alpha/docs" "$tmp/alias/beta"
+  st_canon "$tmp/alias/alpha/docs/port-canon.md" 1 not_applicable
+  printf 'x\n' > "$tmp/alias/beta/b.md"
+  ln -s "$tmp/alias" "$tmp/alias-link"
+  out="$(st_run "$tmp/alias/alpha/docs/port-canon.md" "$tmp/alias-link")"; rc=$?
+  st_assert "a symlinked alias for the ports parent still excludes the canon" 1 "$rc" "MISSING: rule-one v1" "$out"
+  st_refute "an aliased ports parent does not credit the canon as an adoption site" "ok: rule-one v1 at docs/port-canon.md" "$out"
+
+  # --- D293 finding 2b, first half: a COPY of the canon inside a port tree
+  # --- carries every anchor the canon defines, and the scan is context-free.
+  # --- beta is not_applicable here so the only MISSING that can appear is
+  # --- alpha's -- pre-fix alpha reported ok off the copy and this failed.
+  mkdir -p "$tmp/copyc/alpha" "$tmp/copyc/beta"
+  st_canon "$tmp/copyc.md" 1 not_applicable
+  st_canon "$tmp/copyc/alpha/copy-of-canon.md" 1 not_applicable
+  printf 'x\n' > "$tmp/copyc/beta/b.md"
+  out="$(st_run "$tmp/copyc.md" "$tmp/copyc")"; rc=$?
+  st_assert "a copy of the canon inside a port does not make that port compliant" 1 "$rc" "MISSING: rule-one v1" "$out"
+  st_refute "an anchor inside a canon copy is not counted as adoption" "ok: rule-one v1 at copy-of-canon.md" "$out"
+
+  # --- D293 finding 2b, second half: an anchor QUOTED as an example inside a
+  # --- fenced code block is documentation, not adoption.
+  mkdir -p "$tmp/fb/alpha" "$tmp/fb/beta"
+  st_canon "$tmp/fb.md" 1 not_applicable
+  { echo 'For example:'; echo "${f3}markdown"; echo '<!-- canon:rule-one v1 -->'; echo "${f3}"; } > "$tmp/fb/alpha/a.md"
+  printf 'x\n' > "$tmp/fb/beta/b.md"
+  out="$(st_run "$tmp/fb.md" "$tmp/fb")"; rc=$?
+  st_assert "an anchor quoted inside a fenced code block is not counted" 1 "$rc" "MISSING: rule-one v1" "$out"
+  st_refute "a fenced example is not reported as an adoption site" "ok: rule-one v1 at a.md" "$out"
+
+  # --- and the converse, so the fence guard cannot pass by refusing every
+  # --- anchor: an anchor OUTSIDE a fence in the same file is still counted.
+  mkdir -p "$tmp/fo/alpha" "$tmp/fo/beta"
+  st_canon "$tmp/fo.md" 1 not_applicable
+  { echo "${f3}markdown"; echo '<!-- canon:rule-one v9 -->'; echo "${f3}"; echo '<!-- canon:rule-one v1 -->'; } > "$tmp/fo/alpha/a.md"
+  printf 'x\n' > "$tmp/fo/beta/b.md"
+  out="$(st_run "$tmp/fo.md" "$tmp/fo")"; rc=$?
+  st_assert "an anchor outside a fence is still counted when the file also quotes one" 0 "$rc" "ok: rule-one v1 at a.md" "$out"
+
+  # --- D293: the 2b guards must not turn a not_applicable cell from UNEXPECTED
+  # --- into na. Dropping the anchors is right -- they are not this port's
+  # --- adoption -- but a canon COPY sitting in a port tree is itself reported,
+  # --- so the port cannot come out cleaner than it went in.
+  mkdir -p "$tmp/nac/alpha" "$tmp/nac/beta"
+  st_canon "$tmp/nac.md" 1 not_applicable
+  st_canon "$tmp/nac/beta/copy-of-canon.md" 1 not_applicable
+  printf 'x\n' > "$tmp/nac/alpha/a.md"
+  out="$(st_run "$tmp/nac.md" "$tmp/nac")"; rc=$?
+  st_assert "a canon copy on a not_applicable port is reported, not silently dropped" 1 "$rc" "DEFECT: a copy of the canon at copy-of-canon.md" "$out"
+  st_refute "a canon copy does not leave a not_applicable port reporting clean" "verdict: clean" "$out"
+
+  # --- the fenced-anchor counterpart. Here na IS the right answer: a quoted
+  # --- example is documentation, not adoption, so a port that does not owe the
+  # --- rule owes nothing for quoting it. Pinned so the behaviour is a stated
+  # --- decision rather than an accident of the guard.
+  mkdir -p "$tmp/naf/alpha" "$tmp/naf/beta"
+  st_canon "$tmp/naf.md" 1 not_applicable
+  { echo "${f3}markdown"; echo '<!-- canon:rule-one v1 -->'; echo "${f3}"; } > "$tmp/naf/beta/b.md"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/naf/alpha/a.md"
+  out="$(st_run "$tmp/naf.md" "$tmp/naf")"; rc=$?
+  st_refute "a fenced anchor on a not_applicable port is not reported UNEXPECTED" "UNEXPECTED: rule-one" "$out"
+
+  # --- D293: two anchors for one id in a SINGLE file. The multi-anchor fix
+  # --- collects across files; this exercises the per-file extractor path.
+  mkdir -p "$tmp/same/alpha" "$tmp/same/beta"
+  st_canon "$tmp/same.md" 1 not_applicable 2
+  printf '<!-- canon:rule-one v2 -->\n<!-- canon:rule-one v1 -->\n' > "$tmp/same/alpha/a.md"
+  printf 'x\n' > "$tmp/same/beta/b.md"
+  out="$(st_run "$tmp/same.md" "$tmp/same")"; rc=$?
+  st_assert "two anchors for one id in a single file are both judged" 1 "$rc" "carries v1, canon is at v2" "$out"
+  st_refute "a stale anchor later in the same file is not suppressed by an earlier current one" "ok: rule-one v2 at" "$out"
+
+  # --- D293: a HARD LINK to the canon inside a port tree. Physical path
+  # --- resolution does NOT unify hard links -- there is no link to follow --
+  # --- so this case rests entirely on the registry-discriminator guard.
+  mkdir -p "$tmp/hard/alpha" "$tmp/hard/beta"
+  st_canon "$tmp/hard.md" 1 not_applicable
+  printf 'x\n' > "$tmp/hard/beta/b.md"
+  if ln "$tmp/hard.md" "$tmp/hard/alpha/hard-canon.md" 2>/dev/null; then
+    out="$(st_run "$tmp/hard.md" "$tmp/hard")"; rc=$?
+    st_assert "a hard link to the canon inside a port is not an adoption site" 1 "$rc" "MISSING: rule-one v1" "$out"
+    st_refute "a hard-linked canon is not counted as this port's anchors" "ok: rule-one v1 at hard-canon.md" "$out"
+  else
+    pass=$((pass + 2))
+    echo "ok: a hard link to the canon inside a port is not an adoption site [skipped on this host: hard links unavailable]"
+    echo "ok: a hard-linked canon is not counted as this port's anchors [skipped on this host: hard links unavailable]"
+  fi
+
+  # --- D293: an UNTERMINATED fence swallows everything after it. That is the
+  # --- renderer's own reading, so the anchor below it is genuinely inside a
+  # --- code block and is correctly not counted -- pinned because the opposite
+  # --- reading (treat an unclosed fence as no fence) would silently re-open
+  # --- the quoted-anchor hole.
+  mkdir -p "$tmp/unf/alpha" "$tmp/unf/beta"
+  st_canon "$tmp/unf.md" 1 not_applicable
+  { echo "${f3}markdown"; echo '<!-- canon:rule-one v1 -->'; } > "$tmp/unf/alpha/a.md"
+  printf 'x\n' > "$tmp/unf/beta/b.md"
+  out="$(st_run "$tmp/unf.md" "$tmp/unf")"; rc=$?
+  st_assert "an anchor after an unterminated fence opener is not counted" 1 "$rc" "MISSING: rule-one v1" "$out"
+
+  # --- D293: the two halves must ORDER duplicate rows identically, not merely
+  # --- deterministically. bash sorts byte-ordinally; PowerShell's default
+  # --- Sort-Object is culture-aware and case-INSENSITIVE, so mixed-case
+  # --- filenames reversed the rows between halves. Uppercase sorts first here.
+  mkdir -p "$tmp/ord/alpha" "$tmp/ord/beta"
+  st_canon "$tmp/ord.md" 1 not_applicable
+  printf '<!-- canon:rule-one v7 -->\n' > "$tmp/ord/alpha/B.md"
+  printf '<!-- canon:rule-one v8 -->\n' > "$tmp/ord/alpha/a.md"
+  printf 'x\n' > "$tmp/ord/beta/b.md"
+  out="$(st_run "$tmp/ord.md" "$tmp/ord")"; rc=$?
+  first_stale="$(echo "$out" | grep 'STALE: rule-one at' | head -1)"
+  st_assert "duplicate anchor rows sort byte-ordinally, uppercase before lowercase" 1 "$rc" "B.md:1 carries v7" "$first_stale"
 
   # --- a registered, exists:true port whose directory is absent is a gate
   # --- fault, and a gate fault must not be downgraded by an ordinary finding
@@ -1103,11 +1256,36 @@ fi
 # emits absolute paths: a relative --canon would never match, the canon would
 # be scanned, and the port it lives in would report ok on every anchor off the
 # definition site -- the exact false green the exclusion exists to prevent.
+#
+# D293 finding 2a: normalize PHYSICALLY, not logically. `cd` + `pwd` without
+# -P keeps the symlinked spelling it was given, so naming the same tree through
+# an aliased path left $CANON and find's output as two different strings for
+# one file. The self-exclusion below then stopped matching, the canon was
+# scanned as if it were port content, and the port it lives in reported ok off
+# every anchor at the DEFINITION site -- a false green reached by nothing more
+# than how the caller spelled the path. -P resolves both sides to the same
+# physical identity, so the comparison is about the file rather than the
+# spelling. This changes only these two strings; the walker's own symlink
+# disposition in scan_anchors is untouched, and it still refuses rather than
+# follows.
 if [ -e "$CANON" ]; then
-  CANON="$(cd "$(dirname "$CANON")" 2>/dev/null && pwd)/$(basename "$CANON")"
+  # The leaf is resolved as well as the directory. Resolving only the directory
+  # left a symlinked canon FILE carrying its alias spelling, so this half and
+  # the PowerShell half computed different identities for one argument.
+  CANON="$(cd -P "$(dirname "$CANON")" 2>/dev/null && pwd -P)/$(basename "$CANON")"
+  _cl=0
+  while [ -L "$CANON" ] && [ "$_cl" -lt 40 ]; do
+    _ct="$(readlink "$CANON")"
+    case "$_ct" in
+      /*) : ;;
+      *) _ct="$(dirname "$CANON")/$_ct" ;;
+    esac
+    CANON="$(cd -P "$(dirname "$_ct")" 2>/dev/null && pwd -P)/$(basename "$_ct")"
+    _cl=$((_cl + 1))
+  done
 fi
 if [ -d "$PORTS_PARENT" ]; then
-  PORTS_PARENT="$(cd "$PORTS_PARENT" && pwd)"
+  PORTS_PARENT="$(cd -P "$PORTS_PARENT" && pwd -P)"
 fi
 
 if [ ! -r "$CANON" ]; then
@@ -1598,7 +1776,7 @@ scan_anchors() {
 # so a NOT-owed anchor sitting in an unreadable or NUL-bearing .md made the
 # port report clean.
 emit_anchors() {
-  local f="$1" dir="$2" rel out gst nbytes ntext
+  local f="$1" dir="$2" rel out gst nbytes ntext fenced fst
   rel="${f#$dir/}"
   [ -r "$f" ] || return 1
   # Detect the binary case explicitly rather than letting -I fold it into
@@ -1608,6 +1786,61 @@ emit_anchors() {
   nbytes="$(LC_ALL=C wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
   ntext="$(LC_ALL=C tr -d '\000' < "$f" 2>/dev/null | LC_ALL=C wc -c | tr -d '[:space:]')"
   [ "$nbytes" = "$ntext" ] || return 1
+  # D293 finding 2b, first half. This scan is context-free -- it matches anchor
+  # text wherever it sits -- so a COPY of the canon dropped inside a port tree
+  # satisfied every anchor rule at once, and the port reported clean off the
+  # definition site rather than off its own adoption of the rules. The registry
+  # discriminator is what makes the canon self-identifying, so a file carrying
+  # it IS the canon or a copy of it, and the anchors in it are the canon's own.
+  # Emitting nothing for such a file only ever moves a cell toward refusal: a
+  # port whose anchors all came from a copy now reports MISSING, not ok. The
+  # real canon reaches this test too and is excluded by it, which is belt and
+  # braces alongside the path-identity exclusion above it.
+  # Emitting nothing here is NOT enough on its own. A silently-empty file drops
+  # a not_applicable cell from UNEXPECTED to na and starves the unregistered-id
+  # sweep, so a port carrying a stray canon copy would report CLEANER than
+  # before -- a false green in the na tier, which authorizes a release just as
+  # surely as one in the ok tier. So the copy is REPORTED rather than sanitised
+  # away: a reserved record travels back with the hits and the caller turns it
+  # into a DEFECT row. The id is deliberately unrepresentable as a real anchor
+  # id -- the anchor regex admits only [A-Za-z0-9_-], so no file can forge it.
+  # Matched as the registry's JSON KEY, not as the bare word: a file that
+  # merely MENTIONS canon_schema_version in prose is discussing the canon, not
+  # carrying a copy of it, and voiding its anchors would be a false positive on
+  # exactly the ports most likely to document the drift check.
+  if LC_ALL=C grep -qaF -- '"canon_schema_version"' "$f"; then
+    printf '!canon-copy\t0\t%s\n' "$rel"
+    return 0
+  fi
+  # D293 finding 2b, second half. The same context-blindness counts an anchor
+  # QUOTED as an example -- inside a fenced code block in a changelog, a README
+  # or a skill file -- as though the port had adopted the rule. Compute the
+  # lines that sit inside a fence so the extractor below can skip them. The
+  # fence rule is the canon's own `fence-nesting` rule: a closer must use the
+  # same character as its opener and be at least as wide, so a ``` never closes
+  # a ~~~ and an indented narrower run inside a wider block is content.
+  # Status-checked, like the grep below: a failing awk would yield an empty
+  # $fenced and silently turn the fence guard OFF, counting quoted anchors
+  # again. REFUSE, NEVER SANITIZE -- a guard that cannot run refuses the file.
+  fenced="$(LC_ALL=C awk '
+    BEGIN { inf = 0; fc = ""; fw = 0 }
+    {
+      if (match($0, /^[ \t]*(`{3,}|~{3,})/)) {
+        m = substr($0, RSTART, RLENGTH)
+        sub(/^[ \t]*/, "", m)
+        ch = substr(m, 1, 1); w = length(m)
+        # The MARKER line is itself fenced. An anchor sharing a line with a
+        # fence marker sits in the info-string position -- which is exactly
+        # where a README quotes one as an example -- and the PowerShell half
+        # never scans a marker line at all. Printing NR here is what keeps the
+        # two halves reading the same file the same way.
+        if (inf == 0) { inf = 1; fc = ch; fw = w; print NR; next }
+        else if (ch == fc && w >= fw) { inf = 0; fc = ""; fw = 0; print NR; next }
+      }
+      if (inf == 1) print NR
+    }' "$f")"
+  fst=$?
+  [ "$fst" -eq 0 ] || return 1
     # The path is handed to awk through the ENVIRONMENT, not through -v.
     # POSIX requires awk to apply escape processing to a -v assignment, so the
     # two ordinary characters \ and n in a filename became a REAL newline in
@@ -1664,10 +1897,17 @@ emit_anchors() {
     gst=$?
     [ "$gst" -le 1 ] || return 1
     printf '%s\n' "$out" \
-      | rel="$rel" awk '
+      | rel="$rel" fenced="$fenced" awk '
+          BEGIN {
+            # D293 finding 2b: the fenced-line set, computed above. An anchor
+            # on one of these lines is quoted as an example, not adopted.
+            n = split(ENVIRON["fenced"], fa, "\n")
+            for (i = 1; i <= n; i++) if (fa[i] != "") F[fa[i]] = 1
+          }
           {
             if (match($0, /^[0-9]+:/) == 0) next
             ln = substr($0, 1, RLENGTH - 1)
+            if (ln in F) next
             rest = substr($0, RLENGTH + 1)
             if (match(rest, /canon:[A-Za-z0-9][A-Za-z0-9_-]*[ \t]+v[0-9]+/) == 0) next
             m = substr(rest, RSTART, RLENGTH)
@@ -1850,6 +2090,20 @@ for pline in $PORT_LINES; do
     continue
   fi
 
+
+  # D293 finding 2b: split out the reserved canon-copy records BEFORE anything
+  # reads the hit list. Reporting the copy is what stops the guard turning a
+  # not_applicable cell from UNEXPECTED into na, and removing the reserved
+  # records is what stops the unregistered-id sweep below reporting them as an
+  # unknown rule. Both halves do exactly this, in the same order.
+  PCOPIES="$(echo "$FOUND" | grep "^!canon-copy	")"
+  FOUND="$(echo "$FOUND" | grep -v "^!canon-copy	")"
+  if [ -n "$PCOPIES" ]; then
+    for ccopy in $PCOPIES; do
+      record DEFECT "  " "a copy of the canon at $(field "$ccopy" 3) -- its anchors define the rules rather than adopting them, so they are not counted for this port" \
+        "$pid: remove the canon copy at $(field "$ccopy" 3), or move it outside the port tree"
+    done
+  fi
   for eline in $ENTRY_LINES; do
     eid="$(field "$eline" 3)"
     ever="$(field "$eline" 4)"
@@ -1960,28 +2214,49 @@ for pline in $PORT_LINES; do
     fi
 
     # check: anchor
-    hit="$(echo "$FOUND" | grep "^$eid	" | head -1)"
+    # D293 finding 1: take EVERY anchor for this id, not the first. `head -1`
+    # collapsed a port carrying both a current and a stale anchor for one id
+    # into whichever `find` happened to return first -- so the same tree could
+    # report ok or STALE depending on filesystem enumeration order, and the ok
+    # reading suppressed the entire STALE tier for that cell. The sort makes
+    # the order this loop reports in deterministic; `find` is unordered and
+    # nothing else sorts, so without it the ROWS would still shuffle even once
+    # the verdict stopped doing so.
+    anchor_hits="$(echo "$FOUND" | grep "^$eid	" | LC_ALL=C sort)"
     if [ "$astatus" = "not_applicable" ]; then
-      if [ -n "$hit" ]; then
-        record UNEXPECTED "  " "$eid at $(field "$hit" 3) -- this port does not owe this rule" \
-          "$pid: remove the $eid anchor at $(field "$hit" 3); this port does not owe that rule"
+      if [ -n "$anchor_hits" ]; then
+        # Every offending location, not one: a port does not owe this rule, so
+        # each anchor for it is separately something to remove.
+        for hit in $anchor_hits; do
+          record UNEXPECTED "  " "$eid at $(field "$hit" 3) -- this port does not owe this rule" \
+            "$pid: remove the $eid anchor at $(field "$hit" 3); this port does not owe that rule"
+        done
       else
         record na "  " ""
       fi
       continue
     fi
 
-    if [ -z "$hit" ]; then
+    if [ -z "$anchor_hits" ]; then
       record MISSING "  " "$eid v$ever" \
         "$pid: add $(anchor_literal "$eid" "$ever") beside this port's own statement of the $eid rule"
     else
-      hver="$(field "$hit" 2)"
-      if [ "$hver" = "$ever" ]; then
-        record ok "  " "$eid v$ever at $(field "$hit" 3)"
+      # A cell is ok only when EVERY anchor for the id is current. One stale
+      # anchor makes the cell STALE however many current ones sit beside it --
+      # the stale one is still there to be read and followed.
+      stale_seen=0
+      for hit in $anchor_hits; do
+        hver="$(field "$hit" 2)"
+        if [ "$hver" != "$ever" ]; then
+          stale_seen=1
+          record STALE "  " "$eid at $(field "$hit" 3) carries v$hver, canon is at v$ever" \
+            "$pid: update $(field "$hit" 3) to $(anchor_literal "$eid" "$ever")"
+        fi
+      done
+      if [ "$stale_seen" -eq 0 ]; then
+        first_hit="$(echo "$anchor_hits" | head -1)"
+        record ok "  " "$eid v$ever at $(field "$first_hit" 3)"
         N_ANCHOR_OK=$((N_ANCHOR_OK + 1))
-      else
-        record STALE "  " "$eid at $(field "$hit" 3) carries v$hver, canon is at v$ever" \
-          "$pid: update $(field "$hit" 3) to $(anchor_literal "$eid" "$ever")"
       fi
     fi
   done
@@ -2048,22 +2323,44 @@ for cat in $CATALOGS; do
       "catalog $cat: make $ctree readable so the anchor scan can run" catalog
     continue
   fi
+
+  # D293 finding 2b: split out the reserved canon-copy records BEFORE anything
+  # reads the hit list. Reporting the copy is what stops the guard turning a
+  # not_applicable cell from UNEXPECTED into na, and removing the reserved
+  # records is what stops the unregistered-id sweep below reporting them as an
+  # unknown rule. Both halves do exactly this, in the same order.
+  CCOPIES="$(echo "$CFOUND" | grep "^!canon-copy	")"
+  CFOUND="$(echo "$CFOUND" | grep -v "^!canon-copy	")"
+  if [ -n "$CCOPIES" ]; then
+    for ccopy in $CCOPIES; do
+      record DEFECT "  " "catalog $cat -- a copy of the canon at $(field "$ccopy" 3); its anchors define the rules rather than adopting them" \
+        "catalog $cat: remove the canon copy at $(field "$ccopy" 3), or re-vendor without it" catalog
+    done
+  fi
   for eline in $ENTRY_LINES; do
     eid="$(field "$eline" 3)"
     ever="$(field "$eline" 4)"
     echk="$(field "$eline" 7)"
     [ "$echk" = "property" ] && continue
-    hit="$(echo "$CFOUND" | grep "^$eid	" | head -1)"
-    if [ -z "$hit" ]; then
+    # D293 finding 1, same fix on the vendored-catalog side: judge every anchor
+    # for the id rather than whichever one find returned first.
+    anchor_hits="$(echo "$CFOUND" | grep "^$eid	" | LC_ALL=C sort)"
+    if [ -z "$anchor_hits" ]; then
       record MISSING "  " "catalog $cat -- $eid v$ever" \
         "catalog $cat: re-vendor from the port, or add $(anchor_literal "$eid" "$ever")" catalog
     else
-      hver="$(field "$hit" 2)"
-      if [ "$hver" = "$ever" ]; then
-        record ok "  " "catalog $cat -- $eid v$ever at $(field "$hit" 3)"
-      else
-        record STALE "  " "catalog $cat -- $eid at $(field "$hit" 3) carries v$hver, canon is at v$ever" \
-          "catalog $cat: re-vendor; its $eid anchor is v$hver and the canon is at v$ever" catalog
+      stale_seen=0
+      for hit in $anchor_hits; do
+        hver="$(field "$hit" 2)"
+        if [ "$hver" != "$ever" ]; then
+          stale_seen=1
+          record STALE "  " "catalog $cat -- $eid at $(field "$hit" 3) carries v$hver, canon is at v$ever" \
+            "catalog $cat: re-vendor; its $eid anchor is v$hver and the canon is at v$ever" catalog
+        fi
+      done
+      if [ "$stale_seen" -eq 0 ]; then
+        first_hit="$(echo "$anchor_hits" | head -1)"
+        record ok "  " "catalog $cat -- $eid v$ever at $(field "$first_hit" 3)"
       fi
     fi
   done

@@ -100,29 +100,42 @@
 #     anchor and a fence closer matching. Lines are trimmed of \r on split.
 #
 # ---------------------------------------------------------------------------
-# D285 -- THE THREE PAIRED FINDINGS THIS HALF SHARES, AND WHY THEY ARE OPEN
+# D293 -- THE THREE PAIRED FINDINGS THIS HALF SHARED, NOW CLOSED
 # ---------------------------------------------------------------------------
 #
 # D285 disposed of four findings deferred from W2108's round 5. It fixed the
 # grep -I one, which was bash-only and is described above. It DECLINED three,
-# and the reason is this pair rather than their merits:
-#
-#   * head -1 collapsing multiple anchors for one id -- this half's
-#     first-match lookup is the same shape (see the walk-order note below,
-#     which already declines it by pointing at the bash half).
-#   * the canon self-exclusion being an exact path comparison -- this half's
-#     -ceq compare is the same shape.
-#   * a copy of the canon inside a port tree satisfying every anchor rule --
-#     the anchor match is context-free on both sides.
-#
-# Each is a PAIRED change: fixing one half alone manufactures exactly the
+# and the reason was this pair rather than their merits: each existed in this
+# half in the same shape, and fixing one half alone manufactures exactly the
 # verdict disagreement acceptance criterion 1 and pitfall 4 exist to prevent.
-# So they are open as one piece of work across both halves, with matching
-# cases in both suites and a cross-verified run -- not as three small edits.
-# Filed as D293.
-# Note this half's walk-order note declines by pointing at the bash half, and
-# the bash half declined without pointing anywhere; read together they were a
-# loop. Breaking the loop is the point of doing them together.
+# So they were one piece of work across both halves. D293 did that work.
+#
+#   * head -1 / first-match collapsing multiple anchors for one id. Both loops
+#     here (port and vendored catalog) now take EVERY anchor for the id and
+#     report every offending location: one stale anchor makes the cell STALE
+#     however many current ones sit beside it. Sorted, so the row order does
+#     not depend on enumeration order -- which is what made the pre-fix verdict
+#     itself order-dependent.
+#   * the canon self-exclusion being an exact path comparison. Resolve-Path is
+#     logical, so an aliased spelling left the canon and the enumerated paths
+#     as two strings for one file, and the canon was scanned as port content.
+#     Resolve-PhysicalPath now resolves both to physical identity, following
+#     links on the leaf and on every ancestor, bounded against a cycle. The
+#     walker's own symlink disposition is untouched -- it still refuses.
+#   * a copy of the canon inside a port tree satisfying every anchor rule.
+#     Get-FileAnchors now emits nothing for a file carrying the registry
+#     discriminator, and skips anchors inside a fenced code block, so an anchor
+#     QUOTED as an example is not read as adoption. A companion case proves an
+#     anchor OUTSIDE a fence in the same file is still counted.
+#
+# Cases were added to each suite with byte-identical names on both sides.
+# Measured: this half pre-fix 100 passed / 10 failed, post-fix 119 / 0; the
+# bash half pre-fix 106 / 8, post-fix 123 / 0. Both halves' bare fleet runs are
+# byte-identical to each other and to the pre-change baseline.
+#
+# Neither half points at the other any more. The walk-order note below is a
+# SEPARATE, still-open divergence about enumeration order in general, and is
+# not what that loop was about.
 #
 # ---------------------------------------------------------------------------
 # HONEST LIMITS
@@ -754,6 +767,69 @@ function Get-PortMarkdown {
     return $result
 }
 
+# D293 finding 1. Order the multi-anchor rows exactly as the bash half's
+# `LC_ALL=C sort` does: BYTE-ORDINAL over the same tab-joined record. PowerShell's
+# Sort-Object is culture-aware and case-INSENSITIVE by default -- the very trap
+# this file closes everywhere else with -ceq/-cmatch -- so with it a port
+# carrying two anchors for one id in B.md and a.md produced a different row
+# order in each half. Same records, same order, one comparer.
+function Sort-HitsOrdinal {
+    param($Hits)
+    $arr = @($Hits)
+    if ($arr.Count -le 1) { return $arr }
+    # A Comparison delegate, NOT [Array]::Sort(keys, items, comparer): PowerShell
+    # does not bind that paired overload as written, and the measured result was
+    # a sorted key array beside an UNTOUCHED item array -- i.e. a sort that
+    # silently did nothing, which is exactly the shape this fix exists to remove.
+    $list = [System.Collections.Generic.List[object]]::new()
+    foreach ($h in $arr) { $list.Add($h) }
+    $cmp = [System.Comparison[object]]{
+        param($x, $y)
+        [System.StringComparer]::Ordinal.Compare(
+            ($x.Id + "`t" + $x.Version + "`t" + $x.Where),
+            ($y.Id + "`t" + $y.Version + "`t" + $y.Where))
+    }
+    $list.Sort($cmp)
+    return $list.ToArray()
+}
+
+# D293 finding 2a. Resolve a path to its physical identity, following symlinks
+# on the leaf AND on every ancestor, so two spellings of one file compare equal.
+# Bounded against a symlink loop: a cycle returns what it has rather than
+# spinning. Resolution only ever narrows what the self-exclusion below counts as
+# port content, so a failure to resolve leaves the comparison exactly where it
+# was rather than opening a new path to ok.
+function Resolve-PhysicalPath {
+    param([string]$Path)
+    if ([string]::IsNullOrEmpty($Path)) { return $Path }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return $Path }
+    $guard = 0
+    while ($item.LinkType -and $item.Target -and $guard -lt 40) {
+        $t = @($item.Target)[0]
+        if ([string]::IsNullOrEmpty($t)) { break }
+        if (-not [System.IO.Path]::IsPathRooted($t)) {
+            # A relative link target is relative to the link's own directory.
+            # When there is no such directory there is nothing to resolve
+            # against, and stopping leaves the comparison where it was.
+            $base = Split-Path -Parent $item.FullName
+            if ([string]::IsNullOrEmpty($base)) { break }
+            $t = [System.IO.Path]::GetFullPath((Join-Path $base $t))
+        }
+        $next = Get-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue
+        if (-not $next) { break }
+        $item = $next
+        $guard++
+    }
+    $full = $item.FullName
+    $parent = Split-Path -Parent $full
+    if ($parent -and $parent -cne $full) {
+        $rp = Resolve-PhysicalPath -Path $parent
+        if ($rp -cne $parent) { return (Join-Path $rp (Split-Path -Leaf $full)) }
+    }
+    return $full
+}
+
 $script:AnchorPattern = '<!--[ \t]*canon:([A-Za-z0-9][A-Za-z0-9_-]*)[ \t]+v([0-9]+)[ \t]*-->'
 
 # Every anchor in one file. Returns Ok=$false when the file could not be
@@ -765,8 +841,40 @@ function Get-FileAnchors {
     $read = Read-CanonBytes -Path $Path
     if (-not $read.Ok) { return @{ Ok = $false; Hits = @() } }
     $hits = New-Object System.Collections.Generic.List[object]
+    # D293 finding 2b, first half. This scan is context-free -- it matches
+    # anchor text wherever it sits -- so a COPY of the canon dropped inside a
+    # port tree satisfied every anchor rule at once, and the port reported clean
+    # off the definition site rather than off its own adoption of the rules. The
+    # registry discriminator is what makes the canon self-identifying, so a file
+    # carrying it IS the canon or a copy of it. Emitting nothing for such a file
+    # only ever moves a cell toward refusal.
+    # Matched as the registry's JSON KEY, not the bare word (a prose mention is
+    # a file discussing the canon, not a copy of it), and REPORTED rather than
+    # silently dropped: emitting nothing would move a not_applicable cell from
+    # UNEXPECTED to na and starve the unregistered-id sweep, so a port carrying
+    # a stray copy would come out cleaner than it went in. The reserved id is
+    # unrepresentable as a real anchor id, so no file can forge it.
+    if ($read.Text -clike '*"canon_schema_version"*') {
+        $hits.Add([pscustomobject]@{ Id = '!canon-copy'; Version = '0'; Where = $Rel })
+        return @{ Ok = $true; Hits = $hits }
+    }
     $lines = Split-CanonLines -Text $read.Text
+    # D293 finding 2b, second half. The same context-blindness counted an anchor
+    # QUOTED as an example inside a fenced code block as though the port had
+    # adopted the rule. The fence rule is the canon's own `fence-nesting` rule:
+    # a closer must use the same character as its opener and be at least as
+    # wide, so a ``` never closes a ~~~ and a narrower run inside a wider block
+    # is content.
+    $inFence = $false; $fenceChar = ''; $fenceWidth = 0
     for ($i = 0; $i -lt $lines.Count; $i++) {
+        $fm = [regex]::Match($lines[$i], '^[ \t]*(`{3,}|~{3,})')
+        if ($fm.Success) {
+            $mk = $fm.Groups[1].Value
+            $ch = $mk.Substring(0, 1); $w = $mk.Length
+            if (-not $inFence) { $inFence = $true; $fenceChar = $ch; $fenceWidth = $w; continue }
+            elseif ($ch -ceq $fenceChar -and $w -ge $fenceWidth) { $inFence = $false; $fenceChar = ''; $fenceWidth = 0; continue }
+        }
+        if ($inFence) { continue }
         $m = [regex]::Matches($lines[$i], $script:AnchorPattern)
         foreach ($mm in $m) {
             $hits.Add([pscustomobject]@{
@@ -977,6 +1085,20 @@ function Invoke-CanonCheck {
             continue
         }
 
+
+        # D293 finding 2b: split out the reserved canon-copy records BEFORE
+        # anything reads the hit list. Reporting the copy is what stops the
+        # guard turning a not_applicable cell from UNEXPECTED into na, and
+        # removing the reserved records is what stops the unregistered-id sweep
+        # below reporting them as an unknown rule. The bash half does exactly
+        # this, in the same order, with the same message text.
+        $foundCopies = @($found.Hits | Where-Object { $_.Id -ceq '!canon-copy' })
+        $found = @{ Ok = $found.Ok; Hits = @($found.Hits | Where-Object { $_.Id -cne '!canon-copy' }) }
+        foreach ($ccopy in $foundCopies) {
+            Add-Record -Kind 'DEFECT' -Indent '  ' `
+                -Message "a copy of the canon at $($ccopy.Where) -- its anchors define the rules rather than adopting them, so they are not counted for this port" `
+                -Work "$($p.Id): remove the canon copy at $($ccopy.Where), or move it outside the port tree"
+        }
         foreach ($e in $entries) {
             $row = $e.AppliesTo[$pi]
             $astatus = $row.Status
@@ -1045,30 +1167,51 @@ function Invoke-CanonCheck {
             }
 
             # check: anchor
-            $hit = $null
-            foreach ($h in $found.Hits) { if ($h.Id -ceq $e.Id) { $hit = $h; break } }
+            # D293 finding 1: take EVERY anchor for this id, not the first.
+            # First-match collapsed a port carrying both a current and a stale
+            # anchor for one id into whichever the walk happened to return
+            # first -- so the same tree could report ok or STALE depending on
+            # enumeration order, and the ok reading suppressed the entire STALE
+            # tier for that cell. The sort makes the reported order
+            # deterministic; nothing else sorts, so without it the ROWS would
+            # still shuffle once the verdict stopped doing so.
+            $hits = @(Sort-HitsOrdinal (@($found.Hits | Where-Object { $_.Id -ceq $e.Id })))
 
             if ($astatus -ceq 'not_applicable') {
-                if ($hit) {
-                    Add-Record -Kind 'UNEXPECTED' -Indent '  ' `
-                        -Message "$($e.Id) at $($hit.Where) -- this port does not owe this rule" `
-                        -Work "$($p.Id): remove the $($e.Id) anchor at $($hit.Where); this port does not owe that rule"
+                if ($hits.Count -gt 0) {
+                    # Every offending location, not one: this port does not owe
+                    # the rule, so each anchor for it is separately removable.
+                    foreach ($hit in $hits) {
+                        Add-Record -Kind 'UNEXPECTED' -Indent '  ' `
+                            -Message "$($e.Id) at $($hit.Where) -- this port does not owe this rule" `
+                            -Work "$($p.Id): remove the $($e.Id) anchor at $($hit.Where); this port does not owe that rule"
+                    }
                 } else {
                     Add-Record -Kind 'na' -Indent '  ' -Message ''
                 }
                 continue
             }
 
-            if (-not $hit) {
+            if ($hits.Count -eq 0) {
                 Add-Record -Kind 'MISSING' -Indent '  ' -Message "$($e.Id) v$($e.Version)" `
                     -Work "$($p.Id): add $(Get-AnchorLiteral -Id $e.Id -Version $e.Version) beside this port's own statement of the $($e.Id) rule"
-            } elseif ($hit.Version -ceq [string]$e.Version) {
-                $script:AnchorOk++
-                Add-Record -Kind 'ok' -Indent '  ' -Message "$($e.Id) v$($e.Version) at $($hit.Where)"
             } else {
-                Add-Record -Kind 'STALE' -Indent '  ' `
-                    -Message "$($e.Id) at $($hit.Where) carries v$($hit.Version), canon is at v$($e.Version)" `
-                    -Work "$($p.Id): update $($hit.Where) to $(Get-AnchorLiteral -Id $e.Id -Version $e.Version)"
+                # A cell is ok only when EVERY anchor for the id is current. One
+                # stale anchor makes the cell STALE however many current ones
+                # sit beside it -- the stale one is still there to be followed.
+                $staleSeen = $false
+                foreach ($hit in $hits) {
+                    if ($hit.Version -cne [string]$e.Version) {
+                        $staleSeen = $true
+                        Add-Record -Kind 'STALE' -Indent '  ' `
+                            -Message "$($e.Id) at $($hit.Where) carries v$($hit.Version), canon is at v$($e.Version)" `
+                            -Work "$($p.Id): update $($hit.Where) to $(Get-AnchorLiteral -Id $e.Id -Version $e.Version)"
+                    }
+                }
+                if (-not $staleSeen) {
+                    $script:AnchorOk++
+                    Add-Record -Kind 'ok' -Indent '  ' -Message "$($e.Id) v$($e.Version) at $($hits[0].Where)"
+                }
             }
         }
 
@@ -1114,19 +1257,41 @@ function Invoke-CanonCheck {
                 -Work "catalog $cat`: make $ctree readable so the anchor scan can run" -Subject 'catalog'
             continue
         }
+
+        # D293 finding 2b: split out the reserved canon-copy records BEFORE
+        # anything reads the hit list. Reporting the copy is what stops the
+        # guard turning a not_applicable cell from UNEXPECTED into na, and
+        # removing the reserved records is what stops the unregistered-id sweep
+        # below reporting them as an unknown rule. The bash half does exactly
+        # this, in the same order, with the same message text.
+        $cfoundCopies = @($cfound.Hits | Where-Object { $_.Id -ceq '!canon-copy' })
+        $cfound = @{ Ok = $cfound.Ok; Hits = @($cfound.Hits | Where-Object { $_.Id -cne '!canon-copy' }) }
+        foreach ($ccopy in $cfoundCopies) {
+            Add-Record -Kind 'DEFECT' -Indent '  ' `
+                -Message "catalog $cat -- a copy of the canon at $($ccopy.Where); its anchors define the rules rather than adopting them" `
+                -Work "catalog $cat`: remove the canon copy at $($ccopy.Where), or re-vendor without it" -Subject 'catalog'
+        }
         foreach ($e in $entries) {
             if ($e.Check -ceq 'property') { continue }
-            $hit = $null
-            foreach ($h in $cfound.Hits) { if ($h.Id -ceq $e.Id) { $hit = $h; break } }
-            if (-not $hit) {
+            # D293 finding 1, same fix on the vendored-catalog side: judge every
+            # anchor for the id rather than whichever the walk returned first.
+            $hits = @(Sort-HitsOrdinal (@($cfound.Hits | Where-Object { $_.Id -ceq $e.Id })))
+            if ($hits.Count -eq 0) {
                 Add-Record -Kind 'MISSING' -Indent '  ' -Message "catalog $cat -- $($e.Id) v$($e.Version)" `
                     -Work "catalog $cat`: re-vendor from the port, or add $(Get-AnchorLiteral -Id $e.Id -Version $e.Version)" -Subject 'catalog'
-            } elseif ($hit.Version -ceq [string]$e.Version) {
-                Add-Record -Kind 'ok' -Indent '  ' -Message "catalog $cat -- $($e.Id) v$($e.Version) at $($hit.Where)"
             } else {
-                Add-Record -Kind 'STALE' -Indent '  ' `
-                    -Message "catalog $cat -- $($e.Id) at $($hit.Where) carries v$($hit.Version), canon is at v$($e.Version)" `
-                    -Work "catalog $cat`: re-vendor; its $($e.Id) anchor is v$($hit.Version) and the canon is at v$($e.Version)" -Subject 'catalog'
+                $staleSeen = $false
+                foreach ($hit in $hits) {
+                    if ($hit.Version -cne [string]$e.Version) {
+                        $staleSeen = $true
+                        Add-Record -Kind 'STALE' -Indent '  ' `
+                            -Message "catalog $cat -- $($e.Id) at $($hit.Where) carries v$($hit.Version), canon is at v$($e.Version)" `
+                            -Work "catalog $cat`: re-vendor; its $($e.Id) anchor is v$($hit.Version) and the canon is at v$($e.Version)" -Subject 'catalog'
+                    }
+                }
+                if (-not $staleSeen) {
+                    Add-Record -Kind 'ok' -Indent '  ' -Message "catalog $cat -- $($e.Id) v$($e.Version) at $($hits[0].Where)"
+                }
             }
         }
         foreach ($h in $cfound.Hits) {
@@ -1239,6 +1404,133 @@ function Invoke-SelfTestBody {
     St-Refute "canon is never reported as an adoption site" "ok: rule-one v1 at docs/port-canon.md" $r.Output
     $r = Invoke-StRun -Canon 'alpha/docs/port-canon.md' -PortsParent '.' -WorkDir "$Tmp/e"
     St-Assert "relative --canon still excludes the canon" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
+
+    # --- D293 finding 1: every anchor for an id is judged, not the first.
+    # --- Three anchors for one id, two of them stale at DIFFERENT versions, so
+    # --- no enumeration order can satisfy these cases pre-fix: whichever single
+    # --- anchor first-match returned, at least one assertion below fails.
+    New-StDir @("$Tmp/d1/alpha", "$Tmp/d1/beta")
+    New-StCanon -Path "$Tmp/d1.md" -Schema 1 -BetaStatus 'not_applicable' -Version '3'
+    Set-StFile -Path "$Tmp/d1/alpha/a-current.md" -Text "<!-- canon:rule-one v3 -->`n"
+    Set-StFile -Path "$Tmp/d1/alpha/y-old.md" -Text "<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/d1/alpha/z-old.md" -Text "<!-- canon:rule-one v2 -->`n"
+    Set-StFile -Path "$Tmp/d1/beta/b.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/d1.md" -PortsParent "$Tmp/d1"
+    St-Assert "every stale anchor for one id is reported, not just the first" 1 $r.ExitCode "carries v1, canon is at v3" $r.Output
+    St-Assert "a second stale anchor for the same id is also reported" 1 $r.ExitCode "carries v2, canon is at v3" $r.Output
+    St-Refute "a current anchor does not suppress a stale one for the same id" "ok: rule-one v3 at" $r.Output
+
+    # --- D293 finding 2a: the self-exclusion compares physical identity, so
+    # --- naming the ports parent through a symlinked alias while the canon is
+    # --- named by its real path cannot make the two stop matching.
+    New-StDir @("$Tmp/alias/alpha/docs", "$Tmp/alias/beta")
+    New-StCanon -Path "$Tmp/alias/alpha/docs/port-canon.md" -Schema 1 -BetaStatus 'not_applicable'
+    Set-StFile -Path "$Tmp/alias/beta/b.md" -Text "x`n"
+    New-Item -ItemType SymbolicLink -Path "$Tmp/alias-link" -Target "$Tmp/alias" -Force | Out-Null
+    $r = Invoke-StRun -Canon "$Tmp/alias/alpha/docs/port-canon.md" -PortsParent "$Tmp/alias-link"
+    St-Assert "a symlinked alias for the ports parent still excludes the canon" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
+    St-Refute "an aliased ports parent does not credit the canon as an adoption site" "ok: rule-one v1 at docs/port-canon.md" $r.Output
+
+    # --- D293 finding 2b, first half: a COPY of the canon inside a port tree
+    # --- carries every anchor the canon defines, and the scan is context-free.
+    New-StDir @("$Tmp/copyc/alpha", "$Tmp/copyc/beta")
+    New-StCanon -Path "$Tmp/copyc.md" -Schema 1 -BetaStatus 'not_applicable'
+    New-StCanon -Path "$Tmp/copyc/alpha/copy-of-canon.md" -Schema 1 -BetaStatus 'not_applicable'
+    Set-StFile -Path "$Tmp/copyc/beta/b.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/copyc.md" -PortsParent "$Tmp/copyc"
+    St-Assert "a copy of the canon inside a port does not make that port compliant" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
+    St-Refute "an anchor inside a canon copy is not counted as adoption" "ok: rule-one v1 at copy-of-canon.md" $r.Output
+
+    # --- D293 finding 2b, second half: an anchor QUOTED as an example inside a
+    # --- fenced code block is documentation, not adoption.
+    New-StDir @("$Tmp/fb/alpha", "$Tmp/fb/beta")
+    New-StCanon -Path "$Tmp/fb.md" -Schema 1 -BetaStatus 'not_applicable'
+    Set-StFile -Path "$Tmp/fb/alpha/a.md" -Text "For example:`n${f3}markdown`n<!-- canon:rule-one v1 -->`n$f3`n"
+    Set-StFile -Path "$Tmp/fb/beta/b.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/fb.md" -PortsParent "$Tmp/fb"
+    St-Assert "an anchor quoted inside a fenced code block is not counted" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
+    St-Refute "a fenced example is not reported as an adoption site" "ok: rule-one v1 at a.md" $r.Output
+
+    # --- and the converse, so the fence guard cannot pass by refusing every
+    # --- anchor: an anchor OUTSIDE a fence in the same file is still counted.
+    New-StDir @("$Tmp/fo/alpha", "$Tmp/fo/beta")
+    New-StCanon -Path "$Tmp/fo.md" -Schema 1 -BetaStatus 'not_applicable'
+    Set-StFile -Path "$Tmp/fo/alpha/a.md" -Text "${f3}markdown`n<!-- canon:rule-one v9 -->`n$f3`n<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/fo/beta/b.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/fo.md" -PortsParent "$Tmp/fo"
+    St-Assert "an anchor outside a fence is still counted when the file also quotes one" 0 $r.ExitCode "ok: rule-one v1 at a.md" $r.Output
+
+    # --- D293: the 2b guards must not turn a not_applicable cell from
+    # --- UNEXPECTED into na. Dropping the anchors is right -- they are not this
+    # --- port's adoption -- but a canon COPY in a port tree is itself reported.
+    New-StDir @("$Tmp/nac/alpha", "$Tmp/nac/beta")
+    New-StCanon -Path "$Tmp/nac.md" -Schema 1 -BetaStatus 'not_applicable'
+    New-StCanon -Path "$Tmp/nac/beta/copy-of-canon.md" -Schema 1 -BetaStatus 'not_applicable'
+    Set-StFile -Path "$Tmp/nac/alpha/a.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/nac.md" -PortsParent "$Tmp/nac"
+    St-Assert "a canon copy on a not_applicable port is reported, not silently dropped" 1 $r.ExitCode "DEFECT: a copy of the canon at copy-of-canon.md" $r.Output
+    St-Refute "a canon copy does not leave a not_applicable port reporting clean" "verdict: clean" $r.Output
+
+    # --- the fenced-anchor counterpart. Here na IS the right answer: a quoted
+    # --- example is documentation, not adoption. Pinned so the behaviour is a
+    # --- stated decision rather than an accident of the guard.
+    New-StDir @("$Tmp/naf/alpha", "$Tmp/naf/beta")
+    New-StCanon -Path "$Tmp/naf.md" -Schema 1 -BetaStatus 'not_applicable'
+    Set-StFile -Path "$Tmp/naf/beta/b.md" -Text "${f3}markdown`n<!-- canon:rule-one v1 -->`n$f3`n"
+    Set-StFile -Path "$Tmp/naf/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n"
+    $r = Invoke-StRun -Canon "$Tmp/naf.md" -PortsParent "$Tmp/naf"
+    St-Refute "a fenced anchor on a not_applicable port is not reported UNEXPECTED" "UNEXPECTED: rule-one" $r.Output
+
+    # --- D293: two anchors for one id in a SINGLE file.
+    New-StDir @("$Tmp/same/alpha", "$Tmp/same/beta")
+    New-StCanon -Path "$Tmp/same.md" -Schema 1 -BetaStatus 'not_applicable' -Version '2'
+    Set-StFile -Path "$Tmp/same/alpha/a.md" -Text "<!-- canon:rule-one v2 -->`n<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/same/beta/b.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/same.md" -PortsParent "$Tmp/same"
+    St-Assert "two anchors for one id in a single file are both judged" 1 $r.ExitCode "carries v1, canon is at v2" $r.Output
+    St-Refute "a stale anchor later in the same file is not suppressed by an earlier current one" "ok: rule-one v2 at" $r.Output
+
+    # --- D293: a HARD LINK to the canon inside a port tree. Physical path
+    # --- resolution does NOT unify hard links, so this rests entirely on the
+    # --- registry-discriminator guard.
+    New-StDir @("$Tmp/hard/alpha", "$Tmp/hard/beta")
+    New-StCanon -Path "$Tmp/hard.md" -Schema 1 -BetaStatus 'not_applicable'
+    Set-StFile -Path "$Tmp/hard/beta/b.md" -Text "x`n"
+    $hardOk = $true
+    try { New-Item -ItemType HardLink -Path "$Tmp/hard/alpha/hard-canon.md" -Target "$Tmp/hard.md" -ErrorAction Stop | Out-Null }
+    catch { $hardOk = $false }
+    if ($hardOk) {
+        $r = Invoke-StRun -Canon "$Tmp/hard.md" -PortsParent "$Tmp/hard"
+        St-Assert "a hard link to the canon inside a port is not an adoption site" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
+        St-Refute "a hard-linked canon is not counted as this port's anchors" "ok: rule-one v1 at hard-canon.md" $r.Output
+    } else {
+        $script:StPass += 2
+        [Console]::Out.WriteLine("ok: a hard link to the canon inside a port is not an adoption site [skipped on this host: hard links unavailable]")
+        [Console]::Out.WriteLine("ok: a hard-linked canon is not counted as this port's anchors [skipped on this host: hard links unavailable]")
+    }
+
+    # --- D293: an UNTERMINATED fence swallows everything after it. That is the
+    # --- renderer's own reading, so the anchor below it is genuinely inside a
+    # --- code block and is correctly not counted.
+    New-StDir @("$Tmp/unf/alpha", "$Tmp/unf/beta")
+    New-StCanon -Path "$Tmp/unf.md" -Schema 1 -BetaStatus 'not_applicable'
+    Set-StFile -Path "$Tmp/unf/alpha/a.md" -Text "${f3}markdown`n<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/unf/beta/b.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/unf.md" -PortsParent "$Tmp/unf"
+    St-Assert "an anchor after an unterminated fence opener is not counted" 1 $r.ExitCode "MISSING: rule-one v1" $r.Output
+
+    # --- D293: the two halves must ORDER duplicate rows identically, not merely
+    # --- deterministically. Sort-Object's default comparer is culture-aware and
+    # --- case-INSENSITIVE, which reversed these rows against the bash half.
+    New-StDir @("$Tmp/ord/alpha", "$Tmp/ord/beta")
+    New-StCanon -Path "$Tmp/ord.md" -Schema 1 -BetaStatus 'not_applicable'
+    Set-StFile -Path "$Tmp/ord/alpha/B.md" -Text "<!-- canon:rule-one v7 -->`n"
+    Set-StFile -Path "$Tmp/ord/alpha/a.md" -Text "<!-- canon:rule-one v8 -->`n"
+    Set-StFile -Path "$Tmp/ord/beta/b.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/ord.md" -PortsParent "$Tmp/ord"
+    $firstStale = @($r.Output -split "`n" | Where-Object { $_ -cmatch 'STALE: rule-one at' })
+    $firstStaleLine = if ($firstStale.Count -gt 0) { $firstStale[0] } else { '' }
+    St-Assert "duplicate anchor rows sort byte-ordinally, uppercase before lowercase" 1 $r.ExitCode "B.md:1 carries v7" $firstStaleLine
 
     # --- a registered, exists:true port whose directory is absent is a gate
     # --- fault, and a gate fault must not be downgraded by an ordinary finding
@@ -2125,11 +2417,22 @@ if ($SelfTest) {
 # absolute: a relative -Canon would never match, the canon would be scanned,
 # and the port it lives in would report ok on every anchor off the definition
 # site -- the exact false green the exclusion exists to prevent.
+#
+# D293 finding 2a: resolve PHYSICALLY, not logically. Resolve-Path keeps the
+# symlinked spelling it was given, so naming the same tree through an aliased
+# path left $Canon and the enumerated paths as two different strings for one
+# file. The self-exclusion below then stopped matching, the canon was scanned
+# as if it were port content, and the port it lives in reported ok off every
+# anchor at the DEFINITION site -- a false green reached by nothing more than
+# how the caller spelled the path. This is the bash half's `cd -P` / `pwd -P`,
+# expressed with what .NET gives us. It changes only these two strings; the
+# walker's own symlink disposition is untouched and still refuses rather than
+# follows.
 if (Test-Path -LiteralPath $Canon) {
-    $Canon = (Resolve-Path -LiteralPath $Canon).Path
+    $Canon = Resolve-PhysicalPath -Path (Resolve-Path -LiteralPath $Canon).Path
 }
 if (Test-Path -LiteralPath $PortsParent -PathType Container) {
-    $PortsParent = (Resolve-Path -LiteralPath $PortsParent).Path
+    $PortsParent = Resolve-PhysicalPath -Path (Resolve-Path -LiteralPath $PortsParent).Path
 }
 
 $canonReadable = $false

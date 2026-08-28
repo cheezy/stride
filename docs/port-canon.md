@@ -421,11 +421,8 @@ it documents `workflow_steps` skips.
 sentence. `stride-opencode-lite` is recorded `not_applicable` with its reason: it
 emits no `workflow_steps` object and has no completion endpoint, so a closed set
 of rejection codes has nothing to reject against. **`stride-lite` states the same
-structural fact about itself** and is nonetheless still carried as `required`,
-which is why it is the fleet's remaining MISSING cell on this entry. That
-inconsistency is real and is left standing deliberately: resolving it is a policy
-decision about `stride-lite`, not a side effect of registering another port, and
-narrowing its row would green a gate result rather than answer the question. That is the one
+structural fact about itself** and is recorded `deferred` with those grounds as
+its reason. Both rows are the one
 sanctioned shape of a narrowed cell — a structural fact about the port, recorded
 with its reason — and not the forbidden move of narrowing applicability to green
 a report. On the first run only the source carried the vocabulary; consult a live
@@ -447,7 +444,7 @@ run for which cells are outstanding today.
     {"port": "stride-copilot",      "status": "required", "variant": "", "reason": ""},
     {"port": "stride-copilot-lite", "status": "required", "variant": "", "reason": ""},
     {"port": "stride-gemini",       "status": "required", "variant": "", "reason": ""},
-    {"port": "stride-lite",         "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-lite",         "status": "deferred", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint, so the closed six-value set has nothing to reject against. Four of the six codes name conditions its loop cannot reach, and the remaining two would restate its own skip table in imported spelling. The port records these same grounds itself in skills/stride-lite-workflow/SKILL.md."},
     {"port": "stride-opencode",     "status": "required", "variant": "", "reason": ""},
     {"port": "stride-pi",           "status": "required", "variant": "", "reason": ""},
     {"port": "stride-opencode-lite","status": "not_applicable", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint: its telemetry is a bare array in a committed markdown file, so a closed reason_code set has nothing to reject against. Four of the six codes name conditions its loop cannot reach, and the remaining two would restate its own two-value skip table in imported spelling. The port records this reasoning itself in skills/stride-opencode-lite-workflow/SKILL.md and names this row as the thing to correct; reopen if a completion API ever lands there."}
@@ -576,9 +573,11 @@ it, and the hook suite exercises them.
 
 **Across the fleet.** Two ports cite this document by path and rule id where they
 record why they have not adopted `reason-code-vocabulary` — `stride-lite` and
-`stride-opencode-lite`. Read "not adopted" as plain English, **not** as the
-`deferred` status value: neither row is `deferred`, and a live run reports zero
-deferred cells. `stride-copilot` and `stride-gemini` name it in their changelogs.
+`stride-opencode-lite`. Read "not adopted" as plain English rather than as a
+status value: the two rows are recorded differently — `stride-lite` carries
+`deferred`, `stride-opencode-lite` carries `not_applicable` — so consult a live
+run for the statuses in force today. `stride-copilot` and `stride-gemini` name
+it in their changelogs.
 
 > **The `stride-opencode-lite` citation once contradicted this file's own
 > registry, and no longer does.** The registry carried `"exists": false` for that

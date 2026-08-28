@@ -285,7 +285,7 @@ does not.
     {"port": "stride-lite",         "status": "required", "variant": "lib-matrix", "reason": "Matrix lives in lib/select_workflow_branch.md rather than skills/stride-workflow/."},
     {"port": "stride-opencode",     "status": "required", "variant": "",           "reason": ""},
     {"port": "stride-pi",           "status": "required", "variant": "",           "reason": ""},
-    {"port": "stride-opencode-lite","status": "required", "variant": "",           "reason": ""}
+    {"port": "stride-opencode-lite","status": "required", "variant": "",           "reason": "Carries its decision matrix in skills/stride-opencode-lite-workflow/SKILL.md rather than lib/select_workflow_branch.md as the other lite variants do, so it takes the unqualified variant rather than lib-matrix."}
   ]
 }
 ```
@@ -375,7 +375,7 @@ file can answer — check the board rather than reading closure out of this note
     {"port": "stride-lite",         "status": "required", "variant": "lib-matrix", "reason": "Matrix lives in lib/select_workflow_branch.md rather than skills/stride-workflow/."},
     {"port": "stride-opencode",     "status": "required", "variant": "",           "reason": ""},
     {"port": "stride-pi",           "status": "required", "variant": "",           "reason": ""},
-    {"port": "stride-opencode-lite","status": "required", "variant": "",           "reason": ""}
+    {"port": "stride-opencode-lite","status": "required", "variant": "",           "reason": "No subagent-workflow mirror exists in this port, so the rule has a single statement site rather than two. Its matrix carries three outcome columns, not five: there is no Decompose column and no Isolate column, so the precedence order resolves over Explore, Plan and Review alone. It also carries no separate defect row: every task file gets a complexity value from create-decomposer, so a defect follows its complexity row like any other task."}
   ]
 }
 ```
@@ -418,15 +418,15 @@ it documents `workflow_steps` skips.
 
 **Applicability.** Required wherever a port emits `workflow_steps`. Read the
 `applies_to` rows below for who that is today rather than taking a count from this
-sentence. `stride-opencode-lite` is recorded `not_applicable` with its reason: it
-emits no `workflow_steps` object and has no completion endpoint, so a closed set
-of rejection codes has nothing to reject against. **`stride-lite` states the same
-structural fact about itself** and is recorded `deferred` with those grounds as
-its reason. Both rows are the one
-sanctioned shape of a narrowed cell — a structural fact about the port, recorded
-with its reason — and not the forbidden move of narrowing applicability to green
-a report. On the first run only the source carried the vocabulary; consult a live
-run for which cells are outstanding today.
+sentence. **`stride-lite` and `stride-opencode-lite` state the same structural
+fact about themselves** and are both recorded `deferred` with those grounds as
+their reason: neither emits a `workflow_steps` object and neither has a
+completion endpoint, so a closed set of rejection codes has nothing to reject
+against. Both rows are the one sanctioned shape of a narrowed cell — a
+structural fact about the port, recorded with its reason — and not the
+forbidden move of narrowing applicability to green a report. On the first run
+only the source carried the vocabulary; consult a live run for which cells are
+outstanding today.
 
 ```json
 {
@@ -444,10 +444,10 @@ run for which cells are outstanding today.
     {"port": "stride-copilot",      "status": "required", "variant": "", "reason": ""},
     {"port": "stride-copilot-lite", "status": "required", "variant": "", "reason": ""},
     {"port": "stride-gemini",       "status": "required", "variant": "", "reason": ""},
-    {"port": "stride-lite",         "status": "deferred", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint, so the closed six-value set has nothing to reject against. Four of the six codes name conditions its loop cannot reach, and the remaining two would restate its own skip table in imported spelling. The port records these same grounds itself in skills/stride-lite-workflow/SKILL.md."},
+    {"port": "stride-lite",         "status": "deferred", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint, so the closed six-value set has nothing to reject against. Four of the six codes name conditions its loop cannot reach, and the remaining two would restate its own skip table in imported spelling. The port records these same grounds itself in skills/stride-lite-workflow/SKILL.md. Reopen if a completion API and a workflow_steps payload ever land there."},
     {"port": "stride-opencode",     "status": "required", "variant": "", "reason": ""},
     {"port": "stride-pi",           "status": "required", "variant": "", "reason": ""},
-    {"port": "stride-opencode-lite","status": "not_applicable", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint: its telemetry is a bare array in a committed markdown file, so a closed reason_code set has nothing to reject against. Four of the six codes name conditions its loop cannot reach, and the remaining two would restate its own two-value skip table in imported spelling. The port records this reasoning itself in skills/stride-opencode-lite-workflow/SKILL.md and names this row as the thing to correct; reopen if a completion API ever lands there."}
+    {"port": "stride-opencode-lite","status": "deferred", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint, so the closed six-value set has nothing to reject against. Four of the six codes name conditions its loop cannot reach, and the remaining two would restate its own two-value skip table in imported spelling. The port records these same grounds itself in skills/stride-opencode-lite-workflow/SKILL.md. Reopen if a completion API and a workflow_steps payload ever land there."}
   ]
 }
 ```
@@ -574,10 +574,9 @@ it, and the hook suite exercises them.
 **Across the fleet.** Two ports cite this document by path and rule id where they
 record why they have not adopted `reason-code-vocabulary` — `stride-lite` and
 `stride-opencode-lite`. Read "not adopted" as plain English rather than as a
-status value: the two rows are recorded differently — `stride-lite` carries
-`deferred`, `stride-opencode-lite` carries `not_applicable` — so consult a live
-run for the statuses in force today. `stride-copilot` and `stride-gemini` name
-it in their changelogs.
+status value: both rows are recorded `deferred`, on the same structural ground.
+Consult a live run for the statuses in force today rather than taking them from
+this sentence. `stride-copilot` and `stride-gemini` name it in their changelogs.
 
 > **The `stride-opencode-lite` citation once contradicted this file's own
 > registry, and no longer does.** The registry carried `"exists": false` for that
@@ -586,10 +585,12 @@ it in their changelogs.
 > believes absent, that port was printed among the clean repos without a single
 > rule cell being examined. **D291** performed the registry transition described
 > under "Changing this file": `exists` is now `true`, four entries carry
-> an applicable status and `reason-code-vocabulary` carries `not_applicable` with
-> its reason, and the port is examined on every run. The episode is kept here
-> because it is the failure mode this file most wants a reader to recognise — a
-> gate reporting a subject clean that it never looked at.
+> an applicable status and `reason-code-vocabulary` carries `deferred` with its
+> reason — D291 recorded that row `not_applicable`, and W2118 aligned it with
+> `stride-lite`'s identically-grounded row — and the port is examined on every
+> run. The episode is kept here because it is the failure mode this file most
+> wants a reader to recognise — a gate reporting a subject clean that it never
+> looked at.
 
 **At the edit site — the direction that was missing.** Each source file in this
 repository that states or restates a governed rule now carries a back-reference

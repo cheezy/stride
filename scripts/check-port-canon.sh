@@ -224,12 +224,14 @@
 #      baseline.
 #
 # The suite is at 139 cases. The current fleet baseline is exit 1 with
-# ok 53, missing 2, stale 0, unexpected 0, defect 0, unverifiable 0, 1 cell
-# not applicable and 1 deferred. (W2117 moved it there by recording
-# stride-lite's reason-code-vocabulary cell as deferred rather than required.
-# Before that, D291 had moved it to missing 3 and 0 deferred by bringing
-# stride-opencode-lite into scope: the port had been skipped as absent while
-# still being printed among the clean repos, so its cells were never counted.
+# ok 53, missing 2, stale 0, unexpected 0, defect 0, unverifiable 0, 0 cells
+# not applicable and 2 deferred. (W2118 moved it there by recording
+# stride-opencode-lite's reason-code-vocabulary cell as deferred rather than
+# not_applicable; W2117 had moved stride-lite's cell to deferred just before,
+# from required. Before those, D291 had moved it to missing 3 and 0 deferred
+# by bringing stride-opencode-lite into scope: the port had been skipped as
+# absent while still being printed among the clean repos, so its cells were
+# never counted.
 # The prior record was ok 51, missing 1 and 5 deferred.) Note it is nothing
 # like the
 # "ok 4, missing 44, defect 4" recorded above, which was true when W2108 ran

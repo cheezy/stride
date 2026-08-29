@@ -68,6 +68,30 @@ gate itself — a record, not a contract.
 > while the scan is advisory and a caller needs local shell access to set argv;
 > it is the property that has to hold first if that ever stops being true.
 
+> **The last two `deferred` cells were the failure this file exists to
+> prevent, occurring inside this file.** `deferred` is the only status the
+> checker excludes from every check: its branch in the per-entry loop runs
+> before the property branch, before the anchor sweep and before the
+> `not_applicable` UNEXPECTED sweep, and it records an empty message, so the
+> cell prints no line and appears only in the tally. An anchor placed on one --
+> claiming a compliance this file says the port does not have -- would have
+> been reported neither ok nor UNEXPECTED, and the run would still have exited
+> 0. Two of fifty-seven cells sat in that state while the run reported nine
+> clean repositories. **D302** re-statused both to `not_applicable`, which is
+> what the definitions require for a structural fact that makes a rule
+> unreachable, and which IS swept. The disposition worth recording is not the
+> status change but what produced it: the rows were being defended in the
+> prose of one status while recorded under another, and W2118 had traded the
+> checked status for the unchecked one for symmetry alone, with no change in
+> the underlying facts. **A status is not a label for how settled a decision
+> feels; it selects which checks run.** Neither status reddens a run, so a
+> green result could never have distinguished them -- which is why this went
+> three rounds. Each reason also lost an unenumerated count of how many
+> rejection codes the ports' loops cannot reach: it was named nowhere, the
+> ports' own text contradicts it for at least `hook_body_empty`, and an
+> unenumerated count is unfalsifiable by construction. The transport grounds
+> and the reopen conditions, which were verified, remain.
+
 ## How to read this file
 
 Every rule below is one H3 entry with the same seven parts in the same order:
@@ -462,12 +486,21 @@ it documents `workflow_steps` skips.
 **Applicability.** Required wherever a port emits `workflow_steps`. Read the
 `applies_to` rows below for who that is today rather than taking a count from this
 sentence. **`stride-lite` and `stride-opencode-lite` state the same structural
-fact about themselves** and are both recorded `deferred` with those grounds as
-their reason: neither emits a `workflow_steps` object and neither has a
-completion endpoint, so a closed set of rejection codes has nothing to reject
+fact about themselves** and are both recorded `not_applicable` with those
+grounds as their reason: neither emits a `workflow_steps` object and neither has
+a completion endpoint, so a closed set of rejection codes has nothing to reject
 against. Both rows are the one sanctioned shape of a narrowed cell — a
 structural fact about the port, recorded with its reason — and not the
-forbidden move of narrowing applicability to green a report. On the first run
+forbidden move of narrowing applicability to green a report. That sentence is
+this file's definition of `not_applicable`, which is why the rows now carry it:
+**D302** found them recorded `deferred`, a status the definitions reserve for a
+port not yet in scope and the only one the checker excludes from every check,
+so the two cells were being defended in the vocabulary of one status while
+recorded under another. Each reason also lost a clause it could not support —
+a count of how many of the six codes the ports' loops cannot reach, which was
+enumerated nowhere and which the ports' own text contradicts for at least
+`hook_body_empty`. What survives is what was verified: the transport grounds,
+and the reopen condition. On the first run
 only the source carried the vocabulary; consult a live run for which cells are
 outstanding today.
 
@@ -487,10 +520,10 @@ outstanding today.
     {"port": "stride-copilot",      "status": "required", "variant": "", "reason": ""},
     {"port": "stride-copilot-lite", "status": "required", "variant": "", "reason": ""},
     {"port": "stride-gemini",       "status": "required", "variant": "", "reason": ""},
-    {"port": "stride-lite",         "status": "deferred", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint, so the closed six-value set has nothing to reject against. Four of the six codes name conditions its loop cannot reach, and the remaining two would restate its own skip table in imported spelling. The port records these same grounds itself in skills/stride-lite-workflow/SKILL.md. Reopen if a completion API and a workflow_steps payload ever land there."},
+    {"port": "stride-lite",         "status": "not_applicable", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint, so the closed six-value set has nothing to reject against. The port records these same grounds itself in skills/stride-lite-workflow/SKILL.md. Reopen if a completion API and a workflow_steps payload ever land there."},
     {"port": "stride-opencode",     "status": "required", "variant": "", "reason": ""},
     {"port": "stride-pi",           "status": "required", "variant": "", "reason": ""},
-    {"port": "stride-opencode-lite","status": "deferred", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint, so the closed six-value set has nothing to reject against. Four of the six codes name conditions its loop cannot reach, and the remaining two would restate its own two-value skip table in imported spelling. The port records these same grounds itself in skills/stride-opencode-lite-workflow/SKILL.md. Reopen if a completion API and a workflow_steps payload ever land there."}
+    {"port": "stride-opencode-lite","status": "not_applicable", "variant": "", "reason": "Emits no workflow_steps object and has no completion endpoint, so the closed six-value set has nothing to reject against. The port records these same grounds itself in skills/stride-opencode-lite-workflow/SKILL.md. Reopen if a completion API and a workflow_steps payload ever land there."}
   ]
 }
 ```
@@ -617,7 +650,8 @@ it, and the hook suite exercises them.
 **Across the fleet.** Two ports cite this document by path and rule id where they
 record why they have not adopted `reason-code-vocabulary` — `stride-lite` and
 `stride-opencode-lite`. Read "not adopted" as plain English rather than as a
-status value: both rows are recorded `deferred`, on the same structural ground.
+status value: both rows are recorded `not_applicable`, on the same structural
+ground.
 Consult a live run for the statuses in force today rather than taking them from
 this sentence. `stride-copilot` and `stride-gemini` name it in their changelogs.
 
@@ -628,12 +662,14 @@ this sentence. `stride-copilot` and `stride-gemini` name it in their changelogs.
 > believes absent, that port was printed among the clean repos without a single
 > rule cell being examined. **D291** performed the registry transition described
 > under "Changing this file": `exists` is now `true`, four entries carry
-> an applicable status and `reason-code-vocabulary` carries `deferred` with its
-> reason — D291 recorded that row `not_applicable`, and W2118 aligned it with
-> `stride-lite`'s identically-grounded row — and the port is examined on every
-> run. The episode is kept here because it is the failure mode this file most
-> wants a reader to recognise — a gate reporting a subject clean that it never
-> looked at.
+> an applicable status and `reason-code-vocabulary` carries `not_applicable`
+> with its reason — D291 recorded that row `not_applicable`, W2118 moved it to
+> `deferred` to match `stride-lite`'s identically-grounded row, and **D302**
+> restored D291's status on both rows after establishing that the trade had
+> swapped a checked status for an unchecked one with no change in the
+> underlying facts — and the port is examined on every run. The episode is kept
+> here because it is the failure mode this file most wants a reader to
+> recognise — a gate reporting a subject clean that it never looked at.
 
 **At the edit site — the direction that was missing.** Each source file in this
 repository that states or restates a governed rule now carries a back-reference

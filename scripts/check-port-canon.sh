@@ -223,9 +223,14 @@
 #      fleet runs stay byte-identical to each other and to the pre-change
 #      baseline.
 #
-# The suite is at 139 cases. The current fleet baseline is exit 0 with
-# ok 55, missing 0, stale 0, unexpected 0, defect 0, unverifiable 0, 0 cells
-# not applicable and 2 deferred -- the first exit-0 run this gate has had.
+# The suite is at 141 cases. The current fleet baseline is exit 0 with
+# ok 55, missing 0, stale 0, unexpected 0, defect 0, unverifiable 0, 2 cells
+# not applicable and 0 deferred -- the first exit-0 run this gate has had.
+# (D302 inverted the last two figures by re-statusing the fleet's only two
+# non-ok cells from deferred to not_applicable. The figures before it were
+# 0 not applicable and 2 deferred; they are recorded here as superseded
+# rather than deleted, because this line is read as what a clean run should
+# print and a reader who checks it deserves to see which way it moved.)
 # (W2119 moved it there by anchoring decision-matrix-authority and
 # row-precedence in stride-opencode-lite, closing the last two MISSING cells.
 # W2118 had moved it to missing 2 by recording that port's
@@ -287,7 +292,18 @@
 #
 #   A recorded deferral is NOT among the reasons, and that is worth stating
 #   because it is the objection a reader expects: deferred cells cannot make
-#   this script exit non-zero, and today's two coexist with exit 0.
+#   this script exit non-zero.
+#
+#   Say the other half too, because it is the part that surprises: a deferral
+#   does not merely decline to redden the run, it opts the cell out of every
+#   check. The deferred branch in the per-entry loop runs BEFORE the property
+#   branch, before the anchor sweep, and before the not_applicable UNEXPECTED
+#   sweep, and it records an empty message, so the cell prints no line at all
+#   and appears only in the tally. An anchor placed on a deferred cell --
+#   claiming a compliance the canon says the port does not have -- is therefore
+#   reported neither ok nor UNEXPECTED. A not_applicable cell IS swept and does
+#   report UNEXPECTED for a stray anchor, which is the whole difference between
+#   the two statuses and the reason D302 re-statused the last two deferrals.
 #
 #   What IS gated is --self-test, as bash Test Group 30 and PowerShell Group
 #   32 -- hermetic, synthetic fixtures only, a function of this script alone.
@@ -482,6 +498,31 @@ self_test() {
   printf '<!-- canon:rule-one v2 -->\n' > "$tmp/s/beta/b.md"
   out="$(st_run "$tmp/s.md" "$tmp/s")"; rc=$?
   st_assert "older anchor reports STALE" 1 "$rc" "STALE: rule-one" "$out"
+
+  # --- D302: a not_applicable cell must REPORT, not merely be tallied.
+  # Without these two cases the whole visible half of D302 is ungated: reverting
+  # the message at both `record na` sites leaves the suite fully green, and the
+  # suite is what this file's own EXIT CODES header names as the gated artifact.
+  # A mutation test confirmed that gap before these were added. One case per
+  # check kind, because the two `record na` sites sit on different branches.
+  st_canon "$tmp/nap.md" 1 not_applicable
+  mkdir -p "$tmp/nap/alpha" "$tmp/nap/beta"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/nap/alpha/a.md"
+  printf 'no anchor here\n' > "$tmp/nap/beta/b.md"
+  out="$(st_run "$tmp/nap.md" "$tmp/nap")"; rc=$?
+  st_assert "a not_applicable anchor cell reports its own line" 0 "$rc" \
+    "not applicable: rule-one -- this port does not owe this rule" "$out"
+
+  # fence-nesting is the one property this checker actually implements
+  # (PROPERTY_IMPL below), so it is the only id that reaches the property
+  # branch's na site rather than bailing out UNVERIFIABLE first.
+  st_canon "$tmp/napp.md" 1 not_applicable 1 property fence-nesting
+  mkdir -p "$tmp/napp/alpha" "$tmp/napp/beta"
+  printf 'x\n' > "$tmp/napp/alpha/a.md"
+  printf 'x\n' > "$tmp/napp/beta/b.md"
+  out="$(st_run "$tmp/napp.md" "$tmp/napp")"; rc=$?
+  st_assert "a not_applicable property cell reports its own line" 0 "$rc" \
+    "not applicable: fence-nesting -- this port does not owe this rule" "$out"
 
   # --- UNEXPECTED, both kinds
   st_canon "$tmp/u.md" 1 not_applicable
@@ -2421,7 +2462,10 @@ for pline in $PORT_LINES; do
     fi
 
     if [ "$echk" = "property" ]; then
-      if [ "$astatus" = "not_applicable" ]; then record na "  " ""; continue; fi
+      if [ "$astatus" = "not_applicable" ]; then
+        record na "  " "$eid -- this port does not owe this rule"
+        continue
+      fi
       impl="$(property_impl_version "$eid")"
       if [ -z "$impl" ] || [ "$impl" != "$ever" ]; then
         # The work belongs to THIS SCRIPT, not to the port. Routing it per-port
@@ -2562,7 +2606,13 @@ ${pprev#$ptree/}($d)"
             "$pid: remove the $eid anchor at $(field "$hit" 3); this port does not owe that rule"
         done
       else
-        record na "  " ""
+        # D302: a message, so the cell REPORTS rather than appearing only in the
+        # tally. An empty message here made a not_applicable cell as silent on
+        # the page as a deferred one, which is most of what made the two look
+        # interchangeable -- the difference is real (this branch sweeps for
+        # anchors and reports UNEXPECTED above; the deferred branch returns
+        # before reaching it) but it was invisible in a clean run.
+        record na "  " "$eid -- this port does not owe this rule"
       fi
       continue
     fi

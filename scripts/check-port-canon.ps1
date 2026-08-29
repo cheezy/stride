@@ -1313,7 +1313,10 @@ function Invoke-CanonCheck {
             if ($astatus -ceq 'deferred') { Add-Record -Kind 'deferred' -Indent '  ' -Message ''; continue }
 
             if ($e.Check -ceq 'property') {
-                if ($astatus -ceq 'not_applicable') { Add-Record -Kind 'na' -Indent '  ' -Message ''; continue }
+                if ($astatus -ceq 'not_applicable') {
+                    Add-Record -Kind 'na' -Indent '  ' -Message "$($e.Id) -- this port does not owe this rule"
+                    continue
+                }
                 $impl = ''
                 if ($script:PropertyImpl.ContainsKey($e.Id)) { $impl = $script:PropertyImpl[$e.Id] }
                 if (-not $impl -or $impl -cne [string]$e.Version) {
@@ -1401,7 +1404,17 @@ function Invoke-CanonCheck {
                             -Work "$($p.Id): remove the $($e.Id) anchor at $($hit.Where); this port does not owe that rule"
                     }
                 } else {
-                    Add-Record -Kind 'na' -Indent '  ' -Message ''
+                    # D302: a message, so the cell REPORTS rather than appearing
+                    # only in the tally. An empty message here made a
+                    # not_applicable cell as silent on the page as a deferred
+                    # one, which is most of what made the two look
+                    # interchangeable -- the difference is real (this branch
+                    # sweeps for anchors and reports UNEXPECTED above; the
+                    # deferred branch returns before reaching it) but it was
+                    # invisible in a clean run. Paired with the bash half; the
+                    # wording matches byte for byte because Test Group 31
+                    # compares the two halves' stdout verbatim.
+                    Add-Record -Kind 'na' -Indent '  ' -Message "$($e.Id) -- this port does not owe this rule"
                 }
                 continue
             }
@@ -1598,6 +1611,26 @@ function Invoke-SelfTestBody {
     Set-StFile -Path "$Tmp/s/beta/b.md"  -Text "<!-- canon:rule-one v2 -->`n"
     $r = Invoke-StRun -Canon "$Tmp/s.md" -PortsParent "$Tmp/s"
     St-Assert "older anchor reports STALE" 1 $r.ExitCode "STALE: rule-one" $r.Output
+
+    # --- D302: a not_applicable cell must REPORT, not merely be tallied.
+    # Paired with the bash half's two cases -- the case NAMES must match, or
+    # hook-suite Group 30c (cross-half name equality) goes red, which is the
+    # mechanism that forces this pair to stay together.
+    New-StCanon -Path "$Tmp/nap.md" -Schema 1 -BetaStatus 'not_applicable'
+    New-StDir @("$Tmp/nap/alpha", "$Tmp/nap/beta")
+    Set-StFile -Path "$Tmp/nap/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/nap/beta/b.md"  -Text "no anchor here`n"
+    $r = Invoke-StRun -Canon "$Tmp/nap.md" -PortsParent "$Tmp/nap"
+    St-Assert "a not_applicable anchor cell reports its own line" 0 $r.ExitCode `
+        "not applicable: rule-one -- this port does not owe this rule" $r.Output
+
+    New-StCanon -Path "$Tmp/napp.md" -Schema 1 -BetaStatus 'not_applicable' -Version '1' -Check 'property' -Id 'fence-nesting'
+    New-StDir @("$Tmp/napp/alpha", "$Tmp/napp/beta")
+    Set-StFile -Path "$Tmp/napp/alpha/a.md" -Text "x`n"
+    Set-StFile -Path "$Tmp/napp/beta/b.md"  -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/napp.md" -PortsParent "$Tmp/napp"
+    St-Assert "a not_applicable property cell reports its own line" 0 $r.ExitCode `
+        "not applicable: fence-nesting -- this port does not owe this rule" $r.Output
 
     # --- UNEXPECTED, both kinds
     New-StCanon -Path "$Tmp/u.md" -Schema 1 -BetaStatus 'not_applicable'

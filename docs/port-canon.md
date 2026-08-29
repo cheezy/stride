@@ -27,7 +27,25 @@ runs it for you, and `stride/README.md` documents how to invoke it and what its
 exit codes mean. Run it before cutting a port or catalog release, and read a
 non-zero result as blocking. This section deliberately stops here — the
 checker's contract belongs to the script and its README entry, and restating it
-would create exactly the second copy the Scope note above forbids.
+would create exactly the second copy the Scope note above forbids. What this
+section does carry, below, is the disposition of findings raised against the
+gate itself — a record, not a contract.
+
+> **Two findings from the W2108 audit sat deferred with no owner, and both are
+> now closed.** One: `head -1` collapsed multiple anchors for a single id — one
+> auditor read that as a suppressed STALE tier, another independently judged it
+> defensible. Two: the canon self-exclusion matched an exact path string, so an
+> aliased `--ports-parent`, or a vendored copy of this file inside a port, would
+> have credited that port with every anchor it found. Both were filed rather
+> than patched, because each was read as a judgement call about intent rather
+> than a defect. **D293** closed both, with self-test cases that fail against
+> the pre-fix script; the measurements and the bash/PowerShell split stay in the
+> script header, beside the code they describe. What belongs *here* is the
+> disposition itself. A finding deferred by an explicit decision has no owner
+> and no expiry while it lives only in a script comment — which is how these two
+> outlived three rounds and became more wrong than when they were filed. Record
+> the decision in the entry it governs, or in this section when it governs the
+> gate rather than a rule.
 
 ## How to read this file
 
@@ -333,8 +351,12 @@ port). D221 and D232 are its lineage — this is the same ambiguity those defect
 addressed, relocated from the prose *around* the matrix to the rows *inside* it.
 
 **Port-side anchor.** Beside the port's Step 3 decision matrix, next to its own
-statement of the precedence order. The subagent-workflow mirror does not carry a
-second anchor; one anchor per port directory.
+statement of the precedence order — wherever that normative statement lives,
+which is the workflow skill in most ports, the subagent-workflow skill where
+that is the matrix rather than a mirror, and the helper in the lib-matrix
+ports. Where a port restates the matrix a second time, whether in a
+subagent-workflow mirror or a derived table in its workflow skill, that
+restatement carries no anchor. One anchor per port directory.
 
 **Applicability.** Required everywhere. **This entry reported MISSING for every
 port on the drift check's first run**, and it is worth keeping why on the record,
@@ -365,14 +387,14 @@ file can answer — check the board rather than reading closure out of this note
   "provenance": "quoted",
   "defects": ["D253", "D221", "D232"],
   "check": "anchor",
-  "check_hint": "One anchor per port directory, beside its Step 3 matrix. The subagent-workflow mirror carries no second anchor.",
+  "check_hint": "One anchor per port directory, beside the port's normative matrix. Any second restatement of it carries no anchor.",
   "applies_to": [
     {"port": "stride",              "status": "required", "variant": "",           "reason": ""},
     {"port": "stride-codex",        "status": "required", "variant": "",           "reason": ""},
     {"port": "stride-copilot",      "status": "required", "variant": "",           "reason": ""},
-    {"port": "stride-copilot-lite", "status": "required", "variant": "lib-matrix", "reason": "Matrix lives in lib/select_workflow_branch.md rather than skills/stride-workflow/."},
+    {"port": "stride-copilot-lite", "status": "required", "variant": "lib-matrix", "reason": "Matrix lives in lib/select_workflow_branch.md rather than skills/stride-workflow/. No table in this port carries a Decompose or an Isolate column, and the matrix is restated, unanchored, in the workflow skill and the README."},
     {"port": "stride-gemini",       "status": "required", "variant": "",           "reason": ""},
-    {"port": "stride-lite",         "status": "required", "variant": "lib-matrix", "reason": "Matrix lives in lib/select_workflow_branch.md rather than skills/stride-workflow/."},
+    {"port": "stride-lite",         "status": "required", "variant": "lib-matrix", "reason": "Matrix lives in lib/select_workflow_branch.md rather than skills/stride-workflow/. No table in this port carries a Decompose or an Isolate column, and the matrix is restated, unanchored, in the workflow skill and the README."},
     {"port": "stride-opencode",     "status": "required", "variant": "",           "reason": ""},
     {"port": "stride-pi",           "status": "required", "variant": "",           "reason": ""},
     {"port": "stride-opencode-lite","status": "required", "variant": "",           "reason": "No subagent-workflow mirror exists in this port, so the rule has a single statement site rather than two. Its matrix carries three outcome columns, not five: there is no Decompose column and no Isolate column, so the precedence order resolves over Explore, Plan and Review alone. It also carries no separate defect row: every task file gets a complexity value from create-decomposer, so a defect follows its complexity row like any other task."}

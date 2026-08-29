@@ -10865,6 +10865,256 @@ else
 fi
 
 # ============================================================
+# Test Group 32: W2131 -- the unsafe Stride API curl guard
+# ============================================================
+#
+# The three curl invocation rules are stated in three skills and were still
+# broken under load. The failure is SILENT: the hook reads the API response off
+# stdout to capture the diff and refresh the env cache, so hiding stdout drops
+# the diff and the task completes with an empty changed_files and no error.
+#
+# Two properties matter as much as the refusals themselves, and both have cases
+# here: the guard must NOT fire on ordinary shell usage (a guard that does gets
+# turned off), and it must never echo the command, which carries a Bearer token.
+#
+# The guard runs AFTER the .stride.md gate, so the project below HAS one. An
+# earlier revision hoisted the stdin read above that gate so the guard would
+# also fire without a .stride.md; that was reverted, because every capture path
+# sits below the gate -- such a project has no diff to lose -- and the hoist
+# widened the blast radius to every project on the machine. The fixture carries
+# a .stride.md with empty sections so the guard is reached without any hook
+# section actually executing. If the ordering ever regresses, these cases stop
+# exercising the guard at all, so the no-.stride.md case is pinned explicitly
+# at the end of the group rather than left implicit.
+
+echo ""
+echo "=== Test Group 32: W2131 unsafe Stride API curl guard ==="
+
+G32_PROJ="$TMPDIR_TEST/w2131-guard"
+mkdir -p "$G32_PROJ"
+cat > "$G32_PROJ/.stride.md" <<'G32MD'
+## after_doing
+
+```bash
+```
+G32MD
+
+# Build hook input from a command string without a JSON encoder: the commands
+# below are chosen to contain no character needing escaping beyond the double
+# quotes, which are escaped inline where they appear.
+g32_run() { # $1 = command string -> sets G32_RC, G32_OUT, G32_ERR
+  G32_OUT=$(printf '{"tool_input":{"command":"%s"}}' "$1" \
+    | CLAUDE_PROJECT_DIR="$G32_PROJ" bash "$HOOK_SCRIPT" pre 2>"$TMPDIR_TEST/g32.err")
+  G32_RC=$?
+  G32_ERR=$(cat "$TMPDIR_TEST/g32.err")
+}
+
+# --- Refused: rule 1, -o / --output --------------------------------------
+g32_run 'curl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete'
+assert_exit "32: -o on a Stride curl is refused" 2 "$G32_RC"
+
+g32_run 'curl -sS --output out.json https://www.stridelikeaboss.com/api/tasks/1/complete'
+assert_exit "32: --output on a Stride curl is refused" 2 "$G32_RC"
+
+g32_run 'curl -sS -o /dev/null https://www.stridelikeaboss.com/api/tasks/1/complete'
+assert_exit "32: -o /dev/null is refused (it is still a hidden response)" 2 "$G32_RC"
+
+g32_run 'curl -sS --output=out.json https://www.stridelikeaboss.com/api/tasks/1/complete'
+assert_exit "32: --output=VALUE is refused" 2 "$G32_RC"
+
+# --- Refused: rule 2, transformer pipes -----------------------------------
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | jq -r .data'
+assert_exit "32: a jq pipe is refused" 2 "$G32_RC"
+
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next |head -5'
+assert_exit "32: a head pipe with no space is refused" 2 "$G32_RC"
+
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next 2>&1 | awk {print}'
+assert_exit "32: an awk pipe after a redirect is refused" 2 "$G32_RC"
+
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | grep data'
+assert_exit "32: a grep pipe is refused" 2 "$G32_RC"
+
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | sed s/a/b/'
+assert_exit "32: a sed pipe is refused" 2 "$G32_RC"
+
+# --- Allowed: rule 3, tee is the one blessed pipe -------------------------
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/1/complete | tee .stride/.last-api-response.json'
+assert_exit "32: a tee pipe is allowed" 0 "$G32_RC"
+
+# --- Allowed: not a Stride call -------------------------------------------
+g32_run 'curl -sS -o page.html https://example.com/index.html'
+assert_exit "32: a non-Stride curl with -o is unaffected" 0 "$G32_RC"
+
+g32_run 'curl -sS https://example.com/a.json | jq .'
+assert_exit "32: a non-Stride jq pipe is unaffected" 0 "$G32_RC"
+
+g32_run 'gcc -o prog main.c'
+assert_exit "32: an unrelated command with -o is unaffected" 0 "$G32_RC"
+
+g32_run 'cat foo.json | jq .'
+assert_exit "32: an unrelated jq pipe is unaffected" 0 "$G32_RC"
+
+# --- Allowed: a correct Stride curl ---------------------------------------
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next'
+assert_exit "32: a plain Stride curl with no redirect is allowed" 0 "$G32_RC"
+
+# --- Edge cases named by the task's testing_strategy ----------------------
+# A -o inside a quoted payload is not a flag. A guard that fired here is one an
+# agent learns to route around, so this case is as load-bearing as the refusals.
+g32_run 'curl -sS -d {\"note\":\"use -o here\"} https://www.stridelikeaboss.com/api/tasks/1/complete | tee x.json'
+assert_exit "32: -o inside a quoted payload is not treated as a flag" 0 "$G32_RC"
+
+g32_run 'curl -sS -d {\"n\":\"pipe into jq please\"} https://www.stridelikeaboss.com/api/tasks/1/complete | tee x.json'
+assert_exit "32: the word jq inside a quoted payload is not a pipe" 0 "$G32_RC"
+
+# || is logical or, not a pipe into an empty command.
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next || echo failed'
+assert_exit "32: a logical || after a Stride curl is allowed" 0 "$G32_RC"
+
+# The URL built from a variable still writes /api/tasks/ literally.
+g32_run 'curl -sS -o x.json $STRIDE_API_URL/api/tasks/1/complete'
+assert_exit "32: a URL built from a variable is still in scope" 2 "$G32_RC"
+
+# --- The refusal message, and the token ------------------------------------
+g32_run 'curl -sS -o out.json -H Authorization:Bearer_stride_dev_G32SECRET https://www.stridelikeaboss.com/api/tasks/1/complete'
+assert_exit "32: the token-bearing command is still refused" 2 "$G32_RC"
+assert_contains "32: the refusal names the tee alternative" "tee" "$G32_ERR"
+assert_contains "32: the refusal names the blessed capture path" "last-api-response" "$G32_ERR"
+assert_contains "32: stdout carries a block decision" '"decision":"block"' "$G32_OUT"
+
+# AC6. The command carries a Bearer token; neither stream may echo it.
+if printf '%s%s' "$G32_OUT" "$G32_ERR" | grep -q 'G32SECRET'; then
+  echo -e "  ${RED}FAIL${RESET}: 32: the guard leaked the token into its output"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 32: the guard never echoes the token"
+  PASS=$((PASS + 1))
+fi
+
+# --- Phase scoping ---------------------------------------------------------
+# The guard is a PreToolUse gate. The post phase must not refuse anything.
+G32_OUT=$(printf '{"tool_input":{"command":"%s"}}' 'curl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete' \
+  | CLAUDE_PROJECT_DIR="$G32_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+assert_exit "32: the post phase does not refuse (the guard is PreToolUse only)" 0 "$?"
+
+# --- The misfire cases: benign commands that merely MENTION the literals ---
+# These are the cases the first revision got wrong, and they are why the scope
+# test requires curl to be the actual COMMAND of a pipeline stage rather than a
+# string that appears somewhere. A guard that refuses these is one that gets
+# switched off, which is pitfall 2 exactly.
+g32_run 'grep -o \"curl.*/api/tasks/\" hooks/stride-hook.sh'
+assert_exit "32: grep -o quoting a curl and an endpoint is NOT a Stride curl" 0 "$G32_RC"
+
+g32_run 'grep -rn \"/api/tasks/\" skills/ | head -20'
+assert_exit "32: grepping the repo and piping to head is not in scope" 0 "$G32_RC"
+
+g32_run 'grep -rn \"/api/tasks/\" skills/ | grep curl'
+assert_exit "32: grep | grep curl is not a Stride curl" 0 "$G32_RC"
+
+# --- Adjacent commands: a flag belonging to a NEIGHBOUR is not the curl's ---
+# Judging the whole command string attributed these to the curl and refused a
+# fully compliant, tee-captured lifecycle call.
+g32_run 'curl -sS -X POST $U/api/tasks/claim -d @p.json | tee r.json && gcc -o bin/app src/app.c'
+assert_exit "32: a compliant claim chained with gcc -o is allowed" 0 "$G32_RC"
+
+g32_run 'curl -sS $U/api/tasks/next | tee r.json ; ls -o'
+assert_exit "32: a compliant curl followed by ls -o is allowed" 0 "$G32_RC"
+
+g32_run 'curl -sS $U/api/tasks/next | tee r.json && rustc -O src/main.rs'
+assert_exit "32: a compliant curl chained with rustc -O is allowed" 0 "$G32_RC"
+
+g32_run 'T=$(grep -oE x f | head -n1); curl -sS $U/api/tasks/next | tee r.json'
+assert_exit "32: the documented token-extraction preamble does not block the curl" 0 "$G32_RC"
+
+g32_run 'curl -sS $U/api/tasks/next | tee r.json && cat r.json | jq -r .data'
+assert_exit "32: teeing then reading the FILE with jq is allowed" 0 "$G32_RC"
+
+# --- Spellings of the output flag that a word-only match missed ---
+g32_run 'curl -sS -oout.json $U/api/tasks/1/complete'
+assert_exit "32: an attached -oVALUE is refused" 2 "$G32_RC"
+
+g32_run 'curl -sSo out.json $U/api/tasks/1/complete'
+assert_exit "32: a clustered -sSo is refused" 2 "$G32_RC"
+
+g32_run 'curl -sS -O $U/api/tasks/1/complete'
+assert_exit "32: -O is refused (it also takes the body off stdout)" 2 "$G32_RC"
+
+g32_run 'curl -sS --remote-name $U/api/tasks/1/complete'
+assert_exit "32: --remote-name is refused" 2 "$G32_RC"
+
+# --- Transformers reached by path or through a wrapper ---
+g32_run 'curl -sS $U/api/tasks/next | /usr/bin/jq .'
+assert_exit "32: an absolute path to a transformer is refused" 2 "$G32_RC"
+
+g32_run 'curl -sS $U/api/tasks/next | env jq .'
+assert_exit "32: a transformer behind env is refused" 2 "$G32_RC"
+
+# --- Case: the halves must agree, so case is a varied dimension here ---
+# bash `case` and `[ = ]` are case-sensitive; PowerShell's -like/-contains are
+# NOT by default, so the ps1 half uses -clike/-ccontains/-ceq. Without these
+# cases the differential never varied case and the divergence went unseen.
+g32_run 'curl -sS --OUTPUT out.json $U/api/tasks/next'
+assert_exit "32: --OUTPUT (wrong case) is not the flag" 0 "$G32_RC"
+
+g32_run 'curl -sS $U/api/tasks/next | JQ .'
+assert_exit "32: JQ (wrong case) is not the transformer" 0 "$G32_RC"
+
+g32_run 'CURL -sS $U/api/tasks/next | jq .'
+assert_exit "32: CURL (wrong case) is not curl" 0 "$G32_RC"
+
+# --- The sourcing regression, named directly ---
+# Previously pinned only incidentally, by the D281/D288 groups going red. The
+# hazard: `source file` with no arguments leaves the CALLER's positional
+# parameters visible, so $PHASE picks up an unrelated argument.
+g32_src_out=$(
+  cd "$TMPDIR_TEST" || exit 1
+  probe() {
+    d=$(mktemp -d); PROJECT_DIR="$d"; ENV_CACHE="$d/.stride-env-cache"
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    PROJECT_DIR="$d"; ENV_CACHE="$d/.stride-env-cache"
+    printf "AGENT_NAME='a'\nTASK_OWNED_9='keep'\n" > "$ENV_CACHE"
+    printf "TASK_OWNED_9='fresh'\n" | write_env_cache --preserve-from-cache 2>/dev/null
+    printf 'rc=%s' "$?"
+    rm -rf "$d"
+  }
+  probe some-positional-arg
+)
+assert_eq "32: sourcing with an inherited positional arg leaves stdin intact" "rc=0" "$g32_src_out"
+
+# --- Ordering, pinned explicitly ---
+# The guard sits below the .stride.md gate, so a project without one exits
+# before reaching it. This is the deliberate scope choice recorded above; if it
+# is ever changed, this case is what says so out loud rather than letting the
+# rest of the group quietly stop testing anything.
+G32_BARE="$TMPDIR_TEST/w2131-no-stride-md"
+mkdir -p "$G32_BARE"
+G32_OUT=$(printf '{"tool_input":{"command":"%s"}}' 'curl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete' \
+  | CLAUDE_PROJECT_DIR="$G32_BARE" bash "$HOOK_SCRIPT" pre 2>&1)
+assert_exit "32: with no .stride.md the hook exits before the guard (scope choice)" 0 "$?"
+
+# --- Multi-line commands: newline is a command separator ---
+# testing_strategy.edge_cases names "A multi-line command" explicitly, and the
+# newline-handling code was entirely unexercised before these. The defect they
+# pin failed in BOTH directions, which is why both directions have a case.
+g32_run 'echo hi\ncurl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete'
+assert_exit "32: a curl on line 2 is still judged (newline is a separator)" 2 "$G32_RC"
+
+g32_run 'cd /repo\ncurl -sS https://www.stridelikeaboss.com/api/tasks/next | jq -r .data'
+assert_exit "32: a transformer pipe on line 2 is still refused" 2 "$G32_RC"
+
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | tee r.json\ngcc -o app main.c'
+assert_exit "32: a neighbour on line 2 is not attributed to the curl" 0 "$G32_RC"
+
+# A backslash-newline continuation is ONE command, so it must not be split.
+g32_run 'curl -sS \\\n  -o out.json \\\n  https://www.stridelikeaboss.com/api/tasks/1/complete'
+assert_exit "32: a backslash-continued curl is judged as one command" 2 "$G32_RC"
+
+g32_run 'curl -sS \\\n  -X PATCH https://www.stridelikeaboss.com/api/tasks/1/complete \\\n  -d @payload.json \\\n  | tee r.json'
+assert_exit "32: a backslash-continued compliant curl is allowed" 0 "$G32_RC"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

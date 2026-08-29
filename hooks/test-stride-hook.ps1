@@ -10615,6 +10615,208 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
 }
 
 # ============================================================
+# Test Group 33: W2131 — the unsafe Stride API curl guard
+# ============================================================
+#
+# Mirror of the bash suite's Test Group 32. The three curl invocation rules are
+# stated in three skills and were still broken under load. The failure is
+# SILENT: the hook reads the API response off stdout to capture the diff and
+# refresh the env cache, so hiding stdout drops the diff and the task completes
+# with an empty changed_files and no error.
+#
+# Two properties matter as much as the refusals: the guard must NOT fire on
+# ordinary shell usage (a guard that does gets turned off), and it must never
+# echo the command, which carries a Bearer token.
+#
+# The guard runs AFTER the .stride.md gate, so the project below HAS one. An
+# earlier revision hoisted the stdin read above that gate; it was reverted,
+# because every capture path sits below the gate — such a project has no diff to
+# lose — and the hoist widened the blast radius to every project on the machine.
+# The no-.stride.md case is pinned explicitly at the end rather than left
+# implicit, so a regression in the ordering says so instead of quietly making
+# every case above stop testing the guard.
+
+Write-Host ""
+Write-Host "=== Test Group 33: W2131 unsafe Stride API curl guard ==="
+
+$g33Proj = Join-Path $TmpDir 'w2131-guard'
+New-Item -ItemType Directory -Force -Path $g33Proj | Out-Null
+Set-Content -Path (Join-Path $g33Proj '.stride.md') -Value @'
+## after_doing
+
+```bash
+```
+'@ -Encoding UTF8
+
+function Invoke-G33 {
+    param([string]$Cmd)
+    $payload = @{ tool_input = @{ command = $Cmd } } | ConvertTo-Json -Compress
+    return Invoke-HookScript -InputJson $payload -Phase 'pre' -ProjectDir $g33Proj
+}
+
+# --- Refused: rule 1, -o / --output ---
+$r = Invoke-G33 'curl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete'
+Assert-Exit "33: -o on a Stride curl is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS --output out.json https://www.stridelikeaboss.com/api/tasks/1/complete'
+Assert-Exit "33: --output on a Stride curl is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS -o /dev/null https://www.stridelikeaboss.com/api/tasks/1/complete'
+Assert-Exit "33: -o /dev/null is refused (it is still a hidden response)" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS --output=out.json https://www.stridelikeaboss.com/api/tasks/1/complete'
+Assert-Exit "33: --output=VALUE is refused" 2 $r.ExitCode
+
+# --- Refused: rule 2, transformer pipes ---
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | jq -r .data'
+Assert-Exit "33: a jq pipe is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/next |head -5'
+Assert-Exit "33: a head pipe with no space is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/next 2>&1 | awk {print}'
+Assert-Exit "33: an awk pipe after a redirect is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | grep data'
+Assert-Exit "33: a grep pipe is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | sed s/a/b/'
+Assert-Exit "33: a sed pipe is refused" 2 $r.ExitCode
+
+# --- Allowed: rule 3, tee is the one blessed pipe ---
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/1/complete | tee .stride/.last-api-response.json'
+Assert-Exit "33: a tee pipe is allowed" 0 $r.ExitCode
+
+# --- Allowed: not a Stride call ---
+$r = Invoke-G33 'curl -sS -o page.html https://example.com/index.html'
+Assert-Exit "33: a non-Stride curl with -o is unaffected" 0 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS https://example.com/a.json | jq .'
+Assert-Exit "33: a non-Stride jq pipe is unaffected" 0 $r.ExitCode
+
+$r = Invoke-G33 'gcc -o prog main.c'
+Assert-Exit "33: an unrelated command with -o is unaffected" 0 $r.ExitCode
+
+$r = Invoke-G33 'cat foo.json | jq .'
+Assert-Exit "33: an unrelated jq pipe is unaffected" 0 $r.ExitCode
+
+# --- Allowed: a correct Stride curl ---
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/next'
+Assert-Exit "33: a plain Stride curl with no redirect is allowed" 0 $r.ExitCode
+
+# --- Edge cases named by the task's testing_strategy ---
+# A -o inside a quoted payload is not a flag. A guard that fired here is one an
+# agent learns to route around, so this case is as load-bearing as the refusals.
+$r = Invoke-G33 'curl -sS -d "{\"note\":\"use -o here\"}" https://www.stridelikeaboss.com/api/tasks/1/complete | tee x.json'
+Assert-Exit "33: -o inside a quoted payload is not treated as a flag" 0 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS -d "{\"n\":\"pipe into jq please\"}" https://www.stridelikeaboss.com/api/tasks/1/complete | tee x.json'
+Assert-Exit "33: the word jq inside a quoted payload is not a pipe" 0 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/next || echo failed'
+Assert-Exit "33: a logical || after a Stride curl is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS -o x.json $STRIDE_API_URL/api/tasks/1/complete'
+Assert-Exit "33: a URL built from a variable is still in scope" 2 $r.ExitCode
+
+# --- The refusal message, and the token ---
+$r = Invoke-G33 'curl -sS -o out.json -H Authorization:Bearer_stride_dev_G33SECRET https://www.stridelikeaboss.com/api/tasks/1/complete'
+Assert-Exit "33: the token-bearing command is still refused" 2 $r.ExitCode
+Assert-Contains "33: the refusal names the tee alternative" "tee" $r.Stderr
+Assert-Contains "33: the refusal names the blessed capture path" "last-api-response" $r.Stderr
+Assert-Contains "33: stdout carries a block decision" '"decision":"block"' $r.Stdout
+Assert-NotContains "33: the guard never echoes the token" "G33SECRET" ($r.Stdout + $r.Stderr)
+
+# --- Phase scoping: the guard is a PreToolUse gate ---
+$g33Post = @{ tool_input = @{ command = 'curl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete' } } | ConvertTo-Json -Compress
+$r = Invoke-HookScript -InputJson $g33Post -Phase 'post' -ProjectDir $g33Proj
+Assert-Exit "33: the post phase does not refuse (the guard is PreToolUse only)" 0 $r.ExitCode
+
+# --- The misfire cases: benign commands that merely MENTION the literals ---
+# These are what the first revision got wrong, and why scope requires curl to be
+# the actual COMMAND of a pipeline stage rather than a string that appears.
+$r = Invoke-G33 'grep -o "curl.*/api/tasks/" hooks/stride-hook.sh'
+Assert-Exit "33: grep -o quoting a curl and an endpoint is NOT a Stride curl" 0 $r.ExitCode
+
+$r = Invoke-G33 'grep -rn "/api/tasks/" skills/ | head -20'
+Assert-Exit "33: grepping the repo and piping to head is not in scope" 0 $r.ExitCode
+
+$r = Invoke-G33 'grep -rn "/api/tasks/" skills/ | grep curl'
+Assert-Exit "33: grep | grep curl is not a Stride curl" 0 $r.ExitCode
+
+# --- Adjacent commands: a neighbour's flag is not the curl's ---
+$r = Invoke-G33 'curl -sS -X POST $U/api/tasks/claim -d @p.json | tee r.json && gcc -o bin/app src/app.c'
+Assert-Exit "33: a compliant claim chained with gcc -o is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS $U/api/tasks/next | tee r.json ; ls -o'
+Assert-Exit "33: a compliant curl followed by ls -o is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS $U/api/tasks/next | tee r.json && rustc -O src/main.rs'
+Assert-Exit "33: a compliant curl chained with rustc -O is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 'T=$(grep -oE x f | head -n1); curl -sS $U/api/tasks/next | tee r.json'
+Assert-Exit "33: the documented token-extraction preamble does not block the curl" 0 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS $U/api/tasks/next | tee r.json && cat r.json | jq -r .data'
+Assert-Exit "33: teeing then reading the FILE with jq is allowed" 0 $r.ExitCode
+
+# --- Spellings of the output flag a word-only match missed ---
+$r = Invoke-G33 'curl -sS -oout.json $U/api/tasks/1/complete'
+Assert-Exit "33: an attached -oVALUE is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sSo out.json $U/api/tasks/1/complete'
+Assert-Exit "33: a clustered -sSo is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS -O $U/api/tasks/1/complete'
+Assert-Exit "33: -O is refused (it also takes the body off stdout)" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS --remote-name $U/api/tasks/1/complete'
+Assert-Exit "33: --remote-name is refused" 2 $r.ExitCode
+
+# --- Transformers by path or behind a wrapper ---
+$r = Invoke-G33 'curl -sS $U/api/tasks/next | /usr/bin/jq .'
+Assert-Exit "33: an absolute path to a transformer is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS $U/api/tasks/next | env jq .'
+Assert-Exit "33: a transformer behind env is refused" 2 $r.ExitCode
+
+# --- Case: this half's -like/-contains are case-INSENSITIVE by default, so the
+# guard uses -clike/-ccontains/-ceq to match bash's case/[ = ]. Without these
+# cases the differential never varied case and the divergence went unseen.
+$r = Invoke-G33 'curl -sS --OUTPUT out.json $U/api/tasks/next'
+Assert-Exit "33: --OUTPUT (wrong case) is not the flag" 0 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS $U/api/tasks/next | JQ .'
+Assert-Exit "33: JQ (wrong case) is not the transformer" 0 $r.ExitCode
+
+$r = Invoke-G33 'CURL -sS $U/api/tasks/next | jq .'
+Assert-Exit "33: CURL (wrong case) is not curl" 0 $r.ExitCode
+
+# --- Ordering, pinned explicitly ---
+$g33Bare = Join-Path $TmpDir 'w2131-no-stride-md'
+New-Item -ItemType Directory -Force -Path $g33Bare | Out-Null
+$g33BareJson = @{ tool_input = @{ command = 'curl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete' } } | ConvertTo-Json -Compress
+$r = Invoke-HookScript -InputJson $g33BareJson -Phase 'pre' -ProjectDir $g33Bare
+Assert-Exit "33: with no .stride.md the hook exits before the guard (scope choice)" 0 $r.ExitCode
+
+# --- Multi-line commands: newline is a command separator ---
+# Mirrors bash Group 32. The defect failed in BOTH directions, so both have a case.
+$r = Invoke-G33 "echo hi`ncurl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete"
+Assert-Exit "33: a curl on line 2 is still judged (newline is a separator)" 2 $r.ExitCode
+
+$r = Invoke-G33 "cd /repo`ncurl -sS https://www.stridelikeaboss.com/api/tasks/next | jq -r .data"
+Assert-Exit "33: a transformer pipe on line 2 is still refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS https://www.stridelikeaboss.com/api/tasks/next | tee r.json`ngcc -o app main.c"
+Assert-Exit "33: a neighbour on line 2 is not attributed to the curl" 0 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS \`n  -o out.json \`n  https://www.stridelikeaboss.com/api/tasks/1/complete"
+Assert-Exit "33: a backslash-continued curl is judged as one command" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS \`n  -X PATCH https://www.stridelikeaboss.com/api/tasks/1/complete \`n  -d @payload.json \`n  | tee r.json"
+Assert-Exit "33: a backslash-continued compliant curl is allowed" 0 $r.ExitCode
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

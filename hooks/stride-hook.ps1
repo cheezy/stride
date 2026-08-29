@@ -1980,11 +1980,20 @@ function Get-StrideRoute {
     return $route
 }
 
-# Exit early if no phase argument or no .stride.md
+# Exit early if no phase argument
 if (-not $Phase) { exit 0 }
+
 if (-not (Test-Path $StrideMd)) { exit 0 }
 
-# Read Claude Code hook input from stdin
+# Read Claude Code hook input from stdin.
+#
+# W2131 note on ordering: the unsafe-curl guard below sits AFTER this
+# .stride.md gate. An earlier revision hoisted the read above it so the guard
+# would fire in projects with no .stride.md, on the reasoning that such a
+# project "still loses its diff silently". That reasoning was wrong -- every
+# capture path sits below this gate, so such a project captures nothing and has
+# no diff to lose -- and the hoist widened the guard's blast radius to every
+# project on the machine. Mirrors the same revert in stride-hook.sh.
 $Input = @($input) -join "`n"
 if (-not $Input) { exit 0 }
 
@@ -2001,6 +2010,191 @@ try {
 }
 
 if (-not $Command) { exit 0 }
+
+# --- W2131: refuse unsafe Stride API curl shapes (PreToolUse) --------------
+#
+# Mirror of the guard in stride-hook.sh. The three curl invocation rules are
+# stated in stride-claiming-tasks, stride-workflow and stride-completing-tasks.
+# They were still broken under load, and the failure is SILENT: the hook reads
+# the API response off stdout to capture the diff and refresh the env cache, so
+# hiding stdout means the diff is never captured and the task shows an empty
+# changed_files with no error at all.
+#
+# The command text carries a Bearer token. Nothing below inspects, stores or
+# emits any part of it -- matching is on URL and flag/pipe shape only, and the
+# refusal message is a static string that never interpolates the command.
+
+# tee is deliberately absent: it is the one blessed pipe, because it passes
+# stdout through unchanged.
+$StrideGuardTransformers = @('jq', 'head', 'awk', 'grep', 'sed')
+
+# Resolve the effective command word of a pipeline stage: step over an
+# env/command wrapper and any VAR=VALUE assignments, then basename it, so
+# `env FOO=1 /usr/bin/jq` and `jq` resolve alike. Mirrors
+# stride_guard_cmd_word in stride-hook.sh.
+function Get-StrideGuardCmdWord {
+    param([string]$Segment)
+    $words = @($Segment.Trim() -split '\s+' | Where-Object { $_ -ne '' })
+    $i = 0
+    while ($i -lt $words.Count) {
+        $w = $words[$i]
+        if ($w -ceq 'env' -or $w -ceq 'command') { $i++; continue }
+        if ($w -cmatch '^[^=\s]+=') { $i++; continue }
+        break
+    }
+    if ($i -ge $words.Count) { return '' }
+    return ($words[$i] -replace '^.*/', '')
+}
+
+function Get-StrideUnsafeCurlKind {
+    param([string]$Cmd)
+
+    # --- Cheap prefilter on the RAW text ---
+    # Both literals must appear before any work is done. This is a prefilter
+    # ONLY -- deliberately on the raw text, because a legitimate
+    # `curl -sS "$U/api/tasks/next"` carries the endpoint inside quotes and
+    # would be filtered out if this ran on the quote-blanked text. It decides
+    # nothing; the curl-in-command-position confirmation below decides.
+    #
+    # -cnotlike, not -notlike: PowerShell's -like family is case-INSENSITIVE by
+    # default, which would put `CURL` and `/API/TASKS/` in scope here while the
+    # bash half's `case` left them out. Every other Stride-URL test in this file
+    # already uses -cnotlike for exactly that reason.
+    if ($Cmd -cnotlike '*/api/tasks/*') { return '' }
+    if ($Cmd -cnotlike '*curl*')        { return '' }
+
+    # Heredoc bodies are payload, not command shape. Bounded for the same reason
+    # as the bash half -- the quote walk is superlinear and a PreToolUse hook
+    # killed on a timeout fails OPEN -- and with the same measured ceiling of
+    # 4,000 rather than the 20,000 an earlier revision used, which did not bound
+    # the work at all. Past the ceiling BOTH the strip and the quote blanking
+    # are skipped: skipping only the strip was not monotone, because the
+    # blanking scanner carries quote state that an apostrophe in an unstripped
+    # heredoc body can flip, blanking a real -o on a later line.
+    $oversize = ($Cmd.Length -gt 4000)
+    if ($oversize) {
+        $scan = $Cmd
+    } else {
+        $scan = Remove-StrideHeredocBodies $Cmd
+    }
+
+    # Judge SHAPE only outside quotes. Quoted spans are BLANKED rather than
+    # deleted so adjacency is preserved and a flag cannot be manufactured by
+    # splicing two sides of a removed string together. Backslash escapes are
+    # modelled. Newlines/tabs flattened first so a multi-line command is one line.
+    # Join backslash-newline CONTINUATIONS first: a continued command is one
+    # command, and splitting it at its line breaks would shatter it into
+    # fragments and lose the flag that follows.
+    $joined = $scan -replace '\\\r?\n[ \t]*', ' '
+    # Tabs become spaces, but NEWLINES ARE KEPT: a newline is a command
+    # separator in shell exactly as `;` is. Flattening it away was a real defect
+    # in both directions -- it merged a curl with an unrelated neighbour, and it
+    # hid a curl behind one so an unsafe curl on line two was never judged.
+    $joined = $joined -replace "`t", ' '
+
+    # Blank quoted spans PER LINE, so quote state resets at each newline -- the
+    # correct reading once continuations are already joined above.
+    $blankLine = {
+        param([string]$Line)
+        $b = [System.Text.StringBuilder]::new()
+        $q = ''
+        $i = 0
+        while ($i -lt $Line.Length) {
+            $c = $Line[$i]
+            if ($q -eq '') {
+                if ($c -eq '\') { [void]$b.Append(' '); $i += 2; continue }
+                if ($c -eq "'") { $q = 's'; [void]$b.Append(' '); $i++; continue }
+                if ($c -eq '"') { $q = 'd'; [void]$b.Append(' '); $i++; continue }
+                [void]$b.Append($c); $i++
+            } elseif ($q -eq 's') {
+                if ($c -eq "'") { $q = '' }
+                [void]$b.Append(' '); $i++
+            } else {
+                if ($c -eq '\') { [void]$b.Append(' '); $i += 2; continue }
+                if ($c -eq '"') { $q = '' }
+                [void]$b.Append(' '); $i++
+            }
+        }
+        return $b.ToString()
+    }
+
+    if ($oversize) {
+        # Stateless above the ceiling -- see the note above.
+        $flat = $joined
+    } else {
+        $flat = (($joined -split '\r?\n') | ForEach-Object { & $blankLine $_ }) -join "`n"
+    }
+
+    # --- Split into COMMAND SEGMENTS ---
+    # `;`, `&&` and `||` end one command and begin another. Judging the whole
+    # string instead is how a flag belonging to an unrelated neighbour gets
+    # attributed to the curl: `curl ... | tee r.json && gcc -o app` carries a -o
+    # that is not curl's, and refusing it names a flag the agent's curl does not
+    # have. A pipeline stays INSIDE its segment, because `| tee` and `| jq`
+    # genuinely are part of the curl's own command.
+    $segments = [regex]::Split($flat, '&&|\|\||;|\r?\n')
+
+    foreach ($seg in $segments) {
+        # Is curl the actual COMMAND of some stage of this segment? A mere
+        # mention is not enough -- that is what let `grep -o "curl.*/api/tasks/"`
+        # be refused as a Stride curl.
+        $isCurl = $false
+        foreach ($stage in ($seg -split '\|')) {
+            if ((Get-StrideGuardCmdWord $stage) -ceq 'curl') { $isCurl = $true }
+        }
+        if (-not $isCurl) { continue }
+
+        # --- Rule 1: never -o / --output / -O ---
+        # Token-wise, because curl CLUSTERS short options and ATTACHES values:
+        # `-o out.json`, `-oout.json` and `-sSo out.json` are all the output
+        # flag. `-O`/`--remote-name` is included deliberately: it likewise takes
+        # the body off stdout. Judging only a curl segment is what makes that
+        # safe -- `gcc -O2` and `rustc -O` are different commands, never reached.
+        foreach ($tok in ($seg -split '\s+')) {
+            if ($tok -eq '') { continue }
+            if ($tok -ceq '--output' -or $tok -clike '--output=*' -or
+                $tok -clike '--output/*') {
+                return 'flag'
+            }
+            if ($tok -ceq '--remote-name') { return 'remote' }
+            if ($tok -clike '--*') { continue }
+            if ($tok -clike '-*') {
+                if ($tok -cmatch '^-([A-Za-z]+)') {
+                    if ($Matches[1] -cmatch 'o') { return 'flag' }
+                    if ($Matches[1] -cmatch 'O') { return 'remote' }
+                }
+            }
+        }
+
+        # --- Rule 2: never pipe into a transformer ---
+        $stages = @($seg -split '\|')
+        for ($s = 1; $s -lt $stages.Count; $s++) {
+            $word = Get-StrideGuardCmdWord $stages[$s]
+            # -ccontains, not -contains: the bash half compares with [ = ],
+            # which is case-sensitive, so `| JQ` must not match here either.
+            if ($StrideGuardTransformers -ccontains $word) { return 'pipe' }
+        }
+    }
+
+    return ''
+}
+
+if ($Phase -eq 'pre') {
+    $guardKind = Get-StrideUnsafeCurlKind $Command
+    if ($guardKind) {
+        if ($guardKind -eq 'remote') {
+            $guardMsg = 'Refused: this Stride API curl uses -O/--remote-name, which writes the body to a file instead of stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. The rule is stated for -o/--output, and -O is refused for the same reason rather than as a separate rule: it takes the body off stdout. Use: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
+        } elseif ($guardKind -eq 'flag') {
+            $guardMsg = 'Refused: this Stride API curl uses -o/--output, which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so hiding it drops the diff silently and the task completes with an empty changed_files and no error. Rule: never -o/--output, never pipe into a transformer (jq, head, awk, grep, sed), always pipe into tee. Use: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
+        } else {
+            $guardMsg = 'Refused: this Stride API curl pipes into a transformer (jq, head, awk, grep or sed), which alters or truncates what the Stride hook reads from stdout. The hook needs the response verbatim to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. tee is the one blessed pipe, because it passes stdout through unchanged. Use: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
+        }
+        $payload = [ordered]@{ decision = 'block'; reason = $guardMsg }
+        Write-Output ($payload | ConvertTo-Json -Compress)
+        [Console]::Error.WriteLine("stride-hook: $guardMsg")
+        exit 2
+    }
+}
 
 # --- Determine which Stride hook to run (D220) ---
 # Routing:

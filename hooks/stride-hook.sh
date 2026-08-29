@@ -4925,11 +4925,46 @@ route_after_goal() {
 if [ -z "$PHASE" ]; then
   return 0 2>/dev/null || exit 0
 fi
+
+# When this script is SOURCED rather than executed, stop here. Sourcing exists
+# so tests can drive the functions above in isolation, and this guard must come
+# BEFORE the stdin read below.
+#
+# Kept as cheap insurance rather than as the load-bearing fix (W2131). The
+# ordering that made it load-bearing was reverted -- see the .stride.md gate
+# below -- but the hazard it names is real and costs nothing to keep out.
+# `source file` with no arguments
+# leaves the CALLER's positional parameters visible to the sourced script, so a
+# helper invoked as `d288_probe shape-gate-notice` makes $1 -- and therefore
+# $PHASE -- non-empty inside it. The phase check above then does NOT fire, and
+# without this guard the read below would consume the stdin the caller had
+# staged for one of those functions. That is not hypothetical: it silently broke
+# 19 cases across the D281 and D288 groups, which pipe records into
+# write_env_cache immediately after sourcing.
+#
+# Before the read was hoisted, the .stride.md check happened to absorb this case
+# for the temp directories those tests use. It no longer sits above the read, so
+# the protection is made explicit here rather than left as a side effect.
+if [ "${BASH_SOURCE[0]:-$0}" != "$0" ]; then
+  return 0 2>/dev/null || :
+fi
+
 if [ ! -f "$STRIDE_MD" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
-# Read Claude Code hook input from stdin
+# Read Claude Code hook input from stdin.
+#
+# W2131 note on ordering: the unsafe-curl guard below deliberately sits AFTER
+# this .stride.md gate, not before it. An earlier revision hoisted the read
+# above the gate so the guard would also fire in projects with no .stride.md,
+# on the reasoning that such a project "still loses its diff silently". That
+# reasoning was wrong: every capture path -- stride_route_command, the
+# ENV_CACHE read, self_heal_changed_files_upload, finalize_before_doing -- sits
+# below this gate, so a project without a .stride.md captures nothing in the
+# first place and has no diff to lose. The hoist bought no protection, and it
+# widened the guard's blast radius from Stride-configured projects to every
+# project on the machine, since hooks.json fires on every Bash call.
 INPUT=$(cat)
 
 # Detect jq availability once
@@ -4955,6 +4990,271 @@ fi
 
 if [ -z "$COMMAND" ]; then
   exit 0
+fi
+
+# --- W2131: refuse unsafe Stride API curl shapes (PreToolUse) --------------
+#
+# The three curl invocation rules are stated in stride-claiming-tasks,
+# stride-workflow and stride-completing-tasks. They were still broken under
+# load, and the failure is SILENT: the hook reads the API response off stdout
+# to capture the diff and refresh the env cache, so hiding stdout means the
+# diff is never captured and the task shows an empty changed_files with no
+# error at all. A written rule that cannot fail loudly needs a gate.
+#
+# Scope is deliberately narrow: a command must look like a Stride API call
+# before any shape is judged, so ordinary shell usage is never touched.
+#
+# The command text carries a Bearer token. Nothing below inspects, stores or
+# emits any part of it -- matching is on URL and flag/pipe shape only, and the
+# refusal message is a static string that never interpolates the command.
+
+# Transformers that consume or alter stdout. tee is NOT here: it is the one
+# blessed pipe, because it passes stdout through unchanged.
+STRIDE_GUARD_TRANSFORMERS="jq head awk grep sed"
+
+# Resolve the effective command word of a pipeline stage: step over an
+# `env`/`command` wrapper and any VAR=VALUE assignments, then basename it, so
+# `env FOO=1 /usr/bin/jq` and `jq` resolve alike.
+stride_guard_cmd_word() {
+  _gw_seg="${1#"${1%%[![:space:]]*}"}"
+  while : ; do
+    _gw_word="${_gw_seg%%[[:space:]]*}"
+    case "$_gw_word" in
+      env|command)
+        _gw_seg="${_gw_seg#"$_gw_word"}"
+        _gw_seg="${_gw_seg#"${_gw_seg%%[![:space:]]*}"}"
+        ;;
+      ?*=*)
+        _gw_seg="${_gw_seg#"$_gw_word"}"
+        _gw_seg="${_gw_seg#"${_gw_seg%%[![:space:]]*}"}"
+        ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "${_gw_word##*/}"
+}
+
+stride_guard_unsafe_reason() {
+  _g_cmd="$1"
+
+  # --- Cheap prefilter on the RAW text ------------------------------------
+  # Both literals must appear somewhere before any work is done. This is a
+  # prefilter ONLY -- it is deliberately run on the raw text, because a
+  # legitimate `curl -sS "$U/api/tasks/next"` carries the endpoint inside
+  # quotes and would be filtered out if this ran on the quote-blanked text.
+  # It decides nothing on its own; the confirmation below is what decides.
+  case "$_g_cmd" in *"/api/tasks/"*) : ;; *) return 1 ;; esac
+  case "$_g_cmd" in *curl*) : ;; *) return 1 ;; esac
+
+  # Heredoc bodies are payload, not command shape: a JSON body may legitimately
+  # contain "-o" or the word jq. Strip them before judging.
+  #
+  # Bounded, because _stride_strip_heredocs runs a pure-bash quote walk that is
+  # superlinear: measured on this tree, a quote-dense Stride curl costs 1.4s at
+  # 2,052 characters, 8.1s at 4,052, 25.2s at 6,052 and 57.1s at 8,052 -- a
+  # fitted exponent of about 2.7. A PreToolUse hook killed on the harness
+  # timeout does NOT refuse; it fails OPEN, the one direction this guard must
+  # never fail. The ceiling is set from that curve rather than as a round
+  # number: 4,000 holds the walk near ten seconds, leaving headroom inside a
+  # 60-second budget while staying far larger than any legitimate Stride API
+  # curl (the documented completion call is a few hundred bytes). An earlier
+  # revision used 20,000, which does not bound the work at all -- the budget is
+  # already gone by roughly 8,300 characters.
+  #
+  # Past the ceiling the whole quote-aware pipeline is skipped -- BOTH the
+  # heredoc strip and the quote blanking -- and the raw text is judged. Skipping
+  # only the strip was wrong, and the comment that used to sit here ("can only
+  # make the guard MORE likely to refuse, never less") was false: the blanking
+  # scanner carries quote state, so an apostrophe left behind in an unstripped
+  # heredoc body flips it and blanks a real -o on a later line. With no scanner
+  # there is no state to flip, so the oversized path can only add matches --
+  # monotone as a property of the code rather than as a claim about it. The cost
+  # is that a -o inside a very large quoted payload false-positives above the
+  # ceiling; that is the rare case, and a refusal carrying a clear message is
+  # recoverable where a silent bypass is not.
+  if [ "${#_g_cmd}" -gt 4000 ]; then
+    _g_oversize=1
+    _g_scan="$_g_cmd"
+  else
+    _g_oversize=0
+    _g_scan=$(_stride_strip_heredocs "$_g_cmd")
+  fi
+
+  # A backslash-newline CONTINUATION is one command written over several lines,
+  # so join those first -- splitting a continued curl at its line breaks would
+  # shatter one command into fragments and lose the flag that follows.
+  _g_joined=$(printf '%s' "$_g_scan" | awk '
+    {
+      if (buf != "") { line = buf $0 } else { line = $0 }
+      buf = ""
+      if (line ~ /\\$/) { buf = substr(line, 1, length(line) - 1) " "; next }
+      print line
+    }
+    END { if (buf != "") print buf }')
+
+  # Judge SHAPE only on the parts of the command outside quotes. A -d payload
+  # may legitimately contain "-o" or the word jq, and a rule that fired on those
+  # is one an agent learns to route around. Quoted spans are BLANKED rather than
+  # deleted so offsets and adjacency are preserved and a flag cannot be
+  # manufactured by splicing two sides of a removed string together. Backslash
+  # escapes are modelled, matching _stride_quotes above.
+  #
+  # Tabs become spaces, but NEWLINES ARE KEPT: a newline is a command separator
+  # in shell exactly as `;` is, and flattening it away was a real defect in both
+  # directions -- it merged a curl with an unrelated neighbour (refusing a
+  # compliant curl for a flag on the next line) AND hid a curl behind one (an
+  # unrelated first line meant curl was never seen in command position, so an
+  # unsafe curl on line two was allowed). awk works per line, so quote state
+  # resets at each newline, which is the correct reading once continuations are
+  # already joined above.
+  if [ "$_g_oversize" = "1" ]; then
+    # Stateless above the ceiling -- see the note above.
+    _g_flat=$(printf '%s' "$_g_joined" | tr '\t' ' ')
+  else
+  _g_flat=$(printf '%s' "$_g_joined" | tr '\t' ' ' | awk '
+    {
+      out = ""; q = ""; n = length($0); i = 1
+      while (i <= n) {
+        c = substr($0, i, 1)
+        if (q == "") {
+          if (c == "\\") { out = out " "; i += 2; continue }
+          if (c == "\047") { q = "s"; out = out " "; i++; continue }
+          if (c == "\"")   { q = "d"; out = out " "; i++; continue }
+          out = out c; i++
+        } else if (q == "s") {
+          if (c == "\047") q = ""
+          out = out " "; i++
+        } else {
+          if (c == "\\") { out = out " "; i += 2; continue }
+          if (c == "\"") q = ""
+          out = out " "; i++
+        }
+      }
+      print out
+    }')
+  fi
+
+  # --- Split into COMMAND SEGMENTS ----------------------------------------
+  # `;`, `&&` and `||` end one command and begin another. Judging the whole
+  # string instead is how a flag belonging to an unrelated neighbour gets
+  # attributed to the curl: `curl ... | tee r.json && gcc -o app` carries a -o
+  # that is not curl's, and refusing it names a flag the agent's curl does not
+  # have -- leaving no correct edit to make, which is exactly how a guard gets
+  # switched off. A pipeline stays INSIDE its segment, because `| tee` and
+  # `| jq` genuinely are part of the curl's own command.
+  # Newline is already a separator in $_g_flat; turn the other three into one too.
+  _g_segs=$(printf '%s' "$_g_flat" | sed 's/&&/\
+/g; s/||/\
+/g; s/;/\
+/g')
+
+  # Iterate segments without a pipeline, so no subshell swallows the verdict.
+  _g_oldopts=$-
+  _g_hit=''
+  _g_oldifs=$IFS
+  set -f
+  # Split on newline into positional parameters, then restore IFS immediately.
+  # The segment loop needs newline-only splitting; the TOKEN loop inside it
+  # needs ordinary whitespace splitting, so IFS cannot stay newline for both --
+  # leaving it set made every segment arrive as a single token and silently
+  # disabled every refusal.
+  IFS='
+'
+  set -- $_g_segs
+  IFS=$_g_oldifs
+  for _g_seg in "$@"; do
+    [ -n "$_g_hit" ] && break
+
+    # Is curl the actual COMMAND of some stage of this segment? A mere mention
+    # is not enough -- that is what let `grep -o "curl.*/api/tasks/" f` and
+    # `grep -rn "/api/tasks/" skills/ | grep curl` be refused as Stride curls.
+    _g_is_curl=0
+    _g_stage_rest="$_g_seg"
+    while : ; do
+      _g_stage="${_g_stage_rest%%|*}"
+      case "$(stride_guard_cmd_word "$_g_stage")" in curl) _g_is_curl=1 ;; esac
+      case "$_g_stage_rest" in *"|"*) _g_stage_rest="${_g_stage_rest#*|}" ;; *) break ;; esac
+    done
+    [ "$_g_is_curl" = "1" ] || continue
+
+    # --- Rule 1: never -o / --output / -O ---------------------------------
+    # Token-wise, because curl CLUSTERS short options and ATTACHES their values:
+    # `-o out.json`, `-oout.json` and `-sSo out.json` are all the output flag.
+    # `-O`/`--remote-name` is included deliberately: it likewise takes the body
+    # off stdout, which is the failure this rule is about. Judging only a curl
+    # segment is what makes including it safe -- `gcc -O2` and `rustc -O` are
+    # different commands and are never reached.
+    for _g_tok in $_g_seg; do
+      case "$_g_tok" in
+        --output|--output=*|--output/*) _g_hit=flag; break ;;
+        --remote-name) _g_hit=remote; break ;;
+        --*) : ;;
+        -*)
+          _g_cluster="${_g_tok#-}"
+          _g_alpha=''
+          while [ -n "$_g_cluster" ]; do
+            case "$_g_cluster" in
+              [A-Za-z]*) _g_alpha="$_g_alpha${_g_cluster%"${_g_cluster#?}"}"
+                         _g_cluster="${_g_cluster#?}" ;;
+              *) break ;;
+            esac
+          done
+          case "$_g_alpha" in
+            *o*) _g_hit=flag; break ;;
+            *O*) _g_hit=remote; break ;;
+          esac
+          ;;
+      esac
+    done
+    [ -n "$_g_hit" ] && break
+
+    # --- Rule 2: never pipe into a transformer ----------------------------
+    _g_rest="$_g_seg"
+    while : ; do
+      case "$_g_rest" in *"|"*) : ;; *) break ;; esac
+      _g_rest="${_g_rest#*|}"
+      _g_word=$(stride_guard_cmd_word "$_g_rest")
+      for _g_t in $STRIDE_GUARD_TRANSFORMERS; do
+        if [ "$_g_word" = "$_g_t" ]; then _g_hit=pipe; break; fi
+      done
+      [ -n "$_g_hit" ] && break
+    done
+  done
+  case "$_g_oldopts" in *f*) : ;; *) set +f ;; esac
+
+  case "$_g_hit" in
+    flag)   printf 'flag';   return 0 ;;
+    remote) printf 'remote'; return 0 ;;
+    pipe)   printf 'pipe';   return 0 ;;
+  esac
+  return 1
+}
+
+if [ "$PHASE" = "pre" ]; then
+  STRIDE_GUARD_KIND=$(stride_guard_unsafe_reason "$COMMAND" || true)
+  if [ -n "$STRIDE_GUARD_KIND" ]; then
+    if [ "$STRIDE_GUARD_KIND" = "remote" ]; then
+      STRIDE_GUARD_MSG="Refused: this Stride API curl uses -O/--remote-name, which writes the body to a file instead of stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. The rule is stated for -o/--output, and -O is refused for the same reason rather than as a separate rule: it takes the body off stdout. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
+    elif [ "$STRIDE_GUARD_KIND" = "flag" ]; then
+      STRIDE_GUARD_MSG="Refused: this Stride API curl uses -o/--output, which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so hiding it drops the diff silently and the task completes with an empty changed_files and no error. Rule: never -o/--output, never pipe into a transformer (jq, head, awk, grep, sed), always pipe into tee. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
+    else
+      STRIDE_GUARD_MSG="Refused: this Stride API curl pipes into a transformer (jq, head, awk, grep or sed), which alters or truncates what the Stride hook reads from stdout. The hook needs the response verbatim to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. tee is the one blessed pipe, because it passes stdout through unchanged. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
+    fi
+    if [ "$HAS_JQ" = "true" ]; then
+      printf '%s' "$STRIDE_GUARD_MSG" | jq -Rsc '{decision:"block",reason:.}' 2>/dev/null \
+        || printf '{"decision":"block","reason":"%s"}\n' "$STRIDE_GUARD_MSG"
+    else
+      # Hand-rolled JSON. The reason is a static string chosen above, so no
+      # caller-controlled data is interpolated -- but "static" is not the same
+      # as "needs no escaping": both messages quote the tee path, so the value
+      # carries literal double quotes that would close the JSON string early.
+      # Escaping them here is what keeps the no-jq path emitting the same valid,
+      # compact object the jq path does.
+      printf '{"decision":"block","reason":"%s"}\n' "${STRIDE_GUARD_MSG//\"/\\\"}"
+    fi
+    printf 'stride-hook: %s\n' "$STRIDE_GUARD_MSG" >&2
+    exit 2
+  fi
 fi
 
 # --- Determine which Stride hook to run (D220) ---

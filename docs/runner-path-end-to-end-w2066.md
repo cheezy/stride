@@ -574,7 +574,7 @@ mix hex.outdated                                # vetoes before_doing if red
 #    literal command text — the same extraction stride-hook.sh uses.
 U=$(grep -E '\*\*API URL:\*\*' .stride_auth.md | grep -oE 'https?://[A-Za-z0-9._:/-]+' | head -n1)
 T=$(grep -E '^\- \*\*API Token:\*\*' .stride_auth.md | grep -oE '`[^`]+`' | head -n1 | tr -d '`')
-curl -sS -H "Authorization: Bearer $T" "$U/api/tasks/<ID>" -o .stride/.verify-G.json
+curl -sS -H "Authorization: Bearer $T" "$U/api/tasks/<ID>" | tee .stride/.verify-G.json
 
 jq -r '.data | "col=\(.column_id) status=\(.status) completed_at=\(.completed_at)"' .stride/.verify-G.json
 jq -e '.data.reviewer_result | has("status") and has("issue_counts") and has("issues")

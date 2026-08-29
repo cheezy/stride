@@ -28,16 +28,36 @@ fi
 
 `$s[0] + {…}` **is** the whole-object copy: jq's object merge makes "copy everything, overlay exactly five keys" mechanical rather than remembered, which is the strongest available reading of the set relation stated below. The `issue_counts` sum is spelled out per severity deliberately — `[.issue_counts[]] | add` would also sum unrecognized severity keys and contradict the mapping rule below.
 
-**MANDATORY self-check for Source A** — prints three values and no payload:
+**MANDATORY self-check for Source A** — prints six values and no payload:
 
 ```bash
 jq -n --slurpfile s "$BLOCK" --slurpfile r "$MERGED" --argjson n "$TASK_CRITERION_LINES" '
-  { dropped_sections: (($s[0]|keys) - ($r[0]|keys)),
-    project_checks_equal: ((($r[0].project_checks // [])|length) == (($s[0].project_checks // [])|length)),
-    acceptance_criteria_equal: (($r[0].acceptance_criteria|length) == $n) }'
+  ($s[0].acceptance_criteria // []) as $ac
+  | [$ac[] | select(.status=="not_met" and ((.evidence // "") | startswith("PENDING COMMIT — ")))] as $pending
+  | ([$ac[] | select(.status=="not_met")] | length) as $not_met
+  | ([($s[0].issues // [])[] | select(.category=="acceptance_criteria")] | length) as $ac_issues
+  | { dropped_sections: (($s[0]|keys) - ($r[0]|keys)),
+      project_checks_equal: ((($r[0].project_checks // [])|length) == (($s[0].project_checks // [])|length)),
+      acceptance_criteria_equal: (($r[0].acceptance_criteria|length) == $n),
+      commit_pending_scope_ok: (($not_met - ($pending|length)) == $ac_issues),
+      commit_pending_shape_ok: (([$pending[]
+        | select((.criterion // "") | test("\\bpush|\\btag|\\breleas|\\bdeploy|\\bpull request|\\bPR\\b"; "i"))] | length) == 0),
+      pin_terms: { not_met: $not_met, sentinel: ($pending|length), ac_issues: $ac_issues } }'
 ```
 
-`dropped_sections` must be `[]` and both booleans `true`. A failure means you trimmed the output: **fix the copy, never weaken the check.** For the acceptance-criteria mismatch specifically, **re-run the reviewer — never truncate or pad the array to force the count.**
+`dropped_sections` must be `[]` and **all four** booleans `true`. `pin_terms` is diagnostic, not a pass/fail value — it exists so a failure tells you *which* term broke. A failure means you trimmed the output: **fix the copy, never weaken the check.** For the acceptance-criteria mismatch specifically, **re-run the reviewer — never truncate or pad the array to force the count.**
+
+`commit_pending_scope_ok` is the commit-pending carve-out's scope pin, and it runs here because this is the one self-check that already holds `$BLOCK` open before Step 7 deletes it — making the pin free rather than a new harness. The invariant: **every `"not_met"` criterion is either paired with an `acceptance_criteria` issue or carries the sentinel — never neither, never both.** **The sentinel count is pinned to a row that is BOTH `status: "not_met"` AND whose `evidence` starts with the sentinel** — the status filter matters, because a sentinel can only ever legally sit on a `not_met` row, and without the filter a stray sentinel on a `met` row would silently cancel a genuinely dropped pairing. A whole-file `grep` for the literal is likewise NOT this check and is inflated by the string appearing in criterion text, in `summary`, or in a `note`. On a review with no carve-out the sentinel count is `0` and the check reduces to the pairing rule that always held, so it costs a dispatch without `commit_pending` nothing.
+
+**Be exact about what this detects, because it is narrower than it looks.** It catches a **half-application** — a sentinel written without the matching suppression, or a suppression without the sentinel. It also stops a stray sentinel on a `met` row from cancelling a genuinely dropped pairing, though **it does not by itself report that stray sentinel**: the status filter removes such a row from every term, so a block whose *only* defect is a misplaced sentinel passes. **It does NOT catch mis-qualification.** A reviewer that wrongly decides a criterion qualifies and then applies the carve-out's *complete* documented shape moves the sentinel count up and the paired-issue count down by the same amount, so the equality still holds and the pin still returns `true`. That is one judgement error, not the two compensating errors the "wrong-but-balanced" caveat below describes, and it is the failure mode the three-part AND — not this pin — exists to prevent. **Do not read a green pin as confirmation that the carve-out was correctly granted; it confirms only that whatever was granted was applied consistently.**
+
+`commit_pending_shape_ok` is the one piece of mis-qualification that *is* mechanically checkable, and it covers the explicit never-list: a sentinel-bearing criterion whose text mentions pushing, tagging, releasing, deploying, or opening a pull request is refused outright. It is a keyword heuristic, not a proof — it cannot read leg (b) or leg (c) — but it converts the never-list from prose into a check.
+
+**On failure, do not submit — and read `pin_terms` before choosing the remedy, because the three failing conditions need different ones.** If `sentinel` exceeds the carve-outs you actually intended, a criterion was wrongly granted: re-dispatch the reviewer with `<N>` incremented and the failure named. If `ac_issues` is short, a pairing was dropped: same remedy. If `commit_pending_shape_ok` is `false`, the carve-out reached the never-list: drop the `commit_pending` assertion and review normally. **And one case is neither**: if you asserted no `commit_pending` at all and `sentinel` is nonzero, the sentinel arrived as *data* — most often a reviewer correctly quoting a criterion whose own text embeds it. Neither remedy above applies; treat it as the evidence-collision case the sentinel rule below governs, and have the reviewer re-emit that `evidence` without leading with the literal.
+
+Two limits, stated rather than papered over: this is **detection after the fact, not prevention**, and being count arithmetic it is satisfied by a wrong-but-balanced block. It is the strongest mechanical control available for a prose contract, not a proof — and per the paragraph above, it is not a control on qualification at all.
+
+**Both lookups are total on purpose — `(.acceptance_criteria // [])` and `(.evidence // "")`.** The block is reviewer-authored JSON, and all four values are computed in one `jq -n`, so an unguarded `.acceptance_criteria[]` on an absent key (`Cannot iterate over null`) or an unguarded `.evidence` that is `null` on **any** row — including an unrelated `"met"` one — would abort the whole invocation and take `dropped_sections`, `project_checks_equal` and `acceptance_criteria_equal` down with it. That would make a previously-working check fail on blocks it used to handle, which is a worse outcome than the one this pin prevents. The guards convert those inputs into an honest `false` instead, which is the failure vocabulary this check actually documents. Mirror the same two guards in the Python equivalent sanctioned below.
 
 **Never `cat`, `Read`, or otherwise print the WHOLE block file into your context.** Every jq invocation in this file either redirects to a file or prints only counts and booleans. Reading a bounded slice of it is sanctioned and expected — the fix-the-issues step in the orchestrator selects individual `issues[]` entries, which is the point of keeping the detail on disk rather than in the summary. Printing the block costs exactly the tokens this design exists to save, and re-exposes any diff content the block quotes. Where jq is unavailable, an equivalent Python `json.load` plus the same dict-merge shown below is acceptable — provided it writes to a file and prints only the self-check result.
 
@@ -77,6 +97,36 @@ assert len(reviewer_result.get("project_checks", [])) == len(structured.get("pro
 task_criterion_lines = [c for c in (task["acceptance_criteria"] or "").split("\n") if c.strip()]
 assert len(structured["acceptance_criteria"]) == len(task_criterion_lines), \
     "acceptance_criteria count must equal the task's criterion-line count — re-run the reviewer, do not truncate or pad"
+
+# Commit-pending scope pin — the Source B half of the check Source A runs as
+# `commit_pending_scope_ok`. Source B is reachable whenever the reviewer's block
+# write fails and it emits the fence inline, so leaving it out would be a
+# documented path around a control installed specifically to bound the carve-out.
+# Invariant: every "not_met" criterion is EITHER paired with an
+# acceptance_criteria issue OR carries the sentinel — never neither, never both.
+# The .get()/or-"" guards mirror the // [] and // "" guards in the Source A jq:
+# the block is reviewer-authored, and a null evidence on any row (even a "met"
+# one) must yield an honest failure here, never a TypeError.
+import re
+_criteria = structured.get("acceptance_criteria") or []
+_not_met = sum(1 for c in _criteria if c.get("status") == "not_met")
+# The status filter mirrors the jq: a sentinel can only ever legally sit on a
+# not_met row, and without the filter a stray sentinel on a met row silently
+# cancels a genuinely dropped pairing.
+_pending = [c for c in _criteria
+            if c.get("status") == "not_met"
+            and (c.get("evidence") or "").startswith("PENDING COMMIT — ")]
+_paired = sum(1 for i in (structured.get("issues") or [])
+              if i.get("category") == "acceptance_criteria")
+assert _not_met - len(_pending) == _paired, (
+    "commit-pending scope pin failed — do not submit. Terms: "
+    f"not_met={_not_met} sentinel={len(_pending)} ac_issues={_paired}. "
+    "Read the terms before choosing a remedy, per the Source A guidance above.")
+# The never-list, mechanically: a carve-out never reaches a criterion about
+# pushing, tagging, releasing, deploying, or opening a pull request.
+_never = re.compile(r"\bpush|\btag|\breleas|\bdeploy|\bpull request|\bPR\b", re.I)
+assert not [c for c in _pending if _never.search(c.get("criterion") or "")], \
+    "commit-pending carve-out reached the never-list — drop the commit_pending assertion and review normally"
 
 # D248: write the merged object to the SAME absolute $MERGED path Source A uses
 # (.stride/.reviewer-result-<IDENTIFIER>-r<N>.json under the resolved project

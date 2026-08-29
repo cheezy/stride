@@ -223,12 +223,15 @@
 #      fleet runs stay byte-identical to each other and to the pre-change
 #      baseline.
 #
-# The suite is at 139 cases. The current fleet baseline is exit 1 with
-# ok 53, missing 2, stale 0, unexpected 0, defect 0, unverifiable 0, 0 cells
-# not applicable and 2 deferred. (W2118 moved it there by recording
-# stride-opencode-lite's reason-code-vocabulary cell as deferred rather than
-# not_applicable; W2117 had moved stride-lite's cell to deferred just before,
-# from required. Before those, D291 had moved it to missing 3 and 0 deferred
+# The suite is at 139 cases. The current fleet baseline is exit 0 with
+# ok 55, missing 0, stale 0, unexpected 0, defect 0, unverifiable 0, 0 cells
+# not applicable and 2 deferred -- the first exit-0 run this gate has had.
+# (W2119 moved it there by anchoring decision-matrix-authority and
+# row-precedence in stride-opencode-lite, closing the last two MISSING cells.
+# W2118 had moved it to missing 2 by recording that port's
+# reason-code-vocabulary cell as deferred rather than not_applicable; W2117 had
+# moved stride-lite's cell to deferred just before, from required. Before
+# those, D291 had moved it to missing 3 and 0 deferred
 # by bringing stride-opencode-lite into scope: the port had been skipped as
 # absent while still being printed among the clean repos, so its cells were
 # never counted.
@@ -260,12 +263,35 @@
 #
 #   Under --self-test the codes mean: 0 every case passed, 1 at least one case
 #   failed, 2 the temp dir could not be created or the flags were combined
-#   wrongly. Note the gate's own correct result against the real fleet today is
-#   exit 1 -- anchors are still MISSING (D285 corrected this line, which said
-#   every anchor was missing because no port had adopted one; D291 moved the
-#   figure again -- see the baseline note above rather than repeating it) -- which is why this script is deliberately NOT wired into the
-#   pass/fail hook suite the way its siblings are. Run --self-test to prove
-#   the gate; run it bare to see the fleet's drift.
+#   wrongly. The bare fleet run now exits 0 -- see the baseline note above
+#   rather than repeating the figure here.
+#
+#   That retires the reason this clause used to give. Earlier revisions said
+#   the correct result was exit 1 because anchors were still MISSING, and used
+#   that as the justification for keeping this script out of the pass/fail
+#   suite; D285 and D291 each corrected the figure without revisiting the
+#   justification standing on it. The figure no longer supports it, so the
+#   decision is restated rather than inherited.
+#
+#   The script STAYS OUT of the pass/fail suite, on different grounds. A bare
+#   run measures eleven subjects: this repository, eight sibling ports, and
+#   two vendored catalogs. Ten of the eleven are outside this repo's control,
+#   so a red result usually means another repository has work in flight rather
+#   than that the change under test broke anything -- and a per-task gate has
+#   to be a function of the change under test. This repo IS among the subjects,
+#   so its own anchors drifting would redden the run too; that case is real but
+#   it is one subject in eleven, and it is the one already covered by the
+#   self-test the suite does gate. STALE compounds that: it is the correct
+#   intermediate state of a deliberate canon version bump, so gating on it
+#   would make a planned rollout read as a failure.
+#
+#   A recorded deferral is NOT among the reasons, and that is worth stating
+#   because it is the objection a reader expects: deferred cells cannot make
+#   this script exit non-zero, and today's two coexist with exit 0.
+#
+#   What IS gated is --self-test, as bash Test Group 30 and PowerShell Group
+#   32 -- hermetic, synthetic fixtures only, a function of this script alone.
+#   Run --self-test to prove the gate; run it bare to see the fleet's drift.
 #
 #   Note 2 does NOT mean what it means in check-ps1-compat.sh, where it is
 #   reserved for the machine lacking pwsh. This script shells out to nothing
@@ -320,6 +346,10 @@ synthetic fixture tree. Neither is needed in normal use.
 
 Exit codes: 0 all clear, 1 drift found, 2 no verdict possible.
 The PowerShell half accepts these same spellings as well as its own.
+
+This scan is a release-time step and is deliberately NOT in the pass/fail
+suite; only --self-test is gated. The reasoning is in the EXIT CODES header
+of this file and in the canon's Release gate section.
 USAGE
 }
 

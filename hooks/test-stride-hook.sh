@@ -10467,11 +10467,15 @@ fi
 # Runs the SELF-TEST of check-port-canon.sh and check-port-canon.ps1, and
 # cross-checks the two against each other.
 #
-# NEVER the fleet scan. Its correct result today is exit 1 -- the fleet has not
-# adopted the anchor contract yet -- so registering it here would install a
-# permanently-red group, and a permanently-red group trains people to ignore
-# the suite. The fleet scan stays an ungated release-time step, exactly as
-# README describes it.
+# NEVER the fleet scan -- but NOT because it is red. It exits 0 as of W2119;
+# the fleet has adopted the anchor contract. That was the old reason and it is
+# retired. The reason that holds now: a bare scan measures eleven subjects and
+# ten of them are outside this repository's control, so a red result would usually mean another
+# repository has work in flight rather than that the change under test broke
+# something -- and STALE is the correct state of a deliberate canon version
+# bump, not a fault. If you are here to register the fleet scan, read the EXIT
+# CODES header of scripts/check-port-canon.sh and the canon's Release gate
+# section before deciding; do not re-derive it from this comment.
 #
 # TWO DIFFERENT REASONS A LEG CAN NOT RUN, and they are deliberately not the
 # same thing:

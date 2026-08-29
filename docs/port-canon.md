@@ -47,6 +47,27 @@ gate itself — a record, not a contract.
 > the decision in the entry it governs, or in this section when it governs the
 > gate rather than a rule.
 
+> **The fleet scan stays out of the pass/fail suite, and the reason changed
+> under it.** Until W2121 the script's own header gave its exit-1 result as the
+> justification — anchors were still MISSING fleet-wide, so wiring it in would
+> have installed a permanently-red gate. W2119 closed the last of
+> the last of those cells, and the scan no longer reports drift, which retires
+> that reason entirely. Take the result from a live run, not from this
+> sentence.
+> It is not wired in anyway, on grounds that do not depend on the tally: a bare
+> run measures eleven subjects -- this repository, eight sibling ports and two
+> vendored catalogs -- ten of which this repo does not control, so a red result
+> usually means another repository has work in flight rather than that the
+> change under test broke anything, and STALE is the correct intermediate state
+> of a deliberate version bump rather than a fault. A recorded deferral is not
+> one of the grounds — deferred cells cannot make the script exit non-zero.
+> What is gated is `--self-test`, which is hermetic. Revisit this if the scan
+> ever gains a mode scoped to a single repository — and before wiring it into
+> anything automated, close **D301**, which records that the `--ports-parent`
+> and `--canon` overrides are not confined to the fleet trees. That is harmless
+> while the scan is advisory and a caller needs local shell access to set argv;
+> it is the property that has to hold first if that ever stops being true.
+
 ## How to read this file
 
 Every rule below is one H3 entry with the same seven parts in the same order:
@@ -166,7 +187,7 @@ on that first run, including entries whose rule the port already carried in
 substance (`verdict-note` was the clearest case: D240 ported it fleet-wide, and
 it still reported MISSING everywhere until the anchors were placed). That first
 report was a work list, not a verdict on the fleet or on the checker, and it has
-since been largely worked off — **do not read the passage above as current fleet
+since been worked off — **do not read the passage above as current fleet
 state.** The live run is the only authority on that; take the tally from
 `scripts/check-port-canon.sh`, never from a sentence in this file. **The correct
 response to a MISSING cell is to place the anchor, never to edit `applies_to` to

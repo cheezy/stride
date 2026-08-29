@@ -339,8 +339,9 @@ absent.
 
 **(v1.71.0+)** bash Group 30 and PowerShell Group 32 run the **self-test** of
 both halves of the port-canon drift check, in both suites, and cross-verify the
-two against each other. They never run the fleet scan: its correct result today
-is exit 1, and a permanently-red group teaches people to ignore the suite.
+two against each other. They never run the fleet scan -- not because it is red (it is not, as of
+W2119) but because it measures other checkouts this repository does not
+control. See the fleet-scan paragraph below.
 
 The cross-verification is what makes the pair worth having. `30c`/`32c` compare
 the two halves' **case-name sets**, so a case renamed or lost on one side goes
@@ -514,10 +515,13 @@ PowerShell half builds an object graph with `ConvertFrom-Json`. That is
 deliberate — two readings of one document that reach the same verdict are worth
 more than one reading run twice — and the suites hold them to it (below).
 
-**The FLEET SCAN is still a release-time step that nothing runs for you.** Its
-correct result today is exit 1, because the fleet has not adopted the anchor
-contract yet, so it cannot be a pass/fail suite group without installing a
-permanently-red one. **The SELF-TEST is different and is now gated**: both
+**The FLEET SCAN is still a release-time step that nothing runs for you.** It
+exits 0 as of W2119, which closed the last MISSING cells; consult
+a live run rather than this sentence for today's result. It stays out of the
+pass/fail suite regardless, because a bare run measures eleven subjects -- this
+repository, eight sibling ports and two vendored catalogs -- ten of which this
+repo does not control — the reasoning is recorded in the
+script's own EXIT CODES header and in the canon's Release gate section. **The SELF-TEST is different and is now gated**: both
 halves run as bash Test Group 30 and PowerShell Test Group 32, and those groups
 also cross-verify the two halves against each other.
 

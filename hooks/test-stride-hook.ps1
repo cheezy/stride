@@ -9712,7 +9712,8 @@ if ($g29Missing.Count -gt 0) {
 #         own self-test suites and by the case-name equality in 32c, but no
 #         group runs them through the fixture-tree diff. The evidence that the
 #         two halves agree across the WHOLE space is the fleet-scan diff, and
-#         that cannot be a test group because its correct result today is red.
+#         that is not a test group because it measures other checkouts this
+#         repository does not control (it is no longer red; see sh Group 30).
 #         The fleet scan is never registered anywhere, in either suite.
 #
 # STILL BASH-ONLY, with the reason:
@@ -10378,8 +10379,8 @@ if ($g31Missing.Count -gt 0) {
 # ============================================================
 # Test Group 32: W2107 — the port-canon drift check, both halves
 # ============================================================
-# The mirror of sh Group 30. Same rule: the SELF-TEST, never the fleet scan,
-# whose correct result today is exit 1.
+# The mirror of sh Group 30. Same rule: the SELF-TEST, never the fleet scan --
+# which exits 0 as of W2119, so the reason is not redness. See sh Group 30.
 #
 # 32c compares the two halves' CASE-NAME SETS. 32d is the fixture-tree
 # cross-verification, modelled on Group 28b: both halves are run against one

@@ -57,6 +57,8 @@ SNAP_BASE_RESOLVED_DONE
 STRIDE_HOOK_TIME_SOURCE
 STRIDE_HOOK_TIMEOUT_OVERRIDE
 STRIDE_HOOK_TIMEOUT_TOOL
+STRIDE_ALLOW_STOP
+STRIDE_STOP_GATE_MAX_BLOCKS
 STRIDE_OPEN_WINDOW_MAX_AGE_SECS
 TASK_BASE_REF
 TASK_BASE_REF_OWNER
@@ -11523,6 +11525,410 @@ else
   echo -e "  ${GREEN}PASS${RESET}: 33v: a plain 422 records nothing and stays quiet"
   PASS=$((PASS + 1))
 fi
+
+# ============================================================
+# Test Group 34: W2124 Stop gate — refuse to end a session while
+# a claimable task remains
+# ============================================================
+# The consumer of Group 33's loop-state file. A Stop gate's worst failure is
+# not "failed to block" but "wedged the session", so the permit paths and the
+# bounded re-block guard carry more weight here than the block path does.
+echo ""
+echo "=== Test Group 34: W2124 Stop gate (bash) ==="
+
+STOP_GATE="$SCRIPT_DIR/stride-stop-gate.sh"
+G34_TOKEN='stride_dev_FAKE_G34_SENTINEL'
+
+# A fake curl that emulates `-w '\n%{http_code}'` by printing the body, a
+# newline, then the status. Getting that emulation wrong is the likeliest way
+# this whole group passes for the wrong reason, so the shape is explicit.
+# $1=stub dir  $2=body  $3=code  $4=forced exit (0 = normal)
+g34_stub() {
+  local _dir="$1" _body="$2" _code="$3" _exit="${4:-0}"
+  mkdir -p "$_dir"
+  cat > "$_dir/curl" << G34CURL
+#!/usr/bin/env bash
+echo "ARGS: \$*" >> "$_dir/curl.log"
+[ "$_exit" -ne 0 ] && exit $_exit
+printf '%s\n%s' '$_body' '$_code'
+exit 0
+G34CURL
+  chmod +x "$_dir/curl"
+}
+
+# Fresh project with a .stride_auth.md carrying a FAKE token — never the real
+# file, whose value must not enter this suite.
+g34_proj() {
+  local _d="$TMPDIR_TEST/w2124-$1"
+  rm -rf "$_d"; mkdir -p "$_d/.stride"
+  printf '# auth\n- **API URL:** `https://api.example.invalid`\n- **API Token:** `%s`\n' \
+    "$G34_TOKEN" > "$_d/.stride_auth.md"
+  printf '%s' "$_d"
+}
+
+g34_state() {
+  printf '{"identifier":"%s","needs_review":%s,"completed_at":"2026-08-30T00:00:00Z","session_id":"s"}\n' \
+    "$2" "$3" > "$1/.stride/.loop-state.json"
+}
+
+# Runs the gate with the stub on PATH. Captures stdout and stderr SEPARATELY,
+# because AC8 has to be proved on both streams independently.
+g34_run() {
+  local _proj="$1" _stub="$2" _stdin="${3:-\{\}}"
+  G34_OUT=$(printf '%s' "$_stdin" | CLAUDE_PROJECT_DIR="$_proj" PATH="$_stub:$PATH" \
+    bash "$STOP_GATE" 2>"$TMPDIR_TEST/g34.err")
+  G34_RC=$?
+  G34_ERR=$(cat "$TMPDIR_TEST/g34.err" 2>/dev/null || printf '')
+}
+
+G34_OK_BODY='{"data":{"identifier":"W2124","needs_review":false}}'
+
+# 34a: AC1 — loop state says a completion went unfollowed, and the API has a
+# task. This is the only condition that blocks.
+G34_P=$(g34_proj a); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-a"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34a: a claimable task blocks the stop" 2 "$G34_RC"
+assert_eq "34a: exactly one /api/tasks/next call" \
+  "1" "$(grep -c 'ARGS:' "$G34_S/curl.log" 2>/dev/null | tr -d ' ')"
+
+# 34b: AC2 — and it names the CLAIMABLE task, not the completed one. The
+# negative assertion is the whole value of this case: naming the loop-state
+# identifier would tell the agent to claim work it has already finished, and a
+# fixture reusing one identifier for both would never catch it.
+assert_contains "34b: the block message names the claimable task" "W2124" "$G34_OUT"
+if printf '%s' "$G34_OUT" | grep -q 'W2123'; then
+  echo -e "  ${RED}FAIL${RESET}: 34b: the block message must NOT name the completed task"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34b: the block message does not name the completed task"
+  PASS=$((PASS + 1))
+fi
+
+# 34c: AC3 — no loop-state file. The stub is PRESENT BUT UNHIT, which is
+# stronger evidence than omitting it: it proves the gate short-circuits before
+# the network rather than merely surviving without it.
+G34_P=$(g34_proj c)
+G34_S="$TMPDIR_TEST/w2124-stub-c"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34c: no loop-state file permits the stop" 0 "$G34_RC"
+if [ -f "$G34_S/curl.log" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 34c: must not call the API when there is no loop state"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34c: no API call when there is no loop state"
+  PASS=$((PASS + 1))
+fi
+
+# 34d: AC4 — transport failure (curl exits non-zero).
+G34_P=$(g34_proj d); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-d"; rm -rf "$G34_S"; g34_stub "$G34_S" "" 000 7
+g34_run "$G34_P" "$G34_S"
+assert_exit "34d: a transport failure permits the stop" 0 "$G34_RC"
+
+# 34d2: AC4 AND AC5 in one wire event. An empty Ready queue answers 404 with an
+# {"error": ...} body — verified against the live API, not assumed — so "no
+# task available" and "non-200" are the same observation.
+G34_P=$(g34_proj d2); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-d2"; rm -rf "$G34_S"
+g34_stub "$G34_S" '{"error":"No tasks available in Ready column matching your capabilities"}' 404
+g34_run "$G34_P" "$G34_S"
+assert_exit "34d2: the real empty-queue 404 permits the stop" 0 "$G34_RC"
+
+# 34d3: AC4 — a server error.
+G34_P=$(g34_proj d3); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-d3"; rm -rf "$G34_S"; g34_stub "$G34_S" '{"error":"boom"}' 500
+g34_run "$G34_P" "$G34_S"
+assert_exit "34d3: a 500 permits the stop" 0 "$G34_RC"
+
+# 34d4: AC4 — no credentials at all. Stub present but unhit.
+G34_P=$(g34_proj d4); g34_state "$G34_P" W2123 false; rm -f "$G34_P/.stride_auth.md"
+G34_S="$TMPDIR_TEST/w2124-stub-d4"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34d4: no auth file permits the stop" 0 "$G34_RC"
+if [ -f "$G34_S/curl.log" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 34d4: must not call the API without a resolved URL and token"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34d4: no API call without a resolved URL and token"
+  PASS=$((PASS + 1))
+fi
+
+# 34e: AC5 — a 200 carrying no usable task, in both shapes the API could send.
+G34_P=$(g34_proj e); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-e"; rm -rf "$G34_S"; g34_stub "$G34_S" '{"data":null}' 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34e: a 200 with null data permits the stop" 0 "$G34_RC"
+G34_S="$TMPDIR_TEST/w2124-stub-e2"; rm -rf "$G34_S"; g34_stub "$G34_S" '{"data":{"identifier":""}}' 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34e: a 200 with an empty identifier permits the stop" 0 "$G34_RC"
+
+# 34f: AC6 — the completion needs human review, so the loop legitimately stops.
+# Stub present but unhit proves the short-circuit precedes the network.
+G34_P=$(g34_proj f); g34_state "$G34_P" W2123 true
+G34_S="$TMPDIR_TEST/w2124-stub-f"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34f: needs_review=true permits the stop" 0 "$G34_RC"
+if [ -f "$G34_S/curl.log" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 34f: must not call the API when the completion needs review"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34f: no API call when the completion needs review"
+  PASS=$((PASS + 1))
+fi
+
+# 34f2: every malformed loop-state shape lands on the same permit rule as AC6 —
+# only the literal JSON boolean false proceeds.
+for _shape in '{"identifier":"W1","needs_review":"false"}' '{"identifier":"W1","needs_review":null}' '{"identifier":"W1"}' 'not json at all'; do
+  G34_P=$(g34_proj f2); printf '%s\n' "$_shape" > "$G34_P/.stride/.loop-state.json"
+  G34_S="$TMPDIR_TEST/w2124-stub-f2"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+  g34_run "$G34_P" "$G34_S"
+  assert_exit "34f2: a malformed loop state permits the stop" 0 "$G34_RC"
+done
+
+# 34g: AC7 — asserted from curl's ARGV, never from the clock. A timing-based
+# test of a timeout is the D241 load-sensitivity trap this suite documents at
+# its own tail.
+G34_P=$(g34_proj g); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-g"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S"
+# The needles deliberately omit the leading `--`: assert_contains runs
+# `grep -qF "$needle"` with no `--` terminator, and this repo's grep is ugrep,
+# which parses a leading-dash pattern as an option and exits 2 — so the
+# assertion would fail against a log that does contain the flag.
+assert_contains "34g: the API call is bounded by max-time" "max-time 5" \
+  "$(cat "$G34_S/curl.log" 2>/dev/null || printf '')"
+assert_contains "34g: and by connect-timeout" "connect-timeout 3" \
+  "$(cat "$G34_S/curl.log" 2>/dev/null || printf '')"
+
+# 34h: the bounded re-block guard. This is the case that keeps the gate from
+# wedging a session, which is a worse outcome than never blocking at all.
+G34_P=$(g34_proj h); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-h"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S"; G34_R1=$G34_RC
+g34_run "$G34_P" "$G34_S"; G34_R2=$G34_RC
+g34_run "$G34_P" "$G34_S"; G34_R3=$G34_RC
+assert_eq "34h: the gate refuses twice then yields" "2 2 0" "$G34_R1 $G34_R2 $G34_R3"
+# The spent record is RETAINED, deliberately. Deleting it here is what made the
+# budget per-counter-lifetime rather than per-completion: the next stop started
+# from zero and the cycle ran 2,2,0,2,2,0 forever. Retaining it is what makes
+# "at most N refusals for ONE unfollowed completion" true, and 34r asserts the
+# consequence. It is still cleared by the two events that end a completion's
+# life, which 34h2 and 34h3 cover.
+assert_contains "34h: the spent record is retained so the budget stays spent" \
+  "W2123" "$(cat "$G34_P/.stride/.stop-gate-blocks" 2>/dev/null || printf 'MISSING')"
+
+# 34h2: the counter is keyed on the COMPLETED identifier, so a different
+# completion starts a fresh budget rather than inheriting a spent one.
+G34_P=$(g34_proj h2); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-h2"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S"
+g34_state "$G34_P" W9999 false
+g34_run "$G34_P" "$G34_S"
+assert_exit "34h2: a new completion restarts the block budget" 2 "$G34_RC"
+assert_contains "34h2: and the counter is re-keyed to it" "W9999 1" \
+  "$(cat "$G34_P/.stride/.stop-gate-blocks" 2>/dev/null || printf '')"
+
+# 34h3: removing the loop state clears the counter, so a later unrelated
+# completion never inherits a stale budget.
+G34_P=$(g34_proj h3); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-h3"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S"
+rm -f "$G34_P/.stride/.loop-state.json"
+g34_run "$G34_P" "$G34_S"
+assert_exit "34h3: removing the loop state permits the stop" 0 "$G34_RC"
+if [ -f "$G34_P/.stride/.stop-gate-blocks" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 34h3: removing the loop state must clear the counter"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34h3: removing the loop state clears the counter"
+  PASS=$((PASS + 1))
+fi
+
+# 34h4: THE WEDGE CASE. If the guard cannot record a block it must permit,
+# because a block it cannot count is a block it cannot bound. Skipped as root,
+# where chmod does not restrain access and the case would silently invert.
+if [ "$(id -u)" = "0" ]; then
+  echo "  SKIP: 34h4: running as root, chmod does not restrain the write"
+else
+  G34_P=$(g34_proj h4); g34_state "$G34_P" W2123 false
+  G34_S="$TMPDIR_TEST/w2124-stub-h4"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+  chmod 500 "$G34_P/.stride" 2>/dev/null
+  g34_run "$G34_P" "$G34_S"
+  chmod 700 "$G34_P/.stride" 2>/dev/null
+  assert_exit "34h4: an unrecordable block permits rather than blocking unbounded" 0 "$G34_RC"
+fi
+
+# 34q: a malformed STRIDE_STOP_GATE_MAX_BLOCKS must never wedge the session.
+# Unvalidated, the value reaches `[ "$n" -gt "$MAX" ]`, where a non-numeric
+# right operand makes `[` ERROR with status 2; the `if` reads that as false and
+# the gate blocks EVERY time, unbounded. The reachable path is not exotic —
+# someone turning the gate off with `=off` would get a permanently unstoppable
+# session, the exact opposite of their intent, and the exact wedge this whole
+# design exists to prevent.
+for _bad in off abc 2x 1e2 -1; do
+  G34_P=$(g34_proj q); g34_state "$G34_P" W2123 false
+  G34_S="$TMPDIR_TEST/w2124-stub-q"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+  G34_SEQ=""
+  for _i in 1 2 3 4; do
+    G34_SEQ="$G34_SEQ$(printf '{}' | env CLAUDE_PROJECT_DIR="$G34_P" PATH="$G34_S:$PATH" \
+      STRIDE_STOP_GATE_MAX_BLOCKS="$_bad" bash "$STOP_GATE" > /dev/null 2>&1; echo $?)"
+  done
+  assert_eq "34q: a malformed max-blocks override falls back to the default" "2200" "$G34_SEQ"
+done
+
+# 34r: the budget is per UNFOLLOWED COMPLETION, not per counter-file lifetime.
+# An earlier revision deleted the counter on the yield path, so the next stop
+# restarted from zero and the cycle ran 2,2,0,2,2,0 forever — every later
+# session paying two more blocks for the same stale completion, while the code
+# comment and the docs claimed "at most twice for one unfollowed completion".
+G34_P=$(g34_proj r); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-r"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+G34_SEQ=""
+for _i in 1 2 3 4 5 6; do
+  g34_run "$G34_P" "$G34_S"
+  G34_SEQ="$G34_SEQ$G34_RC"
+done
+assert_eq "34r: the budget is spent once per completion, not once per counter file" \
+  "220000" "$G34_SEQ"
+
+# 34s: the block object carries the legacy spelling too, so a harness honouring
+# only {"decision":"block","reason":...} still receives the reason text. Exit 2
+# blocks either way; this is about the message reaching the model.
+G34_P=$(g34_proj s); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-s"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S"
+assert_eq "34s: the block carries the legacy decision spelling" "block" \
+  "$(printf '%s' "$G34_OUT" | jq -r '.decision' 2>/dev/null)"
+assert_contains "34s: and the legacy reason names the claimable task" "W2124" \
+  "$(printf '%s' "$G34_OUT" | jq -r '.reason' 2>/dev/null)"
+
+# 34i: AC8 — the token appears in NEITHER stream, on the block path and on the
+# error paths, which is where a credential most plausibly leaks.
+G34_P=$(g34_proj i); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-i"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S"
+if printf '%s%s' "$G34_OUT" "$G34_ERR" | grep -qF "$G34_TOKEN"; then
+  echo -e "  ${RED}FAIL${RESET}: 34i: the token must never reach stdout or stderr (block path)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34i: the token reaches neither stream (block path)"
+  PASS=$((PASS + 1))
+fi
+G34_S="$TMPDIR_TEST/w2124-stub-i2"; rm -rf "$G34_S"; g34_stub "$G34_S" '{"error":"nope"}' 404
+G34_P=$(g34_proj i2); g34_state "$G34_P" W2123 false
+g34_run "$G34_P" "$G34_S"
+if printf '%s%s' "$G34_OUT" "$G34_ERR" | grep -qF "$G34_TOKEN"; then
+  echo -e "  ${RED}FAIL${RESET}: 34i: the token must never reach stdout or stderr (404 path)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34i: the token reaches neither stream (404 path)"
+  PASS=$((PASS + 1))
+fi
+G34_S="$TMPDIR_TEST/w2124-stub-i3"; rm -rf "$G34_S"; g34_stub "$G34_S" "" 000 7
+G34_P=$(g34_proj i3); g34_state "$G34_P" W2123 false
+g34_run "$G34_P" "$G34_S"
+if printf '%s%s' "$G34_OUT" "$G34_ERR" | grep -qF "$G34_TOKEN"; then
+  echo -e "  ${RED}FAIL${RESET}: 34i: the token must never reach stdout or stderr (transport-failure path)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34i: the token reaches neither stream (transport-failure path)"
+  PASS=$((PASS + 1))
+fi
+
+# 34j: the block path emits ONE JSON document. `jq .` accepts a concatenated
+# stream and cannot detect the failure this asserts against, so a strict parser
+# is required — the same reasoning the README gives for the D238 stdout contract.
+if command -v python3 > /dev/null 2>&1; then
+  G34_P=$(g34_proj j); g34_state "$G34_P" W2123 false
+  G34_S="$TMPDIR_TEST/w2124-stub-j"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+  g34_run "$G34_P" "$G34_S"
+  if printf '%s' "$G34_OUT" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    echo -e "  ${GREEN}PASS${RESET}: 34j: the block emits exactly one JSON document"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 34j: the block must emit exactly one JSON document"
+    FAIL=$((FAIL + 1))
+  fi
+  assert_contains "34j: and it carries the Stop event name" "\"hookEventName\":\"Stop\"" \
+    "$(printf '%s' "$G34_OUT" | tr -d ' ')"
+else
+  echo "  SKIP: 34j: python3 not available for a strict JSON parse"
+fi
+
+# 34k: stop_hook_active, where the harness sends it, means this Stop is already
+# re-firing after our own block. Honour it. Stub present but unhit.
+G34_P=$(g34_proj k); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-k"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+g34_run "$G34_P" "$G34_S" '{"stop_hook_active":true}'
+assert_exit "34k: stop_hook_active permits the stop" 0 "$G34_RC"
+if [ -f "$G34_S/curl.log" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 34k: must not call the API when the stop is already re-firing"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34k: no API call when the stop is already re-firing"
+  PASS=$((PASS + 1))
+fi
+
+# 34l: the documented escape hatch.
+G34_P=$(g34_proj l); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-l"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+G34_OUT=$(printf '{}' | CLAUDE_PROJECT_DIR="$G34_P" PATH="$G34_S:$PATH" STRIDE_ALLOW_STOP=1 \
+  bash "$STOP_GATE" 2>/dev/null)
+assert_exit "34l: STRIDE_ALLOW_STOP=1 permits the stop" 0 "$?"
+
+# 34m: a server-supplied identifier that is not identifier-shaped is refused
+# rather than sanitised — it is the only server-controlled string that would
+# otherwise reach the block message.
+G34_P=$(g34_proj m); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-m"; rm -rf "$G34_S"
+g34_stub "$G34_S" '{"data":{"identifier":"W1; rm -rf /"}}' 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34m: a non-identifier-shaped next identifier permits the stop" 0 "$G34_RC"
+
+# 34n: the gate is registered for Stop with no matcher, and NOT for
+# SubagentStop — a subagent has no Stride loop of its own and blocking one on
+# its parent's loop state would wedge work that can never clear the gate.
+G34_HOOKS="$SCRIPT_DIR/hooks.json"
+# The command lives at .hooks.Stop[].hooks[].command — the NESTED matcher-group
+# shape the sibling PreToolUse/PostToolUse entries in this same file already
+# use. An earlier revision asserted .hooks.Stop[0].command, which resolves ONLY
+# in the flat shape: it passed against a malformed file whose entry the harness
+# would have dropped, and would have gone red the moment the file was fixed.
+# The suite's one registration assertion was locking in the defect it existed
+# to catch, so it now reads the same path the harness does.
+assert_eq "34n: hooks.json registers a Stop hook" "1" \
+  "$(jq -r '(.hooks.Stop // []) | length' "$G34_HOOKS" 2>/dev/null)"
+assert_eq "34n: the Stop entry carries no matcher" "false" \
+  "$(jq -r '.hooks.Stop[0] | has("matcher")' "$G34_HOOKS" 2>/dev/null)"
+assert_eq "34n: and SubagentStop is deliberately unregistered" "false" \
+  "$(jq -r '.hooks | has("SubagentStop")' "$G34_HOOKS" 2>/dev/null)"
+assert_contains "34n: the Stop entry points at the stop gate" "stride-stop-gate.sh" \
+  "$(jq -r '[.hooks.Stop[].hooks[].command] | join(" ")' "$G34_HOOKS" 2>/dev/null)"
+assert_eq "34n: the Stop command is nested in a matcher group, as the harness reads it" \
+  "1" "$(jq -r '[.hooks.Stop[].hooks[] | select(.type == "command")] | length' "$G34_HOOKS" 2>/dev/null)"
+assert_eq "34n: and it shares the nesting shape of the sibling events" "true" \
+  "$(jq -r '(.hooks.Stop[0] | has("hooks")) and (.hooks.PreToolUse[0] | has("hooks"))' "$G34_HOOKS" 2>/dev/null)"
+
+# 34o: the gate ships executable. A non-executable gate still passes every case
+# above, because they all invoke it as `bash <path>`, and fails in production
+# where the harness execs it directly.
+if [ -x "$STOP_GATE" ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 34o: the stop gate is executable"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 34o: the stop gate must be executable"
+  FAIL=$((FAIL + 1))
+fi
+
+# 34p: the Windows delegation shim must PERMIT when the .ps1 is missing.
+# stride-skill-gate.sh's equivalent branches exit 2; copied verbatim into a Stop
+# hook that would be an unconditional, uncounted, permanent block of every stop
+# on that machine, which the re-block guard could not bound because it never
+# runs. This asserts the divergence is present.
+assert_eq "34p: the shim permits when the .ps1 is missing" "2" \
+  "$(awk '/Windows detected but/,/exit 0/' "$STOP_GATE" | grep -c 'exit 0')"
+
 # ============================================================
 # Summary
 # ============================================================

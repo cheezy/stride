@@ -11095,6 +11095,314 @@ $g34d = New-G34Project 't3'
 $g34r = Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd 'false') -Phase 'post' -ProjectDir $g34d
 Assert-NotContains "34t: a well-formed scalar body is not announced as unparsable" 'unparsable' $g34r.Stderr
 
+
+# ============================================================
+# Test Group 35: W2124 — Stop gate, PowerShell half
+# ============================================================
+# Mirror of the bash suite's Test Group 34. The two halves read the same
+# .stride/.loop-state.json and write the same counter file in a mixed checkout,
+# so a divergence here is a divergence a single user could hit. A PATH-based
+# curl stub does not apply on this half — it uses Invoke-WebRequest — so the
+# network cases use the suite's real-HttpListener technique instead.
+Write-Host ""
+Write-Host "=== Test Group 35: W2124 Stop gate (PowerShell) ==="
+
+$g35Gate = Join-Path $ScriptDir 'stride-stop-gate.ps1'
+$g35Token = 'stride_dev_FAKE_G35_SENTINEL'
+
+function New-G35Project {
+    param([string]$Name, [string]$BaseUrl)
+    $d = Join-Path $TmpDir "w2124-$Name"
+    if (Test-Path $d) { Remove-Item -Recurse -Force $d }
+    New-Item -ItemType Directory -Path (Join-Path $d '.stride') -Force | Out-Null
+    Set-Content -Path (Join-Path $d '.stride_auth.md') -Encoding UTF8 -Value @"
+# auth
+- **API URL:** ``$BaseUrl``
+- **API Token:** ``$g35Token``
+"@
+    return $d
+}
+
+function Set-G35State {
+    param([string]$Dir, [string]$Identifier, [bool]$NeedsReview)
+    $nr = if ($NeedsReview) { 'true' } else { 'false' }
+    Set-Content -Path (Join-Path $Dir '.stride/.loop-state.json') -Encoding UTF8 `
+        -Value ('{{"identifier":"{0}","needs_review":{1},"completed_at":"2026-08-30T00:00:00Z","session_id":"s"}}' -f $Identifier, $nr)
+}
+
+# Runs the gate as a child process, capturing stdout and stderr SEPARATELY —
+# AC8 has to be provable on each stream independently.
+function Invoke-G35Gate {
+    param([string]$ProjectDir, [string]$StdinJson = '{}')
+    $outFile = Join-Path $TmpDir 'g35.out'
+    $errFile = Join-Path $TmpDir 'g35.err'
+    $inFile = Join-Path $TmpDir 'g35.in'
+    Set-Content -LiteralPath $inFile -Value $StdinJson -Encoding UTF8 -NoNewline
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'pwsh'
+    $psi.Arguments = "-NoProfile -File `"$g35Gate`""
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    foreach ($kv in [System.Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+        $psi.Environment["$($kv.Key)"] = [string]$kv.Value
+    }
+    $psi.Environment['CLAUDE_PROJECT_DIR'] = $ProjectDir
+    $null = $psi.Environment.Remove('STRIDE_ALLOW_STOP')
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc.StandardInput.Write($StdinJson)
+    $proc.StandardInput.Close()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    return @{ ExitCode = $proc.ExitCode; Stdout = $stdout; Stderr = $stderr }
+}
+
+# A one-shot HttpListener answering /api/tasks/next with a chosen status+body.
+function Start-G35Listener {
+    param([int]$Port, [int]$StatusCode, [string]$Body, [int]$Requests = 1)
+    return Start-Job -ArgumentList $Port, $StatusCode, $Body, $Requests -ScriptBlock {
+        param($Port, $StatusCode, $Body, $Requests)
+        $l = [System.Net.HttpListener]::new()
+        $l.Prefixes.Add("http://localhost:$Port/")
+        try {
+            $l.Start()
+            for ($i = 0; $i -lt $Requests; $i++) {
+                $ctx = $l.GetContext()
+                $resp = $ctx.Response
+                $resp.StatusCode = $StatusCode
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+                $resp.ContentType = 'application/json'
+                $resp.ContentLength64 = $bytes.Length
+                $resp.OutputStream.Write($bytes, 0, $bytes.Length)
+                $resp.OutputStream.Close()
+            }
+        } catch {
+            # Listener tear-down errors are ignored.
+        } finally {
+            try { $l.Stop() } catch { }
+        }
+    }
+}
+
+$g35OkBody = '{"data":{"identifier":"W2124","needs_review":false}}'
+
+# 35a/35b: AC1 and AC2 — the only blocking condition, and the message names the
+# CLAIMABLE task rather than the completed one. The negative assertion is the
+# point: naming the loop-state identifier would send the agent back to work it
+# has already finished.
+$g35Port = 18901
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body $g35OkBody
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'a' "http://localhost:$g35Port"
+    Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $false
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35a: a claimable task blocks the stop" 2 $g35r.ExitCode
+    Assert-Contains "35b: the block message names the claimable task" 'W2124' $g35r.Stdout
+    Assert-NotContains "35b: and does NOT name the completed task" 'W2123' $g35r.Stdout
+    Assert-NotContains "35i: the token reaches neither stream (block path)" $g35Token ($g35r.Stdout + $g35r.Stderr)
+    # 35j: exactly one JSON document, checked with a strict parse.
+    $g35Parsed = $null
+    try { $g35Parsed = $g35r.Stdout | ConvertFrom-Json } catch { $g35Parsed = $null }
+    Assert-Eq "35j: the block emits one parseable JSON document" 'Stop' `
+        "$(if ($g35Parsed) { $g35Parsed.hookSpecificOutput.hookEventName })"
+} else {
+    Write-Host "  SKIP: 35a/35b: listener did not come up on port $g35Port"
+}
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# 35c/35f/35k/35f2 all point at a LIVE listener that WOULD block, which is the
+# whole point: an earlier revision aimed them at a closed port, so every one of
+# them reached exit 0 through the transport-failure branch and would have
+# stayed green if the short-circuit under test were deleted outright. Against a
+# server that answers 200 with a claimable task, permitting can only mean the
+# short-circuit fired. The bash half gets this from a stub that must remain
+# unhit; this half gets it from a listener that must be ignored.
+$g35ShortPort = 18905
+$g35ShortJob = Start-G35Listener -Port $g35ShortPort -StatusCode 200 -Body $g35OkBody -Requests 8
+$g35ShortUp = Wait-ForListener -Port $g35ShortPort
+$g35ShortUrl = "http://localhost:$g35ShortPort"
+
+# 35c: AC3 — no loop-state file, against a server that would otherwise block.
+if ($g35ShortUp) {
+    $g35d = New-G35Project 'c' $g35ShortUrl
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35c: no loop-state file permits the stop even when a task is claimable" 0 $g35r.ExitCode
+} else {
+    Write-Host "  SKIP: 35c: listener did not come up on port $g35ShortPort"
+}
+
+# 35f: AC6 — a completion awaiting review legitimately ends the loop, again
+# against a server that would block if the gate consulted it.
+if ($g35ShortUp) {
+    $g35d = New-G35Project 'f' $g35ShortUrl
+    Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $true
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35f: needs_review=true permits the stop even when a task is claimable" 0 $g35r.ExitCode
+} else {
+    Write-Host "  SKIP: 35f: listener did not come up on port $g35ShortPort"
+}
+
+# 35d: AC4 — a refused connection.
+$g35d = New-G35Project 'd' 'http://localhost:9'
+Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $false
+$g35r = Invoke-G35Gate -ProjectDir $g35d
+Assert-Exit "35d: an unreachable API permits the stop" 0 $g35r.ExitCode
+Assert-NotContains "35i: the token reaches neither stream (transport-failure path)" `
+    $g35Token ($g35r.Stdout + $g35r.Stderr)
+
+# 35d2: AC4 AND AC5 — the real empty-queue answer is a 404, not a 200 with
+# empty data. On this half a non-2xx throws and is caught, which is the same
+# permit path as a transport failure.
+$g35Port = 18902
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 404 `
+    -Body '{"error":"No tasks available in Ready column matching your capabilities"}'
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'd2' "http://localhost:$g35Port"
+    Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $false
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35d2: the real empty-queue 404 permits the stop" 0 $g35r.ExitCode
+    Assert-NotContains "35i: the token reaches neither stream (404 path)" `
+        $g35Token ($g35r.Stdout + $g35r.Stderr)
+} else {
+    Write-Host "  SKIP: 35d2: listener did not come up on port $g35Port"
+}
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# 35e: AC5 — a 200 carrying no usable task.
+$g35Port = 18903
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body '{"data":null}'
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'e' "http://localhost:$g35Port"
+    Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $false
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35e: a 200 with null data permits the stop" 0 $g35r.ExitCode
+} else {
+    Write-Host "  SKIP: 35e: listener did not come up on port $g35Port"
+}
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# 35h: the bounded re-block guard — the case that keeps this gate from wedging
+# a session, which is worse than never blocking at all.
+$g35Port = 18904
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body $g35OkBody -Requests 4
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'h' "http://localhost:$g35Port"
+    Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $false
+    $r1 = (Invoke-G35Gate -ProjectDir $g35d).ExitCode
+    $r2 = (Invoke-G35Gate -ProjectDir $g35d).ExitCode
+    $r3 = (Invoke-G35Gate -ProjectDir $g35d).ExitCode
+    Assert-Eq "35h: the gate refuses twice then yields" '2 2 0' "$r1 $r2 $r3"
+    # The spent record is RETAINED, deliberately — deleting it restarted the
+    # budget and ran 2,2,0,2,2,0 forever. It is cleared only by the two events
+    # that end a completion's life, which 35h2 and 35h3 cover.
+    Assert-Eq "35h: the spent record is retained so the budget stays spent" 'True' `
+        "$(Test-Path -LiteralPath (Join-Path $g35d '.stride/.stop-gate-blocks'))"
+} else {
+    Write-Host "  SKIP: 35h: listener did not come up on port $g35Port"
+}
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# 35k: stop_hook_active, where the harness sends it, marks a Stop already
+# re-firing after this hook's own block. Closed port, so a network attempt
+# would permit anyway — the assertion is that it never needs one.
+if ($g35ShortUp) {
+    $g35d = New-G35Project 'k' $g35ShortUrl
+    Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $false
+    $g35r = Invoke-G35Gate -ProjectDir $g35d -StdinJson '{"stop_hook_active":true}'
+    Assert-Exit "35k: stop_hook_active permits the stop even when a task is claimable" 0 $g35r.ExitCode
+} else {
+    Write-Host "  SKIP: 35k: listener did not come up on port $g35ShortPort"
+}
+
+# 35f2: every malformed loop-state shape lands on the same permit rule as AC6.
+foreach ($g35Shape in @(
+    '{"identifier":"W1","needs_review":"false"}',
+    '{"identifier":"W1","needs_review":null}',
+    '{"identifier":"W1"}',
+    'not json at all')) {
+    if (-not $g35ShortUp) { continue }
+    $g35d = New-G35Project 'f2' $g35ShortUrl
+    Set-Content -Path (Join-Path $g35d '.stride/.loop-state.json') -Encoding UTF8 -Value $g35Shape
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35f2: a malformed loop state permits the stop" 0 $g35r.ExitCode
+}
+
+# 35l: the documented escape hatch, against a server that would block.
+if ($g35ShortUp) {
+    $g35d = New-G35Project 'l' $g35ShortUrl
+    Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $false
+    $g35lIn = Join-Path $TmpDir 'g35l.in'
+    Set-Content -LiteralPath $g35lIn -Value '{}' -Encoding UTF8 -NoNewline
+    $g35lPsi = [System.Diagnostics.ProcessStartInfo]::new()
+    $g35lPsi.FileName = 'pwsh'
+    $g35lPsi.Arguments = "-NoProfile -File `"$g35Gate`""
+    $g35lPsi.RedirectStandardInput = $true
+    $g35lPsi.RedirectStandardOutput = $true
+    $g35lPsi.RedirectStandardError = $true
+    $g35lPsi.UseShellExecute = $false
+    foreach ($kv in [System.Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+        $g35lPsi.Environment["$($kv.Key)"] = [string]$kv.Value
+    }
+    $g35lPsi.Environment['CLAUDE_PROJECT_DIR'] = $g35d
+    $g35lPsi.Environment['STRIDE_ALLOW_STOP'] = '1'
+    $g35lProc = [System.Diagnostics.Process]::Start($g35lPsi)
+    $g35lProc.StandardInput.Write('{}')
+    $g35lProc.StandardInput.Close()
+    $null = $g35lProc.StandardOutput.ReadToEnd()
+    $null = $g35lProc.StandardError.ReadToEnd()
+    $g35lProc.WaitForExit()
+    Assert-Exit "35l: STRIDE_ALLOW_STOP=1 permits the stop" 0 $g35lProc.ExitCode
+}
+Remove-Job -Job $g35ShortJob -Force -ErrorAction SilentlyContinue
+
+# 35m: a server-supplied identifier that is not identifier-shaped is refused
+# rather than sanitised — it is the only server-controlled string that would
+# otherwise reach the block message.
+$g35Port = 18906
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body '{"data":{"identifier":"W1; rm -rf /"}}'
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'm' "http://localhost:$g35Port"
+    Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $false
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35m: a non-identifier-shaped next identifier permits the stop" 0 $g35r.ExitCode
+} else {
+    Write-Host "  SKIP: 35m: listener did not come up on port $g35Port"
+}
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# 35h2/35h3: the counter is keyed on the COMPLETED identifier, and clearing the
+# loop state clears the counter — the two events that genuinely end a
+# completion's life.
+$g35Port = 18907
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body $g35OkBody -Requests 6
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'h2' "http://localhost:$g35Port"
+    Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $false
+    $null = Invoke-G35Gate -ProjectDir $g35d
+    Set-G35State -Dir $g35d -Identifier 'W9999' -NeedsReview $false
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35h2: a new completion restarts the block budget" 2 $g35r.ExitCode
+    Assert-Contains "35h2: and the counter is re-keyed to it" 'W9999 1' `
+        ((Get-Content -LiteralPath (Join-Path $g35d '.stride/.stop-gate-blocks') -Raw).Trim())
+
+    $g35d = New-G35Project 'h3' "http://localhost:$g35Port"
+    Set-G35State -Dir $g35d -Identifier 'W2123' -NeedsReview $false
+    $null = Invoke-G35Gate -ProjectDir $g35d
+    Remove-Item -LiteralPath (Join-Path $g35d '.stride/.loop-state.json') -Force
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35h3: removing the loop state permits the stop" 0 $g35r.ExitCode
+    Assert-Eq "35h3: and clears the counter" 'False' `
+        "$(Test-Path -LiteralPath (Join-Path $g35d '.stride/.stop-gate-blocks'))"
+} else {
+    Write-Host "  SKIP: 35h2/35h3: listener did not come up on port $g35Port"
+}
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
 # ============================================================
 # Summary
 # ============================================================

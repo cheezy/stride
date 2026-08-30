@@ -11114,6 +11114,415 @@ assert_exit "32: a backslash-continued curl is judged as one command" 2 "$G32_RC
 g32_run 'curl -sS \\\n  -X PATCH https://www.stridelikeaboss.com/api/tasks/1/complete \\\n  -d @payload.json \\\n  | tee r.json'
 assert_exit "32: a backslash-continued compliant curl is allowed" 0 "$G32_RC"
 
+
+# ============================================================
+# Test Group 33: W2123 loop state recorded on completion
+# ============================================================
+# The Stop gate cannot refuse an action it has no evidence for. These cover the
+# file that becomes that evidence: written when a completion SUCCEEDS, cleared
+# when the next claim proves it was followed, and never written for a failure.
+echo ""
+echo "=== Test Group 33: W2123 loop state on completion (bash) ==="
+
+G33_URL="https://www.stridelikeaboss.com"
+G33_STATE=".stride/.loop-state.json"
+
+# Build a hook-input envelope. $1=session_id $2=command $3=stdout payload
+g33_input() {
+  jq -nc --arg s "$1" --arg c "$2" --arg r "$3" \
+    '{session_id:$s,tool_input:{command:$c},tool_response:{stdout:$r}}'
+}
+
+# Fresh project dir with only the section under test, so nothing else runs.
+g33_proj() {
+  local _d="$TMPDIR_TEST/w2123-$1"
+  rm -rf "$_d"; mkdir -p "$_d/.stride"
+  printf '## before_doing\n```bash\n```\n\n## before_review\n```bash\n```\n' > "$_d/.stride.md"
+  printf '%s' "$_d"
+}
+
+G33_OK='{"data":{"id":99,"identifier":"W2123","needs_review":false},"hooks":[{"name":"before_review"}]}'
+G33_COMPLETE_CMD="curl -sS -X PATCH $G33_URL/api/tasks/99/complete -d @payload.json | tee r.json"
+G33_CLAIM_CMD="curl -sS -X POST $G33_URL/api/tasks/claim -d @c.json | tee r.json"
+
+# 33a: a successful completion writes the file with the right identifier.
+G33_D=$(g33_proj a)
+g33_input "sess-abc" "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33a: a successful completion records the identifier" \
+  "W2123" "$(jq -r '.identifier' "$G33_D/$G33_STATE" 2>/dev/null)"
+assert_eq "33a: it records needs_review from the response" \
+  "false" "$(jq -r '.needs_review' "$G33_D/$G33_STATE" 2>/dev/null)"
+assert_eq "33a: it records the session id" \
+  "sess-abc" "$(jq -r '.session_id' "$G33_D/$G33_STATE" 2>/dev/null)"
+assert_eq "33a: completed_at is an ISO8601 Z timestamp" "ok" \
+  "$(jq -r 'if (.completed_at // "") | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") then "ok" else "no" end' "$G33_D/$G33_STATE" 2>/dev/null)"
+
+# 33b: needs_review=true is recorded VERBATIM, and as a JSON boolean rather
+# than the string "true" — the gate branches on it.
+G33_D=$(g33_proj b)
+g33_input "s" "$G33_COMPLETE_CMD" \
+  '{"data":{"id":99,"identifier":"W555","needs_review":true},"hooks":[{"name":"before_review"}]}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33b: needs_review=true is recorded verbatim" \
+  "true" "$(jq -r '.needs_review' "$G33_D/$G33_STATE" 2>/dev/null)"
+assert_eq "33b: needs_review is a boolean, not a string" \
+  "boolean" "$(jq -r '.needs_review | type' "$G33_D/$G33_STATE" 2>/dev/null)"
+
+# 33c: the session id falls back to CLAUDE_SESSION_ID when the input omits it.
+G33_D=$(g33_proj c)
+jq -nc --arg c "$G33_COMPLETE_CMD" --arg r "$G33_OK" \
+  '{tool_input:{command:$c},tool_response:{stdout:$r}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" CLAUDE_SESSION_ID="env-sess" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33c: the session id falls back to CLAUDE_SESSION_ID" \
+  "env-sess" "$(jq -r '.session_id' "$G33_D/$G33_STATE" 2>/dev/null)"
+
+# 33d: with no session id anywhere it degrades to "unknown" rather than
+# dropping the record — the identifier is the field the gate needs.
+G33_D=$(g33_proj d)
+jq -nc --arg c "$G33_COMPLETE_CMD" --arg r "$G33_OK" \
+  '{tool_input:{command:$c},tool_response:{stdout:$r}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" CLAUDE_SESSION_ID="" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33d: an absent session id degrades to unknown" \
+  "unknown" "$(jq -r '.session_id' "$G33_D/$G33_STATE" 2>/dev/null)"
+
+# 33e: a session id that is not identifier-shaped is refused, not sanitised.
+G33_D=$(g33_proj e)
+g33_input 'not a/session id' "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33e: a non-identifier-shaped session id degrades to unknown" \
+  "unknown" "$(jq -r '.session_id' "$G33_D/$G33_STATE" 2>/dev/null)"
+
+# 33f: a 422 does NOT write the file. Every non-success body the API emits
+# lacks .data, which is the discriminator — curl has no -f here, so the error
+# body lands on stdout exactly like a success body would.
+G33_D=$(g33_proj f)
+g33_input "s" "$G33_COMPLETE_CMD" '{"errors":{"completion_summary":["can'"'"'t be blank"]}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+if [ -f "$G33_D/$G33_STATE" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 33f: a 422 completion must not write the loop state"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33f: a 422 completion does not write the loop state"
+  PASS=$((PASS + 1))
+fi
+
+# 33g: THE REGRESSION GUARD for AC4. extract_response_payload is
+# canonical-file-first (D118) and .stride/.last-api-response.json survives
+# across calls, so a build on $RESPONSE_PAYLOAD would resolve the previous
+# CLAIM payload here — which carries both fields — and record a completion
+# that never happened. Same staleness shape as D226. A naive implementation
+# passes 33f and fails this.
+G33_D=$(g33_proj g)
+cat > "$G33_D/.stride/.last-api-response.json" << 'G33STALE'
+{"data":{"id":99,"identifier":"W9999","needs_review":true},"hook":{"name":"before_doing"}}
+G33STALE
+g33_input "s" "$G33_COMPLETE_CMD" '{"errors":{"base":["unprocessable"]}, TRUNCA' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+if [ -f "$G33_D/$G33_STATE" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 33g: a truncated 422 must not inherit the previous claim's payload"
+  echo "    wrote: $(cat "$G33_D/$G33_STATE")"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33g: a truncated 422 does not inherit the previous claim's payload"
+  PASS=$((PASS + 1))
+fi
+
+# 33h: the other side of 33g — a harness-truncated SUCCESS still records, via
+# the canonical snapshot, but only because it demonstrably belongs to THIS
+# completion (hooks is an array, and the task id matches the routed id).
+G33_D=$(g33_proj h)
+cat > "$G33_D/.stride/.last-api-response.json" << 'G33FRESH'
+{"data":{"id":99,"identifier":"W777","needs_review":false},"hooks":[{"name":"before_review"}]}
+G33FRESH
+g33_input "s" "$G33_COMPLETE_CMD" '{"data":{"identifier":"W7 TRUNCA' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33h: a truncated success recovers from the matching snapshot" \
+  "W777" "$(jq -r '.identifier' "$G33_D/$G33_STATE" 2>/dev/null)"
+
+# 33i: and that recovery refuses a snapshot belonging to a DIFFERENT task.
+G33_D=$(g33_proj i)
+cat > "$G33_D/.stride/.last-api-response.json" << 'G33OTHER'
+{"data":{"id":12345,"identifier":"W_OTHER","needs_review":false},"hooks":[{"name":"before_review"}]}
+G33OTHER
+g33_input "s" "$G33_COMPLETE_CMD" '{"data": TRUNCA' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+if [ -f "$G33_D/$G33_STATE" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 33i: recovery must refuse a snapshot for another task id"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33i: recovery refuses a snapshot for another task id"
+  PASS=$((PASS + 1))
+fi
+
+# 33j: a claim clears a stale record. Template: 27f. This is the half that
+# makes the gate correct — a leftover from the PREVIOUS task would otherwise
+# fire it on work that is already done.
+G33_D=$(g33_proj j)
+echo '{"identifier":"W_OLD","needs_review":false,"completed_at":"2020-01-01T00:00:00Z","session_id":"old"}' \
+  > "$G33_D/$G33_STATE"
+g33_input "s" "$G33_CLAIM_CMD" \
+  '{"data":{"id":99,"identifier":"W1"},"hook":{"name":"before_doing"}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+if [ -f "$G33_D/$G33_STATE" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 33j: a claim must clear the previous completion's loop state"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33j: a claim clears the previous completion's loop state"
+  PASS=$((PASS + 1))
+fi
+
+# 33k: atomicity, from both ends. The writer stages a temp in the destination
+# directory and renames, so a killed hook can leave no partial file — assert
+# no temp survives a success, and assert structurally that the writer never
+# redirects straight at the destination (precedent: the Group 29/30 structural
+# gates).
+G33_D=$(g33_proj k)
+g33_input "s" "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33k: no temp file survives a successful write" \
+  "0" "$(find "$G33_D/.stride" -name 'loop-state.*' -type f 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "33k: the writer renames into place rather than redirecting at it" \
+  "0" "$(awk '/^write_loop_state\(\)/,/^}/' "$HOOK_SCRIPT" | grep -c '> *"\$LOOP_STATE_FILE"' | tr -d ' ')"
+assert_eq "33k: the writer stages its temp inside the destination directory" \
+  "1" "$(awk '/^write_loop_state\(\)/,/^}/' "$HOOK_SCRIPT" | grep -c 'mktemp "\$PROJECT_DIR/.stride/loop-state' | tr -d ' ')"
+
+# 33l: the file carries exactly the four documented keys and nothing else —
+# never the response body, task free text, or the Bearer token that rides in
+# the same hook input the session id is read from.
+G33_D=$(g33_proj l)
+g33_input "s" \
+  "curl -sS -X PATCH $G33_URL/api/tasks/99/complete -H 'Authorization: Bearer stride_dev_SECRETVALUE' -d @p.json | tee r.json" \
+  "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33l: the file carries exactly the four documented keys" \
+  "completed_at identifier needs_review session_id" \
+  "$(jq -r 'keys_unsorted | sort | join(" ")' "$G33_D/$G33_STATE" 2>/dev/null)"
+if grep -q 'SECRETVALUE\|Bearer' "$G33_D/$G33_STATE" 2>/dev/null; then
+  echo -e "  ${RED}FAIL${RESET}: 33l: the loop state must never carry the Bearer token"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33l: the loop state never carries the Bearer token"
+  PASS=$((PASS + 1))
+fi
+
+# 33m: an unwritable .stride/ is logged and swallowed. The loop state is a gate
+# input, not a correctness dependency — it must never fail the completion.
+G33_D=$(g33_proj m)
+chmod 500 "$G33_D/.stride" 2>/dev/null
+G33_ERR=$(g33_input "s" "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+G33_RC=$?
+chmod 700 "$G33_D/.stride" 2>/dev/null
+assert_exit "33m: an unwritable .stride does not fail the completion" 0 "$G33_RC"
+# The pitfall is "log and continue", so the failure must be announced rather
+# than swallowed silently — on stderr, never stdout, which carries the one
+# JSON document the harness parses.
+assert_contains "33m: an unwritable .stride is announced on stderr" \
+  "loop state" "$G33_ERR"
+
+# 33n: the full claim -> complete -> claim cycle, which is the lifecycle the
+# gate actually observes.
+G33_D=$(g33_proj n)
+g33_input "s" "$G33_CLAIM_CMD" '{"data":{"id":99,"identifier":"W2123"},"hook":{"name":"before_doing"}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+G33_AFTER_CLAIM=$([ -f "$G33_D/$G33_STATE" ] && echo present || echo absent)
+g33_input "s" "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+G33_AFTER_COMPLETE=$([ -f "$G33_D/$G33_STATE" ] && echo present || echo absent)
+g33_input "s" "$G33_CLAIM_CMD" '{"data":{"id":100,"identifier":"W2124"},"hook":{"name":"before_doing"}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+G33_AFTER_NEXT=$([ -f "$G33_D/$G33_STATE" ] && echo present || echo absent)
+assert_eq "33n: claim -> complete -> claim leaves the state absent/present/absent" \
+  "absent present absent" "$G33_AFTER_CLAIM $G33_AFTER_COMPLETE $G33_AFTER_NEXT"
+
+# 33o: the clear is UNCONDITIONAL, including on a FAILED claim, and this case
+# is why. The claim that fails most often is the one against an empty ready
+# queue — how essentially every session ends. Preserving the record there would
+# make it byte-identical to one left by an agent that completed and never
+# claimed at all, and a gate must refuse in the second case but not the first.
+# Preserving was implemented, and reverted for exactly this.
+G33_D=$(g33_proj o)
+echo '{"identifier":"W_OLD","needs_review":false,"completed_at":"2020-01-01T00:00:00Z","session_id":"old"}' \
+  > "$G33_D/$G33_STATE"
+g33_input "s" "$G33_CLAIM_CMD" '{"errors":{"base":["no task available"]}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+if [ -f "$G33_D/$G33_STATE" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 33o: an empty-queue claim must still clear (no ambiguous record)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33o: an empty-queue claim still clears (no ambiguous record)"
+  PASS=$((PASS + 1))
+fi
+
+# 33p: but a claim whose payload cannot be parsed still clears. This is the
+# deliberate direction, not an oversight: a stale record that can never be
+# cleared makes the gate fire on finished work (a FALSE gate), while an
+# over-eager clear only costs a missed one.
+G33_D=$(g33_proj p)
+echo '{"identifier":"W_OLD","needs_review":false,"completed_at":"2020-01-01T00:00:00Z","session_id":"old"}' \
+  > "$G33_D/$G33_STATE"
+g33_input "s" "$G33_CLAIM_CMD" '{"data":{"id":9 TRUNCA' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+if [ -f "$G33_D/$G33_STATE" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 33p: an unparsable claim must still clear (safe direction)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33p: an unparsable claim still clears (safe direction)"
+  PASS=$((PASS + 1))
+fi
+
+# 33q: a completion carrying NO tool_response at all. Parity with ps1 34l,
+# where Set-StrictMode makes an absent property a terminating error; the bash
+# half must be equally unbothered.
+G33_D=$(g33_proj q)
+G33_RC=0
+jq -nc --arg c "$G33_COMPLETE_CMD" '{session_id:"s",tool_input:{command:$c}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1 || G33_RC=$?
+assert_exit "33q: an absent tool_response does not fail the hook" 0 "$G33_RC"
+# The diagnostic channel must stay QUIET here: there was no body at all, so
+# announcing a parse failure would claim something that never happened, and a
+# channel that cries wolf is one an operator learns to ignore.
+G33_ERR=$(jq -nc --arg c "$G33_COMPLETE_CMD" '{session_id:"s",tool_input:{command:$c}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+if echo "$G33_ERR" | grep -q 'unparsable'; then
+  echo -e "  ${RED}FAIL${RESET}: 33q: an absent body must not be announced as unparsable"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33q: an absent body is not announced as unparsable"
+  PASS=$((PASS + 1))
+fi
+if [ -f "$G33_D/$G33_STATE" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 33q: an absent tool_response must write no loop state"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33q: an absent tool_response writes no loop state"
+  PASS=$((PASS + 1))
+fi
+
+# 33r: the charset gate must agree with the PowerShell twin, and the one input
+# where the two shells can silently disagree is a TRAILING newline: bash reads
+# both values through `$( )`, which strips them, so the ps1 half normalises
+# before validating rather than refusing. An INTERIOR newline is refused by
+# both. These two assertions are the bash side of that contract.
+G33_D=$(g33_proj r)
+# $'...' (ANSI-C quoting), NOT "$(printf 'abc\n')": command substitution strips
+# the trailing newline before it reaches the fixture, so the earlier spelling
+# asserted the stripping behaviour against an input that never contained a
+# newline — the same `$( )` stripping this contract is about, turned back on
+# the test. G33_NL genuinely ends in a linefeed.
+G33_NL=$'abc\n'
+g33_input "$G33_NL" "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33r: a trailing newline in the session id is stripped, not refused" \
+  "abc" "$(jq -r '.session_id' "$G33_D/$G33_STATE" 2>/dev/null)"
+# CRLF must ALSO agree: bash's `$( )` strips the LF and leaves the CR, which the
+# charset gate then refuses, so the ps1 half strips LF only for the same result.
+G33_D=$(g33_proj r3)
+G33_CRLF=$'abc\r\n'
+g33_input "$G33_CRLF" "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33r: a trailing CRLF in the session id is refused" \
+  "unknown" "$(jq -r '.session_id' "$G33_D/$G33_STATE" 2>/dev/null)"
+G33_D=$(g33_proj r2)
+g33_input "$(printf 'a\nb')" "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_eq "33r: an interior newline in the session id is refused" \
+  "unknown" "$(jq -r '.session_id' "$G33_D/$G33_STATE" 2>/dev/null)"
+
+# 33s: testing_strategy names "two sessions concurrently in the same checkout"
+# as an edge case. The design answer is that each writer stages a uniquely
+# named temp and renames, so the loser of the race is overwritten rather than
+# interleaved — assert the observable consequence: exactly one well-formed
+# file, one of the two identifiers, and no temp left behind by either.
+G33_D=$(g33_proj s)
+g33_input "s" "$G33_COMPLETE_CMD" \
+  '{"data":{"id":99,"identifier":"W_AAA","needs_review":false},"hooks":[{"name":"before_review"}]}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1 &
+g33_input "s" "$G33_COMPLETE_CMD" \
+  '{"data":{"id":99,"identifier":"W_BBB","needs_review":false},"hooks":[{"name":"before_review"}]}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1 &
+wait
+G33_CONC=$(jq -r '.identifier' "$G33_D/$G33_STATE" 2>/dev/null)
+case "$G33_CONC" in
+  W_AAA|W_BBB)
+    echo -e "  ${GREEN}PASS${RESET}: 33s: concurrent completions leave one well-formed record"
+    PASS=$((PASS + 1)) ;;
+  *)
+    echo -e "  ${RED}FAIL${RESET}: 33s: concurrent completions must leave one well-formed record"
+    echo "    actual: $G33_CONC"
+    FAIL=$((FAIL + 1)) ;;
+esac
+assert_eq "33s: neither concurrent writer leaves a temp behind" \
+  "0" "$(find "$G33_D/.stride" -name 'loop-state.*' -type f 2>/dev/null | wc -l | tr -d ' ')"
+
+# 33t: a clear that FAILS must be announced. The write path reports all three
+# of its failure modes, so an operator is told when a record could not be
+# WRITTEN but — before this — never when one could not be CLEARED, which is the
+# direction the design itself calls dangerous: the leftover record is exactly
+# what makes a gate fire on work that is already done.
+G33_D=$(g33_proj t)
+g33_input "s" "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+chmod 555 "$G33_D/.stride" 2>/dev/null
+G33_ERR=$(g33_input "s" "$G33_CLAIM_CMD" \
+  '{"data":{"id":902,"identifier":"W2902","needs_review":false},"hook":{"name":"before_doing"}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+G33_RC=$?
+chmod 755 "$G33_D/.stride" 2>/dev/null
+assert_exit "33t: an unclearable loop state does not fail the claim" 0 "$G33_RC"
+assert_contains "33t: an unclearable loop state is announced on stderr" \
+  "could not clear the loop state" "$G33_ERR"
+
+# 33u: a destination that is not a regular file is refused outright. `mv` onto
+# a DIRECTORY succeeds by relocating the temp INSIDE it, so the writer's own
+# failure branch never runs: the record lands where no reader looks and the
+# temp survives indefinitely. The guard exists because mv's success is the
+# wrong signal here.
+G33_D=$(g33_proj u)
+mkdir -p "$G33_D/$G33_STATE"
+G33_ERR=$(g33_input "s" "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+G33_RC=$?
+assert_exit "33u: a non-regular-file destination does not fail the completion" 0 "$G33_RC"
+assert_contains "33u: a non-regular-file destination is announced on stderr" \
+  "not a regular file" "$G33_ERR"
+assert_eq "33u: and no temp is relocated inside it" \
+  "0" "$(find "$G33_D/$G33_STATE" -name 'loop-state.*' -type f 2>/dev/null | wc -l | tr -d ' ')"
+
+# 33v: an UNPARSABLE completion body is announced, because the completion may
+# have succeeded server-side with only the harness's copy cut — evidence lost,
+# indistinguishable from "nothing to record" unless said. A plain 422 stays
+# QUIET: it legitimately records nothing, and announcing every failed
+# completion would be noise that trains an operator to ignore the channel.
+G33_D=$(g33_proj v)
+G33_ERR=$(g33_input "s" "$G33_COMPLETE_CMD" '{"data":{"id":99,"ident TRUNCA' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+assert_contains "33v: an unparsable completion body is announced" \
+  "unparsable" "$G33_ERR"
+# A bare `false` is well-formed JSON, so it must NOT be announced as a parse
+# failure — the reason the test is `jq empty` and not `jq -e .`, whose exit
+# status comes from the VALUE rather than from whether it parsed.
+G33_D=$(g33_proj v3)
+G33_ERR=$(g33_input "s" "$G33_COMPLETE_CMD" 'false' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+if echo "$G33_ERR" | grep -q 'unparsable'; then
+  echo -e "  ${RED}FAIL${RESET}: 33v: a well-formed scalar body must not be announced as unparsable"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33v: a well-formed scalar body is not announced as unparsable"
+  PASS=$((PASS + 1))
+fi
+G33_D=$(g33_proj v2)
+G33_ERR=$(g33_input "s" "$G33_COMPLETE_CMD" '{"errors":{"base":["bad"]}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+if echo "$G33_ERR" | grep -q 'unparsable'; then
+  echo -e "  ${RED}FAIL${RESET}: 33v: a plain 422 must not be announced as unparsable"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33v: a plain 422 records nothing and stays quiet"
+  PASS=$((PASS + 1))
+fi
 # ============================================================
 # Summary
 # ============================================================

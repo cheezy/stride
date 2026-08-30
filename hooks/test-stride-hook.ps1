@@ -10817,6 +10817,285 @@ $r = Invoke-G33 "curl -sS \`n  -X PATCH https://www.stridelikeaboss.com/api/task
 Assert-Exit "33: a backslash-continued compliant curl is allowed" 0 $r.ExitCode
 
 # ============================================================
+# Test Group 34: W2123 — loop state recorded on completion
+# ============================================================
+# Mirror of the bash suite's Test Group 33. The two halves share one .stride/
+# directory in a mixed checkout, so a divergence in what they write — or in
+# when they refuse to write — would be read by the same gate.
+Write-Host ""
+Write-Host "=== Test Group 34: W2123 loop state on completion ==="
+
+$g34Url = 'https://www.stridelikeaboss.com'
+$g34CompleteCmd = "curl -sS -X PATCH $g34Url/api/tasks/99/complete -d @payload.json | tee r.json"
+$g34ClaimCmd = "curl -sS -X POST $g34Url/api/tasks/claim -d @c.json | tee r.json"
+$g34Ok = '{"data":{"id":99,"identifier":"W2123","needs_review":false},"hooks":[{"name":"before_review"}]}'
+
+function New-G34Project {
+    param([string]$Name)
+    $d = Join-Path $TmpDir "w2123-$Name"
+    if (Test-Path $d) { Remove-Item -Recurse -Force $d }
+    New-Item -ItemType Directory -Path (Join-Path $d '.stride') -Force | Out-Null
+    Set-Content -Path (Join-Path $d '.stride.md') -Encoding UTF8 -Value @"
+## before_doing
+
+``````bash
+``````
+
+## before_review
+
+``````bash
+``````
+"@
+    return $d
+}
+
+function New-G34Input {
+    param([string]$SessionId, [string]$Command, [string]$Stdout)
+    $o = [ordered]@{}
+    if ($SessionId) { $o['session_id'] = $SessionId }
+    $o['tool_input'] = @{ command = $Command }
+    $o['tool_response'] = @{ stdout = $Stdout }
+    return ($o | ConvertTo-Json -Compress -Depth 6)
+}
+
+function Get-G34State {
+    param([string]$Dir)
+    $p = Join-Path $Dir '.stride/.loop-state.json'
+    if (-not (Test-Path -LiteralPath $p)) { return $null }
+    try { return (Get-Content -Raw -LiteralPath $p | ConvertFrom-Json) } catch { return $null }
+}
+
+function Test-G34StateExists {
+    param([string]$Dir)
+    return (Test-Path -LiteralPath (Join-Path $Dir '.stride/.loop-state.json'))
+}
+
+# 34a: a successful completion writes the file with the right fields.
+$g34d = New-G34Project 'a'
+Invoke-HookScript -InputJson (New-G34Input 'sess-abc' $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34s = Get-G34State $g34d
+Assert-Eq "34a: a successful completion records the identifier" 'W2123' "$(if ($g34s) { $g34s.identifier })"
+Assert-Eq "34a: it records needs_review from the response" 'False' "$(if ($g34s) { $g34s.needs_review })"
+Assert-Eq "34a: it records the session id" 'sess-abc' "$(if ($g34s) { $g34s.session_id })"
+# Asserted against the RAW file text, never the parsed object: ConvertFrom-Json
+# silently coerces an ISO-8601 string to [DateTime], so a parsed read tests
+# PowerShell's parser rather than what the hook actually wrote. Reading the raw
+# text also proves the writer emitted a STRING and not a serialised date.
+$g34aRaw = Get-Content -Raw -LiteralPath (Join-Path $g34d '.stride/.loop-state.json')
+Assert-Eq "34a: completed_at is an ISO8601 Z timestamp in the file text" 'True' `
+    "$([bool]($g34aRaw -cmatch '"completed_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"'))"
+
+# 34b: needs_review=true is recorded verbatim, and as a JSON boolean — the
+# gate branches on it, so the string "true" would be a silent divergence.
+$g34d = New-G34Project 'b'
+$g34TrueResp = '{"data":{"id":99,"identifier":"W555","needs_review":true},"hooks":[{"name":"before_review"}]}'
+Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd $g34TrueResp) -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34s = Get-G34State $g34d
+Assert-Eq "34b: needs_review=true is recorded verbatim" 'True' "$(if ($g34s) { $g34s.needs_review })"
+Assert-Contains "34b: needs_review is a JSON boolean, not a string" '"needs_review":true' `
+    (Get-Content -Raw -LiteralPath (Join-Path $g34d '.stride/.loop-state.json'))
+
+# 34c: the session id falls back to CLAUDE_SESSION_ID when the input omits it.
+$g34d = New-G34Project 'c'
+$g34SavedSid = $env:CLAUDE_SESSION_ID
+try {
+    $env:CLAUDE_SESSION_ID = 'env-sess'
+    Invoke-HookScript -InputJson (New-G34Input '' $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d | Out-Null
+} finally {
+    if ($null -eq $g34SavedSid) { Remove-Item Env:CLAUDE_SESSION_ID -ErrorAction SilentlyContinue }
+    else { $env:CLAUDE_SESSION_ID = $g34SavedSid }
+}
+$g34s = Get-G34State $g34d
+Assert-Eq "34c: the session id falls back to CLAUDE_SESSION_ID" 'env-sess' "$(if ($g34s) { $g34s.session_id })"
+
+# 34d: a session id that is not identifier-shaped is refused, not sanitised.
+$g34d = New-G34Project 'd'
+Invoke-HookScript -InputJson (New-G34Input 'not a/session id' $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34s = Get-G34State $g34d
+Assert-Eq "34d: a non-identifier-shaped session id degrades to unknown" 'unknown' "$(if ($g34s) { $g34s.session_id })"
+
+# 34e: a 422 does NOT write the file — every non-success body lacks .data.
+$g34d = New-G34Project 'e'
+Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd '{"errors":{"base":["unprocessable"]}}') -Phase 'post' -ProjectDir $g34d | Out-Null
+Assert-Eq "34e: a 422 completion does not write the loop state" 'False' "$(Test-G34StateExists $g34d)"
+
+# 34f: THE REGRESSION GUARD. Get-ResponsePayload is canonical-file-first
+# (D118) and .stride/.last-api-response.json survives across calls, so a build
+# on $responsePayload would resolve the previous CLAIM payload here and record
+# a completion that never happened (the D226 staleness shape).
+$g34d = New-G34Project 'f'
+Set-Content -Path (Join-Path $g34d '.stride/.last-api-response.json') -Encoding UTF8 `
+    -Value '{"data":{"id":99,"identifier":"W9999","needs_review":true},"hook":{"name":"before_doing"}}'
+Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd '{"errors":{"base":["x"]}, TRUNCA') -Phase 'post' -ProjectDir $g34d | Out-Null
+Assert-Eq "34f: a truncated 422 does not inherit the previous claim's payload" 'False' "$(Test-G34StateExists $g34d)"
+
+# 34g: the other side of 34f — a harness-truncated SUCCESS still records, but
+# only from a snapshot that demonstrably belongs to THIS completion.
+$g34d = New-G34Project 'g'
+Set-Content -Path (Join-Path $g34d '.stride/.last-api-response.json') -Encoding UTF8 `
+    -Value '{"data":{"id":99,"identifier":"W777","needs_review":false},"hooks":[{"name":"before_review"}]}'
+Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd '{"data":{"identifier":"W7 TRUNCA') -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34s = Get-G34State $g34d
+Assert-Eq "34g: a truncated success recovers from the matching snapshot" 'W777' "$(if ($g34s) { $g34s.identifier })"
+
+# 34h: and that recovery refuses a snapshot belonging to a DIFFERENT task.
+$g34d = New-G34Project 'h'
+Set-Content -Path (Join-Path $g34d '.stride/.last-api-response.json') -Encoding UTF8 `
+    -Value '{"data":{"id":12345,"identifier":"W_OTHER","needs_review":false},"hooks":[{"name":"before_review"}]}'
+Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd '{"data": TRUNCA') -Phase 'post' -ProjectDir $g34d | Out-Null
+Assert-Eq "34h: recovery refuses a snapshot for another task id" 'False' "$(Test-G34StateExists $g34d)"
+
+# 34i: a claim clears a stale record. This is the half that makes the gate
+# correct — a leftover would fire it on work that is already done.
+$g34d = New-G34Project 'i'
+Set-Content -Path (Join-Path $g34d '.stride/.loop-state.json') -Encoding UTF8 `
+    -Value '{"identifier":"W_OLD","needs_review":false,"completed_at":"2020-01-01T00:00:00Z","session_id":"old"}'
+Invoke-HookScript -InputJson (New-G34Input 's' $g34ClaimCmd '{"data":{"id":99,"identifier":"W1"},"hook":{"name":"before_doing"}}') -Phase 'post' -ProjectDir $g34d | Out-Null
+Assert-Eq "34i: a claim clears the previous completion's loop state" 'False' "$(Test-G34StateExists $g34d)"
+
+# 34j: the file carries exactly the four documented keys, and never the Bearer
+# token that rides in the same hook input the session id is read from.
+$g34d = New-G34Project 'j'
+$g34SecretCmd = "curl -sS -X PATCH $g34Url/api/tasks/99/complete -H 'Authorization: Bearer stride_dev_SECRETVALUE' -d @p.json | tee r.json"
+Invoke-HookScript -InputJson (New-G34Input 's' $g34SecretCmd $g34Ok) -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34s = Get-G34State $g34d
+Assert-Eq "34j: the file carries exactly the four documented keys" `
+    'completed_at identifier needs_review session_id' `
+    "$(if ($g34s) { (($g34s.PSObject.Properties.Name | Sort-Object) -join ' ') })"
+$g34Raw = Get-Content -Raw -LiteralPath (Join-Path $g34d '.stride/.loop-state.json')
+Assert-NotContains "34j: the loop state never carries the Bearer token" 'SECRETVALUE' $g34Raw
+
+# 34k: no temp file survives a successful write — the writer stages in the
+# destination directory and renames, so a killed hook leaves nothing partial.
+$g34d = New-G34Project 'k'
+Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34Tmp = @(Get-ChildItem -Path (Join-Path $g34d '.stride') -Filter 'loop-state.*' -File -ErrorAction SilentlyContinue)
+Assert-Eq "34k: no temp file survives a successful write" '0' "$($g34Tmp.Count)"
+
+# 34l: a completion payload with NO tool_response at all. Set-StrictMode
+# -Version Latest makes reading an absent property a terminating error, and
+# that is exactly the shape that regressed the ps1 claim-clear before (19f).
+$g34d = New-G34Project 'l'
+$g34NoResp = @{ session_id = 's'; tool_input = @{ command = $g34CompleteCmd } } | ConvertTo-Json -Compress -Depth 4
+$g34r = Invoke-HookScript -InputJson $g34NoResp -Phase 'post' -ProjectDir $g34d
+Assert-Exit "34l: an absent tool_response does not fail the hook" 0 $g34r.ExitCode
+Assert-Eq "34l: an absent tool_response writes no loop state" 'False' "$(Test-G34StateExists $g34d)"
+# The diagnostic channel must stay QUIET here: there was no body at all, so
+# announcing a parse failure would claim something that never happened.
+Assert-NotContains "34l: an absent body is not announced as unparsable" 'unparsable' $g34r.Stderr
+
+# 34m: the full claim -> complete -> claim cycle the gate actually observes.
+$g34d = New-G34Project 'm'
+Invoke-HookScript -InputJson (New-G34Input 's' $g34ClaimCmd '{"data":{"id":99,"identifier":"W2123"},"hook":{"name":"before_doing"}}') -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34AfterClaim = if (Test-G34StateExists $g34d) { 'present' } else { 'absent' }
+Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34AfterComplete = if (Test-G34StateExists $g34d) { 'present' } else { 'absent' }
+Invoke-HookScript -InputJson (New-G34Input 's' $g34ClaimCmd '{"data":{"id":100,"identifier":"W2124"},"hook":{"name":"before_doing"}}') -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34AfterNext = if (Test-G34StateExists $g34d) { 'present' } else { 'absent' }
+Assert-Eq "34m: claim -> complete -> claim leaves the state absent/present/absent" `
+    'absent present absent' "$g34AfterClaim $g34AfterComplete $g34AfterNext"
+
+# 34n: the clear is UNCONDITIONAL, including on a FAILED claim, and this case
+# is why. The claim that fails most often is the one against an empty ready
+# queue — how essentially every session ends. Preserving the record there would
+# make it byte-identical to one left by an agent that completed and never
+# claimed at all, and a gate must refuse in the second case but not the first.
+$g34d = New-G34Project 'n'
+Set-Content -Path (Join-Path $g34d '.stride/.loop-state.json') -Encoding UTF8 `
+    -Value '{"identifier":"W_OLD","needs_review":false,"completed_at":"2020-01-01T00:00:00Z","session_id":"old"}'
+Invoke-HookScript -InputJson (New-G34Input 's' $g34ClaimCmd '{"errors":{"base":["no task available"]}}') -Phase 'post' -ProjectDir $g34d | Out-Null
+Assert-Eq "34n: an empty-queue claim still clears (no ambiguous record)" 'False' "$(Test-G34StateExists $g34d)"
+
+# 34o: but an unparsable claim payload still clears — the deliberate safe
+# direction, matching bash 33p. A stale record that can never be cleared makes
+# the gate fire on finished work; an over-eager clear only costs a missed gate.
+$g34d = New-G34Project 'o'
+Set-Content -Path (Join-Path $g34d '.stride/.loop-state.json') -Encoding UTF8 `
+    -Value '{"identifier":"W_OLD","needs_review":false,"completed_at":"2020-01-01T00:00:00Z","session_id":"old"}'
+Invoke-HookScript -InputJson (New-G34Input 's' $g34ClaimCmd '{"data":{"id":9 TRUNCA') -Phase 'post' -ProjectDir $g34d | Out-Null
+Assert-Eq "34o: an unparsable claim still clears (safe direction)" 'False' "$(Test-G34StateExists $g34d)"
+
+# 34p: the charset gate must agree with the bash twin. The one input where the
+# two shells can silently disagree is a TRAILING newline: bash reads both
+# values through `$( )`, which strips them, so this half normalises before
+# validating rather than refusing. An INTERIOR newline is refused by both.
+$g34d = New-G34Project 'p'
+Invoke-HookScript -InputJson (New-G34Input "abc`n" $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34s = Get-G34State $g34d
+Assert-Eq "34p: a trailing newline in the session id is stripped, not refused" 'abc' "$(if ($g34s) { $g34s.session_id })"
+$g34d = New-G34Project 'p2'
+Invoke-HookScript -InputJson (New-G34Input "a`nb" $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34s = Get-G34State $g34d
+Assert-Eq "34p: an interior newline in the session id is refused" 'unknown' "$(if ($g34s) { $g34s.session_id })"
+# CRLF must agree too. The normaliser strips LF ONLY, because bash's `$( )`
+# strips the linefeed and leaves the carriage return for its charset gate to
+# refuse; stripping CRLF here would record "abc" where bash records "unknown",
+# closing the LF divergence by opening a CR one.
+$g34d = New-G34Project 'p3'
+Invoke-HookScript -InputJson (New-G34Input "abc`r`n" $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d | Out-Null
+$g34s = Get-G34State $g34d
+Assert-Eq "34p: a trailing CRLF in the session id is refused" 'unknown' "$(if ($g34s) { $g34s.session_id })"
+
+# 34q: an unwritable .stride/ is announced and swallowed — the "log and
+# continue" pitfall, and the parity partner of bash 33m. Skipped on Windows,
+# where a POSIX mode bit is not the mechanism that makes a directory
+# unwritable; the bash half covers the behaviour on every platform it runs on.
+if ($IsWindows) {
+    Write-Host "  SKIP: 34q: unwritable .stride/ needs POSIX mode bits (bash 33m covers it)"
+} else {
+    $g34d = New-G34Project 'q'
+    & /bin/chmod 500 (Join-Path $g34d '.stride')
+    $g34r = Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d
+    & /bin/chmod 700 (Join-Path $g34d '.stride')
+    Assert-Exit "34q: an unwritable .stride does not fail the completion" 0 $g34r.ExitCode
+    Assert-Contains "34q: an unwritable .stride is announced on stderr" 'loop state' $g34r.Stderr
+}
+
+# 34r: a clear that FAILS must be announced. The write path reports all of its
+# failure modes, so an operator was told when a record could not be WRITTEN but
+# never when one could not be CLEARED — the direction the design itself calls
+# dangerous, since the leftover is what makes a gate fire on finished work.
+if ($IsWindows) {
+    Write-Host "  SKIP: 34r: unclearable .stride/ needs POSIX mode bits (bash 33t covers it)"
+} else {
+    $g34d = New-G34Project 'r'
+    Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d | Out-Null
+    & /bin/chmod 555 (Join-Path $g34d '.stride')
+    $g34r = Invoke-HookScript -InputJson (New-G34Input 's' $g34ClaimCmd '{"data":{"id":902,"identifier":"W2902","needs_review":false},"hook":{"name":"before_doing"}}') -Phase 'post' -ProjectDir $g34d
+    & /bin/chmod 755 (Join-Path $g34d '.stride')
+    Assert-Exit "34r: an unclearable loop state does not fail the claim" 0 $g34r.ExitCode
+    Assert-Contains "34r: an unclearable loop state is announced on stderr" 'could not clear the loop state' $g34r.Stderr
+}
+
+# 34s: a destination that is not a regular file is refused outright. A move
+# onto a DIRECTORY relocates the temp INSIDE it rather than failing, so the
+# writer's catch never runs: the record lands where no reader looks and the
+# temp survives indefinitely.
+$g34d = New-G34Project 's'
+New-Item -ItemType Directory -Force -Path (Join-Path $g34d '.stride/.loop-state.json') | Out-Null
+$g34r = Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd $g34Ok) -Phase 'post' -ProjectDir $g34d
+Assert-Exit "34s: a non-regular-file destination does not fail the completion" 0 $g34r.ExitCode
+Assert-Contains "34s: a non-regular-file destination is announced on stderr" 'not a regular file' $g34r.Stderr
+$g34Stray = @(Get-ChildItem -Path (Join-Path $g34d '.stride/.loop-state.json') -Filter 'loop-state.*' -File -ErrorAction SilentlyContinue)
+Assert-Eq "34s: and no temp is relocated inside it" '0' "$($g34Stray.Count)"
+
+# 34t: an UNPARSABLE completion body is announced — the completion may have
+# succeeded server-side with only the harness's copy cut, so the evidence is
+# lost rather than absent. A plain 422 stays QUIET: it legitimately records
+# nothing, and announcing every failed completion would be noise.
+$g34d = New-G34Project 't'
+$g34r = Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd '{"data":{"id":99,"ident TRUNCA') -Phase 'post' -ProjectDir $g34d
+Assert-Contains "34t: an unparsable completion body is announced" 'unparsable' $g34r.Stderr
+$g34d = New-G34Project 't2'
+$g34r = Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd '{"errors":{"base":["bad"]}}') -Phase 'post' -ProjectDir $g34d
+Assert-NotContains "34t: a plain 422 records nothing and stays quiet" 'unparsable' $g34r.Stderr
+# A bare `false` is well-formed JSON and must not be announced as a parse
+# failure — the reason the decision is a real parse and not `$null -eq $own`.
+$g34d = New-G34Project 't3'
+$g34r = Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd 'false') -Phase 'post' -ProjectDir $g34d
+Assert-NotContains "34t: a well-formed scalar body is not announced as unparsable" 'unparsable' $g34r.Stderr
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

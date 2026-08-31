@@ -11497,7 +11497,7 @@ if (-not $g36Up) {
     # ConvertFrom-Json produces Int64, and an Int32 test silently made this
     # state unreachable on this half while bash honoured it.
     $g36d = New-G36Project 'f' $g36Url
-    Set-G36Record -Dir $g36d -Json ('{{"kind":"error","session_id":"sessA","recorded_at":"x","recorded_at_epoch":{0},"failing_command":"mix test","exit_code":1,"stderr_tail":"boom"}}' -f $g36Now)
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"error","session_id":"sessA","recorded_at":"x","recorded_at_epoch":{0},"exit_code":1,"step":"implementation"}}' -f $g36Now)
     $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
     Assert-Exit "36f: a recorded unrecoverable error permits the stop" 0 $g36r.ExitCode
     Assert-Contains "36f: and names terminal state 4" 'terminal state 4' $g36r.Stderr
@@ -11505,18 +11505,18 @@ if (-not $g36Up) {
     # 36g: a foreign-session record is ignored and the gate STILL BLOCKS. This
     # is the property that stops a stale record silently disabling the gate.
     $g36d = New-G36Project 'g' $g36Url
-    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"SOME_OTHER_SESSION","recorded_at":"x","recorded_at_epoch":{0},"user_message":"stop"}}' -f $g36Now)
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"SOME_OTHER_SESSION","recorded_at":"x","recorded_at_epoch":{0}}}' -f $g36Now)
     $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
     Assert-Exit "36g: a foreign-session record is ignored and the gate still blocks" 2 $g36r.ExitCode
 
     # 36h/36i: with neither side knowing its session the short window decides.
     $g36d = New-G36Project 'h' $g36Url
-    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at":"x","recorded_at_epoch":{0},"user_message":"stop"}}' -f ($g36Now - 86400))
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at":"x","recorded_at_epoch":{0}}}' -f ($g36Now - 86400))
     $g36r = Invoke-G36Gate -ProjectDir $g36d
     Assert-Exit "36h: a day-old unknown-session record is ignored" 2 $g36r.ExitCode
 
     $g36d = New-G36Project 'i' $g36Url
-    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at":"x","recorded_at_epoch":{0},"user_message":"stop"}}' -f $g36Now)
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at":"x","recorded_at_epoch":{0}}}' -f $g36Now)
     $g36r = Invoke-G36Gate -ProjectDir $g36d
     Assert-Exit "36i: a fresh unknown-session record is honoured" 0 $g36r.ExitCode
     Assert-Contains "36i: and names terminal state 3" 'terminal state 3' $g36r.Stderr
@@ -11524,14 +11524,18 @@ if (-not $g36Up) {
     # 36j: every malformed shape fails TOWARD gating. exit_code:0 is the
     # pointed one — a recoverable failure must not pass as an unrecoverable
     # error, and a string "1" must not either, matching the bash twin.
+    # NOTE a bare halt record — kind, session and epoch — is VALID under this
+    # contract and must not appear here: the record carries no free text, so a
+    # halt has nothing further to be missing. 36d covers it as a permit.
     foreach ($g36Bad in @(
         'not json at all',
-        ('{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0}}}' -f $g36Now),
+        '[]',
+        ('{{"session_id":"sessA","recorded_at_epoch":{0}}}' -f $g36Now),
         ('{{"kind":"bogus","session_id":"sessA","recorded_at_epoch":{0}}}' -f $g36Now),
-        ('{{"kind":"error","session_id":"sessA","recorded_at_epoch":{0},"failing_command":"x","exit_code":0}}' -f $g36Now),
-        ('{{"kind":"error","session_id":"sessA","recorded_at_epoch":{0},"failing_command":"x","exit_code":"1"}}' -f $g36Now),
-        ('{{"kind":"error","session_id":"sessA","recorded_at_epoch":{0},"exit_code":1}}' -f $g36Now),
-        ('{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0},"user_message":""}}' -f $g36Now))) {
+        ('{{"kind":"HALT","session_id":"sessA","recorded_at_epoch":{0}}}' -f $g36Now),
+        ('{{"kind":"error","session_id":"sessA","recorded_at_epoch":{0},"exit_code":0,"step":"implementation"}}' -f $g36Now),
+        ('{{"kind":"error","session_id":"sessA","recorded_at_epoch":{0},"exit_code":"1","step":"implementation"}}' -f $g36Now),
+        ('{{"kind":"error","session_id":"sessA","recorded_at_epoch":{0},"exit_code":1}}' -f $g36Now))) {
         $g36d = New-G36Project 'j' $g36Url
         Set-G36Record -Dir $g36d -Json $g36Bad
         $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
@@ -11553,30 +11557,35 @@ if (-not $g36Up) {
     # 36r: a one-element JSON array unrolls through the pipeline, so [ {...} ]
     # became the record here while bash refused it.
     $g36d = New-G36Project 'r' $g36Url
-    Set-G36Record -Dir $g36d -Json ('[{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0},"user_message":"stop"}}]' -f $g36Now)
+    Set-G36Record -Dir $g36d -Json ('[{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0}}}]' -f $g36Now)
     $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
     Assert-Exit "36r: an array-wrapped record is ignored, as on the bash half" 2 $g36r.ExitCode
 
     # 36s: a quoted epoch was accepted by TryParse here and refused by jq's
     # `type == "number"` there.
     $g36d = New-G36Project 's' $g36Url
-    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at_epoch":"{0}","user_message":"stop"}}' -f $g36Now)
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at_epoch":"{0}"}}' -f $g36Now)
     $g36r = Invoke-G36Gate -ProjectDir $g36d
     Assert-Exit "36s: a string recorded_at_epoch is ignored, as on the bash half" 2 $g36r.ExitCode
 
-    # 36t: whitespace is not evidence, including the zero-width characters a
-    # plain trim misses — a U+200B message looks identical in the record.
-    foreach ($g36Blank in @(' ', '   ', "`t", [char]0x200B)) {
-        $g36d = New-G36Project 't' $g36Url
-        Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0},"user_message":"{1}"}}' -f $g36Now, $g36Blank)
-        $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
-        Assert-Exit "36t: a whitespace-only user_message is not evidence" 2 $g36r.ExitCode
-    }
+    # 36t: the record carries NO free text, by contract — the task's own
+    # security considerations forbid storing the user's message, which can hold
+    # a pasted credential or private data in a file that outlives the turn. A
+    # stray field is never read, never echoed, and never required.
+    $g36d = New-G36Project 't' $g36Url
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0},"user_message":"G36_FREETEXT_SENTINEL"}}' -f $g36Now)
+    $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
+    Assert-Exit "36t: a record carrying a stray free-text field still permits on its valid fields" 0 $g36r.ExitCode
+    Assert-NotContains "36t: and the free text reaches neither stream" 'G36_FREETEXT_SENTINEL' ($g36r.Stdout + $g36r.Stderr)
+    $g36d = New-G36Project 't2' $g36Url
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"error","session_id":"sessA","recorded_at_epoch":{0},"exit_code":1}}' -f $g36Now)
+    $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
+    Assert-Exit "36t: an error record with no step is ignored" 2 $g36r.ExitCode
 
     # 36u: 'unknown' is a sentinel, not an identity — matching it on both sides
     # used to skip the freshness window entirely.
     $g36d = New-G36Project 'u' $g36Url
-    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at_epoch":{0},"user_message":"stop"}}' -f ($g36Now - 189216000))
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at_epoch":{0}}}' -f ($g36Now - 189216000))
     $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"unknown"}'
     Assert-Exit "36u: a stale record is ignored even when both sides say unknown" 2 $g36r.ExitCode
 
@@ -11585,6 +11594,15 @@ if (-not $g36Up) {
     Set-G36Record -Dir $g36d -Json '{"kind":"halt","session_id":"sessA","user_message":"stop"}'
     $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
     Assert-Exit "36v: a record with no recorded_at_epoch is ignored" 2 $g36r.ExitCode
+    # A PRESENT but untyped epoch is the shape that diverged: this half checked
+    # only for presence in the exact-match branch while bash required a JSON
+    # number, so the same file ended a session here and not there.
+    foreach ($g36BadEpoch in @('"1756512000"', 'null', '{}', '[]', 'true')) {
+        $g36d = New-G36Project 'v2' $g36Url
+        Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0}}}' -f $g36BadEpoch)
+        $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
+        Assert-Exit "36v: a present-but-untyped recorded_at_epoch is ignored" 2 $g36r.ExitCode
+    }
 
     # 36x: a corrupt loop-state must be reported, not silently permitted — this
     # half used to exit 0 with completely empty stderr while bash announced a

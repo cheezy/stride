@@ -752,10 +752,10 @@ A session may end in exactly four states. Each has a representation the Stop gat
 | Terminal state | Representation the gate reads | Disposition |
 |---|---|---|
 | No claimable task remains | `GET /api/tasks/next` answers 404, or 200 with no `.data.identifier` | Permit, naming state 1 |
-| The completed task needs human review | `.stride/.loop-state.json` `needs_review` is not the literal `false` | Permit, naming state 2 |
-| The user explicitly halted the loop | `.stride/.terminal-state.json` with `kind: "halt"`, quoting the user verbatim | Permit, naming state 3 |
-| An unrecoverable error occurred | `.stride/.terminal-state.json` with `kind: "error"`, carrying a failing command and non-zero exit code | Permit, naming state 4 |
-| Anything else | none | Permit, reported as an unsanctioned stop |
+| The completed task needs human review | `.stride/.loop-state.json` parses and its `needs_review` is the literal boolean `true` | Permit, naming state 2 |
+| The user explicitly halted the loop | `.stride/.terminal-state.json` with `kind: "halt"` — that a halt occurred and when, never the user's words | Permit, naming state 3 |
+| An unrecoverable error occurred | `.stride/.terminal-state.json` with `kind: "error"`, a non-zero exit code and a step name | Permit, naming state 4 |
+| Anything else — including a loop-state file that does not parse | none | Permit, reported as an unsanctioned stop |
 
 States 1 and 2 need nothing written. States 3 and 4 are recorded by you, in this step, and nowhere else — clear the record on any resume, and note a claim clears it for you.
 

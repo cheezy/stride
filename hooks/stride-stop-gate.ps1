@@ -225,10 +225,22 @@ if (Test-Path -LiteralPath $TerminalStateFile) {
         # honoured a six-year-old record — the gate silently off, which this
         # design ranks as the worst outcome available.
         $tsOk = $false
+        # recorded_at_epoch must be a NUMBER here, not merely present: the bash
+        # twin populates its epoch only for a JSON number, so a string, null or
+        # object epoch was honoured on this half and ignored on the other — the
+        # same divergence family as the four already closed, and the fallback
+        # branch below already got this right.
+        $tsEpochTyped = $false
+        if ($tsRec.PSObject.Properties.Match('recorded_at_epoch').Count -gt 0 -and
+            $tsRec.recorded_at_epoch -isnot [string]) {
+            $tsEpochProbe = [int64]0
+            if ([int64]::TryParse([string]$tsRec.recorded_at_epoch, [ref]$tsEpochProbe)) {
+                $tsEpochTyped = $true
+            }
+        }
         if ($tsSid -and ($tsSid -cne 'unknown') -and
             $tsCurrent -and ($tsCurrent -cne 'unknown') -and
-            ($tsSid -ceq $tsCurrent) -and
-            $tsRec.PSObject.Properties.Match('recorded_at_epoch').Count -gt 0) {
+            ($tsSid -ceq $tsCurrent) -and $tsEpochTyped) {
             $tsOk = $true
         } elseif (($tsSid -ceq 'unknown') -and ((-not $tsCurrent) -or ($tsCurrent -ceq 'unknown'))) {
             # Neither side knows its session, so identity cannot decide it.
@@ -248,20 +260,14 @@ if (Test-Path -LiteralPath $TerminalStateFile) {
 
         if ($tsOk) {
             if ($tsKind -ceq 'halt') {
-                # The record must carry the user's own words: an empty quote is
-                # an assertion, and the field exists so a human can check the
-                # claim against the transcript. Never echoed — it is
-                # unconstrained free text and this message reaches both streams.
-                # Whitespace is refused, not merely emptiness: " " passes a
-                # length test while quoting nothing a transcript could
-                # corroborate. The class covers the zero-width and non-breaking
-                # characters a plain trim misses — a U+200B "message" is as
-                # empty as a space and looks identical in the record.
-                if ($tsRec.PSObject.Properties.Match('user_message').Count -gt 0 -and
-                    $tsRec.user_message -is [string] -and
-                    (($tsRec.user_message -creplace '[\s\u200b\u200c\u200d\ufeff\u00a0]', '').Length -gt 0)) {
-                    Exit-PermitState -State '3 (the user halted the loop)'
-                }
+                # The record states THAT a halt occurred and WHEN — it carries
+                # no quote of the user's message, by contract. A user's words
+                # can contain a pasted credential, customer data, or a private
+                # path, and this file persists past the turn, so the transcript
+                # keeps the words and the record keeps only the fact and the
+                # timestamp that locate them. kind, session and epoch are
+                # already validated above.
+                Exit-PermitState -State '3 (the user halted the loop)'
             } elseif ($tsKind -ceq 'error') {
                 # Machine-produced evidence, not an assertion. A recoverable
                 # hook failure is not this state; honouring one would permit any
@@ -281,11 +287,20 @@ if (Test-Path -LiteralPath $TerminalStateFile) {
                         $tsExit = $tsExitParsed
                     }
                 }
-                if ($tsRec.PSObject.Properties.Match('failing_command').Count -gt 0 -and
-                    $tsRec.failing_command -is [string] -and
-                    (($tsRec.failing_command -creplace '[\s\u200b\u200c\u200d\ufeff\u00a0]', '').Length -gt 0) -and
-                    $null -ne $tsExit -and $tsExit -ne 0 -and
-                    $tsExit -gt -2147483648 -and $tsExit -lt 2147483648) {
+                # Bounded, machine-produced evidence only: a non-zero exit
+                # code and a step name from the workflow's own vocabulary. NO
+                # command string and NO stderr capture — a Stride command
+                # routinely carries a bearer token and stderr carries whatever
+                # the failing tool printed, and neither belongs in a file that
+                # outlives the turn.
+                $tsStep = ''
+                if ($tsRec.PSObject.Properties.Match('step').Count -gt 0 -and
+                    $tsRec.step -is [string]) {
+                    $tsStep = [string]$tsRec.step
+                }
+                if ($null -ne $tsExit -and $tsExit -ne 0 -and
+                    $tsExit -gt -2147483648 -and $tsExit -lt 2147483648 -and
+                    ($tsStep -cmatch '\A[a-z_]{1,32}\z')) {
                     Exit-PermitState -State '4 (an unrecoverable error was recorded)'
                 }
             }

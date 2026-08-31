@@ -11996,7 +11996,7 @@ fi
 
 # 35d: state 3, an explicit halt recorded in this session.
 G35_P=$(g35_proj d); g35_state "$G35_P" W2123 false
-g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"stop working on stride\"}"
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW}"
 G35_S="$TMPDIR_TEST/g35-d"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
 g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
 assert_exit "35d: a recorded halt permits the stop" 0 "$G35_RC"
@@ -12015,7 +12015,7 @@ fi
 
 # 35f: state 4, carrying machine-produced evidence rather than an assertion.
 G35_P=$(g35_proj f); g35_state "$G35_P" W2123 false
-g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW,\"failing_command\":\"mix test\",\"exit_code\":1,\"stderr_tail\":\"boom\",\"step\":\"implementation\"}"
+g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW,\"exit_code\":1,\"step\":\"implementation\"}"
 G35_S="$TMPDIR_TEST/g35-f"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
 g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
 assert_exit "35f: a recorded unrecoverable error permits the stop" 0 "$G35_RC"
@@ -12025,7 +12025,7 @@ assert_contains "35f: and names terminal state 4" "terminal state 4" "$G35_ERR"
 # is the property that keeps a stale record from silently disabling the gate,
 # and it is worth more than any of the permit cases above.
 G35_P=$(g35_proj g); g35_state "$G35_P" W2123 false
-g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"SOME_OTHER_SESSION\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"stop\"}"
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"SOME_OTHER_SESSION\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW}"
 G35_S="$TMPDIR_TEST/g35-g"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
 g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
 assert_exit "35g: a foreign-session record is ignored and the gate still blocks" 2 "$G35_RC"
@@ -12033,7 +12033,7 @@ assert_exit "35g: a foreign-session record is ignored and the gate still blocks"
 # 35h: with neither side knowing its session, the short window decides. An old
 # record is ignored — the fallback is heuristic, so it fails toward gating.
 G35_P=$(g35_proj h); g35_state "$G35_P" W2123 false
-g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"unknown\",\"recorded_at\":\"2026-08-29T00:00:00Z\",\"recorded_at_epoch\":$((G35_NOW - 86400)),\"user_message\":\"stop\"}"
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"unknown\",\"recorded_at\":\"2026-08-29T00:00:00Z\",\"recorded_at_epoch\":$((G35_NOW - 86400))}"
 G35_S="$TMPDIR_TEST/g35-h"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
 g35_run "$G35_P" "$G35_S" '{}'
 assert_exit "35h: a day-old unknown-session record is ignored" 2 "$G35_RC"
@@ -12042,7 +12042,7 @@ assert_exit "35h: a day-old unknown-session record is ignored" 2 "$G35_RC"
 # writer with no CLAUDE_SESSION_ID stores the literal `unknown` rather than a
 # uuid, which would be foreign to every session and make state 3 unreachable.
 G35_P=$(g35_proj i); g35_state "$G35_P" W2123 false
-g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"unknown\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"stop\"}"
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"unknown\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW}"
 G35_S="$TMPDIR_TEST/g35-i"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
 g35_run "$G35_P" "$G35_S" '{}'
 assert_exit "35i: a fresh unknown-session record is honoured" 0 "$G35_RC"
@@ -12051,13 +12051,18 @@ assert_contains "35i: and names terminal state 3" "terminal state 3" "$G35_ERR"
 # 35j: every malformed shape fails TOWARD gating. The exit_code:0 case is the
 # pointed one — a recoverable failure must not pass as an unrecoverable error,
 # which would be a fifth state wearing state 4's clothes.
+# NOTE a bare halt record — kind, session and epoch, nothing else — is VALID
+# under this contract and must NOT appear here: the record deliberately carries
+# no free text, so there is nothing further for a halt to be missing. It is
+# covered as a permit by 35d.
 for _bad in \
   'not json at all' \
-  "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW}" \
+  '[]' \
+  "{\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW}" \
   "{\"kind\":\"bogus\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW}" \
-  "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"failing_command\":\"x\",\"exit_code\":0}" \
-  "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"exit_code\":1}" \
-  "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"\"}"; do
+  "{\"kind\":\"HALT\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW}" \
+  "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"exit_code\":0,\"step\":\"implementation\"}" \
+  "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"exit_code\":1}"; do
   G35_P=$(g35_proj j); g35_state "$G35_P" W2123 false
   g35_record "$G35_P" "$_bad"
   G35_S="$TMPDIR_TEST/g35-j"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
@@ -12093,7 +12098,7 @@ assert_eq "35m: and says nothing, because it had nothing to gate on" "0" \
 # 35n: the record's free text reaches neither stream. user_message and
 # stderr_tail are unconstrained, and the permit message names the state only.
 G35_P=$(g35_proj n); g35_state "$G35_P" W2123 false
-g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at\":\"x\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"G35_SENTINEL_LEAK\"}"
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at\":\"x\",\"recorded_at_epoch\":$G35_NOW}"
 G35_S="$TMPDIR_TEST/g35-n"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
 g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
 if printf '%s%s' "$G35_OUT" "$G35_ERR" | grep -qF 'G35_SENTINEL_LEAK'; then
@@ -12111,9 +12116,9 @@ for _kind in halt error; do
   G35_P=$(g35_proj "clear-$_kind")
   printf '## before_doing\n```bash\n```\n' > "$G35_P/.stride.md"
   if [ "$_kind" = halt ]; then
-    g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at\":\"x\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"stop\"}"
+    g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at\":\"x\",\"recorded_at_epoch\":$G35_NOW}"
   else
-    g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at\":\"x\",\"recorded_at_epoch\":$G35_NOW,\"failing_command\":\"x\",\"exit_code\":1}"
+    g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at\":\"x\",\"recorded_at_epoch\":$G35_NOW,\"exit_code\":1,\"step\":\"implementation\"}"
   fi
   jq -nc --arg c "curl -sS -X POST https://www.stridelikeaboss.com/api/tasks/claim -d @c.json | tee r.json" \
     '{session_id:"s",tool_input:{command:$c},tool_response:{stdout:"{\"data\":{\"id\":9,\"identifier\":\"W1\"},\"hook\":{\"name\":\"before_doing\"}}"}}' \
@@ -12192,27 +12197,42 @@ for _huge in 9223372036854775808 99999999999999999999 10000000000000000000; do
   assert_eq "35s: an oversized block budget falls back to the default" "2200" "$G35_SEQ"
 done
 
-# 35t: whitespace is not evidence. The field exists so a human can check the
-# claim against the transcript, and " " quotes nothing — the zero-width case is
-# included because `\s` does not match U+200B and it looks identical in the file.
-for _blank in ' ' '   ' '	' '​'; do
-  G35_P=$(g35_proj t); g35_state "$G35_P" W2123 false
-  g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"$_blank\"}"
-  G35_S="$TMPDIR_TEST/g35-t"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
-  g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
-  assert_exit "35t: a whitespace-only user_message is not evidence" 2 "$G35_RC"
-done
+# 35t: the record carries NO free text, by contract — a user's words can hold a
+# pasted credential or private data, and this file outlives the turn. An earlier
+# draft required a verbatim user_message as evidence; the task's own security
+# considerations forbid storing it, so the transcript keeps the words and the
+# record keeps only the fact and the timestamp that locate them. A record that
+# still carries such a field is honoured on its valid fields and the free text
+# is never read, never echoed, and never required.
+G35_P=$(g35_proj t); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"G35_FREETEXT_SENTINEL\",\"stderr_tail\":\"G35_FREETEXT_SENTINEL\"}"
+G35_S="$TMPDIR_TEST/g35-t"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+if printf '%s%s' "$G35_OUT" "$G35_ERR" | grep -qF 'G35_FREETEXT_SENTINEL'; then
+  echo -e "  ${RED}FAIL${RESET}: 35t: a stray free-text field must never reach either stream"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 35t: a stray free-text field reaches neither stream"
+  PASS=$((PASS + 1))
+fi
+# And an error record needs its step, from a fixed vocabulary — never a command
+# string, which routinely carries a bearer token.
 G35_P=$(g35_proj t2); g35_state "$G35_P" W2123 false
-g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"failing_command\":\" \",\"exit_code\":1}"
+g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"exit_code\":1}"
 G35_S="$TMPDIR_TEST/g35-t2"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
 g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
-assert_exit "35t: a whitespace-only failing_command is not evidence" 2 "$G35_RC"
+assert_exit "35t: an error record with no step is ignored" 2 "$G35_RC"
+G35_P=$(g35_proj t3); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"exit_code\":1,\"step\":\"curl -H Bearer tok\"}"
+G35_S="$TMPDIR_TEST/g35-t3"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+assert_exit "35t: a step outside the fixed vocabulary is ignored" 2 "$G35_RC"
 
 # 35u: `unknown` is a sentinel, not an identity. Matching it on both sides used
 # to satisfy the exact-match branch and skip the window entirely, honouring a
 # six-year-old record — the gate silently off, which this design ranks worst.
 G35_P=$(g35_proj u); g35_state "$G35_P" W2123 false
-g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"unknown\",\"recorded_at_epoch\":$((G35_NOW - 189216000)),\"user_message\":\"stop\"}"
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"unknown\",\"recorded_at_epoch\":$((G35_NOW - 189216000))}"
 G35_S="$TMPDIR_TEST/g35-u"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
 g35_run "$G35_P" "$G35_S" '{"session_id":"unknown"}'
 assert_exit "35u: a stale record is ignored even when both sides say unknown" 2 "$G35_RC"
@@ -12220,17 +12240,27 @@ assert_exit "35u: a stale record is ignored even when both sides say unknown" 2 
 # 35v: the contract lists recorded_at_epoch under Always, and the gate now
 # requires it — a record with no timestamp at all used to be honoured.
 G35_P=$(g35_proj v); g35_state "$G35_P" W2123 false
-g35_record "$G35_P" '{"kind":"halt","session_id":"sessA","user_message":"stop"}'
+g35_record "$G35_P" '{"kind":"halt","session_id":"sessA"}'
 G35_S="$TMPDIR_TEST/g35-v"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
 g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
 assert_exit "35v: a record with no recorded_at_epoch is ignored" 2 "$G35_RC"
+# ABSENT is not the only bad shape. A PRESENT but untyped epoch — a string,
+# null, an object — was honoured on PowerShell and ignored on bash, a fifth
+# divergence that survived precisely because only the absent case was pinned.
+for _badepoch in '"1756512000"' 'null' '{}' '[]' 'true'; do
+  G35_P=$(g35_proj v2); g35_state "$G35_P" W2123 false
+  g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$_badepoch}"
+  G35_S="$TMPDIR_TEST/g35-v2"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+  g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+  assert_exit "35v: a present-but-untyped recorded_at_epoch is ignored" 2 "$G35_RC"
+done
 
 # 35w: exit_code must be a WHOLE number in range. jq's `type == "number"` alone
 # accepted 0.5 and 1e300, which the PowerShell half rejects — the same record
 # ending a session on one host and not the other.
 for _ec in 0.5 1e300 '"1"' 0; do
   G35_P=$(g35_proj w); g35_state "$G35_P" W2123 false
-  g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"failing_command\":\"c\",\"exit_code\":$_ec}"
+  g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"exit_code\":$_ec,\"step\":\"implementation\"}"
   G35_S="$TMPDIR_TEST/g35-w"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
   g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
   assert_exit "35w: a non-integer exit_code is ignored" 2 "$G35_RC"

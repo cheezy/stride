@@ -259,39 +259,34 @@ if [ -f "$TERMINAL_STATE_FILE" ]; then
   if [ "$_ts_ok" = "yes" ]; then
     case "$_ts_kind" in
       halt)
-        # The record must carry the user's own words. An empty quote is an
-        # assertion rather than evidence, and the field exists so a human can
-        # check the claim against the transcript.
-        # Whitespace is refused, not merely emptiness: " " passes a length test
-        # while quoting nothing a transcript could corroborate, which defeats
-        # the only evidence check the agent-recorded states have. The class
-        # includes the zero-width and non-breaking characters `\s` misses —
-        # a U+200B "message" is exactly as empty as a space, and looks
-        # identical to a human reading the record.
-        if jq -e 'try ((.user_message | type) == "string"
-                       and ((.user_message | gsub("[\\s\\x{200b}\\x{200c}\\x{200d}\\x{feff}\\x{00a0}]"; "")) | length) > 0) catch false' \
-          "$TERMINAL_STATE_FILE" > /dev/null 2>&1; then
-          # Never echoes user_message: it is unconstrained free text and this
-          # message reaches both output streams. The state is named; the text
-          # is not quoted.
-          permit_state "3 (the user halted the loop)"
-        fi
+        # The record states THAT a halt occurred and WHEN — it carries no quote
+        # of the user's message, by contract. A user's words can contain a
+        # pasted credential, customer data, or a private path, and this file
+        # persists on disk past the turn, so the transcript keeps the words and
+        # the record keeps only the fact and the timestamp that locate them.
+        # kind, session and epoch have already been validated above, so there
+        # is nothing further to check.
+        permit_state "3 (the user halted the loop)"
         ;;
       error)
-        # Machine-produced evidence, not an assertion: a failing command and a
-        # non-zero exit code. A recoverable hook failure is not this state —
-        # honouring one would permit any stop after any failed hook, which is a
-        # fifth state wearing state 4's clothes.
-        # exit_code must be a WHOLE number in a plausible range: `type ==
-        # "number"` alone accepted 0.5 and 1e300, both of which the PowerShell
-        # half rejects, so the same record ended a session on one host and not
-        # the other.
-        if jq -e 'try ((.failing_command | type) == "string"
-                       and ((.failing_command | gsub("[\\s\\x{200b}\\x{200c}\\x{200d}\\x{feff}\\x{00a0}]"; "")) | length) > 0
-                       and (.exit_code | type) == "number"
+        # Bounded, machine-produced evidence only: a non-zero exit code and a
+        # step name from the workflow's own vocabulary. NO command string and
+        # NO stderr capture — a Stride command routinely carries a bearer token
+        # and stderr carries whatever the failing tool printed, and neither
+        # belongs in a file that outlives the turn.
+        #
+        # A recoverable hook failure is not this state: honouring one would
+        # permit any stop after any failed hook, a fifth state wearing state
+        # 4's clothes. exit_code must be a WHOLE number in range — `type ==
+        # "number"` alone accepted 0.5 and 1e300, which the PowerShell half
+        # rejects, so the same record ended a session on one host and not the
+        # other.
+        if jq -e 'try ((.exit_code | type) == "number"
                        and (.exit_code == (.exit_code | floor))
                        and (.exit_code > -2147483648) and (.exit_code < 2147483648)
-                       and (.exit_code != 0)) catch false' \
+                       and (.exit_code != 0)
+                       and (.step | type) == "string"
+                       and (.step | test("^[a-z_]{1,32}$"))) catch false' \
           "$TERMINAL_STATE_FILE" > /dev/null 2>&1; then
           permit_state "4 (an unrecoverable error was recorded)"
         fi

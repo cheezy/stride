@@ -64,8 +64,8 @@ getting a file of its own.
 | Path | `$CLAUDE_PROJECT_DIR/.stride/.terminal-state.json` |
 | Format | Single-line JSON, `kind` one of `halt` or `error` |
 | Always | `kind`, `session_id`, `recorded_at` (ISO8601-Z), `recorded_at_epoch` (integer) |
-| `kind: "halt"` adds | `user_message` — the user's own words, verbatim, truncated to 500 characters. Must contain at least one visible character: whitespace, and the zero-width and non-breaking characters that read as blank, are refused as quoting nothing |
-| `kind: "error"` adds | `failing_command` (at least one visible character), `exit_code` (a non-zero **whole** number within ±2³¹, not a string), `stderr_tail` (≤500 chars), `step` |
+| `kind: "halt"` adds | nothing. The record states that a halt occurred and when — no more |
+| `kind: "error"` adds | `exit_code` (a non-zero **whole** number within ±2³¹, never a string) and `step`, a short lowercase step name matching `^[a-z_]{1,32}$` — a shape, not free text |
 | Written by | The agent, in Step 8, on an explicit user halt or an unrecoverable abort. Nothing else writes it |
 | Lifecycle | Written at the halt or abort; cleared in Step 0, on any claim, and on an explicit resume |
 | Freshness | Honoured when `session_id` matches the Stop payload's **and neither side is the sentinel**. When the record's `session_id` is the literal `unknown`, the 900-second window applies whichever value the payload carries — `unknown` is a sentinel, not an identity, so it never satisfies an identity match |
@@ -78,6 +78,40 @@ getting a file of its own.
 either GNU `date -d` or BSD `date -j -f`, and a script that picks one fails on
 exactly one platform in a way no CI would catch. Integers compare the same
 everywhere. `recorded_at` is kept beside it for the human reading the file.
+
+### The record carries no free text, deliberately
+
+**A halt record says that a halt happened and when. It does not quote the user,
+and it must not.** A user's message can contain anything — a credential pasted
+mid-conversation, a customer's data, a private path — and this record is a file
+on disk that outlives the turn. Storing the quote would put unbounded text into
+an artifact whose whole job is to be small and mechanical.
+
+The same rule governs `kind: "error"`: no command string, no stderr capture, no
+API response, no diff content. A Stride command routinely carries a bearer
+token, and stderr routinely carries whatever the failing tool printed, so both
+are exactly the free text this record refuses. What remains is an exit code and
+a step name constrained to `^[a-z_]{1,32}$` — bounded, and far too narrow to
+carry anything consideration 2 names: thirty-two characters of lowercase and
+underscore cannot hold an API response, a diff, or a bearer token, which carries
+digits and is much longer. The constraint is a SHAPE rather than an enumerated
+list, and it is written that way here because the gates enforce exactly that and
+nothing more.
+
+**This is a real trade and it is worth naming.** An earlier draft required a
+verbatim `user_message` so a human could check the claim against the
+transcript, which is a genuine auditability gain — and the wrong call. The
+transcript already holds the user's words; duplicating them into a persistent
+side-file buys a convenience an auditor can get elsewhere, at the cost of an
+unbounded-content artifact. The record answers *whether* and *when*; the
+transcript answers *what was said*.
+
+A consequence worth stating plainly: with no quote to check, a halt record is
+closer to an assertion than that earlier draft pretended. The section below on
+auditability already said the agent holds the pen — this makes that more true,
+not less. What the record still gives an auditor is a timestamp and a session id
+to correlate against the transcript, which is enough to find the moment and read
+it there.
 
 ### Session identity, and the `unknown` sentinel
 
@@ -105,8 +139,21 @@ jq -nc --arg k "halt" \
   --arg s "${CLAUDE_SESSION_ID:-unknown}" \
   --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson e "$(date -u +%s)" \
-  --arg m "<the user's words, verbatim>" \
-  '{kind:$k, session_id:$s, recorded_at:$t, recorded_at_epoch:$e, user_message:$m}' \
+  '{kind:$k, session_id:$s, recorded_at:$t, recorded_at_epoch:$e}' \
+  > "$CLAUDE_PROJECT_DIR/.stride/.terminal-state.json"
+```
+
+For an unrecoverable error, add the exit code and the step it failed in — and
+nothing else:
+
+```bash
+jq -nc --arg k "error" \
+  --arg s "${CLAUDE_SESSION_ID:-unknown}" \
+  --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --argjson e "$(date -u +%s)" \
+  --argjson c 1 \
+  --arg p "implementation" \
+  '{kind:$k, session_id:$s, recorded_at:$t, recorded_at_epoch:$e, exit_code:$c, step:$p}' \
   > "$CLAUDE_PROJECT_DIR/.stride/.terminal-state.json"
 ```
 
@@ -119,10 +166,9 @@ rm -f "$CLAUDE_PROJECT_DIR/.stride/.terminal-state.json"
 ## What "explicit" means
 
 A message **from the user, in this session**, whose plain reading is an
-instruction to stop the Stride loop. The record quotes it verbatim in
-`user_message` — never paraphrased, never summarised, because a paraphrase is
-the agent's account of what the user meant and the point of the field is that a
-human can check it against the transcript.
+instruction to stop the Stride loop. The record does **not** quote it — see the
+no-free-text rule above — so what counted as explicit is settled in the
+transcript, which the record's timestamp and session id point at.
 
 None of the following is an explicit halt:
 
@@ -143,12 +189,17 @@ The agent holds the pen. Nothing here technically prevents an agent from
 writing a halt record it should not have written, and claiming otherwise would
 be a worse failure than the one this replaces.
 
-What changes is that the claim becomes checkable. `user_message` is a verbatim
-quote a human can compare against the transcript; `kind: "error"` carries a
-failing command and a non-zero exit code rather than an assertion; and the gate
-names the state in its permit message, so a fabricated halt appears in the
-record instead of vanishing into a silent stop. An unsanctioned stop becomes
-visible rather than invisible — which is all this set out to do.
+What changes is that the stop becomes **visible and locatable**. The gate names
+the state in its permit message, so a fabricated halt appears in the session
+record instead of vanishing into a silent stop; the record's timestamp and
+session id point at the exact moment in the transcript, where the claim can be
+checked against what the user actually said; and `kind: "error"` carries a
+non-zero exit code and a step name rather than a bare assertion.
+
+The record does not itself prove the claim, and it is not built to. It says a
+halt was recorded, in this session, at this instant — and it makes an
+unsanctioned stop distinguishable from a sanctioned one, which is all this set
+out to do.
 
 ## A corrupt file is not a terminal state
 
@@ -165,10 +216,10 @@ The same rule governs every permit the gate reaches after it had something to
 gate on: a missing, empty, or malformed identifier is reported, never silent.
 Silence is reserved for the paths where the gate had nothing to act on at all.
 
-## The gate never echoes the record's free text
+## The gate never echoes the record
 
-`user_message` and `stderr_tail` hold unconstrained text that reaches a hook
-writing to stdout and stderr. The permit message names the **state** and never
-quotes either field. This is the same discipline the gate already applies to
-server-supplied identifiers, which it refuses rather than sanitises when they
-are not identifier-shaped.
+The permit message names the **state** and nothing from the file. Since the
+record carries no free text at all, this is a narrow rule rather than a
+load-bearing one — but it stays stated, because the same discipline governs the
+server-supplied identifier the gate does handle, which it refuses rather than
+sanitises when it is not identifier-shaped.

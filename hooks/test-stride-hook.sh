@@ -11539,6 +11539,26 @@ echo "=== Test Group 34: W2124 Stop gate (bash) ==="
 STOP_GATE="$SCRIPT_DIR/stride-stop-gate.sh"
 G34_TOKEN='stride_dev_FAKE_G34_SENTINEL'
 
+# Absolute path to bash, captured ONCE. The farm cases run the gate with a
+# restricted PATH, and `bash` would otherwise be resolved THROUGH that PATH — so
+# the gate would never start and every assertion in the case would pass
+# vacuously, which this task ranks as worse than having no case at all.
+G34_BASH=$(command -v bash)
+
+# A PATH containing ONLY the named binaries. g34_stub can add a fake command but
+# cannot express ABSENCE, and absence is the only way to drive `command -v`
+# failing. Everything the gate needs must be admitted explicitly, so the list is
+# the gate's real dependency set minus whichever one is under test.
+# $1 = farm dir, $2.. = binaries to admit
+g34_farm() {
+  local _d="$1"; shift
+  rm -rf "$_d"; mkdir -p "$_d"
+  local _b _p
+  for _b in "$@"; do
+    _p=$(command -v "$_b") && ln -sf "$_p" "$_d/$_b"
+  done
+}
+
 # A fake curl that emulates `-w '\n%{http_code}'` by printing the body, a
 # newline, then the status. Getting that emulation wrong is the likeliest way
 # this whole group passes for the wrong reason, so the shape is explicit.
@@ -11662,6 +11682,13 @@ assert_exit "34e: a 200 with null data permits the stop" 0 "$G34_RC"
 G34_S="$TMPDIR_TEST/w2124-stub-e2"; rm -rf "$G34_S"; g34_stub "$G34_S" '{"data":{"identifier":""}}' 200
 g34_run "$G34_P" "$G34_S"
 assert_exit "34e: a 200 with an empty identifier permits the stop" 0 "$G34_RC"
+# The STATE matters here, not just the exit code. This exact response once gave
+# state 1 on bash and undetermined on PowerShell — the same wire answer yielding
+# a different SANCTIONED state on the two halves. The ps1 side is pinned by
+# 36p9; asserting only the exit code here would leave the bash side free to
+# regress and reopen the divergence with nothing going red.
+assert_contains "34e: and names terminal state 1, the same state the ps1 half names" \
+  "terminal state 1" "$G34_ERR"
 
 # 34f: AC6 — the completion needs human review, so the loop legitimately stops.
 # Stub present but unhit proves the short-circuit precedes the network.
@@ -11920,6 +11947,181 @@ else
   echo -e "  ${RED}FAIL${RESET}: 34o: the stop gate must be executable"
   FAIL=$((FAIL + 1))
 fi
+
+
+# --- W2126: the permit paths that had no case ---
+# A gate that blocks wrongly stalls every session in the fleet; a gate that
+# permits wrongly makes the whole goal evaporate quietly. The block path is the
+# one everyone remembers to test, so these are deliberately weighted toward the
+# permits. Every needle below is a PATH-DISCRIMINATING literal: `unsanctioned`
+# alone appears on a dozen branches, so asserting it would let a case pass for
+# reaching the wrong one.
+
+# 34u: [bash-only] no `jq` on PATH. Genuinely bash-only — the PowerShell half
+# uses ConvertFrom-Json, a language feature that cannot be absent. This is a
+# SILENT permit by design (it fires before the gate has anything to report), so
+# the assertions are exit 0, empty stderr, and no API call — and a positive
+# control proves the fixture would otherwise have blocked, without which
+# "exit 0 and silence" is equally satisfied by a gate that simply crashed.
+G34_P=$(g34_proj u); g34_state "$G34_P" W2123 false
+G34_FARM="$TMPDIR_TEST/w2124-farm-u"
+# `bash` is admitted deliberately: the stub curl's `#!/usr/bin/env bash` shebang
+# resolves bash THROUGH this PATH, so without it the stub cannot execute, curl
+# looks like a transport failure, and the case permits for a reason that has
+# nothing to do with jq. That is precisely a case passing for the wrong reason.
+g34_farm "$G34_FARM" bash mkdir date grep head cat tr rm id sed awk
+# The stub is generated INTO the farm, not copied in: g34_stub bakes its own
+# directory into the log path, so a copied stub would log somewhere the
+# no-API-call assertion never looks — an assertion that could not fail.
+g34_stub "$G34_FARM" "$G34_OK_BODY" 200
+# Non-vacuity guard: the farm must really lack jq and really have curl, or the
+# case proves only that some binary was missing.
+assert_eq "[bash-only] 34u: the farm has curl" "yes" \
+  "$([ -x "$G34_FARM/curl" ] && echo yes || echo no)"
+assert_eq "[bash-only] 34u: and the farm has no jq" "yes" \
+  "$([ -e "$G34_FARM/jq" ] && echo no || echo yes)"
+G34_OUT=$(printf '{}' | env -i CLAUDE_PROJECT_DIR="$G34_P" PATH="$G34_FARM" \
+  "$G34_BASH" "$STOP_GATE" 2>"$TMPDIR_TEST/g34u.err")
+G34_RC=$?
+G34_ERR=$(cat "$TMPDIR_TEST/g34u.err" 2>/dev/null || printf '')
+assert_exit "[bash-only] 34u: a missing jq permits the stop" 0 "$G34_RC"
+assert_eq "[bash-only] 34u: and says nothing, having nothing it could evaluate" "0" \
+  "$(printf '%s' "$G34_ERR" | wc -c | tr -d ' ')"
+if [ -f "$G34_FARM/curl.log" ]; then
+  echo -e "  ${RED}FAIL${RESET}: [bash-only] 34u: must not call the API without jq to read the answer"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: [bash-only] 34u: no API call without jq to read the answer"
+  PASS=$((PASS + 1))
+fi
+# The positive control: same fixture, jq restored, must BLOCK. Without it,
+# "exit 0 and empty stderr" is equally satisfied by a gate that simply crashed.
+g34_farm "$G34_FARM" bash jq mkdir date grep head cat tr rm id sed awk
+g34_stub "$G34_FARM" "$G34_OK_BODY" 200
+printf '{}' | env -i CLAUDE_PROJECT_DIR="$G34_P" PATH="$G34_FARM" "$G34_BASH" "$STOP_GATE" > /dev/null 2>&1
+assert_exit "[bash-only] 34u: control — the same fixture blocks once jq is present" 2 "$?"
+
+# 34v: [bash-only] no `curl` on PATH. Also bash-only: the ps1 half uses
+# Invoke-WebRequest, a cmdlet. Unlike 34u this one CAN report, so it must.
+G34_P=$(g34_proj v); g34_state "$G34_P" W2123 false
+G34_FARM="$TMPDIR_TEST/w2124-farm-v"
+g34_farm "$G34_FARM" bash jq mkdir date grep head cat tr rm id sed awk
+assert_eq "[bash-only] 34v: the farm has no curl" "yes" \
+  "$([ -e "$G34_FARM/curl" ] && echo no || echo yes)"
+G34_ERR=$(printf '{}' | env -i CLAUDE_PROJECT_DIR="$G34_P" PATH="$G34_FARM" \
+  "$G34_BASH" "$STOP_GATE" 2>&1 >/dev/null)
+G34_RC=$?
+assert_exit "[bash-only] 34v: a missing curl permits the stop" 0 "$G34_RC"
+assert_contains "[bash-only] 34v: and names curl as the reason" "curl is not available" "$G34_ERR"
+
+# 34w: a 200 whose body is not JSON at all. Distinct from 35z, which covers a
+# body that parses but is not an object, and the needle is deliberately the
+# API-side wording — `the loop-state file could not be parsed` is a different
+# branch with a nearly identical message.
+G34_P=$(g34_proj w); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-w"; rm -rf "$G34_S"; g34_stub "$G34_S" 'not json at all' 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34w: an unparseable API body permits the stop" 0 "$G34_RC"
+assert_contains "34w: and names the API response as the thing that failed" \
+  "the API response could not be parsed" "$G34_ERR"
+
+# 34x: a next identifier longer than 64 characters. The needle must say NEXT:
+# the completed-identifier branch emits a nearly identical sentence, and a
+# needle without that word would pass on either.
+G34_P=$(g34_proj x2); g34_state "$G34_P" W2123 false
+G34_S="$TMPDIR_TEST/w2124-stub-x2"; rm -rf "$G34_S"
+g34_stub "$G34_S" '{"data":{"identifier":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW"}}' 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34x: an over-long next identifier permits the stop" 0 "$G34_RC"
+assert_contains "34x: and names the NEXT identifier, not the completed one" \
+  "the next task identifier is longer than 64" "$G34_ERR"
+
+# 34y: PARTIAL credentials — one of the pair present. 34d4 covers only the
+# both-absent case, and a gate that required just one of them would pass it.
+for _half in url token; do
+  G34_P=$(g34_proj "y-$_half")
+  g34_state "$G34_P" W2123 false
+  if [ "$_half" = url ]; then
+    printf '# auth\n- **API URL:** `https://api.example.invalid`\n' > "$G34_P/.stride_auth.md"
+  else
+    printf '# auth\n- **API Token:** `%s`\n' "$G34_TOKEN" > "$G34_P/.stride_auth.md"
+  fi
+  G34_S="$TMPDIR_TEST/w2124-stub-y"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+  g34_run "$G34_P" "$G34_S"
+  assert_exit "34y: half the credentials permits the stop ($_half only)" 0 "$G34_RC"
+  assert_contains "34y: and names the missing credential pair" \
+    "no API URL or token" "$G34_ERR"
+  if [ -f "$G34_S/curl.log" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 34y: must not call the API with half the credentials"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 34y: no API call with half the credentials"
+    PASS=$((PASS + 1))
+  fi
+done
+
+# 34z: [bash-only] the Windows shim's missing-powershell.exe branch, asserted
+# STRUCTURALLY — because it cannot be driven from this host at all. `OSTYPE` is
+# set by bash ITSELF, not inherited from the environment, so `env -i` does not
+# clear it and `[ -z "$OSTYPE" ]` is never true under any bash on macOS or
+# Linux. An earlier revision of this case tried to drive it behaviourally and
+# passed for an unrelated reason: the gate never entered the shim, took an
+# ordinary permit path instead, and the exit-0 assertion was satisfied by the
+# wrong branch. Both shim arms therefore get shape assertions, and the reason is
+# recorded here so the next person does not spend the same hour on it.
+#
+# What matters about these two arms is the DIRECTION they fail in: the sibling
+# gate stride-skill-gate.sh exits 2 in the same situation, and copied verbatim
+# that would make a broken delegation an unconditional, uncounted, permanent
+# block of every stop on that machine.
+# The range ends at the exec, NOT at the first column-0 `fi`: the platform TEST
+# closes with its own `fi` before the delegation block even opens, so a naive
+# range captured only the comment and asserted against text containing no exit
+# at all — a structural assertion that was itself wrong, and green only because
+# it was measuring nothing.
+# Comment lines are stripped before counting: the shim's own comment explains
+# the divergence by NAMING `exit 2`, so a naive count finds a blocking arm that
+# does not exist in the code.
+G34_SHIM=$(awk '/Platform detection: delegate to PowerShell/,/exec powershell.exe/' "$STOP_GATE")
+G34_SHIM_CODE=$(printf '%s\n' "$G34_SHIM" | grep -v '^[[:space:]]*#')
+assert_eq "[bash-only] 34z: the shim has exactly two failure arms" "2" \
+  "$(printf '%s\n' "$G34_SHIM_CODE" | grep -c 'exit 0' | tr -d ' ')"
+assert_eq "[bash-only] 34z: and neither of them blocks" "0" \
+  "$(printf '%s\n' "$G34_SHIM_CODE" | grep -c 'exit 2' | tr -d ' ')"
+assert_contains "[bash-only] 34z: the missing-powershell arm names what was missing" \
+  "powershell.exe not found" "$G34_SHIM"
+assert_contains "[bash-only] 34z: and the missing-.ps1 arm names that instead" \
+  "stride-stop-gate.ps1 not found" "$G34_SHIM"
+
+# 34ab: a loop-state file that PARSES but is not an object. All four shapes are
+# valid JSON, so the honest reason is that they record no usable needs_review —
+# not that they could not be parsed. The PowerShell half used to say the latter
+# for an array, giving a different reason for the same file; this pins the
+# agreed wording on the bash side so the pair cannot drift apart again.
+for _shape in '[1,2,3]' '"a string"' '5' 'true'; do
+  G34_P=$(g34_proj ab); printf '%s' "$_shape" > "$G34_P/.stride/.loop-state.json"
+  G34_S="$TMPDIR_TEST/w2124-stub-ab"; rm -rf "$G34_S"; g34_stub "$G34_S" "$G34_OK_BODY" 200
+  g34_run "$G34_P" "$G34_S"
+  assert_exit "34ab: a parsed non-object loop state permits the stop" 0 "$G34_RC"
+  assert_contains "34ab: and gives the reason the ps1 half now gives too" \
+    "records no usable needs_review" "$G34_ERR"
+done
+
+# 34aa: [bash-only] — it greps stride-stop-gate.sh's own source text, so it can
+# have no PowerShell twin by construction. Marked rather than left as an
+# unexplained extra case for anyone diffing the halves.
+# The mkdir arm of the counter write. This is a STRUCTURAL assertion, not
+# a behavioural one, and deliberately so: reaching that line requires .stride/
+# to have been read already (the loop-state file lives there), and POSIX
+# `mkdir -p` succeeds on an existing directory whatever its mode — so the arm
+# has no reachable fixture. 34h4 exercises the WRITE failure on an existing
+# directory, which is the reachable half. Asserting the shape keeps the arm from
+# regressing to a bare failure that would block instead of permit.
+assert_eq "[bash-only] 34aa: the counter mkdir permits rather than failing closed" "1" \
+  "$(grep -c 'mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null \\' "$STOP_GATE" | tr -d ' ')"
+assert_contains "[bash-only] 34aa: and its failure arm reports rather than exiting bare" \
+  "permit_undetermined" \
+  "$(grep -A1 'mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null \\' "$STOP_GATE" | tail -1)"
 
 # 34p: the Windows delegation shim must PERMIT when the .ps1 is missing.
 # stride-skill-gate.sh's equivalent branches exit 2; copied verbatim into a Stop

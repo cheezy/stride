@@ -1,6 +1,12 @@
 # test-stride-hook.ps1 — Tests for stride-hook.ps1 PowerShell hook script
 #
-# Mirrors all 6 test groups from test-stride-hook.sh.
+# Mirrors the bash suite's test groups (test-stride-hook.sh). Group NUMBERING is
+# NOT aligned between the halves and never has been — each group's own header
+# names the bash group it mirrors, and that header is authoritative rather than
+# the number. Deliberately no count here: the offset varies (bash 30c mirrors to
+# ps1 32c, bash 34 to ps1 35), so any figure is stale in two directions at once,
+# which is how the previous one survived unnoticed. Sanctioned asymmetries carry
+# a [bash-only] or [ps1-only] label.
 # Self-contained — no Pester or external dependencies.
 #
 # Usage: pwsh test-stride-hook.ps1
@@ -11439,7 +11445,12 @@ function Set-G36Record {
 }
 
 function Invoke-G36Gate {
-    param([string]$ProjectDir, [string]$StdinJson = '{}')
+    # EnvOverrides is declared HERE and not only on the Group 35 runner: this is
+    # a simple (non-advanced) function, so an unknown named argument is absorbed
+    # into $args without error — a call passing -EnvOverrides to a function that
+    # does not declare it sets nothing, the gate runs on its compiled-in
+    # default, and the assertion holds no matter what the code under test does.
+    param([string]$ProjectDir, [string]$StdinJson = '{}', [hashtable]$EnvOverrides = $null)
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = 'pwsh'
     $psi.Arguments = "-NoProfile -File `"$g36Gate`""
@@ -11453,6 +11464,11 @@ function Invoke-G36Gate {
     $psi.Environment['CLAUDE_PROJECT_DIR'] = $ProjectDir
     $psi.Environment['CLAUDE_SESSION_ID'] = ''
     $null = $psi.Environment.Remove('STRIDE_ALLOW_STOP')
+    if ($EnvOverrides) {
+        foreach ($kv in $EnvOverrides.GetEnumerator()) {
+            $psi.Environment["$($kv.Key)"] = [string]$kv.Value
+        }
+    }
     $proc = [System.Diagnostics.Process]::Start($psi)
     $proc.StandardInput.Write($StdinJson)
     $proc.StandardInput.Close()
@@ -11657,6 +11673,229 @@ if (Wait-ForListener -Port $g36Port) {
     Write-Host "  SKIP: 36b: listener did not come up on port $g36Port"
 }
 Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
+
+# --- W2126: the ps1 permit paths that had no case ---
+# This half has FINER-GRAINED branches than bash, which collapses several into a
+# single jq expression, so the gap lists are asymmetric by construction: four
+# separate branches here (no .data, .data not an object, no .identifier,
+# .identifier not a string) correspond to one on the other side. Each needs its
+# own case or the branch is unpinned.
+# Every needle is path-discriminating: 'unsanctioned' alone appears on a dozen
+# branches and would let a case pass for reaching the wrong one.
+
+$g36Port = 18931
+$g36Job = Start-G35Listener -Port $g36Port -StatusCode 200 -Body '{"data":{"identifier":"W2124"}}' -Requests 40
+$g36GapUp = Wait-ForListener -Port $g36Port
+$g36GapUrl = "http://localhost:$g36Port"
+
+# 36p1: a loop-state file that parses but is NOT an object. bash reaches the
+# same verdict through one jq test; here it is its own branch.
+foreach ($g36Shape in @('[1,2,3]', '"a string"', '5', 'true')) {
+    $g36d = New-G36Project 'p1' $g36GapUrl
+    Set-Content -Path (Join-Path $g36d '.stride/.loop-state.json') -Encoding UTF8 -Value $g36Shape
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36p1: a non-object loop state permits the stop" 0 $g36r.ExitCode
+    # These four all PARSE — an array, a string, a number, a boolean — so the
+    # correct reason is the one bash gives: no usable needs_review. Calling them
+    # a parse failure was a cross-half divergence, now aligned. The needle is
+    # the full clause, not a bare 'loop-state file', which three branches share.
+    Assert-Contains "36p1: and gives the same reason bash gives for a parsed non-object" `
+        'records no usable needs_review' $g36r.Stderr
+}
+
+# 36p3: the COMPLETED identifier fails the shape check — the mirror of bash 35x.
+# The needle says 'completed' because the next-identifier branch emits a nearly
+# identical sentence.
+foreach ($g36Ls in @('{"identifier":"","needs_review":false}', '{"needs_review":false}', '{"identifier":"W 2123","needs_review":false}', '{"identifier":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","needs_review":false}')) {
+    $g36d = New-G36Project 'p3' $g36GapUrl
+    Set-Content -Path (Join-Path $g36d '.stride/.loop-state.json') -Encoding UTF8 -Value $g36Ls
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36p3: an unusable completed identifier permits the stop" 0 $g36r.ExitCode
+    Assert-Contains "36p3: and names the COMPLETED identifier" 'completed identifier' $g36r.Stderr
+}
+
+# 36p4: PARTIAL credentials. The both-absent case was already covered; a gate
+# requiring only one of the pair would have passed that and failed this.
+foreach ($g36Half in @('url', 'token')) {
+    $g36d = New-G36Project 'p4' $g36GapUrl
+    if ($g36Half -ceq 'url') {
+        Set-Content -Path (Join-Path $g36d '.stride_auth.md') -Encoding UTF8 -Value "# auth`n- **API URL:** ``$g36GapUrl``"
+    } else {
+        Set-Content -Path (Join-Path $g36d '.stride_auth.md') -Encoding UTF8 -Value "# auth`n- **API Token:** ``stride_dev_FAKE_G36``"
+    }
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36p4: half the credentials permits the stop ($g36Half only)" 0 $g36r.ExitCode
+    Assert-Contains "36p4: and names the missing credential pair" 'no API URL or token' $g36r.Stderr
+}
+Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
+# 36p5: a 500 recovered from the thrown exception. This half learns the status
+# from the exception rather than a -w line, so the recovery is its own branch.
+$g36Port = 18932
+$g36Job = Start-G35Listener -Port $g36Port -StatusCode 500 -Body '{"error":"boom"}'
+if (Wait-ForListener -Port $g36Port) {
+    $g36d = New-G36Project 'p5' "http://localhost:$g36Port"
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36p5: a 500 permits the stop" 0 $g36r.ExitCode
+    Assert-Contains "36p5: and reports the status it recovered" 'the API answered 500' $g36r.Stderr
+} else {
+    Write-Host "  SKIP: 36p5: listener did not come up on port $g36Port"
+}
+Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
+# 36p6: a 200 with an EMPTY body.
+$g36Port = 18933
+$g36Job = Start-G35Listener -Port $g36Port -StatusCode 200 -Body ''
+if (Wait-ForListener -Port $g36Port) {
+    $g36d = New-G36Project 'p6' "http://localhost:$g36Port"
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36p6: a 200 with an empty body permits the stop" 0 $g36r.ExitCode
+    Assert-Contains "36p6: and names the empty body" 'empty body' $g36r.Stderr
+} else {
+    Write-Host "  SKIP: 36p6: listener did not come up on port $g36Port"
+}
+Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
+# 36p7: a 200 whose body is not JSON at all — the twin of bash 34w. The needle
+# says API response, because the loop-state branch emits a near-identical line.
+$g36Port = 18934
+$g36Job = Start-G35Listener -Port $g36Port -StatusCode 200 -Body 'not json at all'
+if (Wait-ForListener -Port $g36Port) {
+    $g36d = New-G36Project 'p7' "http://localhost:$g36Port"
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36p7: an unparseable API body permits the stop" 0 $g36r.ExitCode
+    Assert-Contains "36p7: and names the API response as what failed" 'the API response could not be parsed' $g36r.Stderr
+} else {
+    Write-Host "  SKIP: 36p7: listener did not come up on port $g36Port"
+}
+Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
+# 36p8: a 200 body that parses but is not an object — the twin of bash 35z.
+$g36Port = 18935
+$g36Job = Start-G35Listener -Port $g36Port -StatusCode 200 -Body '[1,2,3]'
+if (Wait-ForListener -Port $g36Port) {
+    $g36d = New-G36Project 'p8' "http://localhost:$g36Port"
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36p8: a non-object API body permits the stop" 0 $g36r.ExitCode
+    Assert-Contains "36p8: and says the response was not an object" 'was not an object' $g36r.Stderr
+} else {
+    Write-Host "  SKIP: 36p8: listener did not come up on port $g36Port"
+}
+Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
+# 36p9-p13: the four separate no-task shapes this half distinguishes, plus the
+# empty identifier. ALL must report state 1 — an empty identifier used to fall
+# through to the shape check and report undetermined here while bash called it
+# state 1, the same wire response yielding a different SANCTIONED STATE on the
+# two halves. That divergence is fixed; these pin it.
+foreach ($g36Body in @('{"other":1}', '{"data":null}', '{"data":"x"}', '{"data":{}}', '{"data":{"identifier":5}}', '{"data":{"identifier":""}}')) {
+    $g36Port = 18936
+    $g36Job = Start-G35Listener -Port $g36Port -StatusCode 200 -Body $g36Body
+    if (Wait-ForListener -Port $g36Port) {
+        $g36d = New-G36Project 'p9' "http://localhost:$g36Port"
+        $g36r = Invoke-G36Gate -ProjectDir $g36d
+        Assert-Exit "36p9: a 200 with no usable task permits the stop" 0 $g36r.ExitCode
+        Assert-Contains "36p9: and names terminal state 1, on every no-task shape" 'terminal state 1' $g36r.Stderr
+    } else {
+        Write-Host "  SKIP: 36p9: listener did not come up on port $g36Port"
+    }
+    Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+}
+
+# 36p13: a next identifier over 64 characters. bash 34x's twin; the needle must
+# say NEXT, since the completed-identifier branch reads almost the same.
+$g36Port = 18937
+$g36Job = Start-G35Listener -Port $g36Port -StatusCode 200 -Body '{"data":{"identifier":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW"}}'
+if (Wait-ForListener -Port $g36Port) {
+    $g36d = New-G36Project 'p13' "http://localhost:$g36Port"
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36p13: an over-long next identifier permits the stop" 0 $g36r.ExitCode
+    # 'the NEXT task identifier' — the completed-identifier branch emits
+    # '...the completed identifier is missing or not identifier-shaped', which
+    # contains a bare 'not identifier-shaped' verbatim, so the shorter needle
+    # was satisfied by a branch this case is not about.
+    Assert-Contains "36p13: and names the NEXT identifier, not the completed one" `
+        'the next task identifier' $g36r.Stderr
+} else {
+    Write-Host "  SKIP: 36p13: listener did not come up on port $g36Port"
+}
+Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
+# 36p15: the max-blocks override is validated. bash 34q/35s cover this; without
+# -EnvOverrides the branch was unreachable from this harness.
+$g36Port = 18938
+# Sized to the BLOCKING calls: one control of 3 plus four loops of 3 is 15, and
+# a budget of 12 ran out mid-loop, whereupon the remaining cases failed as
+# 'could not be reached' — a legitimate permit path that reads exactly like a
+# gate defect. Generous on purpose.
+$g36Job = Start-G35Listener -Port $g36Port -StatusCode 200 -Body '{"data":{"identifier":"W2124"}}' -Requests 40
+if (Wait-ForListener -Port $g36Port) {
+    # CONTROL FIRST. A budget of 1 yields 2,0,0 — a sequence the compiled-in
+    # default of 2 cannot produce — so this proves the override actually reaches
+    # the child. Without it, every assertion below is satisfied by a harness
+    # that silently drops the variable, which is precisely how the earlier
+    # revision of this case passed while testing nothing.
+    $g36d = New-G36Project 'p15c' "http://localhost:$g36Port"
+    $g36Seq = ''
+    foreach ($g36i in 1..3) {
+        $g36r = Invoke-G36Gate -ProjectDir $g36d -EnvOverrides @{ STRIDE_STOP_GATE_MAX_BLOCKS = '1' }
+        $g36Seq += "$($g36r.ExitCode)"
+    }
+    Assert-Eq "36p15: control — a budget of 1 is honoured, proving the override arrives" '200' $g36Seq
+
+    foreach ($g36Bad in @('off', 'abc', '9223372036854775808', '99999999999999999999')) {
+        $g36d = New-G36Project 'p15' "http://localhost:$g36Port"
+        $g36Seq = ''
+        foreach ($g36i in 1..3) {
+            $g36r = Invoke-G36Gate -ProjectDir $g36d -EnvOverrides @{ STRIDE_STOP_GATE_MAX_BLOCKS = $g36Bad }
+            $g36Seq += "$($g36r.ExitCode)"
+        }
+        Assert-Eq "36p15: a malformed max-blocks override falls back to the default" '220' $g36Seq
+    }
+} else {
+    Write-Host "  SKIP: 36p15: listener did not come up on port $g36Port"
+}
+Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
+# 36p16: a 2xx that is NOT 200. Reachable in production for a 201, 202 or 204,
+# and untested on either half: bash drives its single non-200 test with a 500,
+# but on this half a 500 THROWS and is handled in the catch, so the non-throwing
+# arm stayed untouched. A 2xx establishes nothing about a claimable task.
+foreach ($g36Ok in @(201, 202, 204)) {
+    $g36Port = 18940
+    $g36Job = Start-G35Listener -Port $g36Port -StatusCode $g36Ok -Body '{"data":{"identifier":"W2124"}}'
+    if (Wait-ForListener -Port $g36Port) {
+        $g36d = New-G36Project 'p16' "http://localhost:$g36Port"
+        $g36r = Invoke-G36Gate -ProjectDir $g36d
+        Assert-Exit "36p16: a 2xx that is not 200 permits the stop ($g36Ok)" 0 $g36r.ExitCode
+        Assert-Contains "36p16: and reports the status it saw" "the API answered $g36Ok" $g36r.Stderr
+    } else {
+        Write-Host "  SKIP: 36p16: listener did not come up on port $g36Port"
+    }
+    Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+}
+
+# 36p14: the counter write failing permits rather than blocking unbounded — the
+# twin of bash 34h4. POSIX mode bits only, so skipped on Windows where chmod is
+# not the mechanism; bash covers the behaviour on every host it runs on.
+if ($IsWindows) {
+    Write-Host "  SKIP: 36p14: unwritable .stride needs POSIX mode bits (bash 34h4 covers it)"
+} else {
+    $g36Port = 18939
+    $g36Job = Start-G35Listener -Port $g36Port -StatusCode 200 -Body '{"data":{"identifier":"W2124"}}'
+    if (Wait-ForListener -Port $g36Port) {
+        $g36d = New-G36Project 'p14' "http://localhost:$g36Port"
+        & /bin/chmod 500 (Join-Path $g36d '.stride')
+        $g36r = Invoke-G36Gate -ProjectDir $g36d
+        & /bin/chmod 755 (Join-Path $g36d '.stride')
+        Assert-Exit "36p14: an unrecordable block permits rather than blocking unbounded" 0 $g36r.ExitCode
+        Assert-Contains "36p14: and says the block could not be counted" 'could not be recorded' $g36r.Stderr
+    } else {
+        Write-Host "  SKIP: 36p14: listener did not come up on port $g36Port"
+    }
+    Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+}
 
 # ============================================================
 # Summary

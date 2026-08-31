@@ -327,9 +327,14 @@ try {
     Reset-BlockCounter
     Exit-PermitUndetermined -Why 'the loop-state file could not be parsed'
 }
+# A value that PARSED but is not an object — an array, a bare string, a number,
+# a boolean — reports the same reason bash does. Only a genuine ConvertFrom-Json
+# failure is "could not be parsed": `[1,2,3]` parses perfectly well, and calling
+# that a parse failure made the two halves give different reasons for the same
+# file, which is the divergence family this gate keeps producing.
 if ($null -eq $loop -or $loop -isnot [PSCustomObject]) {
     Reset-BlockCounter
-    Exit-PermitUndetermined -Why 'the loop-state file could not be parsed'
+    Exit-PermitUndetermined -Why 'the loop-state file records no usable needs_review'
 }
 if ($loop.PSObject.Properties.Match('needs_review').Count -eq 0 -or
     $loop.needs_review -isnot [bool]) {
@@ -414,7 +419,11 @@ try {
     Exit-PermitUndetermined -Why 'the API could not be reached, or the request timed out'
 }
 
-if ($statusCode -eq 404) { Exit-PermitState -State '1 (no claimable task remains)' }
+# No 404 arm here, deliberately. Without -SkipHttpErrorCheck (7.0+, denylisted
+# for 5.1 by D277) every non-2xx THROWS, so a 404 is handled in the catch above
+# and an arm for it on this path would be unreachable code pretending to be a
+# permit path. What IS reachable here is a 2xx that is not 200 — a 201, 202 or
+# 204 — which establishes nothing about a claimable task.
 if ($statusCode -ne 200) { Exit-PermitUndetermined -Why "the API answered $statusCode" }
 if (-not $body) { Exit-PermitUndetermined -Why 'the API returned an empty body' }
 
@@ -429,6 +438,16 @@ if ($data.PSObject.Properties.Match('identifier').Count -eq 0) { Exit-PermitStat
 if ($data.identifier -isnot [string]) { Exit-PermitState -State '1 (no claimable task remains)' }
 
 $nextIdent = [string]$data.identifier
+
+# An EMPTY identifier is state 1, not undetermined. The bash twin reaches that
+# verdict at its `[ -n "$NEXT_IDENT" ]` test, while this half used to fall
+# through to the identifier-shape check below, where an empty string fails and
+# reports undetermined — the same wire response yielding a different SANCTIONED
+# STATE on the two halves, which is worse than either answer alone. A 200
+# carrying an empty identifier means the queue offered nothing, which is state 1
+# by definition; the shape check below exists for a non-empty value that is not
+# identifier-shaped.
+if ($nextIdent.Length -eq 0) { Exit-PermitState -State '1 (no claimable task remains)' }
 
 # The only server-controlled string that reaches the block message, so it is
 # refused rather than sanitised — a second line of defence for AC8.

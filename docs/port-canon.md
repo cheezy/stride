@@ -633,6 +633,135 @@ ship a file that trips its own rule.
 
 **History.** v1 — authored from the D243 and D217 fixes.
 
+### 6. Blocking a session end is a per-runtime capability, and only a stdout decision is portable — `stop-hook-capability`
+
+<!-- canon:stop-hook-capability v1 -->
+
+**Substance.** A stop gate — a hook that refuses to let a session end while
+claimable work remains — is not one surface with one spelling across the fleet.
+Before wiring one, a port must settle three things about its runtime, and every
+one of them differs: whether a session-end event exists that can refuse at all,
+what value expresses the refusal, and what stops a refused stop from looping.
+Each runtime sits in exactly one of three capability states:
+
+- **Blocks** — a session-end event exists and the value it returns is honoured.
+- **Observes only** — a session-end event exists, but nothing it returns can
+  refuse.
+- **No session-end event** — the runtime exposes no end-of-session surface at
+  all.
+
+The third state is not padding. A port whose runtime occupies it still gets a
+row recording that there is no event, rather than being dropped from the list
+and read later as an oversight. Take a runtime's state from the table below,
+never from the presence of a gate somewhere else in the fleet.
+
+| Runtime | State | Session-end event | How a refusal is expressed | Loop guard |
+|---|---|---|---|---|
+| Claude Code | Blocks | `Stop` | `{"decision":"block","reason":...}` on stdout, or exit 2. The shipped gate also carries the newer `hookSpecificOutput` spelling as sibling keys of that SAME object, never as a second document | Sends `stop_hook_active` on a Stop that re-fires after its own block, but that key sits outside the published schema, so the shipped gate reads it as a bonus and rests on its own persisted consecutive-block counter |
+| Codex CLI | Blocks | `Stop` | `{"decision":"block","reason":...}` on stdout at exit 0, or exit 2 with the prompt on stderr | None supplied by the runtime; the handler must bound itself |
+| Gemini CLI | Blocks | `AfterAgent` | `{"decision":"deny","reason":...}` on stdout at exit 0, and the reason is fed back to the agent as its next prompt | **None documented — no runaway cap** |
+| Copilot | Blocks | `agentStop`, with the PascalCase alias `Stop` | `{"decision":"block","reason":...}` on stdout at exit 0 | Caps at eight consecutive blocks |
+| Pi | Observes only | `turn_end`, `agent_end` | Nothing. `tool_call` is the only surface whose return value refuses, and a tool call is not a session end | n/a |
+| OpenCode | Observes only | `session.idle` | Nothing. The event hook that sees it is invoked with void and is never awaited, so a throw is swallowed by construction | n/a |
+
+**Exit 2 is not portable, and Copilot is where that bites.** On `agentStop`,
+exit 2 is a *warning* only: the runtime reads the hook as having complained, not
+as having refused, and the session ends anyway — so a gate that expresses its
+refusal solely through exit 2 **silently no-ops there**, with no error, no trace,
+and nothing to distinguish it from a gate that correctly found no work to hold
+the session open for. Gemini is a third case again: its `deny` reason returns as
+the agent's next prompt, which is a retry rather than a hard stop. So
+"blocks on exit 2" is true of Claude Code and Codex, a retry on Gemini, and
+nothing at all on Copilot. It is not a rule, and writing it as one is how a
+ported gate disappears.
+
+**Codex adds three conditions of its own**, each of which fails quietly rather
+than loudly. The handler must be declared `async: false`; an async handler runs
+and then has its control effect discarded. Hook definitions are trust-hash
+pinned, so every edit to one needs re-approval before it takes effect again. And
+a `block` whose `reason` is blank degrades to a FAILURE rather than a block.
+
+**The portable shape follows from the matrix, and it is what a port owes.** Emit
+the runtime's own JSON decision on **stdout at exit 0**; never rely on exit 2 to
+carry the refusal; give the decision a non-empty `reason`; and **self-limit** —
+bound the consecutive refusals in the gate's own state rather than trusting the
+runtime to, honouring a runtime-supplied re-fire flag where one exists but never
+depending on it. That shape is correct on every runtime that can block, and
+inert on every runtime that cannot.
+
+**Provenance.** Synthesized from shipped fixes, not quoted. No port states this
+matrix normatively. It was established by reading each runtime's published hook
+contract against the behaviour of the one gate that has shipped,
+`stride/hooks/stride-stop-gate.sh` and its PowerShell twin, whose bounded block
+budget and defensive re-fire read are the two self-limiting requirements above
+arrived at independently. The substance is authored here and disclosed as
+authored.
+
+**Defect trace.** D238, which forced the stdout half of the portable shape: the
+shipped gate had emitted two concatenated JSON documents, a strict parse rejected
+the pair, and the fix was that a refusal must be ONE document on stdout. The
+capability matrix itself has no shipped defect behind it, and that is recorded
+rather than papered over — it was assembled under goal G420 by reading each
+runtime's hook contract *before* the ports were built, precisely so the defect it
+predicts does not have to ship first. That is a departure from this file's own
+admission rule, stated here so a reader can weigh the entry accordingly: every
+mechanism claim above is checkable against its runtime's published hook contract,
+and against the shipped gate for the one runtime already wired. Be precise
+about which that is: the Claude Code row is corroborated in this repository, by
+`stride/hooks/stride-stop-gate.sh`. **Every other row was read from that
+runtime's published hook documentation and has no in-repo corroboration** — no
+port carries these event names — so a port task must re-verify its own row
+against its runtime's current documentation before wiring a gate, rather than
+treating the row as settled because it is written here.
+
+**Port-side anchor.** Beside the port's own statement of how its runtime ends a
+session — the hook-surface or stop-gate section of its markdown, wherever it
+records how a stop is refused. The anchor scan reads markdown only, so an
+anchor placed in a hook script is not seen. A port recorded `not_applicable`
+below owes no anchor at all, so its own statement of why its runtime cannot
+refuse a stop is a courtesy to a reader and is not something the drift check
+verifies.
+
+**Applicability.** Required of every port whose runtime can refuse a session end;
+read the `applies_to` rows below for which ports those are rather than taking it
+from this sentence. A port whose runtime *can* block but which has not wired a
+gate yet is `required` and reports MISSING until it does — `applies_to` records
+what a port must carry, never what it currently carries, and the MISSING cells
+this entry opens are its work list. **`stride-pi`, `stride-opencode` and
+`stride-opencode-lite` are recorded `not_applicable`, with their grounds as their
+reason:** their runtimes observe a session end but cannot refuse one, so there is
+no refusal for the rule to govern. Those rows are the sanctioned shape of a
+narrowed cell — a structural fact about the port, recorded with its reason and
+its reopen condition — and the fact they record is the one a reader most needs,
+because it is why a gate present elsewhere in the fleet will never appear there.
+
+```json
+{
+  "id": "stop-hook-capability",
+  "version": 1,
+  "status": "active",
+  "superseded_by": null,
+  "provenance": "synthesized-from-shipped-fixes",
+  "defects": ["D238"],
+  "check": "anchor",
+  "check_hint": "Anchor sits beside the port's own statement of how its runtime ends a session, wherever its markdown records how a stop is refused or why the runtime cannot refuse one. The anchor scan reads markdown only, so an anchor placed in a hook script is not found.",
+  "applies_to": [
+    {"port": "stride",              "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-codex",        "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-copilot",      "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-copilot-lite", "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-gemini",       "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-lite",         "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-opencode",     "status": "not_applicable", "variant": "", "reason": "OpenCode observes a session end but cannot refuse one. The event hook that sees session.idle is invoked with void and is never awaited, so a throw is swallowed by construction, and tool.execute.before is the only interceptor whose return value refuses, which is not a session end. There is no refusal for the rule to govern. Reopen if OpenCode gains an awaited session-end hook whose decision the runtime reads."},
+    {"port": "stride-pi",           "status": "not_applicable", "variant": "", "reason": "Pi observes a session end but cannot refuse one. turn_end and agent_end are observe-only, and tool_call is the only event whose return value refuses, which is not a session end. There is no refusal for the rule to govern. Reopen if Pi gains a session-end event whose decision the runtime reads."},
+    {"port": "stride-opencode-lite","status": "not_applicable", "variant": "", "reason": "OpenCode observes a session end but cannot refuse one. The event hook that sees session.idle is invoked with void and is never awaited, so a throw is swallowed by construction, and tool.execute.before is the only interceptor whose return value refuses, which is not a session end. There is no refusal for the rule to govern. Reopen if OpenCode gains an awaited session-end hook whose decision the runtime reads."}
+  ]
+}
+```
+
+**History.** v1 — authored from the G420 stop-gate porting research, with the
+stdout-document requirement inherited from the D238 fix.
+
 ## Discovery — how a maintainer reaches this file
 
 **The edit-site back-reference is installed (D283), and this section records
@@ -782,7 +911,13 @@ Every seed entry is `v1`, `"status": "active"`, `"superseded_by": null`.
 
 - **Add a rule only when a shipped defect forced it.** An entry with no defect
   trace is a speculation, and a canon of speculations rots exactly like the
-  scattered docs it replaces. `defects` is non-empty on every entry.
+  scattered docs it replaces. `defects` is non-empty on every entry. **One entry
+  departs from this bullet and discloses the departure in its own Defect trace
+  rather than by inventing an id: `stop-hook-capability`, admitted on
+  prospective research so that the defect it predicts need not ship first. That
+  is recorded here as a departure, not as a precedent — the bullet stands, and a
+  maintainer meeting that entry should read its Defect trace rather than
+  "correcting" it.**
 - **Keep `applies_to` complete.** Every entry lists all nine registry ports, in
   registry order, always. A port that does not owe a rule is recorded
   `not_applicable` **with a reason**, never dropped from the list — that single

@@ -23,7 +23,16 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [1.73.0] - unreleased
+## [1.73.0] - 2026-08-31
+
+> **Released.** Five commits sit above `v1.72.0` and all of them are
+> recorded below — the four tasks of goal G416, which turns the Stride loop
+> from an instruction an agent can decline into a mechanism that refuses:
+> a completion writes evidence that it happened (W2123), a `Stop` hook reads
+> that evidence and refuses to end a session while a claimable task remains
+> (W2124), the four states a session may legitimately end in are named and
+> made checkable (W2125), and the gate's permit paths — the half that
+> strands sessions when it regresses — are pinned by tests (W2126).
 
 ### Added
 

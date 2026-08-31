@@ -2870,6 +2870,11 @@ if ($HookName -eq 'before_doing') {
     # one direction this design calls dangerous, so it is announced. The
     # sibling artefacts above are cleared silently because their staleness is
     # benign; this one's staleness is the whole point of the task.
+    # (W2125) The recorded terminal state belongs to the task window too: a
+    # claim proves a halt was resumed or an error resolved, and a record
+    # surviving one would silently disable the Stop gate in every later
+    # session. Cleared unconditionally, like its siblings above.
+    Remove-Item -Force -LiteralPath (Join-Path $ProjectDir '.stride/.terminal-state.json') -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $LoopStateFile) {
         Remove-Item -Force -LiteralPath $LoopStateFile -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $LoopStateFile) {

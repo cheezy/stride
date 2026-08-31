@@ -5798,6 +5798,11 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
   # stale record, the one direction this design calls dangerous, so it is
   # announced. The sibling artefacts above are cleared silently because their
   # staleness is benign; this one's staleness is the whole point of the task.
+  # (W2125) The recorded terminal state belongs to the task window too: a claim
+  # is precisely the event that proves a halt was resumed or an error resolved,
+  # and a record surviving one would silently disable the Stop gate in every
+  # later session. Cleared unconditionally, like its siblings above.
+  rm -f "$PROJECT_DIR/.stride/.terminal-state.json" 2>/dev/null || true
   if [ -e "$LOOP_STATE_FILE" ]; then
     rm -f "$LOOP_STATE_FILE" 2>/dev/null || true
     if [ -e "$LOOP_STATE_FILE" ]; then

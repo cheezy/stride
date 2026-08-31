@@ -11403,6 +11403,243 @@ if (Wait-ForListener -Port $g35Port) {
 }
 Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
 
+
+# ============================================================
+# Test Group 36: W2125 — the four terminal states, PowerShell half
+# ============================================================
+# Mirror of the bash suite's Test Group 35. Both halves read the same record in
+# a mixed checkout, so a divergence here is one a single user could hit — and
+# one already surfaced during implementation: ConvertFrom-Json yields Int64 for
+# a JSON number, so an `-is [int]` test on exit_code made state 4 unreachable on
+# this half alone. Case 36f exists because of it.
+Write-Host ""
+Write-Host "=== Test Group 36: W2125 terminal states (PowerShell) ==="
+
+$g36Gate = Join-Path $ScriptDir 'stride-stop-gate.ps1'
+$g36Now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+
+function New-G36Project {
+    param([string]$Name, [string]$BaseUrl)
+    $d = Join-Path $TmpDir "w2125-$Name"
+    if (Test-Path $d) { Remove-Item -Recurse -Force $d }
+    New-Item -ItemType Directory -Path (Join-Path $d '.stride') -Force | Out-Null
+    Set-Content -Path (Join-Path $d '.stride_auth.md') -Encoding UTF8 -Value @"
+# auth
+- **API URL:** ``$BaseUrl``
+- **API Token:** ``stride_dev_FAKE_G36``
+"@
+    Set-Content -Path (Join-Path $d '.stride/.loop-state.json') -Encoding UTF8 `
+        -Value '{"identifier":"W2123","needs_review":false,"completed_at":"2026-08-30T00:00:00Z","session_id":"s1"}'
+    return $d
+}
+
+function Set-G36Record {
+    param([string]$Dir, [string]$Json)
+    Set-Content -Path (Join-Path $Dir '.stride/.terminal-state.json') -Encoding UTF8 -Value $Json
+}
+
+function Invoke-G36Gate {
+    param([string]$ProjectDir, [string]$StdinJson = '{}')
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'pwsh'
+    $psi.Arguments = "-NoProfile -File `"$g36Gate`""
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    foreach ($kv in [System.Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+        $psi.Environment["$($kv.Key)"] = [string]$kv.Value
+    }
+    $psi.Environment['CLAUDE_PROJECT_DIR'] = $ProjectDir
+    $psi.Environment['CLAUDE_SESSION_ID'] = ''
+    $null = $psi.Environment.Remove('STRIDE_ALLOW_STOP')
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc.StandardInput.Write($StdinJson)
+    $proc.StandardInput.Close()
+    $out = $proc.StandardOutput.ReadToEnd()
+    $err = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    return @{ ExitCode = $proc.ExitCode; Stdout = $out; Stderr = $err }
+}
+
+$g36Port = 18921
+# Request budget sized to the BLOCKING cases below, not to the case count: a
+# block requires a round-trip, so every ignored-record case consumes one. An
+# earlier budget of 12 ran out partway through and the remaining cases failed
+# as "could not be reached" — a harness exhaustion that reads exactly like a
+# gate defect. Generous on purpose; the listener stops when the block ends.
+$g36Job = Start-G35Listener -Port $g36Port -StatusCode 200 -Body '{"data":{"identifier":"W2124"}}' -Requests 60
+$g36Up = Wait-ForListener -Port $g36Port
+$g36Url = "http://localhost:$g36Port"
+
+if (-not $g36Up) {
+    Write-Host "  SKIP: 36: listener did not come up on port $g36Port"
+} else {
+    # 36c: state 2 — decided by the completion record alone.
+    $g36d = New-G36Project 'c' $g36Url
+    Set-Content -Path (Join-Path $g36d '.stride/.loop-state.json') -Encoding UTF8 `
+        -Value '{"identifier":"W2123","needs_review":true,"completed_at":"2026-08-30T00:00:00Z","session_id":"s1"}'
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36c: a completion awaiting review permits the stop" 0 $g36r.ExitCode
+    Assert-Contains "36c: and names terminal state 2" 'terminal state 2' $g36r.Stderr
+
+    # 36d/36e: state 3, honoured against a server that would otherwise block —
+    # a user who said stop is not overruled by there being work left.
+    $g36d = New-G36Project 'd' $g36Url
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"sessA","recorded_at":"x","recorded_at_epoch":{0},"user_message":"G36_SENTINEL_LEAK"}}' -f $g36Now)
+    $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
+    Assert-Exit "36d: a recorded halt permits the stop" 0 $g36r.ExitCode
+    Assert-Contains "36d: and names terminal state 3" 'terminal state 3' $g36r.Stderr
+    Assert-NotContains "36n: the record's free text reaches neither stream" `
+        'G36_SENTINEL_LEAK' ($g36r.Stdout + $g36r.Stderr)
+
+    # 36f: state 4. The exit_code check must be width-independent —
+    # ConvertFrom-Json produces Int64, and an Int32 test silently made this
+    # state unreachable on this half while bash honoured it.
+    $g36d = New-G36Project 'f' $g36Url
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"error","session_id":"sessA","recorded_at":"x","recorded_at_epoch":{0},"failing_command":"mix test","exit_code":1,"stderr_tail":"boom"}}' -f $g36Now)
+    $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
+    Assert-Exit "36f: a recorded unrecoverable error permits the stop" 0 $g36r.ExitCode
+    Assert-Contains "36f: and names terminal state 4" 'terminal state 4' $g36r.Stderr
+
+    # 36g: a foreign-session record is ignored and the gate STILL BLOCKS. This
+    # is the property that stops a stale record silently disabling the gate.
+    $g36d = New-G36Project 'g' $g36Url
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"SOME_OTHER_SESSION","recorded_at":"x","recorded_at_epoch":{0},"user_message":"stop"}}' -f $g36Now)
+    $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
+    Assert-Exit "36g: a foreign-session record is ignored and the gate still blocks" 2 $g36r.ExitCode
+
+    # 36h/36i: with neither side knowing its session the short window decides.
+    $g36d = New-G36Project 'h' $g36Url
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at":"x","recorded_at_epoch":{0},"user_message":"stop"}}' -f ($g36Now - 86400))
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36h: a day-old unknown-session record is ignored" 2 $g36r.ExitCode
+
+    $g36d = New-G36Project 'i' $g36Url
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at":"x","recorded_at_epoch":{0},"user_message":"stop"}}' -f $g36Now)
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36i: a fresh unknown-session record is honoured" 0 $g36r.ExitCode
+    Assert-Contains "36i: and names terminal state 3" 'terminal state 3' $g36r.Stderr
+
+    # 36j: every malformed shape fails TOWARD gating. exit_code:0 is the
+    # pointed one — a recoverable failure must not pass as an unrecoverable
+    # error, and a string "1" must not either, matching the bash twin.
+    foreach ($g36Bad in @(
+        'not json at all',
+        ('{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0}}}' -f $g36Now),
+        ('{{"kind":"bogus","session_id":"sessA","recorded_at_epoch":{0}}}' -f $g36Now),
+        ('{{"kind":"error","session_id":"sessA","recorded_at_epoch":{0},"failing_command":"x","exit_code":0}}' -f $g36Now),
+        ('{{"kind":"error","session_id":"sessA","recorded_at_epoch":{0},"failing_command":"x","exit_code":"1"}}' -f $g36Now),
+        ('{{"kind":"error","session_id":"sessA","recorded_at_epoch":{0},"exit_code":1}}' -f $g36Now),
+        ('{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0},"user_message":""}}' -f $g36Now))) {
+        $g36d = New-G36Project 'j' $g36Url
+        Set-G36Record -Dir $g36d -Json $g36Bad
+        $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
+        Assert-Exit "36j: a malformed record is ignored and the gate still blocks" 2 $g36r.ExitCode
+    }
+
+    # 36m: the noise rule — the gate says nothing when it had nothing to gate on.
+    $g36d = New-G36Project 'm' $g36Url
+    Remove-Item -LiteralPath (Join-Path $g36d '.stride/.loop-state.json') -Force
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36m: no loop state permits the stop" 0 $g36r.ExitCode
+    Assert-Eq "36m: and says nothing, because it had nothing to gate on" '0' "$($g36r.Stderr.Length)"
+
+    # --- Defects found by exploratory testing, pinned on this half too ---
+    # These four were CROSS-HALF divergences: the same bytes ended a session on
+    # one host and were ignored on the other, which makes the terminal-state
+    # contract host-dependent in a checkout both halves share.
+
+    # 36r: a one-element JSON array unrolls through the pipeline, so [ {...} ]
+    # became the record here while bash refused it.
+    $g36d = New-G36Project 'r' $g36Url
+    Set-G36Record -Dir $g36d -Json ('[{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0},"user_message":"stop"}}]' -f $g36Now)
+    $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
+    Assert-Exit "36r: an array-wrapped record is ignored, as on the bash half" 2 $g36r.ExitCode
+
+    # 36s: a quoted epoch was accepted by TryParse here and refused by jq's
+    # `type == "number"` there.
+    $g36d = New-G36Project 's' $g36Url
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at_epoch":"{0}","user_message":"stop"}}' -f $g36Now)
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36s: a string recorded_at_epoch is ignored, as on the bash half" 2 $g36r.ExitCode
+
+    # 36t: whitespace is not evidence, including the zero-width characters a
+    # plain trim misses — a U+200B message looks identical in the record.
+    foreach ($g36Blank in @(' ', '   ', "`t", [char]0x200B)) {
+        $g36d = New-G36Project 't' $g36Url
+        Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"sessA","recorded_at_epoch":{0},"user_message":"{1}"}}' -f $g36Now, $g36Blank)
+        $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
+        Assert-Exit "36t: a whitespace-only user_message is not evidence" 2 $g36r.ExitCode
+    }
+
+    # 36u: 'unknown' is a sentinel, not an identity — matching it on both sides
+    # used to skip the freshness window entirely.
+    $g36d = New-G36Project 'u' $g36Url
+    Set-G36Record -Dir $g36d -Json ('{{"kind":"halt","session_id":"unknown","recorded_at_epoch":{0},"user_message":"stop"}}' -f ($g36Now - 189216000))
+    $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"unknown"}'
+    Assert-Exit "36u: a stale record is ignored even when both sides say unknown" 2 $g36r.ExitCode
+
+    # 36v: recorded_at_epoch is an Always field and is now required.
+    $g36d = New-G36Project 'v' $g36Url
+    Set-G36Record -Dir $g36d -Json '{"kind":"halt","session_id":"sessA","user_message":"stop"}'
+    $g36r = Invoke-G36Gate -ProjectDir $g36d -StdinJson '{"session_id":"sessA"}'
+    Assert-Exit "36v: a record with no recorded_at_epoch is ignored" 2 $g36r.ExitCode
+
+    # 36x: a corrupt loop-state must be reported, not silently permitted — this
+    # half used to exit 0 with completely empty stderr while bash announced a
+    # false state 2. Neither was right.
+    foreach ($g36Bad in @('x', 'not json', '[]', '{"identifier":"W1","needs_review":null}')) {
+        $g36d = New-G36Project 'x' $g36Url
+        Set-Content -Path (Join-Path $g36d '.stride/.loop-state.json') -Encoding UTF8 -Value $g36Bad
+        $g36r = Invoke-G36Gate -ProjectDir $g36d
+        Assert-NotContains "36x: a corrupt loop-state is not sanctioned as state 2" 'terminal state 2' $g36r.Stderr
+        Assert-Contains "36x: and is reported as unsanctioned" 'unsanctioned' $g36r.Stderr
+    }
+
+    # 36y: a permit that HAD something to gate on is never silent.
+    foreach ($g36Ls in @('{"identifier":"","needs_review":false}', '{"needs_review":false}', '{"identifier":"W 2123","needs_review":false}')) {
+        $g36d = New-G36Project 'y' $g36Url
+        Set-Content -Path (Join-Path $g36d '.stride/.loop-state.json') -Encoding UTF8 -Value $g36Ls
+        $g36r = Invoke-G36Gate -ProjectDir $g36d
+        Assert-Contains "36y: a permit that had something to gate on is never silent" 'unsanctioned' $g36r.Stderr
+    }
+}
+Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
+# 36k: a stop fitting none of the four is permitted but reported as such.
+$g36d = New-G36Project 'k' 'http://localhost:9'
+$g36r = Invoke-G36Gate -ProjectDir $g36d
+Assert-Exit "36k: an undetermined stop is still permitted" 0 $g36r.ExitCode
+Assert-Contains "36k: and is reported as unsanctioned" 'unsanctioned' $g36r.Stderr
+
+# 36a: state 1 — the real empty-queue answer is a 404, recovered from the
+# exception this half gets rather than from a status code it can read directly.
+$g36Port = 18922
+$g36Job = Start-G35Listener -Port $g36Port -StatusCode 404 -Body '{"error":"No tasks available in Ready column matching your capabilities"}'
+if (Wait-ForListener -Port $g36Port) {
+    $g36d = New-G36Project 'a' "http://localhost:$g36Port"
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36a: an empty queue permits the stop" 0 $g36r.ExitCode
+    Assert-Contains "36a: and names terminal state 1" 'terminal state 1' $g36r.Stderr
+} else {
+    Write-Host "  SKIP: 36a: listener did not come up on port $g36Port"
+}
+Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
+# 36b: state 1's other shape — a 200 carrying no usable task.
+$g36Port = 18923
+$g36Job = Start-G35Listener -Port $g36Port -StatusCode 200 -Body '{"data":null}'
+if (Wait-ForListener -Port $g36Port) {
+    $g36d = New-G36Project 'b' "http://localhost:$g36Port"
+    $g36r = Invoke-G36Gate -ProjectDir $g36d
+    Assert-Exit "36b: a 200 with no task permits the stop" 0 $g36r.ExitCode
+    Assert-Contains "36b: and names terminal state 1" 'terminal state 1' $g36r.Stderr
+} else {
+    Write-Host "  SKIP: 36b: listener did not come up on port $g36Port"
+}
+Remove-Job -Job $g36Job -Force -ErrorAction SilentlyContinue
+
 # ============================================================
 # Summary
 # ============================================================

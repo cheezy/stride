@@ -11929,6 +11929,353 @@ fi
 assert_eq "34p: the shim permits when the .ps1 is missing" "2" \
   "$(awk '/Windows detected but/,/exit 0/' "$STOP_GATE" | grep -c 'exit 0')"
 
+
+# ============================================================
+# Test Group 35: W2125 the four sanctioned terminal states
+# ============================================================
+# The gate now answers "which of the four states is this" rather than merely
+# "may I stop". The load-bearing property is NOT that a state permits — it is
+# that a record which should not be honoured (foreign session, stale, malformed,
+# recoverable) is IGNORED and the gate still blocks. A record wrongly honoured
+# turns the gate off silently, which is worse than any refused stop.
+echo ""
+echo "=== Test Group 35: W2125 terminal states (bash) ==="
+
+G35_TS=".stride/.terminal-state.json"
+G35_NOW=$(date -u +%s)
+
+# Group 34's fixtures, aliased so a future renumber there does not break here.
+g35_proj() { g34_proj "ts-$1"; }
+g35_stub() { g34_stub "$@"; }
+g35_state() { g34_state "$@"; }
+
+# $1=dir $2=json record
+g35_record() { printf '%s\n' "$2" > "$1/$G35_TS"; }
+
+# Runs the gate with a Stop payload carrying a session id, capturing both
+# streams separately.
+g35_run() {
+  local _proj="$1" _stub="$2" _stdin="$3"
+  G35_OUT=$(printf '%s' "$_stdin" | env CLAUDE_PROJECT_DIR="$_proj" PATH="$_stub:$PATH" \
+    CLAUDE_SESSION_ID="" bash "$STOP_GATE" 2>"$TMPDIR_TEST/g35.err")
+  G35_RC=$?
+  G35_ERR=$(cat "$TMPDIR_TEST/g35.err" 2>/dev/null || printf '')
+}
+
+G35_OK='{"data":{"identifier":"W2124"}}'
+
+# 35a: state 1 via the real empty-queue answer, which is a 404.
+G35_P=$(g35_proj a); g35_state "$G35_P" W2123 false
+G35_S="$TMPDIR_TEST/g35-a"; rm -rf "$G35_S"
+g35_stub "$G35_S" '{"error":"No tasks available in Ready column matching your capabilities"}' 404
+g35_run "$G35_P" "$G35_S" '{}'
+assert_exit "35a: an empty queue permits the stop" 0 "$G35_RC"
+assert_contains "35a: and names terminal state 1" "terminal state 1" "$G35_ERR"
+
+# 35b: state 1's other shape — a 200 carrying no usable identifier.
+G35_P=$(g35_proj b); g35_state "$G35_P" W2123 false
+G35_S="$TMPDIR_TEST/g35-b"; rm -rf "$G35_S"; g35_stub "$G35_S" '{"data":null}' 200
+g35_run "$G35_P" "$G35_S" '{}'
+assert_exit "35b: a 200 with no task permits the stop" 0 "$G35_RC"
+assert_contains "35b: and names terminal state 1" "terminal state 1" "$G35_ERR"
+
+# 35c: state 2, decided by the completion record alone — the unhit stub proves
+# no API call was needed to establish it.
+G35_P=$(g35_proj c); g35_state "$G35_P" W2123 true
+G35_S="$TMPDIR_TEST/g35-c"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{}'
+assert_exit "35c: a completion awaiting review permits the stop" 0 "$G35_RC"
+assert_contains "35c: and names terminal state 2" "terminal state 2" "$G35_ERR"
+if [ -f "$G35_S/curl.log" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 35c: state 2 must be decided without an API call"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 35c: state 2 is decided without an API call"
+  PASS=$((PASS + 1))
+fi
+
+# 35d: state 3, an explicit halt recorded in this session.
+G35_P=$(g35_proj d); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"stop working on stride\"}"
+G35_S="$TMPDIR_TEST/g35-d"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+assert_exit "35d: a recorded halt permits the stop" 0 "$G35_RC"
+assert_contains "35d: and names terminal state 3" "terminal state 3" "$G35_ERR"
+
+# 35e: THE LOAD-BEARING ONE for state 3. A halt outranks a blocking loop state
+# and precedes the network leg: a user who said stop is not made to wait on an
+# API call, and is not overruled by there being work left.
+if [ -f "$G35_S/curl.log" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 35e: a halt must be honoured without consulting the API"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 35e: a halt is honoured without consulting the API"
+  PASS=$((PASS + 1))
+fi
+
+# 35f: state 4, carrying machine-produced evidence rather than an assertion.
+G35_P=$(g35_proj f); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW,\"failing_command\":\"mix test\",\"exit_code\":1,\"stderr_tail\":\"boom\",\"step\":\"implementation\"}"
+G35_S="$TMPDIR_TEST/g35-f"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+assert_exit "35f: a recorded unrecoverable error permits the stop" 0 "$G35_RC"
+assert_contains "35f: and names terminal state 4" "terminal state 4" "$G35_ERR"
+
+# 35g: a record from ANOTHER session is ignored and the gate still blocks. This
+# is the property that keeps a stale record from silently disabling the gate,
+# and it is worth more than any of the permit cases above.
+G35_P=$(g35_proj g); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"SOME_OTHER_SESSION\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"stop\"}"
+G35_S="$TMPDIR_TEST/g35-g"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+assert_exit "35g: a foreign-session record is ignored and the gate still blocks" 2 "$G35_RC"
+
+# 35h: with neither side knowing its session, the short window decides. An old
+# record is ignored — the fallback is heuristic, so it fails toward gating.
+G35_P=$(g35_proj h); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"unknown\",\"recorded_at\":\"2026-08-29T00:00:00Z\",\"recorded_at_epoch\":$((G35_NOW - 86400)),\"user_message\":\"stop\"}"
+G35_S="$TMPDIR_TEST/g35-h"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{}'
+assert_exit "35h: a day-old unknown-session record is ignored" 2 "$G35_RC"
+
+# 35i: the same record, fresh, is honoured — the fallback exists because a
+# writer with no CLAUDE_SESSION_ID stores the literal `unknown` rather than a
+# uuid, which would be foreign to every session and make state 3 unreachable.
+G35_P=$(g35_proj i); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"unknown\",\"recorded_at\":\"2026-08-30T00:00:00Z\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"stop\"}"
+G35_S="$TMPDIR_TEST/g35-i"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{}'
+assert_exit "35i: a fresh unknown-session record is honoured" 0 "$G35_RC"
+assert_contains "35i: and names terminal state 3" "terminal state 3" "$G35_ERR"
+
+# 35j: every malformed shape fails TOWARD gating. The exit_code:0 case is the
+# pointed one — a recoverable failure must not pass as an unrecoverable error,
+# which would be a fifth state wearing state 4's clothes.
+for _bad in \
+  'not json at all' \
+  "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW}" \
+  "{\"kind\":\"bogus\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW}" \
+  "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"failing_command\":\"x\",\"exit_code\":0}" \
+  "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"exit_code\":1}" \
+  "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"\"}"; do
+  G35_P=$(g35_proj j); g35_state "$G35_P" W2123 false
+  g35_record "$G35_P" "$_bad"
+  G35_S="$TMPDIR_TEST/g35-j"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+  g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+  assert_exit "35j: a malformed record is ignored and the gate still blocks" 2 "$G35_RC"
+done
+
+# 35k: a stop fitting none of the four is permitted, but reported as such —
+# there is no fifth state to file it under.
+G35_P=$(g35_proj k); g35_state "$G35_P" W2123 false
+G35_S="$TMPDIR_TEST/g35-k"; rm -rf "$G35_S"; g35_stub "$G35_S" "" 000 7
+g35_run "$G35_P" "$G35_S" '{}'
+assert_exit "35k: an undetermined stop is still permitted" 0 "$G35_RC"
+assert_contains "35k: and is reported as unsanctioned" "unsanctioned" "$G35_ERR"
+
+# 35l: same for a server error, which establishes nothing.
+G35_P=$(g35_proj l); g35_state "$G35_P" W2123 false
+G35_S="$TMPDIR_TEST/g35-l"; rm -rf "$G35_S"; g35_stub "$G35_S" '{"error":"boom"}' 500
+g35_run "$G35_P" "$G35_S" '{}'
+assert_contains "35l: a 500 is reported as unsanctioned" "unsanctioned" "$G35_ERR"
+
+# 35m: THE NOISE RULE. The gate speaks only when it had something to gate on.
+# This path fires on every Stop event in every project, so a line here would
+# put gate chatter on every stop and teach a reader to ignore the one channel
+# the state names travel on.
+G35_P=$(g35_proj m)
+G35_S="$TMPDIR_TEST/g35-m"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{}'
+assert_exit "35m: no loop state permits the stop" 0 "$G35_RC"
+assert_eq "35m: and says nothing, because it had nothing to gate on" "0" \
+  "$(printf '%s' "$G35_ERR" | wc -c | tr -d ' ')"
+
+# 35n: the record's free text reaches neither stream. user_message and
+# stderr_tail are unconstrained, and the permit message names the state only.
+G35_P=$(g35_proj n); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at\":\"x\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"G35_SENTINEL_LEAK\"}"
+G35_S="$TMPDIR_TEST/g35-n"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+if printf '%s%s' "$G35_OUT" "$G35_ERR" | grep -qF 'G35_SENTINEL_LEAK'; then
+  echo -e "  ${RED}FAIL${RESET}: 35n: the record's free text must reach neither stream"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 35n: the record's free text reaches neither stream"
+  PASS=$((PASS + 1))
+fi
+
+# 35o/35p: a claim clears the record. This is what discharges both named edge
+# cases — a halt the user later resumes, and an error that later resolves —
+# because a claim is precisely the event proving the session moved on.
+for _kind in halt error; do
+  G35_P=$(g35_proj "clear-$_kind")
+  printf '## before_doing\n```bash\n```\n' > "$G35_P/.stride.md"
+  if [ "$_kind" = halt ]; then
+    g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at\":\"x\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"stop\"}"
+  else
+    g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at\":\"x\",\"recorded_at_epoch\":$G35_NOW,\"failing_command\":\"x\",\"exit_code\":1}"
+  fi
+  jq -nc --arg c "curl -sS -X POST https://www.stridelikeaboss.com/api/tasks/claim -d @c.json | tee r.json" \
+    '{session_id:"s",tool_input:{command:$c},tool_response:{stdout:"{\"data\":{\"id\":9,\"identifier\":\"W1\"},\"hook\":{\"name\":\"before_doing\"}}"}}' \
+    | CLAUDE_PROJECT_DIR="$G35_P" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  if [ -f "$G35_P/$G35_TS" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 35o: a claim must clear a recorded $_kind"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 35o: a claim clears a recorded $_kind"
+    PASS=$((PASS + 1))
+  fi
+done
+
+# 35q: the orchestrator carries the enumeration, and AC6 forbids adding another
+# banner to say so. The MANDATORY census is asserted as a ceiling, not a match,
+# so removing one later is not a failure.
+G35_SKILL="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G35_TERM="$SCRIPT_DIR/../skills/stride-workflow/terminal-states.md"
+if [ -f "$G35_SKILL" ]; then
+  assert_contains "35q: the orchestrator points at the terminal-states contract" \
+    "terminal-states.md" "$(cat "$G35_SKILL")"
+  assert_contains "35q: and states that reporting is not stopping" \
+    "Reporting is not stopping" "$(cat "$G35_SKILL")"
+  G35_BANNERS=$(grep -c 'MANDATORY' "$G35_SKILL" 2>/dev/null | tr -d ' ')
+  if [ "${G35_BANNERS:-0}" -le 4 ]; then
+    echo -e "  ${GREEN}PASS${RESET}: 35q: no new MANDATORY banner was added"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 35q: a MANDATORY banner was added (found $G35_BANNERS, ceiling 4)"
+    FAIL=$((FAIL + 1))
+  fi
+  assert_eq "35q: and the sibling adds none either" "0" \
+    "$(grep -c 'MANDATORY' "$G35_TERM" 2>/dev/null | tr -d ' ')"
+  assert_eq "35q: the orchestrator stays inside its byte budget" "ok" \
+    "$([ "$(wc -c < "$G35_SKILL" | tr -d ' ')" -lt 101000 ] && echo ok || echo over)"
+else
+  echo "  SKIP: 35q: SKILL.md not found from the hooks directory"
+fi
+
+# --- Defects found by exploratory testing, pinned so they cannot return ---
+# Every case below reproduces a real finding. The two that mattered most were
+# not forged records at all: corrupting a file the agent already owns produced
+# a positively FALSE sanction, and raising the block budget wedged the session.
+
+# 35r: a corrupt loop-state file must not be announced as a sanctioned state 2.
+# Appending ONE BYTE to a valid file used to turn a correct block into
+# "permitting the stop under sanctioned terminal state 2" — an unsanctioned
+# stop filed under a sanctioned state, in the very audit line this feature
+# exists to produce. An agent wanting out needed no halt record at all.
+for _corrupt in 'x' 'not json' '[]' '' '{"identifier":"W1","needs_review":null}' '{"identifier":"W1","needs_review":"false"}'; do
+  G35_P=$(g35_proj r); printf '%s' "$_corrupt" > "$G35_P/.stride/.loop-state.json"
+  G35_S="$TMPDIR_TEST/g35-r"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+  g35_run "$G35_P" "$G35_S" '{}'
+  if printf '%s' "$G35_ERR" | grep -q 'terminal state 2'; then
+    echo -e "  ${RED}FAIL${RESET}: 35r: a corrupt loop-state must not be sanctioned as state 2"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 35r: a corrupt loop-state is not sanctioned as state 2"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "35r: and is reported as unsanctioned instead" "unsanctioned" "$G35_ERR"
+done
+
+# 35s: an oversized block budget must not wedge the session. An all-digit value
+# at or above 2^63 passed the charset guard and then broke `[ -gt ]`, producing
+# the unbounded block the guard's own comment says it prevents — reached by
+# someone RAISING the budget, the numeric sibling of the `off` case.
+for _huge in 9223372036854775808 99999999999999999999 10000000000000000000; do
+  G35_P=$(g35_proj s); g35_state "$G35_P" W2123 false
+  G35_S="$TMPDIR_TEST/g35-s"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+  G35_SEQ=""
+  for _i in 1 2 3 4; do
+    G35_SEQ="$G35_SEQ$(printf '{}' | env CLAUDE_PROJECT_DIR="$G35_P" PATH="$G35_S:$PATH" \
+      STRIDE_STOP_GATE_MAX_BLOCKS="$_huge" bash "$STOP_GATE" > /dev/null 2>&1; echo $?)"
+  done
+  assert_eq "35s: an oversized block budget falls back to the default" "2200" "$G35_SEQ"
+done
+
+# 35t: whitespace is not evidence. The field exists so a human can check the
+# claim against the transcript, and " " quotes nothing — the zero-width case is
+# included because `\s` does not match U+200B and it looks identical in the file.
+for _blank in ' ' '   ' '	' '​'; do
+  G35_P=$(g35_proj t); g35_state "$G35_P" W2123 false
+  g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"user_message\":\"$_blank\"}"
+  G35_S="$TMPDIR_TEST/g35-t"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+  g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+  assert_exit "35t: a whitespace-only user_message is not evidence" 2 "$G35_RC"
+done
+G35_P=$(g35_proj t2); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"failing_command\":\" \",\"exit_code\":1}"
+G35_S="$TMPDIR_TEST/g35-t2"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+assert_exit "35t: a whitespace-only failing_command is not evidence" 2 "$G35_RC"
+
+# 35u: `unknown` is a sentinel, not an identity. Matching it on both sides used
+# to satisfy the exact-match branch and skip the window entirely, honouring a
+# six-year-old record — the gate silently off, which this design ranks worst.
+G35_P=$(g35_proj u); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" "{\"kind\":\"halt\",\"session_id\":\"unknown\",\"recorded_at_epoch\":$((G35_NOW - 189216000)),\"user_message\":\"stop\"}"
+G35_S="$TMPDIR_TEST/g35-u"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{"session_id":"unknown"}'
+assert_exit "35u: a stale record is ignored even when both sides say unknown" 2 "$G35_RC"
+
+# 35v: the contract lists recorded_at_epoch under Always, and the gate now
+# requires it — a record with no timestamp at all used to be honoured.
+G35_P=$(g35_proj v); g35_state "$G35_P" W2123 false
+g35_record "$G35_P" '{"kind":"halt","session_id":"sessA","user_message":"stop"}'
+G35_S="$TMPDIR_TEST/g35-v"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+assert_exit "35v: a record with no recorded_at_epoch is ignored" 2 "$G35_RC"
+
+# 35w: exit_code must be a WHOLE number in range. jq's `type == "number"` alone
+# accepted 0.5 and 1e300, which the PowerShell half rejects — the same record
+# ending a session on one host and not the other.
+for _ec in 0.5 1e300 '"1"' 0; do
+  G35_P=$(g35_proj w); g35_state "$G35_P" W2123 false
+  g35_record "$G35_P" "{\"kind\":\"error\",\"session_id\":\"sessA\",\"recorded_at_epoch\":$G35_NOW,\"failing_command\":\"c\",\"exit_code\":$_ec}"
+  G35_S="$TMPDIR_TEST/g35-w"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+  g35_run "$G35_P" "$G35_S" '{"session_id":"sessA"}'
+  assert_exit "35w: a non-integer exit_code is ignored" 2 "$G35_RC"
+done
+
+# 35x: no permit that HAD something to gate on may be silent. These four reached
+# a bare exit 0 with empty stderr while a claimable task waited — the invisible
+# stop the four states exist to eliminate.
+for _ls in '{"identifier":"","needs_review":false}' '{"needs_review":false}' '{"identifier":"W 2123","needs_review":false}' '{"identifier":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","needs_review":false}'; do
+  G35_P=$(g35_proj x); printf '%s' "$_ls" > "$G35_P/.stride/.loop-state.json"
+  G35_S="$TMPDIR_TEST/g35-x"; rm -rf "$G35_S"; g35_stub "$G35_S" "$G35_OK" 200
+  g35_run "$G35_P" "$G35_S" '{}'
+  assert_contains "35x: a permit that had something to gate on is never silent" \
+    "unsanctioned" "$G35_ERR"
+done
+
+# 35y: a transport failure is diagnosed as one. curl's -w writes a status line
+# even when the connection fails, so the dedicated message was unreachable and
+# an offline API was reported as "answered 000" — a status no API returns.
+G35_P=$(g35_proj y); g35_state "$G35_P" W2123 false
+G35_S="$TMPDIR_TEST/g35-y"; rm -rf "$G35_S"; g35_stub "$G35_S" "" 000
+g35_run "$G35_P" "$G35_S" '{}'
+assert_contains "35y: a transport failure is diagnosed as unreachable" \
+  "could not be reached" "$G35_ERR"
+
+# 35z: an API body that parses but is not an object establishes nothing. It used
+# to be reported as state 1 in bash and undetermined in PowerShell.
+G35_P=$(g35_proj z); g35_state "$G35_P" W2123 false
+G35_S="$TMPDIR_TEST/g35-z"; rm -rf "$G35_S"; g35_stub "$G35_S" '[1,2,3]' 200
+g35_run "$G35_P" "$G35_S" '{}'
+assert_contains "35z: a non-object API body is undetermined, not state 1" \
+  "unsanctioned" "$G35_ERR"
+
+# 35aa: the clear belongs to Step 0, not Step 8. Step 8 WRITES the record and
+# the Stop hook reads it after the turn ends, so a clear there deleted it before
+# the gate could ever see it — states 3 and 4 were unreachable in the documented
+# flow. Asserted against the orchestrator text itself.
+if [ -f "$G35_SKILL" ]; then
+  assert_eq "35aa: the record is cleared in Step 0, not in the step that writes it" "ok" \
+    "$(awk '/^### Clearing the Orchestrator Activation Marker/,0' "$G35_SKILL" \
+        | grep -c 'terminal-state.json' | awk '{print ($1 == 0) ? "ok" : "cleared-in-step-8"}')"
+  assert_contains "35aa: and Step 0 does clear it" "terminal-state.json" \
+    "$(sed -n '1,200p' "$G35_SKILL")"
+fi
+
 # ============================================================
 # Summary
 # ============================================================

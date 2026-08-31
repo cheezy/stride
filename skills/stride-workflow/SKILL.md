@@ -64,6 +64,12 @@ printf '{"session_id":"%s","started_at":"%s","pid":%d}\n' \
 rm -f "$CLAUDE_PROJECT_DIR/.stride/.orchestrator_active"
 ```
 
+Step 0 additionally clears any terminal-state record left by a previous session, before writing the marker. It is cleared at the START of a session and never at the end: Step 8 is the step that *writes* it, and the Stop hook reads it after the turn ends, so clearing it there would delete the record before the gate could ever see it.
+
+```bash
+rm -f "$CLAUDE_PROJECT_DIR/.stride/.terminal-state.json"
+```
+
 ### Override
 
 `STRIDE_ALLOW_DIRECT=1` bypasses the gate entirely (for plugin debugging or scripted CI). When set, sub-skill calls are allowed regardless of the marker.
@@ -739,9 +745,25 @@ git log origin/main..main --oneline
 
 An empty result means local `main` is level with the remote — the push landed. If it lists commits, the `## after_goal` section did not run (truncated response with no capture and an unreachable status endpoint) — run the `## after_goal` steps from `.stride.md` manually (push, then PATCH the after_goal result per the hook-execution.md section above) so the goal's work reaches the remote. The back-compat grace-window rules for runtimes that predate this feature are in that same section.
 
+### Terminal States
+
+A session may end in exactly four states. Each has a representation the Stop gate reads, so which one applies is a check rather than a judgement, and a stop fitting none of them is reported as unsanctioned rather than passing unnoticed. The contract — the record's shape and lifetime, what counts as an explicit halt, and what the gate does with a stale one — is in [terminal-states.md](terminal-states.md).
+
+| Terminal state | Representation the gate reads | Disposition |
+|---|---|---|
+| No claimable task remains | `GET /api/tasks/next` answers 404, or 200 with no `.data.identifier` | Permit, naming state 1 |
+| The completed task needs human review | `.stride/.loop-state.json` `needs_review` is not the literal `false` | Permit, naming state 2 |
+| The user explicitly halted the loop | `.stride/.terminal-state.json` with `kind: "halt"`, quoting the user verbatim | Permit, naming state 3 |
+| An unrecoverable error occurred | `.stride/.terminal-state.json` with `kind: "error"`, carrying a failing command and non-zero exit code | Permit, naming state 4 |
+| Anything else | none | Permit, reported as an unsanctioned stop |
+
+States 1 and 2 need nothing written. States 3 and 4 are recorded by you, in this step, and nowhere else — clear the record on any resume, and note a claim clears it for you.
+
+**Writing a status summary for the user is not a terminal state. Reporting is not stopping** — after an inter-task summary the next action is Step 1, not the end of the turn. It is named here because it is the stop that reads most like a conclusion while fitting none of the four.
+
 ### Clearing the Orchestrator Activation Marker
 
-When the workflow finally stops -- because there are no more tasks, the user halts the loop, `needs_review=true` puts the task into human review, or an unrecoverable error aborts -- clear the marker:
+When the workflow finally stops -- in one of the four states above -- clear the marker:
 
 ```bash
 rm -f "$CLAUDE_PROJECT_DIR/.stride/.orchestrator_active"

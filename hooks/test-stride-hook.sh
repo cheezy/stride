@@ -12509,6 +12509,213 @@ if [ -f "$G35_SKILL" ]; then
 fi
 
 # ============================================================
+# Test Group 36: W2128 -- the two-round review cap
+# ============================================================
+# Bash-only, on 35q's precedent: these are assertions about markdown contracts,
+# which are language-agnostic, and the ps1 half mirrors only the byte budget
+# (its Group 28). The literal half pins the wording nine other places rely on;
+# the executed half runs the Source A jq EXTRACTED FROM THE CONTRACT ITSELF, so
+# the tested bytes and the documented bytes are provably the same. That
+# technique is W2127's recorded lesson: its two jq defects were caught by
+# executing the check, not by reading it three times.
+echo ""
+echo "=== Test Group 36: W2128 two-round review cap ==="
+
+G36_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G36_RBE="$SCRIPT_DIR/../skills/stride-workflow/review-block-extraction.md"
+G36_CT="$SCRIPT_DIR/../skills/stride-completing-tasks/SKILL.md"
+G36_REV="$SCRIPT_DIR/../agents/task-reviewer.md"
+G36_RUN="$SCRIPT_DIR/../agents/task-runner.md"
+
+if [ -f "$G36_WF" ] && [ -f "$G36_RBE" ] && [ -f "$G36_CT" ]; then
+  assert_contains "36a: the orchestrator states the two-round ceiling" \
+    "Two review rounds is the ceiling" "$(cat "$G36_WF")"
+  assert_contains "36b: and names the round-counter file" \
+    ".review-rounds-<IDENTIFIER>.json" "$(cat "$G36_WF")"
+  assert_contains "36c: the dispatch/round distinction survives" \
+    '`<N>` is not the round counter' "$(cat "$G36_WF")"
+  assert_contains "36d: a critical is exempt from the cap" \
+    "exempt from the cap" "$(cat "$G36_WF")"
+  assert_contains "36e: residual non-criticals are recorded, not fixed" \
+    "RECORDED, not fixed" "$(cat "$G36_WF")"
+  assert_contains "36f: the reviewer contract documents review_round" \
+    "review_round" "$(cat "$G36_REV")"
+  assert_contains "36g: absent means round 1" \
+    "Absent means round 1" "$(cat "$G36_REV")"
+  assert_contains "36h: scoping changes what you look for, never what you emit" \
+    "Scoping changes what you look for, never what you emit" "$(cat "$G36_REV")"
+  assert_contains "36i: the completion self-check carries the cap" \
+    "Review rounds are within the cap" "$(cat "$G36_CT")"
+  # 36j: the anti-contradiction pin. The runner used to cap at three dispatches;
+  # leaving that text anywhere would give two documents two different ceilings.
+  assert_contains "36j: the runner states the same two-round ceiling" \
+    "Two review rounds is the ceiling" "$(cat "$G36_RUN")"
+  assert_eq "36j: and no three-dispatch ceiling survives in the runner" "0" \
+    "$(grep -c 'Three reviewer dispatches' "$G36_RUN" 2>/dev/null | tr -d ' ')"
+  assert_contains "36k: the Source A self-check prints seven values" \
+    "prints seven values" "$(cat "$G36_RBE")"
+  assert_contains "36l: and all five booleans must be true" \
+    "all five" "$(cat "$G36_RBE")"
+  assert_contains "36v: the Source B half carries the cap too" \
+    "review round cap exceeded" "$(cat "$G36_RBE")"
+else
+  echo "  SKIP: 36a-36v: contract files not found from the hooks directory"
+fi
+
+# --- Executed half: the cap actually refuses a third round -------------------
+# Everything below runs bytes EXTRACTED FROM THE CONTRACT, never a local
+# restatement of them. The first cut of this group hand-reimplemented the
+# recount and retyped the Source B assert, and 25 assertions went green over a
+# critical defect (PRIOR_CRITICAL had no derivation and unset aborted jq), which
+# is the whole argument for extraction rather than paraphrase.
+if [ -f "$G36_RBE" ] && command -v jq > /dev/null 2>&1; then
+  G36_DIR="$TMPDIR_TEST/w2128-roundcap"
+  mkdir -p "$G36_DIR/.stride"
+
+  cat > "$G36_DIR/block.json" <<'G36BLOCK'
+{ "schema_version": "1.6", "summary": "fixture", "status": "approved",
+  "project_checks": [{"name":"a","status":"passed"}],
+  "acceptance_criteria": [{"criterion":"one","status":"met","evidence":"x"},
+                          {"criterion":"two","status":"not_met","evidence":"y"}],
+  "issues": [{"category":"acceptance_criteria","severity":"important","description":"d"}],
+  "issue_counts": {"critical":0,"important":1,"minor":0} }
+G36BLOCK
+  jq '. + {dispatched:true}' "$G36_DIR/block.json" > "$G36_DIR/merged.json"
+
+  # Extract the self-check jq from the contract.
+  G36_JQ=$(awk '/MANDATORY self-check for Source A/{f=1} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' "$G36_RBE")
+  # Extract the recount + PRIOR_CRITICAL derivation from the contract too.
+  G36_RECOUNT=$(awk '/^\*\*Disk is the authority/{f=1} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' "$G36_RBE")
+
+  assert_eq "36x: the recount block was extractable from the contract" "yes" \
+    "$(printf '%s' "$G36_RECOUNT" | grep -q 'REVIEW_ROUND' && echo yes || echo no)"
+
+  g36_cap() { # $1=round $2=prior $3=cleared -> round_cap_ok ("ABORT" if jq died)
+    BLOCK="$G36_DIR/block.json" MERGED="$G36_DIR/merged.json" \
+    TASK_CRITERION_LINES=2 REVIEW_ROUND="$1" PRIOR_CRITICAL="$2" CRITICAL_CLEARED="$3" \
+      eval "$G36_JQ" 2>/dev/null | jq -r '.round_cap_ok' 2>/dev/null || echo ABORT
+  }
+
+  assert_eq "36m: round 1 is within the cap"                  "true"  "$(g36_cap 1 0 0)"
+  assert_eq "36n: round 2 is within the cap"                  "true"  "$(g36_cap 2 0 0)"
+  assert_eq "36o: a third round is REFUSED by the self-check" "false" "$(g36_cap 3 0 0)"
+  assert_eq "36p: unless the prior round carried a critical"  "true"  "$(g36_cap 3 1 0)"
+  assert_eq "36p: which keeps blocking however many rounds"   "true"  "$(g36_cap 4 1 0)"
+  assert_eq "36p: or unless CRITICAL_CLEARED was asserted"    "true"  "$(g36_cap 3 0 1)"
+
+  # 36y: malformed input must fail CLOSED on BOTH terms. jq's total ordering
+  # ranks strings/arrays/objects above numbers and null below them, so an
+  # unguarded check returns true for a string "0" and for a null round -- the
+  # cap silently stops binding and reads green.
+  assert_eq "36y: a string prior_critical does not unlock the cap"  "false" "$(g36_cap 3 '"0"' 0)"
+  assert_eq "36y: nor does a boolean one"                          "false" "$(g36_cap 3 true 0)"
+  assert_eq "36y: nor an array"                                    "false" "$(g36_cap 3 '[]' 0)"
+  assert_eq "36y: a null round does not disable the cap"           "false" "$(g36_cap null 0 0)"
+  # 36z: the absent case the contract documents -- must yield a verdict, never
+  # an abort that also takes the four commit_pending booleans down with it.
+  G36_UNSET=$(BLOCK="$G36_DIR/block.json" MERGED="$G36_DIR/merged.json" \
+    TASK_CRITERION_LINES=2 eval "$G36_JQ" 2>/dev/null)
+  assert_eq "36z: an unset recount yields a verdict, not a jq abort" "false" \
+    "$(printf '%s' "$G36_UNSET" | jq -r '.round_cap_ok' 2>/dev/null || echo ABORT)"
+  assert_eq "36z: and pin_terms names it as an unrun recount"        "-1" \
+    "$(printf '%s' "$G36_UNSET" | jq -r '.pin_terms.round' 2>/dev/null || echo ABORT)"
+  assert_eq "36z: the other four booleans survive an unset recount"  "true" \
+    "$(printf '%s' "$G36_UNSET" | jq -r '[.project_checks_equal,.acceptance_criteria_equal,.commit_pending_scope_ok,.commit_pending_shape_ok] | all' 2>/dev/null || echo ABORT)"
+
+  # 36q: the W2127 abort-regression guard on a clean fixture.
+  G36_ALL=$(BLOCK="$G36_DIR/block.json" MERGED="$G36_DIR/merged.json" \
+    TASK_CRITERION_LINES=2 REVIEW_ROUND=1 PRIOR_CRITICAL=0 CRITICAL_CLEARED=0 eval "$G36_JQ" 2>/dev/null)
+  assert_eq "36q: dropped_sections is empty on a clean fixture" "0" \
+    "$(printf '%s' "$G36_ALL" | jq -r '.dropped_sections | length')"
+  assert_eq "36q: and all five booleans evaluate true" "true" \
+    "$(printf '%s' "$G36_ALL" | jq -r '[.project_checks_equal,.acceptance_criteria_equal,.commit_pending_scope_ok,.commit_pending_shape_ok,.round_cap_ok] | all')"
+
+  # --- 36r-36u: the CONTRACT'S OWN recount, over rounds rather than dispatches
+  g36_recount() { # $1=identifier -> "RECOUNT REVIEW_ROUND PRIOR_CRITICAL"
+    ( STRIDE_DIR="$G36_DIR/.stride"; IDENT="$1"
+      eval "$G36_RECOUNT" >/dev/null 2>&1
+      printf '%s %s %s' "$RECOUNT" "$REVIEW_ROUND" "$PRIOR_CRITICAL" )
+  }
+  g36_art() { echo "{\"issue_counts\":{\"critical\":$2}}" > "$G36_DIR/.stride/.reviewer-result-$3-r$1.json"; }
+
+  rm -f "$G36_DIR/.stride/".* 2>/dev/null
+  g36_art 1 0 W9999; echo '{bad' > "$G36_DIR/.stride/.review-W9999-r2.json"; g36_art 3 0 W9999
+  assert_eq "36r: a crashed dispatch burns a filename, not a round" "2 2 0" "$(g36_recount W9999)"
+  g36_art 1 0 W8888
+  assert_eq "36s: and the count resets per task"                    "1 1 0" "$(g36_recount W8888)"
+  rm -f "$G36_DIR/.stride/.review-rounds-W9999.json"
+  assert_eq "36t: a resumed session recovers the count from disk"   "2 2 0" "$(g36_recount W9999)"
+  : > "$G36_DIR/.stride/.reviewer-result-W9999-r5.json"
+  assert_eq "36u: a zero-byte artifact is NOT counted as a round"   "2 2 0" "$(g36_recount W9999)"
+  printf '   ' > "$G36_DIR/.stride/.reviewer-result-W9999-r6.json"
+  assert_eq "36u: nor is a whitespace-only one"                     "2 2 0" "$(g36_recount W9999)"
+  # 36ad: a security finding is never recordable. "important" is the reviewer's
+  # documented default severity for a security finding, so the record-don't-fix
+  # relaxation would otherwise ship an unfixed weakness to Done. Pinned at all
+  # four sites that state the relaxation.
+  assert_contains "36ad: the orchestrator exempts security from record-don't-fix" \
+    'never a `category: "security"` issue' "$(cat "$G36_WF")"
+  assert_contains "36ad: the sibling's remedy exempts it too" \
+    "never recordable at any severity" "$(cat "$G36_RBE")"
+  assert_contains "36ad: and the completion self-check exempts it" \
+    'nor for a `category: "security"` issue' "$(cat "$G36_CT")"
+  # 36ae: both rm sites must guard $STRIDE_DIR. The claim-time clear runs at
+  # Step 2, before Step 5 resolves the project root, so an unguarded glob there
+  # silently deletes nothing -- which is the fix for the most reachable
+  # stranding route quietly becoming a no-op.
+  assert_contains "36ae: the artifact clear resolves and guards STRIDE_DIR" \
+    "STRIDE_DIR unresolved" "$(cat "$G36_RBE")"
+
+  # 36ab: an unset or bogus $STRIDE_DIR must fail CLOSED. It globs nothing, so
+  # without an explicit guard the recount returns 0 and the cap reads green --
+  # a fail-open that 42 earlier assertions did not see, because every one of
+  # them set the variable.
+  assert_eq "36ab: an unset STRIDE_DIR fails closed, not open" "-1" \
+    "$( ( unset STRIDE_DIR; IDENT=W9999; eval "$G36_RECOUNT" >/dev/null 2>&1; printf '%s' "$REVIEW_ROUND" ) )"
+  assert_eq "36ab: and so does one naming a missing directory" "-1" \
+    "$( ( STRIDE_DIR="$G36_DIR/nope"; IDENT=W9999; eval "$G36_RECOUNT" >/dev/null 2>&1; printf '%s' "$REVIEW_ROUND" ) )"
+
+  # 36ac: the Source B round-cap assert must sit BELOW the $MERGED write. 36w
+  # awks the assert body out and runs it standalone, so it verifies the logic
+  # and structurally cannot see the position -- which is how an assert that was
+  # annotated rather than moved passed a full green run.
+  assert_eq "36ac: the Source B round-cap assert sits below the \$MERGED write" "ok" \
+    "$(awk '/json.dump\(reviewer_result/{d=NR} /^assert _r >= 0/{a=NR} END{print (d && a && a > d) ? "ok" : "assert-above-dump"}' "$G36_RBE")"
+
+  # 36aa: PRIOR_CRITICAL must read the previous round by NUMERIC index. Lexical
+  # ordering puts r10 before r9 and would read r8 here.
+  rm -f "$G36_DIR/.stride/".* 2>/dev/null
+  for i in 1 2 3 4 5 6 7 8; do g36_art $i 0 W7777; done
+  g36_art 9 1 W7777; g36_art 10 0 W7777
+  assert_eq "36aa: the previous round is found by numeric index, not lexical" "10 10 1" "$(g36_recount W7777)"
+
+  # 36w: Source B parity, from the CONTRACT'S bytes rather than a retyped copy.
+  if command -v python3 > /dev/null 2>&1; then
+    G36_PY=$(awk '/^# Round-cap pin/{f=1} f&&/^assert _r >= 0/{p=1} f{print} p&&/\)$/{exit}' "$G36_RBE")
+    g36_py() { # $1=round $2=prior $3=cleared -> pass|refused
+      python3 -c "
+import sys
+review_round, prior_critical, critical_cleared = $1, $2, $3
+try:
+$(printf '%s' "$G36_PY" | sed 's/^/    /')
+except AssertionError:
+    print('refused'); sys.exit(0)
+print('pass')" 2>/dev/null || echo error
+    }
+    assert_eq "36w: Source B permits round 2"                   "pass"    "$(g36_py 2 0 0)"
+    assert_eq "36w: Source B refuses a third round"             "refused" "$(g36_py 3 0 0)"
+    assert_eq "36w: Source B honours the critical exemption"    "pass"    "$(g36_py 3 1 0)"
+    assert_eq "36w: Source B agrees on a string prior_critical" "refused" "$(g36_py 3 "'0'" 0)"
+    assert_eq "36w: Source B agrees on a boolean prior_critical" "refused" "$(g36_py 3 True 0)"
+    assert_eq "36w: Source B agrees on a null round"            "refused" "$(g36_py None 0 0)"
+  else
+    echo "  SKIP: 36w: python3 not installed"
+  fi
+else
+  echo "  SKIP: 36m-36aa: jq not installed or the contract file is missing"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

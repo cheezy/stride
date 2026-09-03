@@ -120,11 +120,17 @@ gate — that is a finding to report in your record, not a shortcut to take.**
    and `important` issue, then **re-dispatch** the reviewer — a re-review is a
    dispatch, never a self-assessment of your own fix, because an inline review
    forfeits both independence and the structured block the completion payload
-   requires. **Three reviewer dispatches is the ceiling: the initial review plus
-   at most two re-reviews.** Stop earlier if a round does not converge — a
+   requires. **Two review rounds is the ceiling: the initial review plus one round
+   scoped to verifying your fixes.** `stride-workflow` Step 5 owns the cap, its
+   counter and its scoping; follow them by reference. A round is a dispatch that
+   produced a `$MERGED` file, so a crashed or unparsable dispatch is re-dispatched
+   and consumes no round. **A `critical` is exempt** — it blocks however many
+   rounds it takes, and a further round dispatched to clear one is not a cap
+   breach. At the cap with only `important`/`minor` open, do not run another
+   round: record them per Step 5 and complete. Stop earlier if a round does not converge — a
    re-review returning the same `critical`/`important` finding with no reduction
    in the combined count will not be fixed by one more. When the cap or the
-   convergence rule is reached with issues still open, emit `review_blocked` with
+   convergence rule is reached with a `critical` still open, emit `review_blocked` with
    `failure.kind: "review_escalation"`. That is a **stop without completing**,
    not a relaxation of Step 5's gate: you are not completing with unfixed issues,
    you are declining to complete and handing the task to a human. It is also the

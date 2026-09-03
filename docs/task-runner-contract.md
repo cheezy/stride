@@ -264,7 +264,7 @@ Seven values, exhaustive. A runner may not invent an eighth.
 - **`review_blocked`** — the review gate could not be satisfied: an escalation
   `stride-completing-tasks` routes to a human, a `partial` / `unmitigated`
   security consideration the runner could not mitigate, or a review loop that
-  ran out of rounds — the runner caps re-reviews and stops when a round stops
+  reached its cap with a `critical` still open — the runner caps re-reviews and stops when a round stops
   converging, rather than re-reviewing indefinitely. All three are a **stop
   without completing**, never a relaxation of the review gate: nothing ships with
   unfixed issues, the task stays claimed and uncompleted, and a human takes it.

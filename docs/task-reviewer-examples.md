@@ -8,7 +8,7 @@ Reference material for the `stride:task-reviewer` agent, split out of `agents/ta
 
 ```json
 {
-  "schema_version": "1.6",
+  "schema_version": "1.7",
   "summary": "Reviewed 3 acceptance criteria, 4 pitfalls, 2 security considerations, 3 project checks from CODE-REVIEW.md (1 met, 1 not met, 1 not applicable), 12 diff hunks against task patterns, and the task's 7-row behaviour/test matrix; found 1 critical pitfall violation, 1 important partially-satisfied acceptance criterion, 1 important unmitigated security consideration, 1 important project-check failure, 1 important unbacked matrix row, and 1 minor naming issue, all blocking approval.",
   "status": "changes_requested",
   "issue_counts": {
@@ -197,7 +197,7 @@ That object is the **block file's** entire content, and is also what the fenced 
 
 ```text
 6 issues found (1 critical, 4 important, 1 minor)
-block: /Users/me/proj/.stride/.review-W2068-r1.json (17144 B, schema_version "1.6")
+block: /Users/me/proj/.stride/.review-W2068-r1.json (17144 B, schema_version "1.7")
 report: /Users/me/proj/.stride/.review-W2068-r1.md (5824 B)
 status: changes_requested
 issue_counts: critical 1, important 4, minor 1
@@ -219,7 +219,7 @@ top issues (6 of 6):
 
 ```json
 {
-  "schema_version": "1.6",
+  "schema_version": "1.7",
   "summary": "Reviewed 3 acceptance criteria, 2 pitfalls, 1 security consideration and 6 diff hunks against the task's patterns; all reviewable criteria are met and no issues were found. The third criterion asks only for the commit, which the after_doing hook at Step 6 makes after this review, so it is reported as pending under the commit-pending carve-out rather than as a defect.",
   "status": "approved",
   "issue_counts": { "critical": 0, "important": 0, "minor": 0 },
@@ -253,7 +253,7 @@ top issues (6 of 6):
 
 ```text
 Approved
-block: /Users/me/proj/.stride/.review-W2131-r1.json (3180 B, schema_version "1.6")
+block: /Users/me/proj/.stride/.review-W2131-r1.json (3180 B, schema_version "1.7")
 report: /Users/me/proj/.stride/.review-W2131-r1.md (2044 B)
 status: approved
 issue_counts: critical 0, important 0, minor 0

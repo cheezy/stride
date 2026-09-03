@@ -163,6 +163,8 @@ Run this **before every** `PATCH /api/tasks/:id/complete`. If ANY check fails, *
 
   **This check carries the same scoping as the checkboxes above.** On a **Shape 2 self-reported skip** zero rounds ran, and on the **Step 5 prose fallback (Source C)** no `$MERGED` was written, so the dispatch counted as no round — in both cases there is no round count to exceed and the check is inapplicable rather than failed. That is never licence to route a dispatched, parsed review through either shape in order to escape the cap, nor to delete an artifact to lower the count: Step 7 is the only sanctioned deleter, and a hand-deleted artifact buys one extra round at the cost of a record a human is relying on.
 
+- [ ] **`cosmetic` findings are reported, never suppressed.** A `cosmetic: true` entry changes exactly one thing — the orchestrator's re-review disposition — so it **stays in `issues[]` with its honest `severity` and `category`, rides through the whole-object copy unchanged, and reaches `completion_notes` like any other finding.** Never drop one, never add it to an enumerated copy list, and never re-label a substantive finding cosmetic to avoid a round: that is a reviewer defect whose remedy is re-running the reviewer, never editing `reviewer_result`. **Pinned as `cosmetic_shape_ok`** on both extraction paths — `cosmetic: true` on a non-`minor` severity, on `category: "security"`, or as a non-boolean is refused; do not submit. Definition: `stride/agents/task-reviewer.md`.
+
 This gate is **not bypassable** by submitting a self-reported skip (`dispatched: false`) when a `stride:task-reviewer` agent actually ran — a dispatched review must pass every check above. The self-check compares counts, keys, and status enums only; it never prints task content, diffs, or secrets. (The Kanban server now hard-rejects a report that fails any of these, so a failing self-check is also a failing completion — catch it here, before you submit.)
 
 ## The Complete Completion Process
@@ -357,7 +359,7 @@ Every `/complete` call **must** include both `explorer_result` and `reviewer_res
   "summary": "<40+ non-whitespace characters describing what was reviewed>",
   "issues_found": 0,
   "acceptance_criteria_checked": 5,
-  "schema_version": "1.6",
+  "schema_version": "1.7",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
   "issues": [],

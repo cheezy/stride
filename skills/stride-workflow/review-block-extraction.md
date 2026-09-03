@@ -2,6 +2,12 @@
 
 Read this at Step 5, after the task-reviewer has returned (or when an older reviewer emitted its block inline), while building `reviewer_result`. The dispatch procedure, the three-source order, and the always-read-from-the-paths-YOU-supplied rule stay in the orchestrator skill; everything below is the mechanics that run once you hold `$BLOCK` and `$REPORT`.
 
+## The `commit_pending` dispatch assertion
+
+**`commit_pending` — orchestrator-asserted, not a field the task supplies.** Step 5's reviewer dispatch passes every review field *the task supplies*; this one is a lifecycle fact only you know, so it is passed alongside that list rather than added to it. **Set it when this task's commit is genuinely a step still ahead of the review.** Step 5 runs before Steps 6 and 7, so on a project whose `## after_doing` stages and commits (`git add -A`) that is the ordinary case; on a nested-repo task it is whichever later step or operator makes that commit. **On that nested-repo shape, make `performed_by` do real work**: a criterion reading only "the fix is committed to the plugin repo" gives the reviewer nothing to separate your scheduled commit from an earlier one the task itself required, so leg (c) is undecidable and the standing default refuses the carve-out — you get the blocked round anyway. Name the step **and** its position relative to this task's work (for example "the operator's manual commit inside the nested plugin repo, made after this review and after the after_doing gate — no earlier commit in that repo was required by this task"), so leg (c) has a yardstick. If this task DID require an earlier commit in that repo, do not assert the flag at all. **What it must carry:** `{ "pending": true, "performed_by": "<the step that makes this commit>" }`. A bare `true` with no `performed_by` is an incomplete assertion — **do not send one**: `performed_by` is precisely what lets the reviewer tell a scheduled commit from an overdue one, and without it the flag degrades into a blanket licence to ignore any commit criterion. **When NOT to set it:** when the task's own work required a commit that should already have happened — a mid-work commit the task specified, or a nested-repo commit already made. **Never set it to make a `changes_requested` round pass.** It asserts a lifecycle fact, not a desired outcome; asserting it falsely hides real uncommitted work, which is a worse defect than the extra round it would have avoided. **Re-review rounds:** re-evaluate the assertion each round, and stop sending it once the commit has actually been made. The carve-out's semantics — what qualifies, what is emitted, and what it may never do — are owned by `stride/agents/task-reviewer.md` (the `acceptance_criteria` array hard rule and the `status` rule); do not restate them here.
+
+**The carve-out is scope-pinned by a check you must not skip.** The assertion is self-certified: you are the party whose review round it unblocks, and the reviewer has no independent evidence of lifecycle order with which to verify you. So the *result* is verified instead — the `commit_pending_scope_ok` boolean in the MANDATORY Source A self-check below asserts that every `"not_met"` criterion is either paired with an `acceptance_criteria` issue or carries the sentinel, never neither and never both. It runs on **both** extraction paths — as `commit_pending_scope_ok` in the Source A jq, and as the matching assertion in the Source B self-check, which is reachable whenever the reviewer's block write fails and it emits the fence inline — costs a dispatch without `commit_pending` nothing, and **a failure on either path means do not submit.** The check and its exact jq are in the Source A self-check below; do not restate them elsewhere.
+
 ## Review rounds — the counter, the cap, and its three variables
 
 **A round is a reviewer dispatch that produced a `$MERGED` file** — not a dispatch. `<N>` stays a dispatch counter that increments for crashed re-dispatches so two dispatches never share a path, so a crashed or unparsable reviewer burns a filename, not a round. `$MERGED` is the authority rather than `$BLOCK` because it is written on **both** Source A and Source B, so an inline-fence round counts identically to a file round.
@@ -86,7 +92,7 @@ fi
 
 Re-claiming is therefore also the **only sanctioned repair** for a counter that over-reports — the take-the-larger rule has no downward path within an attempt, by design, so a stale or inflated `rounds` value would otherwise be permanent. Never hand-delete these files mid-attempt to buy another round: that is the one move this whole control exists to prevent.
 
-**Three limits, stated rather than papered over.** (1) A Source C round writes no `$MERGED` and therefore does not count, so this cap does not bound a reviewer that repeatedly lands on Source C — the convergence rule in `stride/agents/task-runner.md` is what bounds that, and for the same reason a Source C round can never supply a non-zero `PRIOR_CRITICAL`, so a Critical found on that path needs `CRITICAL_CLEARED`. (2) **`CRITICAL_CLEARED` is self-certified but NOT result-verified, and that is a real asymmetry with `commit_pending`, which it otherwise resembles.** `commit_pending` is pinned mechanically by `commit_pending_scope_ok` on both paths; `critical_cleared` has no counterpart — `($cc == 1)` unlocks any round number, and nothing checks that a `critical` ever existed, that this round verified one, or that `completion_notes` recorded what it was for. The prohibition on using it to pass a cap reached with only `important`/`minor` findings is therefore **prose only**, which is the shape this feature's own pitfalls rule out for the cap itself. It is disclosed here rather than left implied; a mechanical pin needs a signal the block does not currently carry. (3) The `critical` exemption is deliberately unbounded, so a reviewer that keeps reporting a `critical` is bounded only by that same convergence rule; the cap governs rounds, never correctness, and this is the price of that.
+**Five limits, stated rather than papered over.** (1) A Source C round writes no `$MERGED` and therefore does not count, so this cap does not bound a reviewer that repeatedly lands on Source C — the convergence rule in `stride/agents/task-runner.md` is what bounds that, and for the same reason a Source C round can never supply a non-zero `PRIOR_CRITICAL`, so a Critical found on that path needs `CRITICAL_CLEARED`. (2) **`CRITICAL_CLEARED` is self-certified but NOT result-verified, and that is a real asymmetry with `commit_pending`, which it otherwise resembles.** `commit_pending` is pinned mechanically by `commit_pending_scope_ok` on both paths; `critical_cleared` has no counterpart — `($cc == 1)` unlocks any round number, and nothing checks that a `critical` ever existed, that this round verified one, or that `completion_notes` recorded what it was for. The prohibition on using it to pass a cap reached with only `important`/`minor` findings is therefore **prose only**, which is the shape this feature's own pitfalls rule out for the cap itself. It is disclosed here rather than left implied; a mechanical pin needs a signal the block does not currently carry. (3) **`cosmetic` is self-certified and NOT result-verified, exactly as `CRITICAL_CLEARED` is.** `cosmetic_shape_ok` checks the flag's *type* and its *co-ordinates* — severity and category — and **cannot reach its truth**. A reviewer that marks a substantive `minor` cosmetic passes every boolean and ends the review loop, and no signal in the block is independent of the reviewer's judgement, which is the same reason a pin was impossible for `CRITICAL_CLEARED`. So the cheapest abuse is not relabelling a `critical` or a `security` finding — the pin refuses those — but relabelling an ordinary substantive `minor`, which it cannot see. Disclosed here rather than left implied; the remedy is a human reading `issues[]`, and note the Review queue currently groups by severity alone, so the flag is invisible there. (4) **The all-cosmetic re-review disposition is likewise Source-A/B only.** `cosmetic_shape_ok` can only run where a structured block parsed; on Source C `issues[]` is absent by construction, so "every entry is cosmetic" is vacuously true and the rule is inapplicable rather than satisfied — an absent or empty `issues[]` is never an all-cosmetic round. (5) The `critical` exemption is deliberately unbounded, so a reviewer that keeps reporting a `critical` is bounded only by that same convergence rule; the cap governs rounds, never correctness, and this is the price of that.
 
 ## Guards on Source A
 
@@ -114,7 +120,7 @@ fi
 
 `$s[0] + {…}` **is** the whole-object copy: jq's object merge makes "copy everything, overlay exactly five keys" mechanical rather than remembered, which is the strongest available reading of the set relation stated below. The `issue_counts` sum is spelled out per severity deliberately — `[.issue_counts[]] | add` would also sum unrecognized severity keys and contradict the mapping rule below.
 
-**MANDATORY self-check for Source A** — prints seven values and no payload:
+**MANDATORY self-check for Source A** — prints eight values and no payload:
 
 ```bash
 jq -n --slurpfile s "$BLOCK" --slurpfile r "$MERGED" --argjson n "$TASK_CRITERION_LINES" \
@@ -130,6 +136,9 @@ jq -n --slurpfile s "$BLOCK" --slurpfile r "$MERGED" --argjson n "$TASK_CRITERIO
       commit_pending_scope_ok: (($not_met - ($pending|length)) == $ac_issues),
       commit_pending_shape_ok: (([$pending[]
         | select((.criterion // "") | test("\\bpush|\\btag|\\breleas|\\bdeploy|\\bpull request|\\bPR\\b"; "i"))] | length) == 0),
+      cosmetic_shape_ok: ((([$s[0].issues[]? | select(has("cosmetic")) | select((.cosmetic | type) != "boolean")] | length) == 0)
+        and (([$s[0].issues[]? | select(.cosmetic == true)
+               | select(.severity != "minor" or .category == "security")] | length) == 0)),
       round_cap_ok: ((($round | numbers) // -1) as $r
         | (($prior_critical | numbers) // 0) as $pc
         | (($critical_cleared | numbers) // 0) as $cc
@@ -139,7 +148,7 @@ jq -n --slurpfile s "$BLOCK" --slurpfile r "$MERGED" --argjson n "$TASK_CRITERIO
                    critical_cleared: $critical_cleared } }'
 ```
 
-`dropped_sections` must be `[]` and **all five** booleans `true`. `pin_terms` is diagnostic, not a pass/fail value — it exists so a failure tells you *which* term broke. A failure means you trimmed the output: **fix the copy, never weaken the check.** For the acceptance-criteria mismatch specifically, **re-run the reviewer — never truncate or pad the array to force the count.**
+`dropped_sections` must be `[]` and **all six** booleans `true`. `pin_terms` is diagnostic, not a pass/fail value — it exists so a failure tells you *which* term broke. A failure means you trimmed the output: **fix the copy, never weaken the check.** For the acceptance-criteria mismatch specifically, **re-run the reviewer — never truncate or pad the array to force the count.**
 
 `commit_pending_scope_ok` is the commit-pending carve-out's scope pin, and it runs here because this is the one self-check that already holds `$BLOCK` open before Step 7 deletes it — making the pin free rather than a new harness. The invariant: **every `"not_met"` criterion is either paired with an `acceptance_criteria` issue or carries the sentinel — never neither, never both.** **The sentinel count is pinned to a row that is BOTH `status: "not_met"` AND whose `evidence` starts with the sentinel** — the status filter matters, because a sentinel can only ever legally sit on a `not_met` row, and without the filter a stray sentinel on a `met` row would silently cancel a genuinely dropped pairing. A whole-file `grep` for the literal is likewise NOT this check and is inflated by the string appearing in criterion text, in `summary`, or in a `note`. On a review with no carve-out the sentinel count is `0` and the check reduces to the pairing rule that always held, so it costs a dispatch without `commit_pending` nothing.
 
@@ -228,6 +237,21 @@ _never = re.compile(r"\bpush|\btag|\breleas|\bdeploy|\bpull request|\bPR\b", re.
 assert not [c for c in _pending if _never.search(c.get("criterion") or "")], \
     "commit-pending carve-out reached the never-list — drop the commit_pending assertion and review normally"
 
+# Cosmetic shape pin -- the Source B half of `cosmetic_shape_ok`. A cosmetic
+# flag may only ever sit on a minor, non-security finding, and must be a real
+# boolean; anything else is a reviewer defect and never something to "fix" by
+# editing the block. This refuses rather than coerces. Note it reaches the
+# flag's TYPE and CO-ORDINATES only, never its truth -- see limit (3) above for
+# the cheaper abuse it cannot see.
+_issues = structured.get("issues") or []
+assert not [i for i in _issues
+            if "cosmetic" in i and not isinstance(i.get("cosmetic"), bool)], \
+    "cosmetic must be a boolean when present -- re-run the reviewer, do not coerce it"
+assert not [i for i in _issues
+            if i.get("cosmetic") is True
+            and (i.get("severity") != "minor" or i.get("category") == "security")], \
+    "cosmetic is only ever valid on a minor, non-security finding -- do not submit"
+
 # D248: write the merged object to the SAME absolute $MERGED path Source A uses
 # (.stride/.reviewer-result-<IDENTIFIER>-r<N>.json under the resolved project
 # root), so Step 7's `jq --slurpfile r "$MERGED"` splice works identically on
@@ -271,6 +295,8 @@ assert _r >= 0 and (_r <= 2 or _pc > 0 or _cc == 1), (
     "PAST the cap, escalate review_blocked (or set CRITICAL_CLEARED if this "
     "round verified a critical no prior round recorded). Never run another "
     "round; a critical is fixed or escalated, never recorded.")
+
+
 ```
 
 ## Field mapping into `reviewer_result`

@@ -12552,10 +12552,10 @@ if [ -f "$G36_WF" ] && [ -f "$G36_RBE" ] && [ -f "$G36_CT" ]; then
     "Two review rounds is the ceiling" "$(cat "$G36_RUN")"
   assert_eq "36j: and no three-dispatch ceiling survives in the runner" "0" \
     "$(grep -c 'Three reviewer dispatches' "$G36_RUN" 2>/dev/null | tr -d ' ')"
-  assert_contains "36k: the Source A self-check prints seven values" \
-    "prints seven values" "$(cat "$G36_RBE")"
-  assert_contains "36l: and all five booleans must be true" \
-    "all five" "$(cat "$G36_RBE")"
+  assert_contains "36k: the Source A self-check prints eight values" \
+    "prints eight values" "$(cat "$G36_RBE")"
+  assert_contains "36l: and all six booleans must be true" \
+    "all six" "$(cat "$G36_RBE")"
   assert_contains "36v: the Source B half carries the cap too" \
     "review round cap exceeded" "$(cat "$G36_RBE")"
 else
@@ -12573,8 +12573,8 @@ if [ -f "$G36_RBE" ] && command -v jq > /dev/null 2>&1; then
   mkdir -p "$G36_DIR/.stride"
 
   cat > "$G36_DIR/block.json" <<'G36BLOCK'
-{ "schema_version": "1.6", "summary": "fixture", "status": "approved",
-  "project_checks": [{"name":"a","status":"passed"}],
+{ "schema_version": "1.7", "summary": "fixture", "status": "approved",
+  "project_checks": [{"check":"a","source":"CODE-REVIEW.md","status":"met","evidence":"x"}],
   "acceptance_criteria": [{"criterion":"one","status":"met","evidence":"x"},
                           {"criterion":"two","status":"not_met","evidence":"y"}],
   "issues": [{"category":"acceptance_criteria","severity":"important","description":"d"}],
@@ -12713,6 +12713,168 @@ print('pass')" 2>/dev/null || echo error
   fi
 else
   echo "  SKIP: 36m-36aa: jq not installed or the contract file is missing"
+fi
+
+# ============================================================
+# Test Group 37: W2129 -- the cosmetic finding class
+# ============================================================
+# Bash-only, on 35q/36's precedent: assertions about markdown contracts, which
+# are language-agnostic. The executed half runs the Source A jq EXTRACTED FROM
+# THE CONTRACT, for the reason Group 36 records: W2128's first cut passed 25
+# green assertions over a critical because it restated the check instead of
+# extracting it.
+echo ""
+echo "=== Test Group 37: W2129 cosmetic finding class ==="
+
+G37_REV="$SCRIPT_DIR/../agents/task-reviewer.md"
+G37_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G37_RBE="$SCRIPT_DIR/../skills/stride-workflow/review-block-extraction.md"
+G37_CT="$SCRIPT_DIR/../skills/stride-completing-tasks/SKILL.md"
+
+if [ -f "$G37_REV" ] && [ -f "$G37_WF" ] && [ -f "$G37_RBE" ]; then
+  assert_contains "37a: the issue schema carries a cosmetic boolean" \
+    '**`cosmetic`**' "$(cat "$G37_REV")"
+  assert_contains "37b: absent means false" \
+    "absent means \`false\`" "$(cat "$G37_REV")"
+  assert_contains "37c: cosmetic is presentational only" \
+    "presentational only" "$(cat "$G37_REV")"
+  assert_contains "37d: a cosmetic flag on a substantive finding is a reviewer defect" \
+    "is a **reviewer defect**" "$(cat "$G37_REV")"
+  assert_contains "37e: cosmetic is orthogonal to severity, not a fourth level" \
+    "orthogonal" "$(cat "$G37_REV")"
+  assert_contains "37f: an all-cosmetic round buys no further review round" \
+    "buys no further review round" "$(cat "$G37_WF")"
+  assert_contains "37g: cosmetic findings still reach completion_notes" \
+    "reaches \`completion_notes\` like any other finding" "$(cat "$G37_CT")"
+  # 37h: the flag rides through on the WHOLE-OBJECT copy. What actually carries
+  # an unknown key is the `$s[0] + {...}` merge form -- a merge that enumerated
+  # keys would silently drop `cosmetic`, which is the failure this pins. Assert
+  # the merge form itself, and that no copy path reconstructs issues[] entries.
+  assert_contains "37h: the Source A merge is the whole-object form" \
+    '$s[0] + {' "$(cat "$G37_RBE")"
+  assert_eq "37h: and no copy path reconstructs issues[] entry keys" "0" \
+    "$(grep -c 'issues\[\][ ]*|[ ]*{' "$G37_RBE" 2>/dev/null | tr -d ' ')"
+else
+  echo "  SKIP: 37a-37h: contract files not found from the hooks directory"
+fi
+
+if [ -f "$G37_RBE" ] && command -v jq > /dev/null 2>&1; then
+  G37_DIR="$TMPDIR_TEST/w2129-cosmetic"
+  mkdir -p "$G37_DIR"
+  G37_JQ=$(awk '/MANDATORY self-check for Source A/{f=1} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' "$G37_RBE")
+
+  # A coherent base block: criteria all met, so no acceptance_criteria issue is
+  # owed and commit_pending_scope_ok stays true while we vary only issues[].
+  cat > "$G37_DIR/base.json" <<'G37B'
+{ "schema_version": "1.7", "summary": "fixture", "status": "approved",
+  "project_checks": [{"check":"a","source":"CODE-REVIEW.md","status":"met","evidence":"x"}],
+  "acceptance_criteria": [{"criterion":"one","status":"met","evidence":"x"},
+                          {"criterion":"two","status":"met","evidence":"y"}],
+  "issues": [],
+  "issue_counts": {"critical":0,"important":0,"minor":0} }
+G37B
+
+  g37_shape() { # $1 = issues[] JSON -> cosmetic_shape_ok
+    jq ".issues = $1" "$G37_DIR/base.json" > "$G37_DIR/b.json"
+    jq '. + {dispatched:true}' "$G37_DIR/b.json" > "$G37_DIR/m.json"
+    BLOCK="$G37_DIR/b.json" MERGED="$G37_DIR/m.json" TASK_CRITERION_LINES=2 \
+    REVIEW_ROUND=1 PRIOR_CRITICAL=0 CRITICAL_CLEARED=0 \
+      eval "$G37_JQ" 2>/dev/null | jq -r '.cosmetic_shape_ok' 2>/dev/null || echo ABORT
+  }
+
+  assert_eq "37i: cosmetic on a minor, non-security finding is valid" "true" \
+    "$(g37_shape '[{"severity":"minor","category":"code_quality","cosmetic":true}]')"
+  assert_eq "37j: cosmetic on a critical is REFUSED" "false" \
+    "$(g37_shape '[{"severity":"critical","category":"code_quality","cosmetic":true}]')"
+  assert_eq "37k: cosmetic on an important is REFUSED" "false" \
+    "$(g37_shape '[{"severity":"important","category":"code_quality","cosmetic":true}]')"
+  assert_eq "37l: cosmetic on a security finding is REFUSED" "false" \
+    "$(g37_shape '[{"severity":"minor","category":"security","cosmetic":true}]')"
+  assert_eq "37m: a non-boolean cosmetic is REFUSED, never coerced" "false" \
+    "$(g37_shape '[{"severity":"minor","category":"code_quality","cosmetic":"yes"}]')"
+  assert_eq "37n: a finding with no cosmetic key is unaffected" "true" \
+    "$(g37_shape '[{"severity":"minor","category":"code_quality"}]')"
+  assert_eq "37o: an empty issues array is unaffected" "true" "$(g37_shape '[]')"
+
+  # 37p: all six booleans still evaluate together -- the W2127/W2128 abort guard,
+  # since a compile error in the new boolean takes the other five down with it.
+  G37_ALL=$(jq '.issues = [{"severity":"minor","category":"code_quality","cosmetic":true}]' "$G37_DIR/base.json" > "$G37_DIR/b.json";
+            jq '. + {dispatched:true}' "$G37_DIR/b.json" > "$G37_DIR/m.json";
+            BLOCK="$G37_DIR/b.json" MERGED="$G37_DIR/m.json" TASK_CRITERION_LINES=2 \
+            REVIEW_ROUND=1 PRIOR_CRITICAL=0 CRITICAL_CLEARED=0 eval "$G37_JQ" 2>/dev/null)
+  assert_eq "37p: dropped_sections is empty on a clean cosmetic fixture" "0" \
+    "$(printf '%s' "$G37_ALL" | jq -r '.dropped_sections | length')"
+  assert_eq "37p: and all six booleans evaluate true" "true" \
+    "$(printf '%s' "$G37_ALL" | jq -r '[.project_checks_equal,.acceptance_criteria_equal,.commit_pending_scope_ok,.commit_pending_shape_ok,.round_cap_ok,.cosmetic_shape_ok] | all')"
+  assert_contains "37q: the self-check advertises eight values" \
+    "prints eight values" "$(cat "$G37_RBE")"
+
+  # 37t: the OWNING definition must describe the pin correctly. The reviewer
+  # agent reads agents/task-reviewer.md and nothing else, so a prohibition
+  # paragraph that omits `important` -- which the pin does refuse -- teaches the
+  # one party that emits the flag a rule the gate will reject. That was a real
+  # defect: the paragraph said "Two categories" while naming one category and one
+  # severity, and three sibling artifacts had it right while the authoritative
+  # one did not.
+  assert_contains "37t: the definition names all three refused conditions" \
+    "covers **\`critical\` and \`important\` alike**" "$(cat "$G37_REV")"
+  assert_contains "37t: and says the pin cannot reach the flag's truth" \
+    "never its truth" "$(cat "$G37_REV")"
+  assert_contains "37t: the self-certification limit is disclosed" \
+    "self-certified and NOT result-verified" "$(cat "$G37_RBE")"
+  # 37u: the gate reads on the ARTIFACT's claim, not only the finding's -- the
+  # single sharpest source of classification drift found by exploration.
+  assert_contains "37u: a false statement of fact is never cosmetic" \
+    "A false statement of fact is never cosmetic" "$(cat "$G37_REV")"
+
+  # 37s: the all-cosmetic disposition must be SCOPED to a parsed block. On the
+  # Source C prose fallback issues[] is omitted by construction, so "every entry
+  # is cosmetic" is vacuously true over an empty array while the prose reports
+  # real findings -- every sibling control here carries that scoping and this
+  # one must too.
+  assert_contains "37s: the all-cosmetic rule is scoped to a parsed block" \
+    "vacuously true" "$(cat "$G37_WF")"
+  assert_contains "37s: an empty issues[] is never an all-cosmetic round" \
+    "never an all-cosmetic round" "$(cat "$G37_WF")"
+  assert_contains "37s: and the Source C limit is disclosed beside the others" \
+    "Five limits, stated rather than papered over" "$(cat "$G37_RBE")"
+
+  # 37r: Source B parity, EXECUTED. Asserting only that the assertion's message
+  # string appears would leave an inverted predicate (== for != on severity, or a
+  # dropped category clause) green -- the message survives either way. 36w set
+  # the precedent by awking the Source B assert out and running it; this does the
+  # same for the cosmetic pin, over the shapes the jq half is tested against.
+  if command -v python3 > /dev/null 2>&1; then
+    G37_PY=$(awk '/^# Cosmetic shape pin/{f=1} f{print} f&&/do not submit"$/{exit}' "$G37_RBE")
+    g37_py() { # $1 = issues[] JSON literal -> pass|refused
+      python3 -c "
+import sys
+structured = {'issues': $1}
+try:
+$(printf '%s' "$G37_PY" | sed 's/^/    /')
+except AssertionError:
+    print('refused'); sys.exit(0)
+print('pass')" 2>/dev/null || echo error
+    }
+    assert_eq "37r: Source B permits cosmetic on a minor non-security finding" "pass" \
+      "$(g37_py '[{"severity":"minor","category":"code_quality","cosmetic":True}]')"
+    assert_eq "37r: Source B REFUSES cosmetic on a critical" "refused" \
+      "$(g37_py '[{"severity":"critical","category":"code_quality","cosmetic":True}]')"
+    assert_eq "37r: Source B REFUSES cosmetic on an important" "refused" \
+      "$(g37_py '[{"severity":"important","category":"code_quality","cosmetic":True}]')"
+    assert_eq "37r: Source B REFUSES cosmetic on a security finding" "refused" \
+      "$(g37_py '[{"severity":"minor","category":"security","cosmetic":True}]')"
+    assert_eq "37r: Source B REFUSES a non-boolean, never coercing it" "refused" \
+      "$(g37_py '[{"severity":"minor","category":"code_quality","cosmetic":"yes"}]')"
+    assert_eq "37r: Source B refuses a truthy 1 as well" "refused" \
+      "$(g37_py '[{"severity":"minor","category":"code_quality","cosmetic":1}]')"
+    assert_eq "37r: Source B is unaffected by a finding with no cosmetic key" "pass" \
+      "$(g37_py '[{"severity":"minor","category":"code_quality"}]')"
+  else
+    echo "  SKIP: 37r: python3 not installed"
+  fi
+else
+  echo "  SKIP: 37i-37r: jq not installed or the contract file is missing"
 fi
 
 # ============================================================

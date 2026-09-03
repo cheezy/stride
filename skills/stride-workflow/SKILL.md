@@ -609,6 +609,8 @@ Include placeholder hook results in the request body:
 "before_review_result": {"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}
 ```
 
+**The `reviewer` entry's `duration_ms` is an aggregate; `dispatch_count` is scoped more narrowly.** The deep security review, the Step 5.5 session and Step 5.6 hardening fold their wall-clock into that one entry rather than adding a seventh step name — a new *key* is not a new *name* — while the count covers only the reviewer's own dispatches. **They measure different populations, so `duration_ms / dispatch_count` is NOT a per-round figure.** **Unless no reviewer ran:** then it is the skip form and those dispatches go in `completion_notes` instead, so a missing figure is not evidence of absent cost. Neither is a token count — **do not invent one**. **The pair shows a review phase was long; it does NOT rank two tasks by cost** — wall-clock buys ~2.1× different tokens per second by dispatch kind and can invert the true order. All six limits: [telemetry-cost.md](telemetry-cost.md).
+
 **Hook durations: every task-lifecycle hook result is `0`, and `after_goal` is the one place a real figure is both obtainable and persistable (W1455, D224, D234).**
 
 The executor writes each hook's structured result — with a real measured duration — to a durable per-hook file, `.stride/.hook-result-<hook>.json`, cleared at claim time (D234). The rules that matter when you build a request:
@@ -791,6 +793,7 @@ Each element of `workflow_steps` is an object with these keys:
 | `name` | string | Always | One of the six vocabulary values — the Step Name Vocabulary table is in [reference.md](reference.md); the two End-of-Workflow Examples below spell all six out |
 | `dispatched` | boolean | Always | `true` if the step ran; `false` if intentionally skipped |
 | `duration_ms` | integer | When `dispatched=true` | Wall-clock time the step took, in milliseconds |
+| `dispatch_count` | integer | Optional, when `dispatched=true` | How many times this step's subagent was **dispatched** — the cost unit, since a crashed dispatch still spent its tokens. **Counts dispatches, NOT rounds** (a crashed re-dispatch burns a filename but not a round), so never fill it from the round counter. Omitting it is always valid. **Read [telemetry-cost.md](telemetry-cost.md) before drawing any conclusion from it** |
 | `reason` | string | When `dispatched=false` | Short explanation of why the step was skipped |
 | `reason_code` | enum | Optional, when `dispatched=false` | Machine-readable skip category (D239). Supplied **alongside** `reason`, never instead of it — the code is what the compliance dashboard aggregates, the prose is what a human reads. A code outside the list below is rejected with a `422`; omitting the key entirely is always valid |
 
@@ -821,7 +824,7 @@ A medium-complexity task that exercised every phase:
   {"name": "explorer",       "dispatched": true, "duration_ms": 12450},
   {"name": "planner",        "dispatched": true, "duration_ms": 8200},
   {"name": "implementation", "dispatched": true, "duration_ms": 1820000},
-  {"name": "reviewer",       "dispatched": true, "duration_ms": 15300},
+  {"name": "reviewer",       "dispatched": true, "duration_ms": 15300, "dispatch_count": 2},
   {"name": "after_doing",    "dispatched": true, "duration_ms": 45678},
   {"name": "before_review",  "dispatched": true, "duration_ms": 2340}
 ]
@@ -850,6 +853,7 @@ A small task with 0-1 key_files that legitimately skipped exploration, planning,
 - Always include **all six** step names. Skipped steps are recorded with `dispatched: false` — never omitted.
 - Record entries in the order the steps occurred in the workflow (the canonical order is shown in both examples above, and in the Step Name Vocabulary table in [reference.md](reference.md)).
 - When `dispatched: false`, the `reason` must describe **why** the step was skipped (e.g., decision matrix rule, task metadata, platform constraint) — not merely restate that it was skipped.
+- Add `dispatch_count` to a `dispatched: true` entry whenever you dispatched its subagent more than once. **Count dispatches, including one re-dispatched after a crash; do not fill it from the round counter, which deliberately excludes those.** Omitting it stays valid so an older plugin completes as before — but **state a `1` you know**: an omission you chose looks exactly like one a plugin could not avoid.
 - Add `reason_code` next to that prose whenever one of the six categories fits. Without it the entry still validates, but it lands in the compliance breakdown as its own one-row bucket rather than aggregating with every other skip of the same kind.
 - A missing `workflow_steps` array, or one with fewer than six entries, indicates an incomplete telemetry record.
 
@@ -857,22 +861,13 @@ A small task with 0-1 key_files that legitimately skipped exploration, planning,
 
 ## Explorer and Reviewer Result Rollout
 
-Every `/complete` payload **must** include `explorer_result` and `reviewer_result` as top-level objects. Both are pre-validated by `Kanban.Tasks.CompletionValidation` on the server. The full shape (dispatched-subagent vs. self-reported skip), the 40-character non-whitespace summary rule, and the five-value skip-reason enum live in the `stride-completing-tasks` skill — this orchestrator does not duplicate them.
-
-The server is rolling out hard enforcement behind a feature flag `:strict_completion_validation`:
-
-| Phase | Server behavior | Agent impact |
-|---|---|---|
-| **Grace (current)** | Missing or invalid results log a structured warning and the request succeeds | Emit the fields correctly now; the warning volume is a preview of the strict-mode rejection volume |
-| **Strict (after all 5 plugins release)** | Missing or invalid results return `422` with a `failures` list | Any agent not emitting valid fields is locked out of completion |
-
-**Why this matters for the orchestrator:** Steps 3 (explorer dispatch) and 5 (reviewer dispatch) already capture the durations and summaries needed for these fields. Persist those into `explorer_result` and `reviewer_result` in the Step 7 payload. **`explorer_result.summary` comes from the explorer's bounded returned summary, not from its report file** — the field is a short account of what was explored, and the 40-non-whitespace-character floor is met many times over by a summary bounded at 6,000. Never read the report file in order to fill it. When the decision matrix skips a step — or when you self-explore/self-review — submit the skip form with a reason from the enum and a substantive summary explaining what you did instead. See `stride-completing-tasks` for the exact shape, rejection examples, and minimum-length rule.
+Every `/complete` payload **must** include `explorer_result` and `reviewer_result` as top-level objects; their shapes, the 40-non-whitespace-character summary rule and the five-value skip-reason enum live in `stride-completing-tasks`. **Persist the durations and summaries Steps 3 and 5 already captured into the Step 7 payload** — that is where these fields come from. **`explorer_result.summary` comes from the explorer's bounded returned summary, never from its report file** — reading the report to fill a short field spends exactly what the split saves. **When the decision matrix skips a step, or you self-explored or self-reviewed, submit the skip form** with a reason from the enum and a substantive summary saying what you did instead. The server's grace-to-strict rollout — background only, and non-normative — is in [reference.md](reference.md).
 
 ---
 
 ## Reference Material
 
-Seven lookup sections live in [reference.md](reference.md), out of the hot path because running a task does not require reading them: the **Step Name Vocabulary** for `workflow_steps`, **Edge Cases**, the **Complete Workflow Flowchart**, the **Platform Summary**, **Failure Modes This Skill Prevents**, the **Quick Reference Card**, and the **Step 3 Design Rationale**. Nothing there is authoritative — the flowchart and the card summarise the procedure, they do not define it; every step, gate, Decision Summary, schema and self-check the workflow actually executes stays here. Read it when you want to look something up, not as part of running a task.
+The orchestrator's lookup material lives in [reference.md](reference.md), out of the hot path because running a task does not require reading it — that file enumerates its own contents, so this pointer cannot go stale as sections are added. **Nothing there is authoritative**: it summarises the procedure and never defines it, and every step, gate, Decision Summary, schema and self-check the workflow executes stays here or in the gated step file named at its own gate. Read it to look something up, not as part of running a task.
 
 ---
 

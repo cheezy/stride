@@ -12878,6 +12878,137 @@ else
 fi
 
 # ============================================================
+# Test Group 38: W2130 -- dispatch_count on the reviewer step
+# ============================================================
+# Bash-only, on 35q/36/37's precedent. The executed half PARSES THE DOCUMENTED
+# EXAMPLE rather than a restatement of it, so the shape a reader copies is the
+# shape under test -- the same argument Groups 36 and 37 record.
+echo ""
+echo "=== Test Group 38: W2130 dispatch_count ==="
+
+G38_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G38_CT="$SCRIPT_DIR/../skills/stride-completing-tasks/SKILL.md"
+
+if [ -f "$G38_WF" ] && [ -f "$G38_CT" ]; then
+  assert_contains "38a: the schema table carries dispatch_count" \
+    '| `dispatch_count` | integer |' "$(cat "$G38_WF")"
+  assert_contains "38b: it is optional on a dispatched entry" \
+    'Optional, when `dispatched=true`' "$(cat "$G38_WF")"
+  assert_contains "38c: it counts dispatches, NOT rounds" \
+    '**Counts dispatches, NOT rounds**' "$(cat "$G38_WF")"
+  assert_contains "38d: a crashed re-dispatch still counts" \
+    'including one re-dispatched after a crash' "$(cat "$G38_WF")"
+  assert_contains "38e: omitting it stays valid" \
+    'Omitting it stays valid' "$(cat "$G38_WF")"
+  assert_contains "38f: the reviewer duration is documented as an aggregate" \
+    "is an aggregate; \`dispatch_count\` is scoped more narrowly" "$(cat "$G38_WF")"
+  # 38r: the two keys measure different populations, so the division the example
+  # invites is wrong. On real records it overstated the mean round by 40-52%,
+  # and the bias is not constant, so it cannot be divided out.
+  assert_contains "38r: the invited division is explicitly disarmed" \
+    "is NOT a per-round figure" "$(cat "$G38_WF")"
+  # 38s: the pair must not be sold as a cost ranking. Wall-clock buys ~2.1x
+  # different tokens per second by dispatch kind, and on the only two real
+  # records it inverted the true order.
+  assert_contains "38s: the pair is not claimed to rank tasks by cost" \
+    "does NOT rank two tasks by cost" "$(cat "$G38_WF")"
+  # 38t: a review-skipped task can still have burned a security review and an
+  # exploratory session, so absence is not evidence of absent cost.
+  assert_contains "38t: a missing figure is not evidence of absent cost" \
+    "not evidence of absent cost" "$(cat "$G38_WF")"
+  assert_contains "38g: a new key is not a new step name" \
+    'a new *key* is not a new *name*' "$(cat "$G38_WF")"
+  assert_contains "38h: the completion skill documents it too" \
+    'dispatch_count' "$(cat "$G38_CT")"
+  # 38i: the task's own verification_step greps this file for 'round'.
+  assert_eq "38i: the completion skill explains it in round terms" "ok" \
+    "$(grep -q 'review rounds plus any crashed re-dispatches' "$G38_CT" && echo ok || echo missing)"
+else
+  echo "  SKIP: 38a-38i: contract files not found from the hooks directory"
+fi
+
+# --- 38u: the limits sibling exists and states every limit it claims to -----
+G38_TC="$SCRIPT_DIR/../skills/stride-workflow/telemetry-cost.md"
+if [ -f "$G38_TC" ]; then
+  assert_contains "38u: limit 1 -- wall-clock is not token cost" \
+    "Wall-clock is not token cost" "$(cat "$G38_TC")"
+  assert_contains "38u: limit 2 -- the keys measure different populations" \
+    "measure different populations" "$(cat "$G38_TC")"
+  assert_contains "38u: limit 3 -- a skipped review can still have cost" \
+    "Absence of a cost figure is not evidence of absent cost" "$(cat "$G38_TC")"
+  assert_contains "38u: limit 4 -- readers must not impute an absence" \
+    "rather than imputing a value for absences" "$(cat "$G38_TC")"
+  assert_contains "38u: limit 5 -- crash and extra round are not separable" \
+    "cannot separate a crashed re-dispatch" "$(cat "$G38_TC")"
+  # The earlier version of this asserted `reviewer_result.review_round`, which
+  # is orchestrator-asserted DISPATCH INPUT and not part of the reviewer's
+  # emitted schema -- so the mitigation it pointed at returned nothing. Assert
+  # the artifact that actually holds the round number.
+  assert_contains "38u: and it points at where the round number really lives" \
+    ".review-rounds-<IDENTIFIER>.json" "$(cat "$G38_TC")"
+  assert_contains "38u: and warns off the field that only looks like it" \
+    "not part of the reviewer's emitted schema" "$(cat "$G38_TC")"
+  # 38v: the sibling says five limits and must actually carry five.
+  # The pattern MUST be unbounded. A range bounded to the number being asserted
+  # (the earlier '[1-6]') can never report more than that number, so a seventh
+  # limit added beside a stale heading passes silently -- and the [1-5]->[1-6]
+  # hand-edit this group needed mid-task WAS that drift, invisible to its own
+  # test. Count any numbered limit, then compare to the heading.
+  G38_LIMITS=$(grep -c '^\*\*([0-9][0-9]*)' "$G38_TC" 2>/dev/null | tr -d ' ')
+  G38_SAID=$(sed -n 's/^## The \([a-z][a-z]*\) limits$/\1/p' "$G38_TC" | head -1)
+  G38_SAID_N=$(awk -v w="$G38_SAID" 'BEGIN{n=split("one two three four five six seven eight nine ten",a," "); for(i=1;i<=n;i++) if(a[i]==w){print i; exit} print 0}')
+  assert_eq "38v: the heading's stated count matches the limits actually present" \
+    "$G38_LIMITS" "$G38_SAID_N"
+  # And the limits must be numbered consecutively from 1 -- a gap or a repeat
+  # would make the count agree while the list is still wrong.
+  assert_eq "38v: and they are numbered consecutively from one" "ok" \
+    "$(grep -o '^\*\*([0-9][0-9]*)' "$G38_TC" | tr -cd '0-9\n' | paste -sd, - \
+       | awk -v n="$G38_LIMITS" 'BEGIN{FS=","} {for(i=1;i<=n;i++) if($i != i){print "gap at " i; exit} print "ok"}')"
+  # 38w: the missing server-side type gate is disclosed, not left implied --
+  # unlike reason_code, dispatch_count is accepted whatever its type.
+  assert_contains "38w: the absent type gate is disclosed as a limit" \
+    "Nothing validates the value on the way in" "$(cat "$G38_TC")"
+else
+  echo "  SKIP: 38u-38w: telemetry-cost.md not found"
+fi
+
+# --- Executed half: the DOCUMENTED example must actually be valid ------------
+if [ -f "$G38_WF" ] && command -v jq > /dev/null 2>&1; then
+  G38_EX=$(awk '/^### End-of-Workflow Example \(full dispatch\)/{f=1} f&&/^```json/{g=1;next} g&&/^```/{exit} g' "$G38_WF")
+  G38_JSON=$(printf '{%s}' "$G38_EX")
+
+  assert_eq "38j: the documented full-dispatch example is valid JSON" "ok" \
+    "$(printf '%s' "$G38_JSON" | jq -e . >/dev/null 2>&1 && echo ok || echo invalid)"
+  assert_eq "38k: it still carries exactly six steps" "6" \
+    "$(printf '%s' "$G38_JSON" | jq -r '.workflow_steps | length')"
+  # 38l: the six-name vocabulary is unchanged -- no seventh name was added.
+  assert_eq "38l: and the canonical six names, in order" \
+    "explorer planner implementation reviewer after_doing before_review" \
+    "$(printf '%s' "$G38_JSON" | jq -r '[.workflow_steps[].name] | join(" ")')"
+  assert_eq "38m: the reviewer entry carries an integer dispatch_count" "number" \
+    "$(printf '%s' "$G38_JSON" | jq -r '.workflow_steps[] | select(.name=="reviewer") | .dispatch_count | type')"
+  # 38n: it is >1 in the example, or the example fails to show what it is for.
+  assert_eq "38n: and the example shows a value greater than one" "true" \
+    "$(printf '%s' "$G38_JSON" | jq -r '(.workflow_steps[] | select(.name=="reviewer") | .dispatch_count) > 1')"
+  # 38o: no OTHER entry carries it -- only the reviewer is expected to exceed 1,
+  # and an example that sprayed it everywhere would teach the wrong thing.
+  assert_eq "38o: no other step in the example carries it" "1" \
+    "$(printf '%s' "$G38_JSON" | jq -r '[.workflow_steps[] | select(has("dispatch_count"))] | length')"
+  # 38p: the skip example must NOT have grown one -- dispatch_count is for
+  # dispatched steps, and a skipped step has no dispatches to count.
+  G38_SKIP=$(awk '/^### End-of-Workflow Example \(small task, decision matrix skips\)/{f=1} f&&/^```json/{g=1;next} g&&/^```/{exit} g' "$G38_WF")
+  assert_eq "38p: the skip example carries no dispatch_count" "0" \
+    "$(printf '{%s}' "$G38_SKIP" | jq -r '[.workflow_steps[] | select(has("dispatch_count"))] | length')"
+  # 38q: omitting the key leaves a conforming entry -- the back-compat claim,
+  # executed rather than asserted.
+  assert_eq "38q: an entry without dispatch_count is still well-formed" "true" \
+    "$(printf '%s' '{"name":"reviewer","dispatched":true,"duration_ms":15300}' \
+       | jq -r 'has("name") and has("dispatched") and has("duration_ms") and (has("dispatch_count") | not)')"
+else
+  echo "  SKIP: 38j-38q: jq not installed or the contract file is missing"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

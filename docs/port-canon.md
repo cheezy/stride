@@ -762,6 +762,269 @@ because it is why a gate present elsewhere in the fleet will never appear there.
 **History.** v1 — authored from the G420 stop-gate porting research, with the
 stdout-document requirement inherited from the D238 fix.
 
+### 7. Two review rounds is the ceiling, and the second verifies rather than re-reviews — `review-round-cap`
+
+<!-- canon:review-round-cap v1 -->
+
+**Substance.** A port's review phase must terminate by construction rather than
+by the reviewer running out of things to say. Two rounds is the ceiling. A
+**round** is a dispatch that produced a parsed review block; a crashed or
+unparsable dispatch is re-dispatched and consumes no round, which is why the
+round counter and the per-dispatch filename counter are deliberately different
+numbers. Round two receives the **full** diff — the cap scopes the second
+round's *mission*, never its *evidence* — and still emits every section verdict,
+the full `acceptance_criteria` array and `project_checks`. After round two,
+remaining `important` and `minor` findings are **recorded, not fixed**, by
+severity, category and `file:line` in both `completion_notes` and one line of
+`completion_summary`. Two carve-outs bound the cap in opposite directions and
+both are part of the rule: a `critical` finding is **exempt and always blocks**
+— fix it and dispatch a further scoped round, or stop without completing rather
+than record it — and a finding of `category: "security"` is **never** merely
+recorded at any severity: it is **fixed or escalated instead**, which is the
+disposition the prohibition exists to compel and binds exactly as tightly.
+
+**Provenance.** Quoted. The rule is stated normatively at
+`stride/skills/stride-workflow/SKILL.md`, in the paragraph beginning "Two review
+rounds is the ceiling" in Step 5 and in the `REVIEW_BLOCK_PATH` bullet above it;
+that file remains the source, and the round counter's own shape, write and
+recount live in `stride/skills/stride-workflow/review-block-extraction.md`. The
+governed text, verbatim:
+
+> **Two review rounds is the ceiling, and the second verifies rather than re-reviews.** A round is a dispatch that produced a `$MERGED` file; a crashed or unparsable dispatch is re-dispatched and consumes no round.
+
+> **After round two, remaining `important` and `minor` findings are RECORDED, not fixed — never a `category: "security"` issue, fixed or escalated at any severity, `important` being the reviewer's default for one:**
+
+> **`critical` is exempt from the cap and always blocks:** fix it and dispatch a further round scoped to that finding; where you cannot, stop without completing (`review_blocked`, `failure.kind: "review_escalation"`) rather than recording it.
+
+> **`<N>` is not the round counter.** It counts dispatches, so a crashed one consumes a path but not a round; the cap below counts rounds, recorded in `.stride/.review-rounds-<IDENTIFIER>.json` — an identifier and an integer, never review content.
+
+**Defect trace.** W2128, which shipped the cap, and whose own review rounds are
+the evidence for it — the changelog entry records that an uncapped loop "does not
+converge — a reviewer asked to review always finds something", and that round
+two, the cap's first real exercise, found five further defects with a split
+disposition. **No `D` identifier exists for this rule**, and none is invented
+here: it shipped as a work task whose defects were found and fixed in-task rather
+than filed separately. That is a note about which id namespace carries the trace,
+not a departure from this file's admission rule — the rule was forced by observed
+behaviour that shipped, which is what that rule asks for.
+
+**Port-side anchor.** Beside the port's own statement of the review-round
+ceiling, wherever its workflow or lifecycle markdown bounds the re-review loop.
+A port that has not yet adopted a cap has no host paragraph, so it owes the
+anchor only when it adopts one — and reports MISSING until then, which is the
+signal this entry exists to produce.
+
+**Applicability.** Required of every port. Every port in the registry runs a
+reviewer and a fix-then-re-review loop, so every port has a loop that can fail to
+converge; none is narrowed. `variant` is empty throughout — the number of rounds
+is not a per-port structural fact the way the section-key count is.
+
+```json
+{
+  "id": "review-round-cap",
+  "version": 1,
+  "status": "active",
+  "superseded_by": null,
+  "provenance": "quoted",
+  "defects": ["W2128"],
+  "check": "anchor",
+  "check_hint": "Anchor sits beside the port's statement of the review-round ceiling, wherever its workflow markdown bounds the re-review loop. Not beside the per-dispatch filename counter, which is a different number.",
+  "applies_to": [
+    {"port": "stride",              "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-codex",        "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-copilot",      "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-copilot-lite", "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-gemini",       "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-lite",         "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-opencode",     "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-pi",           "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-opencode-lite","status": "required", "variant": "", "reason": ""}
+  ]
+}
+```
+
+**History.** v1 — seeded from W2128.
+
+### 8. A cosmetic finding changes disposition, never the finding — `cosmetic-finding-class`
+
+<!-- canon:cosmetic-finding-class v1 -->
+
+**Substance.** A reviewer's issue entries may carry an optional `cosmetic`
+boolean marking a finding as presentational only, and a round whose findings are
+**all** cosmetic buys no further review round. The flag is admissible only when
+**both** gates hold: the finding's claim is correct, **and** the artifact it
+points at asserts nothing that is itself false — so a false statement of fact is
+never cosmetic however small it looks. The flag changes **disposition alone**:
+never `severity`, never `category`, never `status`, and it never removes the
+finding from `issues[]` or from the report. It is orthogonal to severity rather
+than a fourth level of it — it sits only on a `minor`, and a `minor` may perfectly
+well be substantive. Three conditions are refused **mechanically**, not
+advisorily: a severity other than `minor`, a `category` of `"security"`, and a
+non-boolean value. Two scope limits are part of the rule: the predicate reads
+`issues[]` only, so an absent or empty array is **never** an all-cosmetic round
+and a `changes_requested` status is honoured regardless; and the whole rule is
+inapplicable — not satisfied — on a prose-fallback payload where no structured
+block parsed.
+
+**Provenance.** Quoted. The rule is stated normatively at
+`stride/agents/task-reviewer.md`, in the four paragraphs beginning "`cosmetic` —
+presentational only" under the `issues` field; that file owns the definition and
+remains the source. `stride/skills/stride-workflow/SKILL.md` Step 5 carries the
+orchestrator-side mirror and says so itself. The governed text, verbatim:
+
+> **`cosmetic` — presentational only, and it changes disposition, never the finding.** Set it `true` only when **both** claims hold: the *finding's* claim is correct, **and** the *artifact* it points at asserts nothing that is itself false.
+
+> **A false statement of fact is never cosmetic**, however small, and however much its subject resembles a count or a wording.
+
+> **It is never a way to downgrade a real finding.** `cosmetic: true` on a finding whose claim is *substantive* — anything where the code or contract would behave differently, or a reader would be misled — is a **reviewer defect**, not a judgement call.
+
+> **Three conditions are refused mechanically, not advisorily.** `cosmetic: true` is rejected when the severity is anything other than `minor` — which covers **`critical` and `important` alike** — when `category` is `"security"`, or when `cosmetic` is not a real boolean (no coercion: `1`, `"yes"` and `"true"` are all refused).
+
+**Defect trace.** W2129, which added the `cosmetic` key to `issues[]` and bumped
+the reviewer block's `schema_version` from `1.6` to `1.7` — the one change in
+that release that added a field, and the bump is recorded in the schema field's
+own note. The forcing observation is in the changelog: in the observed session "a
+line-wrap fix and a word-count observation each contributed to a full re-review
+round", which is the cost this class removes. **No `D` identifier exists for this
+rule**, on the same terms as `review-round-cap` above: it shipped as a work task
+whose defects were found and fixed in-task rather than filed separately.
+
+**Port-side anchor.** Beside the port's own definition of the cosmetic class in
+its reviewer contract — the paragraph that says what the flag means and what it
+may not do — not beside the orchestrator-side mirror, which is a restatement. A
+port whose reviewer block has no `cosmetic` key has no host paragraph and reports
+MISSING until it adopts one.
+
+**Applicability.** Required of every port. Every port in the registry ships a
+reviewer that emits an issues array, so every one has somewhere for the class to
+live and a re-review loop for it to spare; none is narrowed. The `schema_version`
+value a port's block declares is voicing, not substance — a port is compliant when
+it carries the class and its prohibitions, whatever version string it stamps.
+
+```json
+{
+  "id": "cosmetic-finding-class",
+  "version": 1,
+  "status": "active",
+  "superseded_by": null,
+  "provenance": "quoted",
+  "defects": ["W2129"],
+  "check": "anchor",
+  "check_hint": "Anchor sits beside the port's definition of the cosmetic class in its reviewer contract — what the flag means and what it may not do — not beside the orchestrator-side mirror of the all-cosmetic disposition.",
+  "applies_to": [
+    {"port": "stride",              "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-codex",        "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-copilot",      "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-copilot-lite", "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-gemini",       "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-lite",         "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-opencode",     "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-pi",           "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-opencode-lite","status": "required", "variant": "", "reason": ""}
+  ]
+}
+```
+
+**History.** v1 — seeded from W2129.
+
+### 9. `dispatch_count` counts dispatches, and its six limits bound every reading of it — `dispatch-count-telemetry`
+
+<!-- canon:dispatch-count-telemetry v1 -->
+
+**Substance.** A `workflow_steps` entry with `dispatched: true` may carry an
+optional integer `dispatch_count` recording how many times that step's subagent
+was dispatched, so that the review phase's cost stops being invisible on the
+completion record. Two things are constitutive of the rule rather than incidental
+to it. First, **the unit is the dispatch, not the round** — a crashed
+re-dispatch spent its tokens and so is counted, which is exactly what the round
+counter excludes, so the key must never be filled from the round counter, and a
+compliant count may legitimately exceed the two-round cap without breaching it.
+Second, **the key travels with its limits**: it is a cost signal, not a ranking,
+and a port that ships the key without also carrying the caveats has shipped a
+number that will be over-read. Those limits, in substance: wall-clock is not
+token cost and the two can disagree; `duration_ms` and `dispatch_count` measure
+different populations, so one is never divided by the other; a review-skipped
+task can incur real review-phase cost and record none of it; an omitted count is
+ambiguous and must never be imputed; the count cannot separate a crashed
+re-dispatch from a genuine extra round; and nothing validates the value on the
+way in, so a consumer must guard it. Omitting the key stays valid, so an older
+plugin completes as before — but a `1` that is known is stated, because a chosen
+omission is indistinguishable from an unavoidable one.
+
+**Provenance.** Quoted. The key is defined normatively at
+`stride/skills/stride-workflow/SKILL.md` — the `dispatch_count` row of the
+Per-Step Schema table and the writing rule in that section's Rules list — and its
+limits at `stride/skills/stride-workflow/telemetry-cost.md`; those files remain
+the source. The governed text, verbatim. The schema row's definition:
+
+> How many times this step's subagent was **dispatched** — the cost unit, since a crashed dispatch still spent its tokens. **Counts dispatches, NOT rounds** (a crashed re-dispatch burns a filename but not a round), so never fill it from the round counter. Omitting it is always valid. **Read [telemetry-cost.md](telemetry-cost.md) before drawing any conclusion from it**
+
+The writing rule:
+
+> Add `dispatch_count` to a `dispatched: true` entry whenever you dispatched its subagent more than once. **Count dispatches, including one re-dispatched after a crash; do not fill it from the round counter, which deliberately excludes those.** Omitting it stays valid so an older plugin completes as before — but **state a `1` you know**: an omission you chose looks exactly like one a plugin could not avoid.
+
+And the six limits, by their own lead sentences:
+
+> **(1) Wall-clock is not token cost, and the two can disagree about which task was more expensive.**
+
+> **(2) The two keys measure different populations, so do not divide one by the other.**
+
+> **(3) A review-skipped task can have a real review-phase cost and record none of it.**
+
+> **(4) An omitted `dispatch_count` is ambiguous, and readers must not impute.**
+
+> **(5) It cannot separate a crashed re-dispatch from a genuine extra round.**
+
+> **(6) Nothing validates the value on the way in, so a consumer must guard it.**
+
+**Defect trace.** W2130, which added the key. The forcing observation is
+recorded in the changelog: the review phase "ran to roughly 2.13 million subagent
+tokens across four tasks and no completion record showed it", leaving the cost
+invisible to the next reader. **No `D` identifier exists for this rule**, on the
+same terms as the two entries above: it shipped as a work task whose defects were
+found and fixed in-task rather than filed separately.
+
+**Port-side anchor.** Beside the port's own documentation of the
+`dispatch_count` key — its schema table or the writing rule in its telemetry
+section, wherever the port tells an agent when to emit it. A port recorded
+`not_applicable` below owes no anchor at all.
+
+**Applicability.** Required of every port that emits a `workflow_steps` object.
+**`stride-lite` and `stride-opencode-lite` are recorded `not_applicable`, with
+their grounds as their reason:** neither emits a `workflow_steps` object nor has
+a completion endpoint, so there is no entry for the key to sit on — a structural
+fact about those ports, which each records in its own workflow skill, and the
+same fact on which entry `reason-code-vocabulary` already narrows them. Note what
+this row does **not** say: the seven `required` ports are not thereby compliant.
+This entry is new and no port yet carries its anchor, so a run today reports
+MISSING across all seven, and those cells are the work list.
+
+```json
+{
+  "id": "dispatch-count-telemetry",
+  "version": 1,
+  "status": "active",
+  "superseded_by": null,
+  "provenance": "quoted",
+  "defects": ["W2130"],
+  "check": "anchor",
+  "check_hint": "Anchor sits beside the port's own documentation of the dispatch_count key — its workflow_steps schema table or the writing rule in its telemetry section. A port that emits no workflow_steps object is not_applicable and owes no anchor.",
+  "applies_to": [
+    {"port": "stride",              "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-codex",        "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-copilot",      "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-copilot-lite", "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-gemini",       "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-lite",         "status": "not_applicable", "variant": "", "reason": "Emits no workflow_steps object at all, so there is no entry for the key to sit on and no completion payload to carry it. The port records these same structural grounds itself in skills/stride-lite-workflow/SKILL.md, and entry reason-code-vocabulary already narrows this port on the identical fact. Reopen if a completion API and a workflow_steps payload ever land there."},
+    {"port": "stride-opencode",     "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-pi",           "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-opencode-lite","status": "not_applicable", "variant": "", "reason": "Emits no workflow_steps object at all, so there is no entry for the key to sit on and no completion payload to carry it. The port records these same structural grounds itself in skills/stride-opencode-lite-workflow/SKILL.md, and entry reason-code-vocabulary already narrows this port on the identical fact. Reopen if a completion API and a workflow_steps payload ever land there."}
+  ]
+}
+```
+
+**History.** v1 — seeded from W2130.
+
 ## Discovery — how a maintainer reaches this file
 
 **The edit-site back-reference is installed (D283), and this section records

@@ -23,6 +23,31 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.75.0] - 2026-09-04
+
+### Added
+
+- **The three rules 1.74.0 shipped are now registered in the port canon, so a port that lacks one is visible instead of silently divergent.** `docs/port-canon.md` gains entries 7-9 — `review-round-cap`, `cosmetic-finding-class` and `dispatch-count-telemetry` — each `check: "anchor"`, each `provenance: "quoted"`, and each carrying its governed text verbatim in Provenance rather than a paraphrase. Until now a green drift check meant only that nothing was watching these three: a port that never received the round cap was indistinguishable from one that had it. The matching `v1` anchors were placed beside the governed text at `skills/stride-workflow/SKILL.md:452` (the cap), `agents/task-reviewer.md:124` (the cosmetic class) and `skills/stride-workflow/SKILL.md:863` (`dispatch_count`), with a back-reference paragraph at each site and an anchor-free one on the cosmetic mirror in Step 5. The six existing entries are byte-unchanged — `git diff --stat` reports `docs/port-canon.md` at 263 insertions and 0 deletions.
+
+- **`defects` names work items rather than inventing a `D` id, and each entry says so.** No defect id exists for any of the three; they shipped as W2128, W2129 and W2130, confirmed from `git log`. Each Defect trace records that absence explicitly and declines to manufacture an id. This is deliberately **not** claimed as a departure from the file's own "add a rule only when a shipped defect forced it" rule, which names `stop-hook-capability` as its single departure: each of these rules was forced by behaviour that shipped and was fixed in-task, and only the id namespace differs.
+
+### Changed
+
+- **The drift check now exits 1 with `ok 62, missing 36`, and that is the entries working rather than a break.** The pre-entry baseline was `ok 59, missing 5` and *already* exited 1 — those five were the pre-existing `stop-hook-capability` gap, stride's own included. The three entries opened 31 further cells: 8 ports owe the cap and the cosmetic class (16), 6 ports owe `dispatch_count` (6), and 3 vendored catalog copies owe all three (9). 31 plus the pre-existing 5 reconciles exactly with the reported 36. Verify with `bash scripts/check-port-canon.sh`; `--self-test` stays at 141 passed, 0 failed, exit 0. Expect exit 1 until the port goals land.
+
+- **`stride-lite` and `stride-opencode-lite` are recorded `not_applicable` for `dispatch-count-telemetry` only, on a structural ground read from those ports rather than assumed.** Neither emits a `workflow_steps` object nor has a completion endpoint, so there is no entry for the key to sit on — `stride-lite/CHANGELOG.md` states it outright, and both ports' workflow skills record the same ground for the sibling `reason-code-vocabulary` entry. Those two cells will never close. Both ports still owe the other two rules, and the record keeps the two situations apart: a port that *cannot* carry a rule is not a port that has not got to it yet.
+
+- **The README says the three rules are canon-governed.** The paragraphs documenting them were added in 1.74.0 and did not say the rules had become fleet-binding; a consolidated note now names each entry and where stride's anchor for it lives. It carries no anchor of its own, for the reason the `reason-code-vocabulary` note already gives: the canon assigns one anchor per rule per port directory and stride's are placed beside the governed text.
+
+### Fixed
+
+- **`review-round-cap` registered the security carve-out at less than full strength, and both reviews caught it independently.** Its Substance carried the prohibition — a `category: "security"` finding is never merely recorded — but dropped the disposition the source mandates, that such a finding is *fixed or escalated* instead; and that clause of the governed paragraph appeared in no blockquote, under a heading reading "The governed text, verbatim". A port implementing from the entry alone could have satisfied "not merely recorded" by filing a security finding as a deferred defect, which is weaker than what this plugin enforces. Substance now carries the disposition and the clause is quoted byte-exactly. Caught by review round one and, independently, by a specialist security pass that returned the consideration `partial`; round two approved with both considerations `mitigated`. No version bump was owed on the entry: it was still unshipped at `v1` and no port carried its anchor.
+
+### Notes
+
+- **Four report-quality defects in `scripts/check-port-canon.sh` were found and are recorded but not fixed here** — an exploratory session against the checker's own output, which ended on a quiet charter at 11 of 12 probes. All four pre-date this release and none was introduced by it. The sharpest: `check_hint` is parsed and schema-validated but never printed — there is a `HINT` record emitted and no reader for it — so every MISSING work item names no file and no location, contradicting the script's own comment that a work item can be acted on without opening the canon. The second: the work-item template tells a maintainer to add the anchor "beside this port's own statement of the rule" for ports that have no such statement, which followed literally produces the false compliance the canon itself calls worse than the MISSING it replaced. Both are worst exactly when a new rule lands, which is what this release does; a fix belongs to the checker, on its own terms.
+
+
 ## [1.74.0] - 2026-09-03
 
 ### Changed

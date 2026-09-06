@@ -10747,6 +10747,21 @@ else
   printf 'z\n' > "$d/p/beta/b.md"
   d296_case "two sibling subdirectories with fence defects" "$d/c.md" "$d/p"
 
+  # 5b. Two sibling subdirectories each owing a BACK-REFERENCE. The second
+  #     property check emits one row and one work item per offending anchor
+  #     SITE rather than one joined row per port, so its output is ordered by
+  #     the walk in a way the fence check's single joined row is not. Two
+  #     siblings is the shape that has caught every ordering divergence in this
+  #     pair, because the halves walk in opposite directions -- `find` against a
+  #     LIFO stack over Get-ChildItem. This is what proves the fleet's
+  #     back-reference work list comes out of both halves in the same order.
+  d="$D296_DIR/backref"; mkdir -p "$d/p/alpha/sub1" "$d/p/alpha/sub2" "$d/p/beta"
+  d296_canon "$d/c.md" property edit-site-back-reference required
+  printf '<!-- canon:edit-site-back-reference v1 -->\nrule text with nothing below it\n' > "$d/p/alpha/sub1/a.md"
+  printf '<!-- canon:edit-site-back-reference v1 -->\nrule text with nothing below it\n' > "$d/p/alpha/sub2/b.md"
+  printf '<!-- canon:edit-site-back-reference v1 -->\nrule text\n\nsee stride/docs/port-canon.md, entry edit-site-back-reference, before changing this\n' > "$d/p/beta/b.md"
+  d296_case "two sibling subdirectories each owing a back-reference" "$d/c.md" "$d/p"
+
   # 6. Two unknown-id anchors in the SAME directory. These agreed even before
   #    the sort, because a single directory's entries come out in one order --
   #    so this case exists to keep that true rather than to have caught it.

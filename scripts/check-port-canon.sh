@@ -15,6 +15,56 @@
 #                 because the canon's entry version is ahead of the checker
 #   ok            the cell is clean
 #
+# TWO property checks are implemented, and the second one has a blind spot
+# worth stating beside the gate rather than only in the canon:
+#
+#   fence-nesting            a nested fence is legitimate only when the outer
+#                            one is wider. Byte-verifiable over a port's whole
+#                            markdown tree.
+#   edit-site-back-reference every anchor site carries prose beside it naming
+#                            the canon by path and naming the entry id.
+#
+# What edit-site-back-reference CAN see: anchored sites. An anchor comment is a
+# machine-readable marker of "this file states this governed rule", so the
+# check can ask whether a back-reference sits below it.
+#
+# What it CANNOT see: a file that states a governed rule and carries NO anchor.
+# Deciding that would mean deciding whether prose restates a rule's substance,
+# which is not mechanically decidable and is not attempted here. ANCHOR SITES
+# ARE A LOWER BOUND on the edit sites the rule governs, not the whole set --
+# the canon entry says the same in its own check_hint, and the ok line repeats
+# it so a reader meets the bound where the green appears. A port can pass this
+# check and still owe back-references at unanchored sites.
+#
+# It keys on two CANON-CONTROLLED tokens -- the canon filename and the entry id
+# -- and never on a phrase, because back-references are voiced per port by
+# design (D240) and a prose match would turn every port's own voice into a
+# false negative.
+#
+# The search runs DOWNWARD from the anchor to end of file, with no lower bound.
+# Two bounds were tried and both were wrong. A fixed line window needs a
+# constant, and the measured real offsets run from 1 to 54 lines. Bounding at
+# the NEXT ANCHOR looks principled and produced a live false positive: in
+# stride-opencode-lite the row-precedence and decision-matrix-authority anchors
+# sit three lines apart, and the paragraph that back-references row-precedence
+# sits below BOTH of them and says so in as many words -- so that bound
+# reported a correctly-written port as owing a back-reference it already had.
+# What prevents crediting the wrong anchor is the ID requirement, not a
+# positional bound: a neighbouring entry back-reference names the NEIGHBOUR id.
+#
+# TWO KNOWN BOUNDS, both over-credits, both stated rather than closed:
+#   1. A paragraph far below that names this id and the canon filename credits
+#      this anchor even if it was written about something else.
+#   2. If one entry id were a substring of another, a paragraph naming the
+#      longer would also credit the shorter. No such pair exists among the
+#      registered ids, and a word-boundary spelling does not port between POSIX
+#      ERE and .NET without divergence risk.
+# Both move a cell AWAY from refusal, which is the direction this file already
+# accepts elsewhere for the same kind of reason. Measured against the real
+# fleet when this landed: of the sites the check refused, none had a back-
+# reference it was missing -- every canon mention below a refused anchor named
+# a DIFFERENT entry id and belonged to that entry's own anchor.
+#
 # ROUND 5 -- independent security audit (W2108), recorded here because a
 # checker's credibility rests on what has been tried against it, and that
 # history is invisible from the code alone.
@@ -223,9 +273,26 @@
 #      fleet runs stay byte-identical to each other and to the pre-change
 #      baseline.
 #
-# The suite is at 141 cases. The current fleet baseline is exit 0 with
-# ok 55, missing 0, stale 0, unexpected 0, defect 0, unverifiable 0, 2 cells
-# not applicable and 0 deferred -- the first exit-0 run this gate has had.
+# The suite is at 155 cases (153 in the PowerShell half; the gap is the two
+# [bash-only] cases). The current fleet baseline is exit 1 with
+# ok 94, missing 5, stale 0, unexpected 0, defect 42, unverifiable 0, 7 cells
+# not applicable and 0 deferred.
+#
+# (W2136 moved it there, and the move is the checker working rather than a
+# regression. Registering edit-site-back-reference put 9 UNVERIFIABLE cells on
+# the board; implementing it resolved them into 1 ok and 42 DEFECT rows -- one
+# per anchor site across the fleet that carries no back-reference. Those 42 are
+# the WORK LIST the installation tasks consume, not drift to suppress. The 5
+# MISSING are a separate, pre-existing stop-hook-capability gap. The figures
+# immediately before W2136 were ok 93, missing 5, unverifiable 9.)
+#
+# (The line above previously read "exit 0 with ok 55, missing 0 ... 2 cells not
+# applicable and 0 deferred -- the first exit-0 run this gate has had". That
+# figure was already stale before W2136 read it: entries and catalog subjects
+# were added after it was written and nothing brought it forward. It is
+# recorded as superseded rather than deleted, on the same principle the note
+# below already applies -- a reader who checks this line deserves to see which
+# way it moved.)
 # (D302 inverted the last two figures by re-statusing the fleet's only two
 # non-ok cells from deferred to not_applicable. The figures before it were
 # 0 not applicable and 2 deferred; they are recorded here as superseded
@@ -435,6 +502,44 @@ self_test() {
       echo '  "applies_to": ['
       echo '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
       echo "    {\"port\": \"beta\", \"status\": \"${3:-required}\", \"variant\": \"\", \"reason\": \"r\"} ] }"
+      echo "${f3}"
+    } > "$1"
+  }
+
+  # An ADDITIVE sibling of st_canon: a TWO-entry canon carrying one anchor rule
+  # and one property rule, with independently settable beta statuses. The
+  # back-reference cases need both -- an anchor for the property check to judge,
+  # and the property entry itself -- and st_canon builds only one entry. It is a
+  # new function rather than more optional parameters on st_canon because some
+  # forty existing cases depend on that function's exact output.
+  st_canon2() { # $1=path $2=anchor-beta-status $3=prop-beta-status $4=prop-version
+    local abeta="${2:-required}" pbeta="${3:-required}" pver="${4:-1}"
+    {
+      echo "# canon"
+      echo "${f3}json"
+      echo '{ "canon_schema_version": 1,'
+      echo '  "ports": ['
+      echo '    {"id": "alpha", "family": "f", "dir": "alpha", "exists": true, "note": ""},'
+      echo '    {"id": "beta",  "family": "f", "dir": "beta",  "exists": true, "note": ""}'
+      echo '  ] }'
+      echo "${f3}"
+      echo "### r"
+      echo "<!-- canon:rule-one v1 -->"
+      echo "${f3}json"
+      echo '{ "id": "rule-one", "version": 1, "status": "active", "superseded_by": null,'
+      echo '  "provenance": "quoted", "defects": ["D1"], "check": "anchor", "check_hint": "h",'
+      echo '  "applies_to": ['
+      echo '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
+      echo "    {\"port\": \"beta\", \"status\": \"$abeta\", \"variant\": \"\", \"reason\": \"r\"} ] }"
+      echo "${f3}"
+      echo "### b"
+      echo "<!-- canon:edit-site-back-reference v$pver -->"
+      echo "${f3}json"
+      echo "{ \"id\": \"edit-site-back-reference\", \"version\": $pver, \"status\": \"active\", \"superseded_by\": null,"
+      echo '  "provenance": "quoted", "defects": ["D1"], "check": "property", "check_hint": "h",'
+      echo '  "applies_to": ['
+      echo '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
+      echo "    {\"port\": \"beta\", \"status\": \"$pbeta\", \"variant\": \"\", \"reason\": \"r\"} ] }"
       echo "${f3}"
     } > "$1"
   }
@@ -920,6 +1025,104 @@ self_test() {
   out="$(st_run "$tmp/p7.md" "$tmp/p1")"; rc=$?
   st_assert "a property entry ahead of this checker is UNVERIFIABLE" 1 "$rc" "UNVERIFIABLE: fence-nesting v7" "$out"
   st_refute "an unimplemented property version never silently passes" "ok: fence-nesting" "$out"
+
+  # --- the edit-site-back-reference property: does each anchor site carry the
+  # --- back-reference the canon requires beside it? The fixture prose is
+  # --- deliberately NOT the fleet's wording -- the check keys on the canon
+  # --- filename and the entry id, never on a phrase, and a fixture written in
+  # --- the fleet's voice could not tell the two apart.
+  BR="see stride/docs/port-canon.md, entry rule-one, before changing this"
+
+  st_canon2 "$tmp/br.md"
+  mkdir -p "$tmp/br/alpha" "$tmp/br/beta"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n' > "$tmp/br/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/br/beta/b.md"
+  out="$(st_run "$tmp/br.md" "$tmp/br")"; rc=$?
+  st_assert "an anchor with no back-reference is a DEFECT" 1 "$rc" "DEFECT: edit-site-back-reference" "$out"
+
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/br/alpha/a.md"
+  out="$(st_run "$tmp/br.md" "$tmp/br")"; rc=$?
+  st_assert "a back-reference below the anchor satisfies the rule" 0 "$rc" "ok: edit-site-back-reference" "$out"
+  # The bound belongs where the green appears, not only in the script header.
+  st_assert "a property ok states that anchor sites are a lower bound" 0 "$rc" "lower bound on the edit sites" "$out"
+
+  # A port whose row is narrowed owes no citation of a rule it does not owe.
+  st_canon2 "$tmp/brna.md" required not_applicable
+  mkdir -p "$tmp/brna/alpha" "$tmp/brna/beta"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/brna/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n' > "$tmp/brna/beta/b.md"
+  out="$(st_run "$tmp/brna.md" "$tmp/brna")"; rc=$?
+  st_assert "a narrowed row is never asked for a back-reference" 0 "$rc" "not applicable: edit-site-back-reference" "$out"
+  st_refute "a narrowed row never reports a back-reference DEFECT" "DEFECT: edit-site-back-reference" "$out"
+
+  # Quoted as an example is not adopted -- the same reading the anchor scan
+  # applies, using the same fence walk.
+  mkdir -p "$tmp/brf/alpha" "$tmp/brf/beta"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%stext\n%s\n%s\n' "$f3" "$BR" "$f3" > "$tmp/brf/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/brf/beta/b.md"
+  out="$(st_run "$tmp/br.md" "$tmp/brf")"; rc=$?
+  st_assert "a back-reference inside a fenced block does not count" 1 "$rc" "DEFECT: edit-site-back-reference" "$out"
+
+  # Prose ABOVE an anchor naming the canon is, in this fleet, a forward pointer
+  # to a DIFFERENT entry. Reading upward would credit this anchor for it.
+  mkdir -p "$tmp/bru/alpha" "$tmp/bru/beta"
+  printf '%s\n\n<!-- canon:rule-one v1 -->\nsome rule text\n' "$BR" > "$tmp/bru/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/bru/beta/b.md"
+  out="$(st_run "$tmp/br.md" "$tmp/bru")"; rc=$?
+  st_assert "a back-reference above the anchor does not count" 1 "$rc" "DEFECT: edit-site-back-reference" "$out"
+
+  # Each anchor is its own site with its own region, so one satisfied anchor
+  # does not cover another in the same file. NOTE the assertion literal carries
+  # . and : -- . is a metacharacter in both BRE and .NET and matches itself plus
+  # one other character. That is an over-match, identical in both engines.
+  mkdir -p "$tmp/br2/alpha" "$tmp/br2/beta"
+  printf '<!-- canon:rule-one v1 -->\n\n%s\n\n<!-- canon:rule-one v1 -->\n' "$BR" > "$tmp/br2/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/br2/beta/b.md"
+  out="$(st_run "$tmp/br.md" "$tmp/br2")"; rc=$?
+  st_assert "two anchors in one file are judged separately" 1 "$rc" "at a.md:5" "$out"
+
+  # An anchor for a rule the port does not owe is already UNEXPECTED; it is not
+  # ALSO asked for a back-reference it has no obligation to carry.
+  st_canon2 "$tmp/brx.md" not_applicable required
+  mkdir -p "$tmp/brx/alpha" "$tmp/brx/beta"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/brx/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n' > "$tmp/brx/beta/b.md"
+  out="$(st_run "$tmp/brx.md" "$tmp/brx")"; rc=$?
+  st_assert "an anchor for a rule this port does not owe is not asked for a back-reference" 1 "$rc" "UNEXPECTED: rule-one" "$out"
+  st_refute "a not-owed anchor is never reported as owing a back-reference" "has no back-reference" "$out"
+
+  # A released changelog entry records what shipped rather than stating the
+  # current rule, so there is nothing there for a back-reference to prompt.
+  mkdir -p "$tmp/brc/alpha" "$tmp/brc/beta"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/brc/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\nhistorical entry\n' > "$tmp/brc/alpha/CHANGELOG.md"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/brc/beta/b.md"
+  out="$(st_run "$tmp/br.md" "$tmp/brc")"; rc=$?
+  st_assert "a CHANGELOG anchor is not an edit site" 0 "$rc" "ok: edit-site-back-reference" "$out"
+
+  # Two OWED anchors can share one physical line, and each still owes its own
+  # back-reference. The bash half keyed its site map by line number and
+  # collapsed them into one, dropping an obligation AND diverging from the
+  # PowerShell half, which iterates a list. The case above puts its two anchors
+  # on different lines and cannot reach this.
+  mkdir -p "$tmp/brl/alpha" "$tmp/brl/beta"
+  printf '<!-- canon:rule-one v1 --> <!-- canon:edit-site-back-reference v1 -->\nrule text\n' > "$tmp/brl/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/brl/beta/b.md"
+  out="$(st_run "$tmp/br.md" "$tmp/brl")"; rc=$?
+  st_assert "two owed anchors on one physical line: the first is judged" 1 "$rc" "the rule-one anchor here has no back-reference" "$out"
+  st_assert "two owed anchors on one physical line: the second is judged" 1 "$rc" "the edit-site-back-reference anchor here has no back-reference" "$out"
+
+  # A back-reference may sit BELOW a later anchor and still be this anchor's.
+  # stride-opencode-lite does exactly that: two anchors three lines apart, and
+  # one paragraph below both that names which entry it belongs to. Bounding the
+  # search at the next anchor reported that correctly-written port as owing a
+  # back-reference it already had. What keeps the credit honest is the ID
+  # requirement, not a positional bound.
+  mkdir -p "$tmp/brk/alpha" "$tmp/brk/beta"
+  printf '<!-- canon:rule-one v1 -->\n\n<!-- canon:edit-site-back-reference v1 -->\n\nsee stride/docs/port-canon.md, entry rule-one and entry edit-site-back-reference, before changing either\n' > "$tmp/brk/alpha/a.md"
+  printf '<!-- canon:rule-one v1 -->\nsome rule text\n\n%s\n' "$BR" > "$tmp/brk/beta/b.md"
+  out="$(st_run "$tmp/br.md" "$tmp/brk")"; rc=$?
+  st_assert "a back-reference below a later anchor still counts" 0 "$rc" "ok: edit-site-back-reference" "$out"
 
   # --- vendored trees are excluded from the scan: a node_modules copy is a
   # --- dependency's file, not the port's, and must not satisfy a rule.
@@ -1953,12 +2156,167 @@ fence_defect() {
   return 0
 }
 
+# The second property implementation. Where fence_defect judges a file's own
+# structure, this one judges whether each anchor site in the file carries the
+# back-reference that canon entry `edit-site-back-reference` requires beside it.
+#
+# WHAT IT CAN AND CANNOT SEE, stated here because a gate's blind spot belongs
+# beside the gate. It sees ANCHORED sites only: an anchor comment is a
+# machine-readable marker of "this file states this governed rule", and the
+# check asks whether prose below it names the canon by path and names the entry
+# id. It CANNOT see a file that states a governed rule and carries NO anchor --
+# deciding that would mean deciding whether prose restates a rule's substance,
+# which is not mechanically decidable and is not attempted here. So a port can
+# satisfy this check and still owe back-references at unanchored sites. The
+# canon's own check_hint says the same thing in its own words: anchor sites are
+# a lower bound on the sites the rule governs, not the whole set. The ok line
+# repeats it, so a reader meets the bound where the green appears.
+#
+# It keys on two CANON-CONTROLLED tokens -- the canon's filename and the entry's
+# own id -- and never on a phrase. Back-references are voiced per port by design
+# (the D240 shaping precedent), so a prose match would turn every port's own
+# voice into a false negative, which is this rule's stated pitfall.
+#
+# Known bound, recorded rather than closed: if one entry id were a substring of
+# another, a paragraph naming the longer would also credit the shorter. No such
+# pair exists among the registered ids. The over-credit direction is AWAY from
+# refusal, and the alternative -- a word-boundary spelling -- does not port
+# between POSIX ERE and .NET without divergence risk, which is the exact class
+# these two halves keep regressing on.
+#
+# Inputs arrive through the ENVIRONMENT, never through -v: POSIX requires awk to
+# apply escape processing to a -v assignment, which is the record-forgery class
+# emit_anchors already guards one site over.
+#   rel     -- this file's port-relative path, emitted back in each record
+#   sites   -- "line<TAB>id", one per anchor in this file that OWES a
+#              back-reference (the caller applies the owing test)
+#   allanch -- every anchor line in this file, owed or not, one per line; these
+#              bound each site's search region
+# Output: "rel<TAB>line<TAB>id" per owed site with no back-reference. Empty
+# output means CLEAN, so "I could not open this file" must not use it -- the
+# same contract, and the same reason, as fence_defect above.
+backref_defect() {
+  local file="$1" rel="$2" sites="$3" out st
+  [ -r "$file" ] || { printf 'unreadable'; return 0; }
+  out="$(rel="$rel" sites="$sites" LC_ALL=C awk '
+    BEGIN {
+      # Indexed by POSITION, never keyed by line number. Two owed anchors can
+      # share one physical line -- nothing forbids it -- and a line-keyed map
+      # silently collapses them into one, dropping an obligation. The
+      # PowerShell half iterates a list of site objects and would have kept
+      # both, so the collapse was also a half-divergence: measured, bash
+      # reported defect 1 where PowerShell reported defect 2 on one tree.
+      ns = 0
+      n = split(ENVIRON["sites"], sa, "\n")
+      for (i = 1; i <= n; i++) {
+        if (sa[i] == "") continue
+        tp = index(sa[i], "\t")
+        if (tp == 0) continue
+        ns++
+        SLN[ns] = substr(sa[i], 1, tp - 1) + 0
+        SID[ns] = substr(sa[i], tp + 1)
+      }
+      inf = 0; fc = ""; fw = 0
+    }
+    {
+      T[NR] = $0
+      # The SAME fence walk as emit_anchors: same character classes, same
+      # "a closer must use the opener character and be at least as wide" rule,
+      # same marker-line-is-fenced rule. Kept deliberately identical to that
+      # copy -- if you change one, change the other, or a back-reference quoted
+      # as an example starts counting in one place and not the other.
+      if (match($0, /^[ \t]*(`{3,}|~{3,})/)) {
+        mk = substr($0, RSTART, RLENGTH)
+        sub(/^[ \t]*/, "", mk)
+        ch = substr(mk, 1, 1); w = length(mk)
+        if (inf == 0) { inf = 1; fc = ch; fw = w; FENCED[NR] = 1; next }
+        else if (ch == fc && w >= fw) { inf = 0; fc = ""; fw = 0; FENCED[NR] = 1; next }
+      }
+      if (inf == 1) FENCED[NR] = 1
+    }
+    END {
+      last = NR
+      for (s = 1; s <= ns; s++) {
+        sl = SLN[s]
+        id = SID[s]
+        # Region: everything BELOW the anchor, to end of file.
+        #
+        # DOWNWARD ONLY, and that half is load-bearing. Prose ABOVE an anchor
+        # that names the canon and an id is, in this fleet, a forward pointer
+        # to a DIFFERENT entry -- stride/skills/stride-workflow/SKILL.md
+        # carries exactly that shape above two anchors. Reading upward would
+        # credit those anchors for a paragraph that is not their
+        # back-reference.
+        #
+        # There is deliberately NO lower bound -- not a line window, and not
+        # the next anchor. Both were tried and both are wrong. A line window
+        # needs a constant, and the measured real offsets run from 1 to 54
+        # lines, so any constant either misses real back-references or is
+        # wide enough to be arbitrary. Bounding at the next anchor looks
+        # principled and produced a LIVE FALSE POSITIVE: in
+        # stride-opencode-lite the row-precedence anchor and the
+        # decision-matrix-authority anchor sit three lines apart, and the
+        # paragraph that back-references row-precedence sits below BOTH of
+        # them, saying so in as many words. That bound reported a
+        # back-reference missing where the port had written one correctly.
+        #
+        # What actually prevents crediting the wrong anchor is the ID
+        # requirement below, not a positional bound: a neighbouring entry
+        # back-reference names the NEIGHBOUR id, so it cannot satisfy this
+        # site. The positional bound was redundant protection whose only
+        # observable effect was refusing correct work.
+        #
+        # STATED BOUND, in the direction this file already accepts: a
+        # paragraph far below that names both this id and the canon filename
+        # will credit this anchor even if it was written about something else.
+        # That is an over-credit, AWAY from refusal, and it is the same trade
+        # the D296 notes above record accepting for the same kind of reason.
+        seen_path = 0; seen_id = 0; okk = 0
+        for (ln = sl + 1; ln <= last; ln++) {
+          # A blank line ends the paragraph, so the two signals must co-occur
+          # within ONE paragraph rather than anywhere below.
+          if (T[ln] ~ /^[ \t]*$/) { seen_path = 0; seen_id = 0; continue }
+          # A fenced line contributes no signal but does not break the
+          # paragraph -- the same reading the anchor scan applies.
+          if (!(ln in FENCED)) {
+            if (index(T[ln], "port-canon.md") > 0) seen_path = 1
+            if (index(T[ln], id) > 0) seen_id = 1
+          }
+          # Matching the bare filename accepts every relative spelling a port
+          # uses -- stride/docs/port-canon.md in eight ports, bare
+          # docs/port-canon.md in the stride README -- without the checker
+          # having to know how deep a port sits.
+          # NOTE: no apostrophes anywhere in this awk program -- it is single
+          # quoted, so one would terminate the string and break the script.
+          if (seen_path && seen_id) { okk = 1; break }
+        }
+        if (okk == 0) printf "%s\t%d\t%s\n", ENVIRON["rel"], sl, id
+      }
+    }' "$file")"
+  st=$?
+  # Status-checked for the same reason the fenced= computation is: a failing
+  # awk yields empty output, and empty output means CLEAN. REFUSE, NEVER
+  # SANITIZE -- a check that could not run refuses the file.
+  #
+  # It reports the failure as the SAME 'unreadable' sentinel a missing read
+  # permission does, rather than through a return code. That is deliberate:
+  # fence_defect never returns non-zero, so the caller was written to read the
+  # OUTPUT and nothing else -- and a bare `return 1` here was therefore
+  # swallowed, turning a scan that did not run into a clean file. That is the
+  # fail-open this comment claims to prevent, so the refusal travels the same
+  # channel as the value. Both halves route the sentinel to the UNVERIFIABLE
+  # "could not read" row, which is the honest verdict for a file this check
+  # could not evaluate.
+  [ "$st" -eq 0 ] || { printf 'unreadable'; return 0; }
+  printf '%s' "$out"
+}
+
 # Which property rules this checker can actually evaluate, and at which
 # version. A property entry has no anchor, so it cannot report STALE by
 # comparing versions in a port -- its version binds the CHECK instead. If the
 # canon's entry is ahead of what is implemented here, the honest answer is
 # UNVERIFIABLE, never a pass on logic that no longer matches the rule.
-PROPERTY_IMPL="fence-nesting:1"
+PROPERTY_IMPL="fence-nesting:1 edit-site-back-reference:1"
 
 property_impl_version() {
   case "$PROPERTY_IMPL" in
@@ -2476,6 +2834,43 @@ for pline in $PORT_LINES; do
           "scripts/check-port-canon.sh: implement the $eid property check at v$ever (this is a checker change, not a port change)"
         continue
       fi
+      # Dispatch, not a special case: the walk, its four refusal guards and
+      # its accumulators are generic and unchanged. What varies per property
+      # id is (a) what is computed before the walk, (b) which implementation
+      # judges each file, and (c) how the result is reported.
+      #
+      # For edit-site-back-reference, (a) is the port's OWED anchor sites --
+      # which anchors in this port are required to carry a back-reference.
+      # Note what is NOT here: this port's own row for edit-site-back-reference
+      # being deferred or not_applicable is already handled by the two guards
+      # above, which return before any of this runs. The narrowed-row rule
+      # therefore costs no code at the port level; only the PER-ANCHOR-ID
+      # narrowing below is new.
+      OWED=""; nsites=0
+      if [ "$eid" = "edit-site-back-reference" ]; then
+        while IFS= read -r arec; do
+          [ -n "$arec" ] || continue
+          aid="$(field "$arec" 1)"
+          aloc="$(field "$arec" 3)"
+          arel="${aloc%:*}"; aln="${aloc##*:}"
+          # A changelog is not an edit site. A released entry records what
+          # shipped rather than stating the current rule, so there is nothing
+          # there for a back-reference to prompt, and editing one to track a
+          # rule change would falsify the record. The canon check_hint says so
+          # in as many words.
+          [ "${arel##*/}" = "CHANGELOG.md" ] && continue
+          # No APPLY row means the id is not registered -- already reported by
+          # the unregistered-id sweep below, and reporting it twice is noise.
+          # A row that is not "required" means this port does not owe THAT
+          # rule, and a port that does not owe a rule does not owe a citation
+          # of it. One test covers both.
+          arow2="$(echo "$RECORDS" | grep "^APPLY	$aid	$pidx	")"
+          [ "$(field "$arow2" 5)" = "required" ] || continue
+          OWED="$OWED
+$arel	$aln	$aid"
+          nsites=$((nsites + 1))
+        done < <(printf '%s\n' "$FOUND")
+      fi
       nfiles=0; hits=""; pst=""; pprev=""; phave=0; punread=""; plinked=""
       while IFS= read -r -d '' pf; do
         if [ "$phave" -eq 1 ]; then
@@ -2513,7 +2908,19 @@ ${pprev#$ptree/}"
             pprev="$pf"; phave=1; continue
           fi
           nfiles=$((nfiles + 1))
-          d="$(fence_defect "$pprev")"
+          if [ "$eid" = "edit-site-back-reference" ]; then
+            # Paths reach awk through the ENVIRONMENT here too, for the same
+            # reason emit_anchors does it: -v applies escape processing, and a
+            # path holding a backslash would forge a field separator.
+            prel="${pprev#$ptree/}"
+            fsites="$(printf '%s\n' "$OWED" | prel="$prel" awk -F'\t' 'BEGIN { r = ENVIRON["prel"] } $1 == r { printf "%s\t%s\n", $2, $3 }')"
+            # Called even when this file owes nothing, so the unreadable
+            # sentinel keeps firing on every file the walk counted -- the
+            # contract fence_defect states and the reason it states it.
+            d="$(backref_defect "$pprev" "$prel" "$fsites")"
+          else
+            d="$(fence_defect "$pprev")"
+          fi
           if [ "$d" = unreadable ]; then
             punread="$punread
 ${pprev#$ptree/}"
@@ -2524,8 +2931,16 @@ ${pprev#$ptree/}"
             # ordered the pieces, which diverged from the PowerShell half's
             # whole-string sort. The emitted format is unchanged; only the
             # accumulator's separator is, so each entry stays one sort key.
-            hits="$hits
+            if [ "$eid" = "edit-site-back-reference" ]; then
+              # backref_defect already emits a full "rel<TAB>line<TAB>id"
+              # record per offending site, and one file can owe several, so
+              # append the list as-is rather than wrapping it as one entry.
+              hits="$hits
+$d"
+            else
+              hits="$hits
 ${pprev#$ptree/}($d)"
+            fi
           fi
         fi
         pprev="$pf"; phave=1
@@ -2574,15 +2989,44 @@ ${pprev#$ptree/}($d)"
         # the identical reversed-order divergence one tier over. Outside what
         # the task asked for, but it is the same defect two sites further on and
         # cheaper to close now than to rediscover.
-        hits="$(printf '%s' "$hits" | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
-        plinked="$(printf '%s' "$plinked" | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
-        punread="$(printf '%s' "$punread" | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
-        record DEFECT "  " "$eid --$hits" \
-          "$pid: fix the $eid violations listed in the body above"
+        if [ "$eid" = "edit-site-back-reference" ]; then
+          # The UNEXPECTED reporting shape rather than the fence one: one row
+          # and one work item per offending LOCATION, so the work list names
+          # the port and the file that owes each back-reference instead of
+          # pointing at a body the reader has to parse. Sorted first, with the
+          # same LC_ALL=C comparer and for the same D296 reason as below --
+          # the two halves walk in opposite directions, so two sibling
+          # subdirectories would otherwise emit the same rows reversed.
+          hits="$(printf '%s' "$hits" | grep -v '^$' | LC_ALL=C sort)"
+          while IFS= read -r bhit; do
+            [ -n "$bhit" ] || continue
+            brel="$(field "$bhit" 1)"; bln="$(field "$bhit" 2)"; bid="$(field "$bhit" 3)"
+            # The path and the entry id only -- never a byte of file content,
+            # which is this rule's own security consideration.
+            record DEFECT "  " \
+              "$eid at $brel:$bln -- the $bid anchor here has no back-reference to the canon below it" \
+              "$pid: add a back-reference below the $bid anchor at $brel:$bln -- prose naming port-canon.md and entry $bid"
+          done < <(printf '%s\n' "$hits")
+        else
+          hits="$(printf '%s' "$hits" | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
+          plinked="$(printf '%s' "$plinked" | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
+          punread="$(printf '%s' "$punread" | grep -v '^$' | LC_ALL=C sort | sed 's/^/ /' | tr -d '\n')"
+          record DEFECT "  " "$eid --$hits" \
+            "$pid: fix the $eid violations listed in the body above"
+        fi
       else
         # State what was walked. An unqualified "verified" over an empty
         # enumeration is indistinguishable from one over a real tree.
-        record ok "  " "$eid (property verified across $nfiles markdown files)"
+        if [ "$eid" = "edit-site-back-reference" ]; then
+          # And state the bound where the green appears. A port with zero
+          # anchor sites prints "0 anchor sites checked", which reads as
+          # "nothing was proved" rather than as a clean bill. The substring
+          # "property verified across" is preserved deliberately: an existing
+          # self-test case asserts on it in both halves.
+          record ok "  " "$eid (property verified across $nfiles markdown files; $nsites anchor sites checked -- anchor sites are a lower bound on the edit sites this rule governs)"
+        else
+          record ok "  " "$eid (property verified across $nfiles markdown files)"
+        fi
       fi
       continue
     fi

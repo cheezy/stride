@@ -20,6 +20,39 @@
 #   UNVERIFIABLE  a check: "property" rule this script cannot evaluate
 #   ok            the cell is clean
 #
+# TWO property checks are implemented, and the second one has a blind spot
+# worth stating beside the gate rather than only in the canon:
+#
+#   fence-nesting            a nested fence is legitimate only when the outer
+#                            one is wider.
+#   edit-site-back-reference every anchor site carries prose beside it naming
+#                            the canon by path and naming the entry id.
+#
+# What edit-site-back-reference CAN see: anchored sites. What it CANNOT see: a
+# file that states a governed rule and carries NO anchor -- deciding that would
+# mean deciding whether prose restates a rule's substance, which is not
+# mechanically decidable and is not attempted. ANCHOR SITES ARE A LOWER BOUND
+# on the edit sites the rule governs, not the whole set; the ok line says so
+# where the green appears. A port can pass this check and still owe
+# back-references at unanchored sites.
+#
+# It keys on two CANON-CONTROLLED tokens -- the canon filename and the entry id
+# -- never on a phrase, because back-references are voiced per port by design
+# (D240).
+#
+# The search runs DOWNWARD to end of file, with no lower bound. A fixed window
+# needs a constant and the measured real offsets run 1 to 54 lines; bounding at
+# the next anchor produced a live false positive in stride-opencode-lite, where
+# two anchors sit three lines apart and the paragraph back-referencing the
+# first sits below both. The ID requirement, not a positional bound, is what
+# prevents crediting the wrong anchor.
+#
+# TWO KNOWN BOUNDS, both over-credits, both stated rather than closed: a
+# paragraph far below naming this id and the canon filename credits this anchor
+# even if written about something else; and one entry id being a substring of
+# another would let a paragraph naming the longer credit the shorter (no such
+# pair exists among the registered ids). Both move a cell away from refusal.
+#
 # ---------------------------------------------------------------------------
 # EXIT CODES, and why tier 2 means here what it means in the bash half
 # ---------------------------------------------------------------------------
@@ -1154,6 +1187,114 @@ function Test-FenceDefect {
 }
 
 # --------------------------------------------------------------------------
+# The second property check: edit-site-back-reference v1.
+#
+# Ported from the bash half, which is the reference implementation. Where
+# Test-FenceDefect judges a file's own structure, this one judges whether each
+# anchor site in the file carries the back-reference the canon requires beside
+# it.
+#
+# WHAT IT CAN AND CANNOT SEE. It sees ANCHORED sites only -- an anchor comment
+# is a machine-readable marker of "this file states this governed rule". It
+# CANNOT see a file that states a governed rule and carries NO anchor, because
+# deciding that would mean deciding whether prose restates a rule's substance,
+# which is not mechanically decidable and is not attempted. A port can satisfy
+# this check and still owe back-references at unanchored sites. The canon's own
+# check_hint says the same: anchor sites are a lower bound on the sites the
+# rule governs, not the whole set. The ok line repeats it.
+#
+# It keys on two CANON-CONTROLLED tokens -- the canon's filename and the
+# entry's own id -- never on a phrase. Back-references are voiced per port by
+# design (D240), so a prose match would turn every port's own voice into a
+# false negative.
+#
+# Same contract as Test-FenceDefect: 'unreadable' for a file that could not be
+# opened, because an empty result means CLEAN and must never mean "I could not
+# look". Every comparison is ORDINAL, as everywhere else in this file: a
+# case-insensitive match here would credit an anchor for a paragraph naming a
+# differently-cased id.
+# --------------------------------------------------------------------------
+function Test-BackReferenceDefect {
+    param([string]$Path, [string]$Rel, $Sites)
+    $read = Read-CanonBytes -Path $Path
+    if (-not $read.Ok) { return 'unreadable' }
+    $out = New-Object System.Collections.Generic.List[string]
+    # @( ) on every collection: a one-element result unrolls to a bare scalar,
+    # and .Count on a scalar is terminating under Set-StrictMode Latest (D295).
+    $sitesArr = @($Sites)
+    if ($sitesArr.Count -eq 0) { return @($out) }
+    # NO @( ) here. Split-CanonLines returns ,$out precisely so the collection
+    # survives PowerShell's unrolling on return (D295); wrapping it again yields
+    # a ONE-element array holding the list, and every region scan then reads an
+    # empty file. Get-FileAnchors and Test-FenceDefect call it bare for the same
+    # reason -- match them.
+    $lines = Split-CanonLines -Text $read.Text
+    # The SAME fence walk Get-FileAnchors uses, with the marker line itself
+    # counted as fenced -- that half skips marker lines outright, which is the
+    # same disposition. If you change one, change the other.
+    $fenced = New-Object 'System.Collections.Generic.HashSet[int]'
+    $inFence = $false; $fenceChar = ''; $fenceWidth = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $fm = [regex]::Match($lines[$i], '^[ \t]*(`{3,}|~{3,})')
+        if ($fm.Success) {
+            $mk = $fm.Groups[1].Value
+            $ch = $mk.Substring(0, 1); $w = $mk.Length
+            if (-not $inFence) {
+                $inFence = $true; $fenceChar = $ch; $fenceWidth = $w
+                [void]$fenced.Add($i + 1); continue
+            } elseif ($ch -ceq $fenceChar -and $w -ge $fenceWidth) {
+                $inFence = $false; $fenceChar = ''; $fenceWidth = 0
+                [void]$fenced.Add($i + 1); continue
+            }
+        }
+        if ($inFence) { [void]$fenced.Add($i + 1) }
+    }
+    $last = $lines.Count
+    # Iterated as a LIST, so two owed anchors sharing one physical line stay
+    # two sites. The bash half keyed its site map by line number and collapsed
+    # them, which was both a dropped obligation and a half-divergence -- fixed
+    # there, and pinned by a case in both halves.
+    foreach ($site in $sitesArr) {
+        $sl = [int]$site.Line
+        $id = [string]$site.Id
+        # Region: everything BELOW the anchor, to end of file.
+        #
+        # DOWNWARD ONLY, and that half is load-bearing: prose ABOVE an anchor
+        # naming the canon and an id is, in this fleet, a forward pointer to a
+        # DIFFERENT entry, and reading upward would credit this anchor for it.
+        #
+        # There is deliberately NO lower bound -- not a line window, and not
+        # the next anchor. A window needs a constant and the measured real
+        # offsets run 1 to 54 lines. Bounding at the next anchor looks
+        # principled and produced a LIVE FALSE POSITIVE: in
+        # stride-opencode-lite the row-precedence and decision-matrix-authority
+        # anchors sit three lines apart and the paragraph back-referencing
+        # row-precedence sits below BOTH, saying so in as many words. What
+        # actually prevents crediting the wrong anchor is the ID requirement
+        # below, not a positional bound. Stated bound, away from refusal: a
+        # paragraph far below naming both this id and the canon filename will
+        # credit this anchor even if written about something else.
+        $seenPath = $false; $seenId = $false; $okk = $false
+        for ($ln = $sl + 1; $ln -le $last; $ln++) {
+            if ($ln -lt 1 -or $ln -gt $last) { continue }
+            $t = $lines[$ln - 1]
+            # A blank line ends the paragraph, so the two signals must co-occur
+            # within ONE paragraph rather than anywhere in the region.
+            if ($t -cmatch '^[ \t]*$') { $seenPath = $false; $seenId = $false; continue }
+            # A fenced line contributes no signal but does not break the
+            # paragraph -- the same reading the anchor scan applies.
+            if (-not $fenced.Contains($ln)) {
+                if ($t.Contains('port-canon.md', [System.StringComparison]::Ordinal)) { $seenPath = $true }
+                if ($t.Contains($id, [System.StringComparison]::Ordinal)) { $seenId = $true }
+            }
+            if ($seenPath -and $seenId) { $okk = $true; break }
+        }
+        if (-not $okk) { $out.Add($Rel + "`t" + $sl + "`t" + $id) }
+    }
+    return @($out)
+}
+
+# --------------------------------------------------------------------------
 # The verdict dispatcher.
 #
 # One site produces the printed row, the counter and the work-list entry, so
@@ -1213,6 +1354,7 @@ function Get-AnchorLiteral {
 # the -cne guarding the version below is correct and was simply never reached.
 $script:PropertyImpl = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
 $script:PropertyImpl.Add('fence-nesting', '1')
+$script:PropertyImpl.Add('edit-site-back-reference', '1')
 
 $script:Catalogs = @(
     'stride-codex-marketplace/plugins/stride-codex',
@@ -1330,6 +1472,47 @@ function Invoke-CanonCheck {
                         -Work "scripts/check-port-canon.ps1: implement the $($e.Id) property check at v$($e.Version) (this is a checker change, not a port change)"
                     continue
                 }
+                # Dispatch, not a special case: the walk and its four refusal
+                # guards are generic and unchanged. What varies per property id
+                # is what is computed before the walk, which implementation
+                # judges each file, and how the result is reported. Mirrors the
+                # bash half site for site.
+                #
+                # This port's own row for edit-site-back-reference being
+                # deferred or not_applicable is already handled by the two
+                # guards above, which return before any of this runs, so the
+                # narrowed-row rule costs no code here. Only the PER-ANCHOR-ID
+                # narrowing below is new.
+                $owed = New-Object System.Collections.Generic.List[object]
+                $nsites = 0
+                if ($e.Id -ceq 'edit-site-back-reference') {
+                    foreach ($h in @($found.Hits)) {
+                        $wi = $h.Where.LastIndexOf(':')
+                        if ($wi -lt 0) { continue }
+                        $arel = $h.Where.Substring(0, $wi)
+                        $aln = [int]$h.Where.Substring($wi + 1)
+                        $base = $arel
+                        $si = $base.LastIndexOf('/')
+                        if ($si -ge 0) { $base = $base.Substring($si + 1) }
+                        # A released changelog entry records what shipped rather
+                        # than stating the current rule, so there is nothing
+                        # there for a back-reference to prompt.
+                        if ($base -ceq 'CHANGELOG.md') { continue }
+                        # No row means the id is unregistered -- already reported
+                        # by the unregistered-id sweep, and twice is noise. A row
+                        # that is not required means this port does not owe THAT
+                        # rule, and a port that does not owe a rule does not owe
+                        # a citation of it. One test covers both.
+                        $arow = $null
+                        foreach ($e2 in $entries) {
+                            if ($e2.Id -ceq $h.Id) { $arow = $e2.AppliesTo[$pi]; break }
+                        }
+                        if ($null -eq $arow) { continue }
+                        if ($arow.Status -cne 'required') { continue }
+                        $owed.Add([pscustomobject]@{ Rel = $arel; Line = $aln; Id = $h.Id })
+                        $nsites++
+                    }
+                }
                 $nfiles = 0
                 $hits = New-Object System.Collections.Generic.List[string]
                 $linked = New-Object System.Collections.Generic.List[string]
@@ -1338,9 +1521,25 @@ function Invoke-CanonCheck {
                     if ($it.Disposition -ceq 'ignore') { continue }
                     if ($it.Disposition -ceq 'refuse') { $linked.Add(' ' + $it.Rel); continue }
                     $nfiles++
-                    $d = Test-FenceDefect -Path $it.Full
-                    if ($d -ceq 'unreadable') { $unread.Add(' ' + $it.Rel); continue }
-                    if ($d) { $hits.Add(' ' + $it.Rel + '(' + $d + ')') }
+                    $isBackref = ($e.Id -ceq 'edit-site-back-reference')
+                    if ($isBackref) {
+                        $fsites = @($owed | Where-Object { $_.Rel -ceq $it.Rel })
+                        # Called even when this file owes nothing, so the
+                        # unreadable sentinel keeps firing on every file the
+                        # walk counted -- the contract Test-FenceDefect states.
+                        $d = Test-BackReferenceDefect -Path $it.Full -Rel $it.Rel -Sites $fsites
+                    } else {
+                        $d = Test-FenceDefect -Path $it.Full
+                    }
+                    # $d is a string for fence-nesting and a list for the
+                    # back-reference check, so the sentinel test is guarded on
+                    # type: -ceq against an array filters rather than compares.
+                    $isUnread = $false
+                    if ($d -is [string]) { if ($d -ceq 'unreadable') { $isUnread = $true } }
+                    if ($isUnread) { $unread.Add(' ' + $it.Rel); continue }
+                    if ($isBackref) {
+                        foreach ($bh in @($d)) { if ($bh) { $hits.Add([string]$bh) } }
+                    } elseif ($d) { $hits.Add(' ' + $it.Rel + '(' + $d + ')') }
                 }
                 if ($linked.Count -gt 0) {
                     Add-Record -Kind 'UNVERIFIABLE' -Indent '  ' `
@@ -1374,11 +1573,40 @@ function Invoke-CanonCheck {
                     # here are bare " rel(reason:line)" strings, not anchor
                     # records, so this is a plain ordinal sort rather than
                     # Sort-HitsOrdinal.
-                    $hitsArr = Sort-StringsOrdinal $hits
-                    Add-Record -Kind 'DEFECT' -Indent '  ' -Message "$($e.Id) --$($hitsArr -join '')" `
-                        -Work "$($p.Id): fix the $($e.Id) violations listed in the body above"
+                    if ($e.Id -ceq 'edit-site-back-reference') {
+                        # The UNEXPECTED reporting shape rather than the fence
+                        # one: one row and one work item per offending LOCATION,
+                        # so the work list names the port and the file that owes
+                        # each back-reference. Sorted first with the same
+                        # ordinal comparer and for the same D296 reason -- the
+                        # two halves walk in opposite directions.
+                        foreach ($bhit in @(Sort-StringsOrdinal $hits)) {
+                            $parts = @([string]$bhit -split "`t")
+                            if ($parts.Count -lt 3) { continue }
+                            $brel = $parts[0]; $bln = $parts[1]; $bid = $parts[2]
+                            # The path and the entry id only -- never a byte of
+                            # file content, which is this rule's own security
+                            # consideration.
+                            Add-Record -Kind 'DEFECT' -Indent '  ' `
+                                -Message "$($e.Id) at ${brel}:${bln} -- the $bid anchor here has no back-reference to the canon below it" `
+                                -Work "$($p.Id): add a back-reference below the $bid anchor at ${brel}:${bln} -- prose naming port-canon.md and entry $bid"
+                        }
+                    } else {
+                        $hitsArr = Sort-StringsOrdinal $hits
+                        Add-Record -Kind 'DEFECT' -Indent '  ' -Message "$($e.Id) --$($hitsArr -join '')" `
+                            -Work "$($p.Id): fix the $($e.Id) violations listed in the body above"
+                    }
                 } else {
-                    Add-Record -Kind 'ok' -Indent '  ' -Message "$($e.Id) (property verified across $nfiles markdown files)"
+                    if ($e.Id -ceq 'edit-site-back-reference') {
+                        # State the bound where the green appears. A port with
+                        # zero anchor sites prints "0 anchor sites checked",
+                        # which reads as "nothing was proved" rather than as a
+                        # clean bill. The substring "property verified across"
+                        # is preserved: an existing self-test asserts on it.
+                        Add-Record -Kind 'ok' -Indent '  ' -Message "$($e.Id) (property verified across $nfiles markdown files; $nsites anchor sites checked -- anchor sites are a lower bound on the edit sites this rule governs)"
+                    } else {
+                        Add-Record -Kind 'ok' -Indent '  ' -Message "$($e.Id) (property verified across $nfiles markdown files)"
+                    }
                 }
                 continue
             }
@@ -2036,6 +2264,104 @@ function Invoke-SelfTestBody {
     $r = Invoke-StRun -Canon "$Tmp/p7.md" -PortsParent "$Tmp/p1"
     St-Assert "a property entry ahead of this checker is UNVERIFIABLE" 1 $r.ExitCode "UNVERIFIABLE: fence-nesting v7" $r.Output
     St-Refute "an unimplemented property version never silently passes" "ok: fence-nesting" $r.Output
+
+    # --- the edit-site-back-reference property: does each anchor site carry the
+    # --- back-reference the canon requires beside it? The fixture prose is
+    # --- deliberately NOT the fleet's wording -- the check keys on the canon
+    # --- filename and the entry id, never on a phrase, and a fixture written in
+    # --- the fleet's voice could not tell the two apart.
+    $BR = "see stride/docs/port-canon.md, entry rule-one, before changing this"
+
+    New-StCanon2 -Path "$Tmp/br.md"
+    New-StDir @("$Tmp/br/alpha", "$Tmp/br/beta")
+    Set-StFile -Path "$Tmp/br/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`nsome rule text`n"
+    Set-StFile -Path "$Tmp/br/beta/b.md"  -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    $r = Invoke-StRun -Canon "$Tmp/br.md" -PortsParent "$Tmp/br"
+    St-Assert "an anchor with no back-reference is a DEFECT" 1 $r.ExitCode "DEFECT: edit-site-back-reference" $r.Output
+
+    Set-StFile -Path "$Tmp/br/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    $r = Invoke-StRun -Canon "$Tmp/br.md" -PortsParent "$Tmp/br"
+    St-Assert "a back-reference below the anchor satisfies the rule" 0 $r.ExitCode "ok: edit-site-back-reference" $r.Output
+    # The bound belongs where the green appears, not only in the script header.
+    St-Assert "a property ok states that anchor sites are a lower bound" 0 $r.ExitCode "lower bound on the edit sites" $r.Output
+
+    # A port whose row is narrowed owes no citation of a rule it does not owe.
+    New-StCanon2 -Path "$Tmp/brna.md" -AnchorBetaStatus 'required' -PropBetaStatus 'not_applicable'
+    New-StDir @("$Tmp/brna/alpha", "$Tmp/brna/beta")
+    Set-StFile -Path "$Tmp/brna/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    Set-StFile -Path "$Tmp/brna/beta/b.md"  -Text "<!-- canon:rule-one v1 -->`nsome rule text`n"
+    $r = Invoke-StRun -Canon "$Tmp/brna.md" -PortsParent "$Tmp/brna"
+    St-Assert "a narrowed row is never asked for a back-reference" 0 $r.ExitCode "not applicable: edit-site-back-reference" $r.Output
+    St-Refute "a narrowed row never reports a back-reference DEFECT" "DEFECT: edit-site-back-reference" $r.Output
+
+    # Quoted as an example is not adopted -- the same reading the anchor scan
+    # applies, using the same fence walk.
+    New-StDir @("$Tmp/brf/alpha", "$Tmp/brf/beta")
+    Set-StFile -Path "$Tmp/brf/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n${f3}text`n$BR`n$f3`n"
+    Set-StFile -Path "$Tmp/brf/beta/b.md"  -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    $r = Invoke-StRun -Canon "$Tmp/br.md" -PortsParent "$Tmp/brf"
+    St-Assert "a back-reference inside a fenced block does not count" 1 $r.ExitCode "DEFECT: edit-site-back-reference" $r.Output
+
+    # Prose ABOVE an anchor naming the canon is, in this fleet, a forward pointer
+    # to a DIFFERENT entry. Reading upward would credit this anchor for it.
+    New-StDir @("$Tmp/bru/alpha", "$Tmp/bru/beta")
+    Set-StFile -Path "$Tmp/bru/alpha/a.md" -Text "$BR`n`n<!-- canon:rule-one v1 -->`nsome rule text`n"
+    Set-StFile -Path "$Tmp/bru/beta/b.md"  -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    $r = Invoke-StRun -Canon "$Tmp/br.md" -PortsParent "$Tmp/bru"
+    St-Assert "a back-reference above the anchor does not count" 1 $r.ExitCode "DEFECT: edit-site-back-reference" $r.Output
+
+    # Each anchor is its own site with its own region, so one satisfied anchor
+    # does not cover another in the same file. NOTE the assertion literal carries
+    # . and : -- . is a metacharacter in both BRE and .NET and matches itself plus
+    # one other character. That is an over-match, identical in both engines.
+    New-StDir @("$Tmp/br2/alpha", "$Tmp/br2/beta")
+    Set-StFile -Path "$Tmp/br2/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n`n$BR`n`n<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/br2/beta/b.md"  -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    $r = Invoke-StRun -Canon "$Tmp/br.md" -PortsParent "$Tmp/br2"
+    St-Assert "two anchors in one file are judged separately" 1 $r.ExitCode "at a.md:5" $r.Output
+
+    # An anchor for a rule the port does not owe is already UNEXPECTED; it is not
+    # ALSO asked for a back-reference it has no obligation to carry.
+    New-StCanon2 -Path "$Tmp/brx.md" -AnchorBetaStatus 'not_applicable' -PropBetaStatus 'required'
+    New-StDir @("$Tmp/brx/alpha", "$Tmp/brx/beta")
+    Set-StFile -Path "$Tmp/brx/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    Set-StFile -Path "$Tmp/brx/beta/b.md"  -Text "<!-- canon:rule-one v1 -->`nsome rule text`n"
+    $r = Invoke-StRun -Canon "$Tmp/brx.md" -PortsParent "$Tmp/brx"
+    St-Assert "an anchor for a rule this port does not owe is not asked for a back-reference" 1 $r.ExitCode "UNEXPECTED: rule-one" $r.Output
+    St-Refute "a not-owed anchor is never reported as owing a back-reference" "has no back-reference" $r.Output
+
+    # A released changelog entry records what shipped rather than stating the
+    # current rule, so there is nothing there for a back-reference to prompt.
+    New-StDir @("$Tmp/brc/alpha", "$Tmp/brc/beta")
+    Set-StFile -Path "$Tmp/brc/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    Set-StFile -Path "$Tmp/brc/alpha/CHANGELOG.md" -Text "<!-- canon:rule-one v1 -->`nhistorical entry`n"
+    Set-StFile -Path "$Tmp/brc/beta/b.md" -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    $r = Invoke-StRun -Canon "$Tmp/br.md" -PortsParent "$Tmp/brc"
+    St-Assert "a CHANGELOG anchor is not an edit site" 0 $r.ExitCode "ok: edit-site-back-reference" $r.Output
+
+    # Two OWED anchors can share one physical line, and each still owes its own
+    # back-reference. This half already iterates a list of sites and kept both;
+    # the bash half keyed its map by line number and collapsed them, dropping an
+    # obligation and diverging from this half. The case is carried here too so
+    # the behaviour is pinned on both sides rather than only where it broke.
+    New-StDir @("$Tmp/brl/alpha", "$Tmp/brl/beta")
+    Set-StFile -Path "$Tmp/brl/alpha/a.md" -Text "<!-- canon:rule-one v1 --> <!-- canon:edit-site-back-reference v1 -->`nrule text`n"
+    Set-StFile -Path "$Tmp/brl/beta/b.md"  -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    $r = Invoke-StRun -Canon "$Tmp/br.md" -PortsParent "$Tmp/brl"
+    St-Assert "two owed anchors on one physical line: the first is judged" 1 $r.ExitCode "the rule-one anchor here has no back-reference" $r.Output
+    St-Assert "two owed anchors on one physical line: the second is judged" 1 $r.ExitCode "the edit-site-back-reference anchor here has no back-reference" $r.Output
+
+    # A back-reference may sit BELOW a later anchor and still be this anchor's.
+    # stride-opencode-lite does exactly that: two anchors three lines apart, and
+    # one paragraph below both naming which entry it belongs to. Bounding the
+    # search at the next anchor reported that correctly-written port as owing a
+    # back-reference it already had. What keeps the credit honest is the ID
+    # requirement, not a positional bound.
+    New-StDir @("$Tmp/brk/alpha", "$Tmp/brk/beta")
+    Set-StFile -Path "$Tmp/brk/alpha/a.md" -Text "<!-- canon:rule-one v1 -->`n`n<!-- canon:edit-site-back-reference v1 -->`n`nsee stride/docs/port-canon.md, entry rule-one and entry edit-site-back-reference, before changing either`n"
+    Set-StFile -Path "$Tmp/brk/beta/b.md"  -Text "<!-- canon:rule-one v1 -->`nsome rule text`n`n$BR`n"
+    $r = Invoke-StRun -Canon "$Tmp/br.md" -PortsParent "$Tmp/brk"
+    St-Assert "a back-reference below a later anchor still counts" 0 $r.ExitCode "ok: edit-site-back-reference" $r.Output
 
     # --- vendored trees are excluded: a node_modules copy is a dependency's
     # --- file, not the port's, and must not satisfy a rule.
@@ -2760,6 +3086,48 @@ function New-StCanon {
         '  "applies_to": ['
         '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
         "    {""port"": ""beta"", ""status"": ""$BetaStatus"", ""variant"": """", ""reason"": ""r""} ] }"
+        "$f3"
+    )
+    Set-StCanonFile -Path $Path -Lines $lines
+}
+
+# An ADDITIVE sibling of New-StCanon: a TWO-entry canon carrying one anchor rule
+# and one property rule, with independently settable beta statuses. The
+# back-reference cases need both -- an anchor for the property check to judge,
+# and the property entry itself. A new function rather than more optional
+# parameters on New-StCanon, which some forty existing cases depend on.
+function New-StCanon2 {
+    param(
+        [string]$Path, [string]$AnchorBetaStatus = 'required',
+        [string]$PropBetaStatus = 'required', [string]$PropVersion = '1'
+    )
+    $f3 = $script:F3
+    $lines = @(
+        '# canon'
+        "${f3}json"
+        '{ "canon_schema_version": 1,'
+        '  "ports": ['
+        '    {"id": "alpha", "family": "f", "dir": "alpha", "exists": true, "note": ""},'
+        '    {"id": "beta",  "family": "f", "dir": "beta",  "exists": true, "note": ""}'
+        '  ] }'
+        "$f3"
+        '### r'
+        '<!-- canon:rule-one v1 -->'
+        "${f3}json"
+        '{ "id": "rule-one", "version": 1, "status": "active", "superseded_by": null,'
+        '  "provenance": "quoted", "defects": ["D1"], "check": "anchor", "check_hint": "h",'
+        '  "applies_to": ['
+        '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
+        "    {""port"": ""beta"", ""status"": ""$AnchorBetaStatus"", ""variant"": """", ""reason"": ""r""} ] }"
+        "$f3"
+        '### b'
+        "<!-- canon:edit-site-back-reference v$PropVersion -->"
+        "${f3}json"
+        "{ ""id"": ""edit-site-back-reference"", ""version"": $PropVersion, ""status"": ""active"", ""superseded_by"": null,"
+        '  "provenance": "quoted", "defects": ["D1"], "check": "property", "check_hint": "h",'
+        '  "applies_to": ['
+        '    {"port": "alpha", "status": "required", "variant": "", "reason": ""},'
+        "    {""port"": ""beta"", ""status"": ""$PropBetaStatus"", ""variant"": """", ""reason"": ""r""} ] }"
         "$f3"
     )
     Set-StCanonFile -Path $Path -Lines $lines

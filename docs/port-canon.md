@@ -1025,6 +1025,142 @@ MISSING across all seven, and those cells are the work list.
 
 **History.** v1 — seeded from W2130.
 
+### 10. A file that states a governed rule carries a back-reference beside it, in every port — `edit-site-back-reference`
+
+<!-- canon:edit-site-back-reference v1 -->
+
+**Substance.** Wherever a file states or restates a rule this canon governs, a
+back-reference sits beside it: prose naming this file by path and the entry id,
+and saying that a change to the rule's substance owes a version bump here. The
+obligation is **site-based** — every site that states a governed rule, not merely
+the files this document happens to cite — and it binds **every port**, not only
+the repository this canon lives in.
+
+Three things are constitutive of the rule rather than incidental to it. First,
+**the anchor comment is not a substitute for the prose.** An anchor renders as
+nothing, names an id and a version, and says nothing about what an edit owes; a
+maintainer mid-edit reads the prose or reads no prompt at all. The two do
+different jobs — the anchor is what a checker reads, the back-reference is what a
+human reads — and a port carrying only the first is machine-verifiable and
+unprompted, which is the exact combination this entry exists to end. Second, **a
+back-reference restates no substance.** A second copy of the rule is the drift
+the Scope note above forbids, so the back-reference points at the obligation and
+stops. Third, **it is voiced in its own file's idiom** rather than pasted from
+another port, per the D240 per-port shaping precedent — so this entry governs
+that a back-reference exists and what it must name, and never its wording.
+
+One carve-out travels with the rule: **a changelog is not an edit site.** A
+released entry records what shipped rather than stating the current rule, so
+there is nothing there for a back-reference to prompt, and editing one to track a
+rule change would falsify the record. Sites are the files a maintainer changes in
+order to change the rule.
+
+**Provenance.** **Synthesized from shipped fixes — not quoted.** No normative
+statement of this rule exists outside this document: D283 and D292 installed
+back-references and recorded what they were doing in `stride/CHANGELOG.md` and in
+the Discovery section below, but neither states the obligation as a rule binding
+anyone. The substance above is authored here, derived from those two fixes and
+from the failure they were fixing. This entry is disclosed as authored rather
+than presented as a citation.
+
+**Defect trace.** Two defects, both shipped, and the pair is the whole
+evidentiary basis for the rule.
+
+- **D283** — the canon could reach its sources and its sources could not reach
+  back. The version bump is owed when substance changes, substance changes in the
+  source file rather than here, and no source file mentioned this document, so
+  the bump had no trigger where the edit actually happens. The failure was shaped
+  exactly like success: substance lands in the source, the canon keeps saying
+  `v1`, every port keeps its `v1` anchor, and the drift check reports the fleet
+  green over a fleet that has drifted. D283 installed back-references beside four
+  files' governed rules in this repository.
+- **D292** — the site test applied per-file leaves sites uncovered. `README.md`
+  restated the whole `reason_code` vocabulary and carried no back-reference,
+  because it was named by neither an entry's Provenance nor the Scope note. D292
+  closed it on the site test alone, which is what established that the test is
+  site-based rather than membership-based.
+
+**The extension to the ports is a decision, not a defect.** No port-side `D`
+identifier forced it; W2135 decided it, and the blockquote below records the
+decision and its grounds so that a reader meets the reasoning where the rule is.
+
+**Port-side anchor.** None. This is a property of how a port's files are
+written, not a rule with a single host paragraph to sit beside — the obligation
+is distributed over every site that states a governed rule, so one anchor would
+certify a compliance it cannot see. A port owes back-references, not an anchor
+for this entry.
+
+**Applicability.** Required everywhere, and checked as a **property** rather than
+an anchor, on the same terms as `fence-nesting`: the property is verifiable
+across a port's whole markdown tree, which is a stronger check than an anchor's
+presence rather than a weaker one. **Note what this row does not say.** The nine
+`required` ports are not thereby compliant, and neither is this repository's
+green result on the anchor checks evidence about them. The checker implements one
+property today, so a run reports this entry UNVERIFIABLE in every cell, and that
+verdict is a work item against the **script** — it says the gate cannot yet see
+the rule, never that a port satisfies it. Take the fleet's actual state from a
+live run once the check exists, not from this paragraph.
+
+```json
+{
+  "id": "edit-site-back-reference",
+  "version": 1,
+  "status": "active",
+  "superseded_by": null,
+  "provenance": "synthesized-from-shipped-fixes",
+  "defects": ["D283", "D292"],
+  "check": "property",
+  "check_hint": "For every site in the port that states or restates a governed rule, require prose beside it naming this canon by path and the entry id and stating that a substance change owes a version bump here. An anchor comment alone does not satisfy it, and the prose must restate none of the rule's substance. A port's CHANGELOG is not an edit site and is excluded. Anchor sites are a lower bound on the sites to check, not the whole set: a file may state a governed rule without carrying an anchor.",
+  "applies_to": [
+    {"port": "stride",              "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-codex",        "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-copilot",      "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-copilot-lite", "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-gemini",       "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-lite",         "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-opencode",     "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-pi",           "status": "required", "variant": "", "reason": ""},
+    {"port": "stride-opencode-lite","status": "required", "variant": "", "reason": ""}
+  ]
+}
+```
+
+**History.** v1 — authored from the D283 and D292 fixes and extended to the
+whole fleet by W2135.
+
+> **The obligation binds every port, and the reason is that the drift check
+> cannot read substance.** The check compares a port's anchor *version* against
+> this file; it never compares the port's *text* against the entry's Substance.
+> So a maintainer editing a governed restatement inside a port moves substance
+> while the anchor still reads `v1`, and the run reports that cell ok — the D283
+> failure exactly, one repository out. Every port states governed rules in its
+> own voice, by the D240 shaping precedent, which means every port has edit sites
+> and every port can drift at them. A safeguard installed in one of nine
+> repositories protects one of nine repositories.
+>
+> The alternative was to keep the stride-only scope on the ground that only this
+> repository's files are Provenance sources. It was rejected on its own terms:
+> Provenance is a claim about where a rule is *defined*, and this failure is
+> about where a rule is *restated*. D292 already settled that distinction inside
+> this repository when it closed a site named by no entry at all.
+>
+> The measurement that decided it, taken on the day this entry was written: of
+> the anchor sites across the nine ports, only this repository carried a
+> back-reference at every one of them; eight ports had sites with none beside
+> them, and three ports — `stride-gemini`, `stride-lite` and `stride-copilot-lite`
+> — carried none anywhere. Several ports already carry back-reference prose at
+> some sites, inherited by copying when they ported an entry's substance, which
+> is a convention half-adopted by accident rather than one anybody decided. Take
+> the tally from a live run rather than from this sentence; what the numbers were
+> for is the shape, and the shape is that adoption was arbitrary.
+>
+> No port is narrowed. A narrowed row must name a structural fact about the port
+> that makes the rule unreachable, and none was found: every port's rule-stating
+> sites sit in prose files with room for a back-reference sentence beside them.
+> Reopen this if a port ever states a governed rule only in a place with no host
+> paragraph — a generated file, or a fenced block, which the anchor scan already
+> excludes — since that is the shape that would earn `not_applicable` here.
+
 ## Discovery — how a maintainer reaches this file
 
 **The edit-site back-reference is installed (D283), and this section records
@@ -1069,6 +1205,13 @@ beside it, naming this file by path and the entry id, so that editing the rule
 surfaces the obligation without the editor having to already know this document
 exists.
 
+**Since W2135 that obligation is a governed rule in its own right, and it binds
+every port.** Entry `edit-site-back-reference` carries it, with the decision and
+its grounds recorded there. This section describes how the mechanism reached
+*this* repository first and what it looks like here; the entry is what states the
+rule, sets its scope and owns its version. Where the two could be read as
+disagreeing, the entry governs.
+
 That direction is the one that matters for the versioning rule below, which
 requires a version bump when a rule's **substance** changes. Substance changes
 in the source file, not here. Without a pointer at the edit site, a maintainer
@@ -1087,8 +1230,10 @@ the back-reference points at the obligation and stops. Each is voiced in its own
 file's idiom rather than in one imported form, per the D240 per-port shaping
 precedent.
 
-**Which files carry one, and why each.** Two are this repository's Provenance
-sources: `stride/agents/task-reviewer.md` for `verdict-note`, and
+**Which files carry one in this repository, and why each.** This list is how the
+site test came out *here*; it is not the extent of the obligation, which entry
+`edit-site-back-reference` states for every port. Two are this repository's
+Provenance sources: `stride/agents/task-reviewer.md` for `verdict-note`, and
 `stride/skills/stride-workflow/SKILL.md` for the other three entries, at three
 separate sites. A third, `stride/skills/stride-completing-tasks/SKILL.md`, is
 named by the Scope note above as a source of record and restates two of the
@@ -1104,8 +1249,11 @@ list an application of the site test rather than of the narrower membership one.
 repository to install a back-reference beside.
 
 **The test is site-based, and the last known divergence is closed.** The test is
-*every site in this repository that states or restates a governed rule* — not
-merely the files this document happens to cite. D283 applied it per-file over
+*every site that states or restates a governed rule* — not merely the files this
+document happens to cite — applied in this repository here, and across the fleet
+by entry `edit-site-back-reference` since W2135. The paragraphs below record how
+it came out in this repository; they say nothing about any port's state, which a
+live run is the only source for. D283 applied it per-file over
 four files and recorded the shortfall rather than papering over it: `README.md`
 restates the six-value `reason_code` vocabulary and the `matrix_deviation`
 clause, and carried no back-reference. **D292** closed that site, so the applied
@@ -1125,7 +1273,9 @@ site.** It restates governed substance in its historical entries — the D239 en
 enumerates the whole vocabulary — but a released entry is a record of what
 shipped, not a statement of the current rule, so there is nothing there for a
 back-reference to prompt and editing one to track a rule change would falsify the
-record. Sites are the files a maintainer changes to change the rule.
+record. Sites are the files a maintainer changes to change the rule. Entry
+`edit-site-back-reference` carries that carve-out fleet-wide, so a port's
+changelog is not an edit site either.
 
 **What remains maintainer-enforced.** The back-reference surfaces the obligation
 at the edit site; it does not enforce it. Nothing fails a build when a substance

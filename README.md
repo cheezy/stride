@@ -127,6 +127,17 @@ The measured problem: **73 skipped entries produced 58 distinct reason strings a
 
 **Canon-governed — entry `reason-code-vocabulary` in `docs/port-canon.md`.** That entry registers this vocabulary as one every port must carry, and the list above restates it rather than being its source of record. A change to its substance owes a version bump in two places before the next release: that entry in the canon, and stride's own `reason-code-vocabulary` anchor — which lives beside the picking table in `skills/stride-workflow/SKILL.md`, not in this file. This README deliberately carries no anchor of its own: the canon assigns one per rule per port directory, and stride's is already placed.
 
+### Optional: `claims_verified_by` (v1.77.0+)
+
+A completion may carry `claims_verified_by`, an object of `{command, output}` recording the command that enumerated every entity a factual claim covers. It is required when this change writes a claim about **several** entities — ports, files, rows, repositories — into a document that outlives the session: a skill file, a README, a CHANGELOG entry, a canon entry. It does not apply to claims about the diff under review, which the completion prose rule already governs.
+
+The provenance is W2120, where three successive drafts of two row reasons were wrong in the same way — a claim about one port reasoned from a sentence written for another — and a one-line census of the trees settled the wording. A sampled command does not satisfy the rule (a claim about nine ports needs a command that lists nine), and a subagent's answer is not evidence, because the point is a command a reviewer can re-run to falsify the claim.
+
+**Supplying it is optional and omitting it is always valid** — a task making no such claim omits it, and an agent that predates the field, on any runtime, completes exactly as before. This repository's Stride server casts a fixed key list on `/complete`, so the field is currently **accepted and discarded rather than persisted**; the skill says so where it documents the field and directs the agent to mirror the command in `completion_summary`, which is persisted, so the evidence reaches a human today. Persistence is tracked separately.
+
+The check for it is **prose-only by construction**. Whether a command is exhaustive *relative to a sentence* is not mechanically decidable, and a shape-only pin would go green on exactly the sampled command the rule exists to refuse. The contract is `skills/stride-workflow/claims-census.md`, gated from the Step 4 bullet. No canon entry: this registers no cross-port rule.
+
+
 ### stride-claiming-tasks
 
 **MANDATORY** before any task claiming or discovery API call. Enforces proper before_doing hook execution, prerequisite verification, and immediate transition to active work. Contains the claim request format including `before_doing_result`.

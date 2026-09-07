@@ -23,6 +23,91 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.77.0] - 2026-09-07
+
+### Added
+
+- **A multi-entity factual claim now has to name the command that enumerated
+  every entity, before it ships into a document (W2132).** The completion payload
+  gains an optional `claims_verified_by` carrying `{command, output}`, and Step 4
+  of the orchestrator requires it when the change writes a factual claim about
+  several entities — ports, files, rows, repositories — into a skill, a README, a
+  CHANGELOG entry or a canon entry. This is the existing universal-claims rule
+  (`stride-completing-tasks`, "Universal claims … must name the command that
+  verified them") extended from the completion prose to the shipped text, and
+  W2120 is why: three successive drafts of two row reasons were wrong in the same
+  way — a claim about one port reasoned from a sentence written for another — and
+  the third said a rule had two statement sites when a census found three. An
+  earlier draft argued a port had no mirror because no directory carried that
+  name, which is a non-sequitur rather than a census. All of them would have been
+  caught by the one-line enumeration that eventually settled the wording. The
+  contract is `skills/stride-workflow/claims-census.md`, gated from the Step 4
+  bullet: what counts as a per-entity documentary claim, how to choose a command
+  that covers the whole space rather than a proxy for it, the `command`/`output`
+  shape (an enumeration, never a file dump), and the two edge cases — a claim no
+  command can enumerate, which is rewritten bounded and owes no census, and a
+  claim true of a subset, whose census must still list the whole set the sentence
+  quantifies over, because "three of the nine" is a claim about nine. It also
+  carries the check that caught a false census while this change was being
+  written: a zero result proves nothing until you confirm the command could have
+  matched anything at all.
+- **Three deliberate limits, recorded rather than papered over.** A sampled
+  command does not satisfy the rule and a subagent's answer is not evidence — the
+  point is a command a reviewer can re-run. The recorded `command` is **data**: no
+  consumer re-executes it, and its output is redacted on the same terms as any
+  other completion field, never carrying a token or a private path. And the
+  pre-submission check for it is **prose-only by construction**, with no jq pin,
+  because whether a command is exhaustive *relative to a sentence* is not
+  mechanically decidable; a shape-only pin would go green on exactly the sampled
+  command this rule exists to refuse. **The field is optional**, so a task making
+  no such claim omits it and an older plugin that never sends it completes exactly
+  as before. This repository's Stride server casts a fixed key list on
+  `/complete`, so the field is accepted and discarded rather than persisted — the
+  skill says so where it documents the field, and directs the agent to mirror the
+  command in `completion_summary` so the evidence reaches a human today.
+  Persistence is not fixed here and is recorded on the task.
+
+### Changed
+
+- **The orchestrator is back inside its byte budget, paid for by two duplicated
+  hook tables rather than by raising the number.** `skills/stride-workflow/SKILL.md`
+  had drifted 1,208 bytes over its 101,000-byte budget before this change, so the
+  budget check and the byte half of test 35q were already red on an untouched
+  tree. Step 6's `Hooks Reference` table duplicated `parser.md` § Recognized
+  Sections — and had already drifted from it on one cell, claiming `after_review`
+  is blocking where `parser.md` says it is not — and its `Hook Environment
+  Variables` table was a lossy, four-columns-into-one copy of `hook-execution.md`
+  § Variable Inventory by Hook, which is also the table the D275 drift guard
+  compares the executor's allow-list against. Both are deleted in favour of
+  pointers at their canonical siblings; the `## before_review` / `## after_goal`
+  example bodies, which existed in no other documentation (only as a `before_doing`
+  test fixture), move into `hook-execution.md` as a
+  new Canonical Hook Examples section with the purpose phrases beside them. Net:
+  102,208 → 100,332 bytes with the new Step 4 bullet included. No budget was
+  raised. The drifted cell is resolved by deletion rather than adjudication, and
+  `parser.md` is the one that survives because it is the correct statement:
+  `after_review` is routed as PostToolUse and fires after `mark_reviewed` has
+  already succeeded, so there is nothing left for it to block. A failing section
+  there still exits 2 — `run_stride_section` returns 2 for any route — but on a
+  PostToolUse route that exit has no gating effect, which is the reason the
+  executor gives for it in `hooks/stride-hook.sh` beside the primary-hook call.
+- **`stride-completing-tasks` paid for its own three additions the same way.** The
+  manual hook-execution procedure was stated a third time there, with the
+  canonical copy in `stride-workflow/platform-other.md` § Step 6; the per-hook step
+  lists and their timing-capture snippets move into that skill's own `reference.md`,
+  which already illustrated the hook *ordering* under Mistake 1 but not the capture
+  itself. The D234/D242 duration derivation was restated in full beside two other
+  copies. The rules stay inline and the mechanics move: 62,946 → 63,343 of
+  64,000 with the field row, the rule paragraph and the new self-check checkbox
+  added.
+- **Hook-suite Test Group 39** pins the field's documentation, its optionality,
+  the not-a-sample rule, the Step 4 gate, the sibling's redaction rule and stated
+  limit, and executes three payload-shape cases: with the field, without it, and
+  with a command carrying no output. The group's header states what it proves and
+  what it does not — the shape is the documented one, not a server acceptance, and
+  no assertion claims a mechanical check for exhaustiveness, because none exists.
+
+
 ## [1.76.0] - 2026-09-06
 
 ### Added

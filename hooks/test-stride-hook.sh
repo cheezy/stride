@@ -13024,6 +13024,85 @@ else
 fi
 
 # ============================================================
+# Test Group 39: W2132 -- the census rule for multi-entity claims
+# ============================================================
+# Bash-only, on 35q/36/37's precedent for markdown-contract assertions.
+# What this group proves: the field is DOCUMENTED with its scope, its
+# optionality and its not-a-sample rule; Step 4 gates the sibling contract;
+# and the documented payload shape parses with and without the field.
+# What it does NOT prove: that the server accepts or persists the key
+# (AgentWorkflow.completion_changeset/5 casts a fixed key list and discards
+# it either way), and NOT that any recorded command is actually exhaustive.
+# Exhaustiveness relative to a sentence is not mechanically decidable, so no
+# assertion here claims to check it -- a shape-only pin would go green on
+# exactly the sampled command the rule exists to refuse.
+echo ""
+echo "=== Test Group 39: W2132 claims_verified_by census ==="
+
+G39_CT="$SCRIPT_DIR/../skills/stride-completing-tasks/SKILL.md"
+G39_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G39_CENSUS="$SCRIPT_DIR/../skills/stride-workflow/claims-census.md"
+
+if [ -f "$G39_CT" ] && [ -f "$G39_WF" ] && [ -f "$G39_CENSUS" ]; then
+  # 39a: verification step 1 of the task, mechanized.
+  assert_contains "39a: the completion field reference documents claims_verified_by" \
+    '`claims_verified_by`' "$(cat "$G39_CT")"
+  # 39b: AC3/AC5 -- optional, and an older plugin still completes.
+  assert_contains "39b: its optionality is stated in the back-compat wording" \
+    'Omitting it stays valid' "$(cat "$G39_CT")"
+  # 39c: pitfall 2 -- a sampled command must not satisfy the rule.
+  assert_contains "39c: the not-a-sample rule is stated" \
+    'never a sample' "$(cat "$G39_CT")"
+  # 39d: the orchestrator gates the contract from where the claim gets written.
+  assert_contains "39d: Step 4 gates the census contract" \
+    'claims-census.md' "$(cat "$G39_WF")"
+  # 39e: the security_considerations survive into the contract, and the
+  # unenforceability is disclosed rather than papered over.
+  assert_contains "39e: the sibling carries the redaction rule" \
+    'never a token' "$(cat "$G39_CENSUS")"
+  assert_contains "39e2: the sibling states the limit it cannot enforce" \
+    'stated rather than papered over' "$(cat "$G39_CENSUS")"
+  # 39f: the pre-submission gate carries the checkbox.
+  assert_contains "39f: the self-check carries the census checkbox" \
+    'carries its census' "$(cat "$G39_CT")"
+else
+  echo "  SKIP: Group 39 skill files not found"
+fi
+
+if [ -f "$G39_CENSUS" ] && command -v jq >/dev/null 2>&1; then
+  # 39g/39h: the two shape cases from the task's testing_strategy, run against
+  # the DOCUMENTED shape. A payload WITH the field and one WITHOUT it must both
+  # satisfy the same predicate -- that is what "the field is optional" means.
+  G39_REQUIRED='["agent_name","completion_summary","actual_complexity","actual_files_changed"]'
+  g39_valid() {
+    printf '%s' "$1" | jq -e --argjson req "$G39_REQUIRED" '
+      ($req - (. | keys)) == []
+      and (((has("claims_verified_by") | not))
+           or ((.claims_verified_by | keys | sort) == ["command","output"]
+               and (.claims_verified_by.command | type) == "string"
+               and (.claims_verified_by.output  | type) == "string"))
+    ' >/dev/null 2>&1
+  }
+  G39_WITH='{"agent_name":"a","completion_summary":"s","actual_complexity":"small","actual_files_changed":"f","claims_verified_by":{"command":"grep -rc x a b","output":"a:1\nb:2"}}'
+  G39_WITHOUT='{"agent_name":"a","completion_summary":"s","actual_complexity":"small","actual_files_changed":"f"}'
+  G39_BAD='{"agent_name":"a","completion_summary":"s","actual_complexity":"small","actual_files_changed":"f","claims_verified_by":{"command":"grep -rc x a b"}}'
+
+  g39_verdict() { if g39_valid "$1"; then echo "valid"; else echo "rejected"; fi; }
+
+  assert_eq "39g: a payload carrying claims_verified_by validates" \
+    "valid" "$(g39_verdict "$G39_WITH")"
+  assert_eq "39h: a payload omitting it still validates" \
+    "valid" "$(g39_verdict "$G39_WITHOUT")"
+  # 39i: the shape is two keys, not one -- an output-less command records no
+  # enumeration and so evidences nothing.
+  assert_eq "39i: a command with no output is refused" \
+    "rejected" "$(g39_verdict "$G39_BAD")"
+else
+  echo "  SKIP: Group 39 executed half needs jq"
+fi
+
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

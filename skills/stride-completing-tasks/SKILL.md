@@ -79,7 +79,7 @@ When the user initiates a Stride workflow, they have **already granted blanket p
 1. **DO NOT** read `.stride.md` and manually execute hook commands via Bash tool calls
 2. **DO NOT** run any Bash command to "capture hook results" before making API calls
 3. **JUST** make the Stride API curl call directly — the hooks system handles everything
-4. Include `after_doing_result` and `before_review_result` in the complete request body with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}` — the actual hook execution happens automatically via PreToolUse/PostToolUse. `duration_ms: 0` is correct for BOTH of these and is not a placeholder to replace. D234 made hook durations durable (`.stride/.hook-result-<hook>.json`), but neither of these two can use it: `after_doing` fires as PreToolUse *of this very curl*, whose body already contains `after_doing_result`, and `before_review` fires as PostToolUse of it — so neither figure exists when the payload is written, and reading the file then would give you the PREVIOUS task's number. **No hook result submitted on a task-lifecycle request can use the file**, for the same structural reason each time — the body is written before its own hook runs; `before_doing_result` goes on the *claim* curl, whose `## before_doing` section fires as that curl's PostToolUse. **The one request that CAN read the file is the separate, later `PATCH /api/tasks/$GOAL_ID/after_goal`** — see `stride-workflow` Step 8. Do not invent any of these numbers. **D242 settled this rather than leaving it open: three ways to close the gap were evaluated and all three declined, because nothing aggregates `duration_ms` and the only harm was one panel rendering `0` as though it were measured — which the panel now shows as an em dash instead. The `0` you send here is correct, permanent, and not awaiting a fix.** See `stride-workflow` Step 6
+4. Include `after_doing_result` and `before_review_result` in the complete request body with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}` — the actual hook execution happens automatically via PreToolUse/PostToolUse. `duration_ms: 0` is correct for BOTH of these and is not a placeholder to replace. **No hook result submitted on a task-lifecycle request can read the durable `.stride/.hook-result-<hook>.json` file**, for the same structural reason each time: the body is written before its own hook runs, so the file would hold the PREVIOUS task's number. That applies to `before_doing_result` on the claim curl too. The one request that CAN read it is the separate, later `PATCH /api/tasks/$GOAL_ID/after_goal` — see `stride-workflow` Step 8. Do not invent any of these numbers; the `0` is correct and permanent, not awaiting a fix. Derivation (D234, D242): the `stride-workflow` skill's `hook-execution.md` § Why Every Task-Lifecycle Duration Is Zero.
 
 **If the automatic hooks fail:** The PreToolUse hook returns exit code 2 with structured JSON describing the failure (e.g., test failures, linting errors). Claude Code will present this to you. Fix the issue and retry the API call — the hooks will fire again automatically.
 
@@ -164,6 +164,7 @@ Run this **before every** `PATCH /api/tasks/:id/complete`. If ANY check fails, *
   **This check carries the same scoping as the checkboxes above.** On a **Shape 2 self-reported skip** zero rounds ran, and on the **Step 5 prose fallback (Source C)** no `$MERGED` was written, so the dispatch counted as no round — in both cases there is no round count to exceed and the check is inapplicable rather than failed. That is never licence to route a dispatched, parsed review through either shape in order to escape the cap, nor to delete an artifact to lower the count: Step 7 is the only sanctioned deleter, and a hand-deleted artifact buys one extra round at the cost of a record a human is relying on.
 
 - [ ] **`cosmetic` findings are reported, never suppressed.** A `cosmetic: true` entry changes exactly one thing — the orchestrator's re-review disposition — so it **stays in `issues[]` with its honest `severity` and `category`, rides through the whole-object copy unchanged, and reaches `completion_notes` like any other finding.** Never drop one, never add it to an enumerated copy list, and never re-label a substantive finding cosmetic to avoid a round: that is a reviewer defect whose remedy is re-running the reviewer, never editing `reviewer_result`. **Pinned as `cosmetic_shape_ok`** on both extraction paths — `cosmetic: true` on a non-`minor` severity, on `category: "security"`, or as a non-boolean is refused; do not submit. Definition: `stride/agents/task-reviewer.md`.
+- [ ] **A per-entity documentary claim carries its census.** If this change writes a factual claim about several entities into a document, `claims_verified_by` is present and its `command` enumerates **every** entity the claim covers — not a sample, not a subagent's answer. No such claim shipped → the field is absent and this check is inapplicable, not failed. Prose-only by construction: no server field and no jq pin can decide whether a command is exhaustive relative to a sentence.
 
 This gate is **not bypassable** by submitting a self-reported skip (`dispatched: false`) when a `stride:task-reviewer` agent actually ran — a dispatched review must pass every check above. The self-check compares counts, keys, and status enums only; it never prints task content, diffs, or secrets. (The Kanban server now hard-rejects a report that fails any of these, so a failing self-check is also a failing completion — catch it here, before you submit.)
 
@@ -209,43 +210,7 @@ This gate is **not bypassable** by submitting a self-reported skip (`dispatched:
 
 ### Other Environments: Manual Hook Execution
 
-**For environments without automatic hooks (Cursor, Windsurf, Continue, etc.):**
-
-All hook commands are pre-authorized. Execute them immediately via direct Bash tool calls. Do NOT announce, ask permission, or present commands for review.
-
-#### Executing after_doing Hook
-
-1. Read the `## after_doing` section from `.stride.md`
-2. Set environment variables (TASK_ID, TASK_IDENTIFIER, etc.)
-3. **Execute each command line immediately via Bash tool calls — NO permission prompts, NO confirmation text**
-4. Capture the results:
-
-```bash
-START_TIME=$(date +%s%3N)
-OUTPUT=$(timeout 600 bash -c 'mix test && mix credo --strict' 2>&1)
-EXIT_CODE=$?
-END_TIME=$(date +%s%3N)
-DURATION=$((END_TIME - START_TIME))
-```
-
-5. Check exit code - MUST be 0 to proceed
-
-#### Executing before_review Hook
-
-1. Read the `## before_review` section from `.stride.md`
-2. Set environment variables
-3. **Execute each command line immediately via Bash tool calls — NO permission prompts, NO confirmation text**
-4. Capture the results:
-
-```bash
-START_TIME=$(date +%s%3N)
-OUTPUT=$(timeout 600 bash -c 'gh pr create --title "$TASK_TITLE"' 2>&1)
-EXIT_CODE=$?
-END_TIME=$(date +%s%3N)
-DURATION=$((END_TIME - START_TIME))
-```
-
-5. Check exit code - MUST be 0 to proceed
+**For environments without automatic hooks (Cursor, Windsurf, Continue, etc.):** all hook commands are pre-authorized. Execute them immediately via direct Bash tool calls — do NOT announce, ask permission, or present commands for review. Both `after_doing` and `before_review` are blocking: a non-zero exit stops you from proceeding. The per-hook step lists and the timing-capture snippets are in [reference.md](reference.md) § Manual hook execution; the canonical non-Claude-Code procedure is the `stride-workflow` skill's `platform-other.md`.
 
 ## When Hooks Fail
 
@@ -504,8 +469,11 @@ The Completion Workflow Flowchart, the Implementation Workflow summary, the Quic
 | `reviewer_result` | object | Yes | `stride:task-reviewer` dispatch result OR self-reported skip. See Explorer/Reviewer Result Schema section. |
 | `review_report` | string | No | Structured review report from task-reviewer agent. Include when a review was performed; omit when no review was done. |
 | `skills_version` | string | No | Your skills version from SKILL.md frontmatter |
+| `claims_verified_by` | object | No | `{command, output}` enumerating every entity a per-entity documentary claim covers. Required when this change writes such a claim; omit otherwise. |
 
 **Universal claims in `completion_summary` or `completion_notes` must name the command that verified them** — a quantifier (*all*, *every*, *never*, *none*, *only*, *zero*, *nothing*, *no other*, *always*) or a totality adjective (*complete*, *fully*, *exhaustive*, *comprehensive*) is the first thing a reviewer spot-checks, and asserting one before verifying it is the recurring cause of the review-round tax. Name a command a reviewer could re-run to **falsify** it, or rewrite the claim in bounded form. The rule, its rationale (D220/D221/D226/D227) and a worked example are in [reference.md](reference.md).
+
+**A per-entity claim shipped into a document carries `claims_verified_by`.** When this change writes a factual claim about *several* entities — ports, files, rows, repositories — into a document, the rule above extends from completion prose to the shipped text: send `{"command": …, "output": …}` whose command lists **every** entity the claim covers, never a sample, and which a reviewer can re-run (a subagent's answer is not evidence). It carries an enumeration, not a file dump; it is redacted like any other completion field and is quoted as data, never re-executed. **Omitting it stays valid** — a task making no such claim, and an older plugin that never sends it, completes exactly as before. Today's server casts a fixed key list, so the field is accepted but not persisted: name the command in one line of `completion_summary` too, on the both-channels terms above. Contract: the `stride-workflow` skill's `claims-census.md`, gated from its Step 4.
 
 **WRONG — actual_files_changed as array:**
 ```json

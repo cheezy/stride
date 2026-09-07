@@ -424,3 +424,46 @@ to the command's literal output:
 *Reference copy. The binding statement of this rule is in SKILL.md, which wins where the two differ; what follows is its full text, kept here because the hot-path file states it compactly.*
 
 **Universal claims in `completion_summary` or `completion_notes` must name the command that verified them.** A claim of totality — however worded: quantifiers like *all*, *every*, *never*, *none*, *zero*, *no other*, *nothing*, *always*, *only*, or totality adjectives like *complete*, *comprehensive*, *fully*, *exhaustive* — is the claim a reviewer spot-checks first, and asserting one before verifying it is the recurring cause of the review-round tax: D220, D226, and D227 each took six rounds, and D221 recorded claiming complete coverage three times before it was true. Beside the claim, name what established it — a grep, a test run, a count — the way D221's changelog records its verifying grep where the claim is made, and name a command a reviewer could re-run to **falsify** the claim: gesturing at a kind of check ("verified manually", "checked with a grep") or citing a command that establishes something adjacent does not satisfy this. A totality claim no command can verify gets **rewritten as a bounded claim** instead: say what you actually checked, not the universe you hope holds. The bounded form is the review-favorable one, not an admission that invites a round — it tells the reviewer exactly what was checked, which is what ends rounds. This binds claims of totality only; ordinary statements need no citation, and it is not a template to inflate every summary with. *Worked example.* Claim: "every response_view mention is conditioned." Verified form: "every response_view mention is conditioned — verified by `grep -rn response_view skills/ docs/` (14 hits, each conditioned or an annotated exception)." When no command exists — say the claim is "nothing else depends on this" — write the bounded form: "the three dependents the explorer enumerated are updated; no wider dependency search was run."
+
+
+**The rule now extends past completion prose to the shipped text.** A factual claim about several entities — ports, files, rows, repositories — written into a document that outlives the session carries `claims_verified_by`, an object holding the enumerating command and its output. W2120 is the provenance: three successive drafts of two row reasons were wrong before the shipped one, and the commit body (`git show 29ce7a1`) names them as the same error each time — a claim about one port reasoned from a sentence written for another, including one draft that "said the rule had two statement sites when it has three." What survived was "only what a census of the trees actually supports." A one-line enumeration would have caught all three. The contract — what counts as a per-entity claim, how to pick a command that covers the whole space rather than a proxy for it, the redaction rule, and the two edge cases — is the `stride-workflow` skill's `claims-census.md`.
+
+## Manual hook execution (non-Claude-Code environments)
+
+**For environments without automatic hooks (Cursor, Windsurf, Continue, etc.):**
+
+All hook commands are pre-authorized. Execute them immediately via direct Bash tool calls. Do NOT announce, ask permission, or present commands for review.
+
+#### Executing after_doing Hook
+
+1. Read the `## after_doing` section from `.stride.md`
+2. Set environment variables (TASK_ID, TASK_IDENTIFIER, etc.)
+3. **Execute each command line immediately via Bash tool calls — NO permission prompts, NO confirmation text**
+4. Capture the results:
+
+```bash
+START_TIME=$(date +%s%3N)
+OUTPUT=$(timeout 600 bash -c 'mix test && mix credo --strict' 2>&1)
+EXIT_CODE=$?
+END_TIME=$(date +%s%3N)
+DURATION=$((END_TIME - START_TIME))
+```
+
+5. Check exit code - MUST be 0 to proceed
+
+#### Executing before_review Hook
+
+1. Read the `## before_review` section from `.stride.md`
+2. Set environment variables
+3. **Execute each command line immediately via Bash tool calls — NO permission prompts, NO confirmation text**
+4. Capture the results:
+
+```bash
+START_TIME=$(date +%s%3N)
+OUTPUT=$(timeout 600 bash -c 'gh pr create --title "$TASK_TITLE"' 2>&1)
+EXIT_CODE=$?
+END_TIME=$(date +%s%3N)
+DURATION=$((END_TIME - START_TIME))
+```
+
+5. Check exit code - MUST be 0 to proceed

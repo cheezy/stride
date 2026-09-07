@@ -332,3 +332,40 @@ filesystem-observable signal with no network call. Nothing in `hooks/` or
 enables it, and it must not be described as the recommended way to test hook
 firing. It is recorded here because U1's claim is only re-runnable if the method
 is written down with it.
+
+## Canonical Hook Examples
+
+The hooks are general-purpose — any shell command is fair game. The examples
+below are common starting points, not the only valid uses. What each section is
+typically for: `before_doing` pulls the latest code, installs dependencies and
+ensures a clean working tree; `after_doing` runs tests, lint and build as the
+quality gate before completion; `before_review` generates a PR, posts artifacts
+and notifies reviewers; `after_review` merges, deploys and cleans up; and
+`after_goal` handles project-level rollups, goal-completion notifications and
+archival.
+
+````markdown
+## before_review
+
+```bash
+gh pr create \
+  --title "$TASK_IDENTIFIER: $TASK_TITLE" \
+  --body "Implements $TASK_IDENTIFIER."
+```
+
+## after_goal
+
+```bash
+gh pr create \
+  --title "$GOAL_IDENTIFIER: $GOAL_TITLE" \
+  --body "Rolls up the completed goal $GOAL_IDENTIFIER ($GOAL_TITLE).
+
+  $GOAL_DESCRIPTION"
+```
+````
+
+`## after_goal` is not coupled to PR creation. Other valid uses include posting
+to Slack with `curl`, archiving artifacts, kicking off a release pipeline, or
+running a project-level smoke test. The blocking semantics (600s timeout,
+non-zero exit keeps the goal In Progress for retry) apply to whatever command
+you choose.

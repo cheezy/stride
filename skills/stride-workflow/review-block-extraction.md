@@ -85,7 +85,8 @@ if [ -z "$STRIDE_DIR" ] || [ ! -d "$STRIDE_DIR" ]; then
 else
   rm -f "$STRIDE_DIR/.review-rounds-$IDENT.json" \
        "$STRIDE_DIR/.review-$IDENT-r"*.json "$STRIDE_DIR/.review-$IDENT-r"*.md \
-       "$STRIDE_DIR/.reviewer-result-$IDENT-r"*.json
+       "$STRIDE_DIR/.reviewer-result-$IDENT-r"*.json \
+       "$STRIDE_DIR/.follow-ups-$IDENT.json"
   # Step 7 only: also "$EXPLORER_REPORT_PATH" "$PLAN_REPORT_PATH"
 fi
 ```

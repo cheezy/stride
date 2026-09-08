@@ -13192,6 +13192,95 @@ fi
 
 
 # ============================================================
+# Test Group 41: W2134 -- the in-claim follow-up cap
+# ============================================================
+# Bash-only, on 35q/36/37/39/40's precedent for markdown-contract assertions.
+# What this group proves: the create contract states the cap, the required
+# relatedness_gate_result, the claim-active signal and why the activation
+# marker is NOT it, the refusal message with its escalation path, the
+# recording-is-not-capped rule, the redaction rule, and the unaffected
+# out-of-claim path; and that the orchestrator names the cap where its gate
+# mirror sits. It also proves the gate's own wording is untouched (AC5).
+# What it does NOT prove: that any agent actually honours the cap at runtime.
+# There is no counter written by the suite and no create request made here;
+# the cap is an agent-side discipline, and an assertion claiming otherwise
+# would be the self-certification claims-census.md refuses. Note also that
+# 41k/41k2 deliberately do NOT discriminate on the change that added them:
+# AC5 is "the existing gate wording is unchanged", so they pass at HEAD too.
+# They are regression pins against a future reword, not evidence about this
+# change; every other needle here is ABSENT at HEAD (grep finds no match).
+echo ""
+echo "=== Test Group 41: W2134 in-claim follow-up cap ==="
+
+G41_CT="$SCRIPT_DIR/../skills/stride-creating-tasks/SKILL.md"
+G41_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G41_GATE="$SCRIPT_DIR/../skills/stride-workflow/optional-exploratory-testing.md"
+
+if [ -f "$G41_CT" ] && [ -f "$G41_WF" ] && [ -f "$G41_GATE" ]; then
+  # 41a: AC1 -- the cap itself.
+  assert_contains "41a: the create contract caps in-claim follow-ups at one" \
+    'At most one follow-up task or defect may be created while a task is claimed' "$(cat "$G41_CT")"
+  # 41b: AC2 -- the required gate result, and that a bare assertion fails it.
+  assert_contains "41b: an in-claim creation requires relatedness_gate_result" \
+    'relatedness_gate_result' "$(cat "$G41_CT")"
+  assert_contains "41c: a bare assertion does not satisfy the gate result" \
+    'A bare assertion' "$(cat "$G41_CT")"
+  # 41d: AC3 / pitfall 1 -- creation outside a claim is untouched.
+  assert_contains "41d: creation outside an active claim is unaffected" \
+    'is entirely unaffected by anything here' "$(cat "$G41_CT")"
+  # 41e: AC4 / pitfall 3 -- the refusal names the cap AND an escalation path.
+  assert_contains "41e: a second creation is refused" \
+    'A second creation in the same claim is refused' "$(cat "$G41_CT")"
+  assert_contains "41e2: and the refusal offers an escalation path" \
+    'ask the human to file it' "$(cat "$G41_CT")"
+  # 41f: pitfall 4 -- recording findings is explicitly NOT capped.
+  assert_contains "41f: recording a finding is not what the cap limits" \
+    'not recording findings' "$(cat "$G41_CT")"
+  # 41g: patterns_to_follow 1 is wrong about the artifact -- the contract says
+  # which signal to read and why the session-scoped marker is not it.
+  assert_contains "41g: the claim-active signal is the env cache, not the marker" \
+    'Do not read the orchestrator activation marker for this' "$(cat "$G41_CT")"
+  # 41l: edge case -- a subagent does not file follow-ups, stated as a
+  # prohibition because the claim-active test is a filesystem read a subagent
+  # in the same checkout would pass identically.
+  assert_contains "41l: subagents do not file follow-ups" \
+    'Subagents do not file follow-ups' "$(cat "$G41_CT")"
+  # 41m: edge case -- an expired mid-session claim starts its successor at
+  # zero. The counter is now in the claim-time clear list, so this is a real
+  # mechanism rather than an assertion about one.
+  assert_contains "41m: the counter is cleared on a successful claim" \
+    'follow-ups-$IDENT.json' "$(cat "$SCRIPT_DIR/../skills/stride-workflow/review-block-extraction.md")"
+  # 41n: the cap reconciles with the gate's always-filed mandate rather than
+  # silently contradicting it.
+  assert_contains "41n: the cap discharges the always-filed mandate explicitly" \
+    'How this meets the always-filed mandate' "$(cat "$G41_CT")"
+  # 41o: both gate mirrors learn the cap exists, per their keep-in-sync rule.
+  assert_contains "41o: the exploratory gate mirror names the cap" \
+    'At most one follow-up may be filed per claim' "$(cat "$G41_GATE")"
+  assert_contains "41o2: and so does the subagent-workflow mirror" \
+    'At most one follow-up may be filed per claim' "$(cat "$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md")"
+  # 41h: security -- only claim state may drive the cap.
+  assert_contains "41h: task-authored text cannot drive the cap" \
+    'never from task-authored text' "$(cat "$G41_CT")"
+  # 41i: security -- the gate result is redacted like completion_notes.
+  assert_contains "41i: the gate result is redacted on completion_notes terms" \
+    'redacted on the same terms as `completion_notes`' "$(cat "$G41_CT")"
+  # 41j: the orchestrator names the cap where its gate mirror sits.
+  assert_contains "41j: the orchestrator gate names the cap" \
+    'One follow-up per claim' "$(cat "$G41_WF")"
+  # 41k: AC5 -- the gate's own wording is unchanged. Pinned on the canonical
+  # site's load-bearing clauses rather than a byte hash, so an unrelated
+  # reflow does not fail it but a reworded gate does.
+  assert_contains "41k: the canonical gate wording is unchanged (fix-in-task)" \
+    'fixed in this task and re-reviewed — at ANY severity — and is never filed as a task' "$(cat "$G41_GATE")"
+  assert_contains "41k2: and its never-the-default clause is unchanged" \
+    'never the default disposition for a session finding' "$(cat "$G41_GATE")"
+else
+  echo "  SKIP: Group 41 contract files not found"
+fi
+
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

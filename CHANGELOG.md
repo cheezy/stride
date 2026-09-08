@@ -114,6 +114,60 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
   is left byte-identical rather than "fixed", because it is a quotation and it
   already discloses its own limit.
 
+- **A follow-up filed during an active claim is now capped at one and has to say
+  why the finding is out of scope (W2134).** `stride-creating-tasks` gains an
+  in-claim section: at most one follow-up task or defect per claim, each create
+  request carrying a top-level `relatedness_gate_result` that answers the
+  relatedness gate's own two questions — whether the responsible lines are lines
+  this task changed, and whether it is the same defect class as the change. A
+  bare "out of scope" does not satisfy it, because those questions being answered
+  rather than asserted is the whole point of the gate. The orchestrator names the
+  cap where its gate mirror sits; the gate's own wording is untouched, which
+  Test Group 41 pins on the canonical site rather than trusting the diff.
+  The reason is measured and already recorded in the gate: under the previous
+  severity-first default, one session completed 9 tasks and created 14 follow-ups
+  (D257). Filing is easier than fixing and feels responsible, so the default
+  drifts toward filing; a cap plus a required justification makes the exception
+  explicit rather than habitual.
+- **What the cap does not touch, stated so it cannot be read as discouragement.**
+  Creation **outside** an active claim — planning, decomposition, the
+  `/stride:create-tasks` entry point, a session with nothing claimed — is
+  entirely unaffected. And what is capped is creating *work items*, not recording
+  findings: findings still go into `completion_notes` at any number, and one
+  recorded there is not a lesser outcome, since it reaches the same human without
+  adding a queue item nobody owns. A second in-claim creation is refused with a
+  message that names both the cap and the way forward, because a genuinely
+  out-of-scope second Critical must not become unfileable.
+- **The task's own `patterns_to_follow` named the wrong artifact, and the
+  contract says so where it matters.** It directed the cap at the orchestrator
+  activation marker as "the signal for whether a claim is active". That marker is
+  written **once per session, not once per task** — the orchestrator states this
+  where it writes it — so a session working six tasks would share one cap across
+  all of them. The claim-scoped signal is `TASK_IDENTIFIER` in
+  `.stride-env-cache`, which the hook writes from the claim response; that also
+  satisfies the requirement that only claim state drive the cap, since nothing a
+  task's own text says can reach it. The counter mirrors the review-round
+  counter's shape — `.stride/.follow-ups-<IDENTIFIER>.json`, an identifier and an
+  integer, never finding content, with the same anchored identifier sanitation.
+  This change also **adds it to the claim-time clear list** beside the review
+  artifacts, so a claim that expired mid-session starts its successor at zero
+  instead of inheriting a stale count — the counter's clearing is a mechanism
+  here, not an assertion about one.
+- **Two collisions the cap would otherwise have created, resolved rather than
+  left.** The relatedness gate says an out-of-scope Critical is *always filed*,
+  which a cap of one can contradict on a second such finding; the create contract
+  now states that the escalation path is what discharges that mandate — the
+  finding is recorded in `completion_summary`, named as an out-of-scope Critical
+  the cap refused, and handed to a human, because the mandate is that it never
+  gets silently dropped rather than that this agent creates the row. And because
+  the gate is stated in three places under an explicit keep-in-sync obligation,
+  the cap pointer was added to all of them, not just the orchestrator's. The
+  subagent path is closed by prohibition rather than by the claim check: that
+  check is a filesystem read a subagent in the same checkout would pass
+  identically, and two subagents each reading a count of zero would both believe
+  they held the single slot.
+
+
 ### Changed
 
 - **The orchestrator is back inside its byte budget, paid for by two duplicated

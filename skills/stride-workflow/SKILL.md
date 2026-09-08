@@ -546,6 +546,7 @@ If either condition is false, **skip this step entirely and proceed to Step 6 wi
 | **Out-of-scope** finding at High / Moderate / Minor | No escalation — map per `stride-completing-tasks`, record in the existing carriers, never append to `issues[]`; a follow-up is the exception, never the default → Step 6 |
 | Finding with absent or unrecognized severity | Map to `important`, quote the raw value bounded and redacted, never escalate on it; the relatedness gate row above still decides fix-vs-file → Step 6 |
 
+**One follow-up per claim, with a recorded `relatedness_gate_result`; a second is refused** (`stride-creating-tasks`).
 
 ---
 

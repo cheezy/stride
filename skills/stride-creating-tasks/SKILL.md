@@ -153,6 +153,99 @@ Use BEFORE calling `POST /api/tasks` to create any Stride task or defect.
 **For new tasks** (being created in same request with a goal):
 Use array indices since identifiers don't exist yet - see stride-creating-goals skill.
 
+## In-claim follow-ups: the cap and `relatedness_gate_result`
+
+**This section governs creation *during an active claim* only.** Creating tasks
+outside one — planning, decomposition, `/stride:create-tasks`, a fresh session
+with nothing claimed — is entirely unaffected by anything here.
+
+### What counts as an active claim
+
+A claim is active when `TASK_IDENTIFIER` is set in `<project root>/.stride-env-cache`.
+The hook writes that file from the claim response, so it reflects claim state and
+nothing else. **Do not read the orchestrator activation marker for this.** That
+marker is written once per session, not once per task — the orchestrator says so
+where it writes it — so it cannot answer "is a claim active", and a session that
+works six tasks would share one cap across all of them. This also satisfies the
+rule that only claim state may drive the cap: `.stride-env-cache` is written by
+the hook from the server's response, never from task-authored text, so nothing a
+task's `description` or `pitfalls` says can turn the cap off or on.
+
+### The cap: one per claim
+
+**At most one follow-up task or defect may be created while a task is claimed.**
+The count lives in `.stride/.follow-ups-<IDENTIFIER>.json` — an identifier and an
+integer, never finding content — mirroring the review-round counter's shape and
+resolved the same way: walk up to the first ancestor containing `.stride.md`, and
+use the identifier only when it matches `^[A-Za-z0-9_-]+$` (anchored; a
+containment test would admit `../../etc/x`), else the numeric task id. It is
+cleared on a successful claim, like the round counter, so a claim that expired
+mid-session starts its successor at zero rather than inheriting a stale count.
+
+**A second creation in the same claim is refused**, and the refusal names the cap
+and the way forward: *"one follow-up already filed this claim; record this finding
+in `completion_notes` instead, or — if it is a genuinely out-of-scope Critical —
+say so plainly in `completion_summary` and ask the human to file it."* The
+escalation path matters: a real second out-of-scope Critical must not become
+unfileable, and a refusal that offers no route would make it so.
+
+**How this meets the always-filed mandate.** The relatedness gate says an
+out-of-scope Critical is *always filed*. That mandate and this cap collide only
+once per claim — on a second out-of-scope Critical — and the escalation path is
+what discharges it: the finding is recorded in `completion_summary`, named as an
+out-of-scope Critical the cap refused, and handed to the human to file. The
+mandate is that such a finding never gets silently dropped, not that this agent
+must be the one to create the row. A finding that reaches a human by name is
+filed in every sense the mandate cares about.
+
+**What is capped is creating work items, not recording findings.** Findings still
+go in `completion_notes` at any number, and a finding recorded there is not a
+lesser outcome — it reaches the same human without adding a queue item nobody
+owns.
+
+**Subagents do not file follow-ups.** The claim-active test is a filesystem read,
+so a subagent running in the same checkout would pass it identically — the cap is
+therefore stated as a prohibition rather than left to the check: an explorer,
+planner or reviewer never creates a task, and their own contracts already bar it.
+A finding a subagent surfaces comes back in its report and is dispositioned by the
+orchestrator, which is the one place the count is kept. This also avoids a race
+the counter could not settle, since two subagents reading a count of zero would
+both believe they held the single slot.
+
+### `relatedness_gate_result` — required for an in-claim creation
+
+An in-claim create request carries `relatedness_gate_result` at the **top level,
+beside `agent_name`** — it describes the decision to file, not the task being
+filed, so it does not belong inside the `task` object:
+
+```json
+{
+  "agent_name": "Claude Opus 5",
+  "relatedness_gate_result": "Out of scope: the responsible lines are in lib/other.ex, which this task did not change, and the defect class differs from the one this change fixed.",
+  "task": { "title": "…", "type": "defect" }
+}
+```
+
+It must **name why the finding is out of scope in the relatedness gate's own
+terms** — whether the responsible lines are lines this task changed, and whether
+it is the same defect class as the change. A bare assertion ("out of scope",
+"unrelated", "different area") does not satisfy it, because the gate's whole
+point is that those two questions get answered rather than asserted. If you
+cannot answer both, the finding is related, and a related finding is fixed in
+this task at any severity rather than filed.
+
+**Redaction.** The gate result is free text that may quote a finding, so it is
+redacted on the same terms as `completion_notes` — **no real credentials, tokens,
+customer data, or internal hostnames**, the same four categories the relatedness
+gate's own redaction rule names. Quote a `file:line` rather than the line itself
+when the line is what carries the secret.
+
+**Older plugins and older servers are unaffected.** A plugin that never sends
+`relatedness_gate_result` still creates tasks exactly as before, and a server
+that does not read it ignores it — the cap and the field are an agent-side
+discipline, not a server validation.
+
+
 ## Request Envelope: `agent_name` beside the `task` root key
 
 `POST /api/tasks` takes a **request envelope**, not a bare task object. The task fields go under the `task` root key, and `agent_name` rides at the **top level, beside it**:

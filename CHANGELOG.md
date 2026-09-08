@@ -23,6 +23,21 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Added — a canon anchor beside the Stop gate, which had none (D306)
+
+The Stop gate has been documented in `README.md` since v1.73.0, but canon entry
+`stop-hook-capability` — registered by W2140 on 2026-08-31 and required of this
+port — never got its anchor here, so `scripts/check-port-canon.sh` has reported
+this cell `MISSING` on every run since. The anchor now sits above that
+documentation, with the back-reference the `edit-site-back-reference` rule
+requires below it, naming the canon by path and the entry by id.
+
+Nothing about the gate changed and no canon version moved. Placing a missing
+anchor is compliance with the rule as written; bumping the entry would have
+marked every other port's anchor stale across the fleet.
+
 ## [1.77.0] - 2026-09-07
 
 ### Added

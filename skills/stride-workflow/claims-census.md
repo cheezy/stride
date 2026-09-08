@@ -22,12 +22,25 @@ verified them". That rule polices what you say *about* your work. This one
 polices what your work *says*, because a wrong sentence in a skill file outlives
 every completion record that described it.
 
+**What this rule does not cover: an explorer or plan report.** A report is
+deleted after a successful completion (Step 7 housekeeping), so it fails
+condition 3 — it does not outlive the session — and owes no census. Claims
+*inside* a report are governed instead by `verified_by` in
+`agents/task-explorer.md` step 6. The two rules meet at exactly one point and
+do not otherwise overlap: a report claim marked unverified may not become a
+shipped sentence, and a shipped sentence is where this rule takes over.
+
 **Explicit non-triggers**, so the requirement stays narrow enough to be obeyed:
 
 - A claim about a single entity.
 - A claim about the diff you just wrote, which a reviewer reads directly.
-- An already-bounded claim that names its own sample ("the three ports the
-  explorer enumerated", "in the two files this task touches").
+- An already-bounded claim that names its own sample ("the three ports listed
+  in this task's `key_files`", "in the two files this task touches"). The
+  sample must be one you can point at yourself — a task field, a diff, a
+  command's output. **A count taken from a subagent's report is not a bounded
+  claim, it is an unverified one**, and naming it as your sample launders it
+  into fact. See `agents/task-explorer.md` step 6: a report claim with no
+  `verified_by` is unverified, and an unverified claim is not a census.
 
 A rule that fires on everything gets routed around. This one is meant to fire on
 the sentence that says *every*, *all*, *none*, *no other*, or names a count.
@@ -117,7 +130,10 @@ What survived was "only what a census of the trees actually supports."
 **A claim about entities no command can enumerate.** Rewrite it bounded, exactly
 as the completion skill already prescribes for an unverifiable universal: "the
 three dependents the explorer enumerated are updated; no wider dependency search
-was run." A bounded claim owes no census, so **omit the field**.
+was run." A bounded claim owes no census, so **omit the field**. That form is
+acceptable only because it discloses its own limit in the same sentence; strip
+the disclosure and it becomes the laundered subagent count the non-trigger list
+above rejects.
 
 **A claim that is true of a subset and says so.** The census still enumerates the
 whole set the sentence quantifies over, because "three of the nine" is a claim

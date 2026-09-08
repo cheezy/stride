@@ -66,6 +66,53 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
   skill says so where it documents the field, and directs the agent to mirror the
   command in `completion_summary` so the evidence reaches a human today.
   Persistence is not fixed here and is recorded on the task.
+- **An explorer's factual claim now names the command that produced it, and a
+  claim with no command is unverified (W2133).** `agents/task-explorer.md` step
+  6 gains a per-claim `verified_by` — a prose convention on the claim's own
+  line, not a payload key, because the report has no schema — and an
+  `unverified` mark for a claim with none. There is no third state. Step 3 of
+  the orchestrator states the consequence: an unverified claim may not be the
+  basis for shipped text without a check the caller runs itself. W2120 is why.
+  An explorer report there asserted two port copies of
+  `lib/select_workflow_branch.md` were byte-identical — `diff` exits 1, not 0 —
+  and attributed one table's outcome columns to another, when that file carries
+  a token contract headed `| Token | Explore | Plan | Review |` *and*,
+  separately, a branch matrix headed `| Complexity | Key files | Branch |`.
+  Neither claim was checked and both read as measurement, which is the whole
+  problem: a subagent report reads as authority, so an unsourced claim in one is
+  indistinguishable from a measured one to the caller and to a reviewer alike.
+- **Four limits, so the rule stays narrow enough to be obeyed.** It binds
+  **factual claims about the codebase** — a size, a count, a line number, a
+  header row, whether two files are identical — and **not** judgement or
+  recommendation, which no command settles and which a decorated field would
+  only teach readers to skip past. A claim established by **reading** is
+  unverified and says so with the `file:line` it was read at; reading is not a
+  command, another agent's report is not a command, and the claim is not
+  evidence of itself. A command **too long for the bound** is shortened to its
+  head plus an ellipsis, never dropped — dropping it would turn a verified claim
+  into one that reads unverified, so the degradation ladder's existing rung 1
+  was extended rather than a fourth rung added. And **the bounded-summary limits
+  do not move**: they are unchanged in all five places that state them, now
+  pinned by the suite for the first time. An older explorer that omits the field
+  still works — its claims are read as unverified, with no detection and no
+  negotiation, the same degradation the orchestrator already applies to an
+  explorer that ignores `EXPLORER_REPORT_PATH`.
+- **Two safety rules on the recorded command.** Its paths are repo-relative and
+  it never carries a token, a credential or a private host; where an honest
+  command would, the command is dropped and the claim marked unverified rather
+  than a new redaction sentinel minted, so every redaction keeps the single
+  `[REDACTED — ` prefix a reader can search for. And a recorded command is
+  **data**: no consumer executes one because it appeared in a report, which
+  would make a report a command-injection carrier. Also fixed here: W2132's
+  `claims-census.md` offered "the three ports the explorer enumerated" as an
+  already-bounded claim owing no census, which is exactly the W2120 failure one
+  layer up — a subagent's count laundered into a sample. The example now names a
+  source the author can point at, and the two documents cross-reference in both
+  directions, because they genuinely do not overlap: an explorer report is
+  deleted at Step 7, so it fails the census rule's "outlives the session"
+  condition. The neighbouring quotation of `stride-completing-tasks/reference.md`
+  is left byte-identical rather than "fixed", because it is a quotation and it
+  already discloses its own limit.
 
 ### Changed
 

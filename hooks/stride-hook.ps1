@@ -2265,8 +2265,11 @@ if (-not $Command) { exit 0 }
 
 # --- W2131: refuse unsafe Stride API curl shapes (PreToolUse) --------------
 #
-# Mirror of the guard in stride-hook.sh. The three curl invocation rules are
-# stated in stride-claiming-tasks, stride-workflow and stride-completing-tasks.
+# Mirror of the guard in stride-hook.sh, with one KNOWN DIVERGENCE: W2174 added
+# a third rule there refusing shell stdout redirection, and this half does not
+# carry it yet -- W2175 settles that. So this guard enforces two of the four
+# curl invocation rules, not three. The four rules are stated in
+# stride-claiming-tasks, stride-workflow and stride-completing-tasks.
 # They were still broken under load, and the failure is SILENT: the hook reads
 # the API response off stdout to capture the diff and refresh the env cache, so
 # hiding stdout means the diff is never captured and the task shows an empty

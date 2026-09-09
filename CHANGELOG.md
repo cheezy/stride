@@ -25,6 +25,69 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Added — the curl guard now refuses shell stdout redirection (W2174)
+
+`stride_guard_unsafe_reason` in `hooks/stride-hook.sh` enforced two of the three
+rules it advertised: it refused `-o`/`--output`/`-O` and a pipe into a
+transformer, but permitted `curl … /complete -d @p.json > resp.json`. That is
+the same failure as `-o` written in different syntax, and the one most natural
+to type. It is not the last of them — a subshell (`( curl … ) > f`), a prior
+`exec > f`, and command substitution (`RESP=$(curl …)`) all still take the body
+off stdout and are still permitted, because every rule here is judged inside the
+curl's own command segment and those three move the capture outside it. Rules 1
+and 2 have always had the same blind spot; a redirect is singled out now because
+it is the shape an agent actually reaches for. It was observed in the field: with stdout redirected the hook recovered
+no response body, no `.stride/.loop-state.json` was written, and because that
+file is part of the Stop gate's only block condition the gate went blind and
+permitted a session to end with claimable work still in Ready.
+
+A third rule now refuses a stdout redirect in a Stride API curl's own command
+segment — `>`, `>file`, `>>`, `1>`, `1>>`, `&>`, `&>>`, `>|`, `> /dev/null` and
+`>&2` — with its own refusal message naming the redirect and the `tee` form.
+
+The rule reads the **file descriptor, not the operator**, which is what keeps it
+from misfiring: a `>` is a stdout redirect unless a descriptor other than `1`
+stands as its own word immediately before it. So `2>`, `2>>`, `2>&1` and `3>`
+are permitted — they leave the body on stdout, and refusing them would be a
+false positive that teaches an agent to route around the guard — while `>&2` is
+refused, because it moves the body to stderr, which is the same blindness by a
+different route. Digits that are not a standalone word are not a descriptor, so
+`…/api/tasks/1>out.json` is refused too.
+
+Scope narrows in one place, because the prefilter only asks whether
+`/api/tasks/` appears *anywhere* in the command. A single pre-pass now asks the
+narrower question — does it appear **outside every redirect target** — and Rule
+3 is gated on the answer, so `curl https://example.com/x >
+/tmp/api/tasks/9/complete` stays permitted: an ordinary curl whose output path
+merely resembles the API, and refusing it would be the false positive the
+pitfalls warn about. It drops each redirect's target word rather than requiring
+the URL to come first, so the order the two are written in does not matter.
+
+That pre-pass runs on the heredoc-stripped, continuation-joined text **before
+quote blanking**, on the same basis as the prefilter and for the same reason
+that comment already gives: a legitimate curl carries its endpoint inside
+quotes. Asking the question of the blanked command segments instead would make
+every Stride curl with a quoted URL invisible to Rule 3 — the documented call
+shape, and so precisely the call the rule exists to refuse. Rules 1 and 2 never
+re-derive whether a segment is a Stride call; they take it from the prefilter
+and judge only shape on the blanked text, and this keeps as close to that as a
+rule about redirect *targets* can.
+
+Scope is unchanged in every other respect. The rule runs last in the segment
+loop and only when no earlier rule matched, so every command refused today keeps
+the message it renders today; it is judged per command segment, so
+`curl … | tee r.json && echo done > log.txt` is still permitted; it reuses the
+existing quote-blanking and heredoc-stripping rather than adding a second
+scanner, so a `>` inside a payload or a heredoc body is not a redirect; and it
+inherits the 4000-character ceiling's stateless raw-text scan unchanged. The
+message is a static string like the three beside it — the command carries a
+Bearer token and is never interpolated, stored or echoed.
+
+`README.md` and the three skills that enumerated "three rules" now say four.
+
+**Not ported to PowerShell.** `hooks/stride-hook.ps1` keeps the two-rule guard,
+so the two halves diverge until W2175 settles it.
+
 ### Added — a canon anchor beside the Stop gate, which had none (D306)
 
 The Stop gate has been documented in `README.md` since v1.73.0, but canon entry

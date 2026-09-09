@@ -10624,8 +10624,10 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
 # Test Group 33: W2131 — the unsafe Stride API curl guard
 # ============================================================
 #
-# Mirror of the bash suite's Test Group 32. The three curl invocation rules are
-# stated in three skills and were still broken under load. The failure is
+# Mirror of the bash suite's Test Group 32, minus the stdout-redirection cases
+# it gained in W2174 -- the PowerShell guard does not carry that rule yet, and
+# W2175 settles it. The four curl invocation rules are stated in three skills
+# and were still broken under load. The failure is
 # SILENT: the hook reads the API response off stdout to capture the diff and
 # refresh the env cache, so hiding stdout drops the diff and the task completes
 # with an empty changed_files and no error.

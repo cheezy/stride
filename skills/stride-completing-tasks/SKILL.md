@@ -231,13 +231,17 @@ The plugin hook captures your `changed_files` diff and refreshes the env cache
 (`TASK_ID`, `TASK_BASE_REF`) by reading the API response off the Bash tool's
 **stdout**. Hide that response and the hook goes blind: the diff is never
 captured/uploaded and the completed task shows `changed_files: []` in Review —
-with **no error**. Three rules, always:
+with **no error**. Four rules, always:
 
 1. **Never `-o` / `--output`** (nor `-o /dev/null`). It removes the response from
    stdout entirely — the hook cannot see it.
-2. **Never pipe the response into a transformer** (`jq`, `head`, `awk`, `grep`,
+2. **Never redirect stdout** (`>`, `>>`, `1>`, `&>`, `>|`, including
+   `> /dev/null`). Same failure as `-o`, written in different syntax. `2>` and
+   `2>&1` are fine — they leave the body on stdout, the only stream the hook
+   reads.
+3. **Never pipe the response into a transformer** (`jq`, `head`, `awk`, `grep`,
    `sed`, …). They alter or truncate what the hook reads.
-3. **Always pipe into `tee`** — the one blessed pipe, because it passes stdout
+4. **Always pipe into `tee`** — the one blessed pipe, because it passes stdout
    through **unchanged** (the hook sees it) **and** writes a full copy for the
    truncation fallback. The `?response_view=slim` on this curl degrades safely:
    an older server ignores the parameter and echoes the full task, which the

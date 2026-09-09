@@ -5150,7 +5150,7 @@ fi
 
 # --- W2131: refuse unsafe Stride API curl shapes (PreToolUse) --------------
 #
-# The three curl invocation rules are stated in stride-claiming-tasks,
+# The four curl invocation rules are stated in stride-claiming-tasks,
 # stride-workflow and stride-completing-tasks. They were still broken under
 # load, and the failure is SILENT: the hook reads the API response off stdout
 # to capture the diff and refresh the env cache, so hiding stdout means the
@@ -5290,6 +5290,43 @@ stride_guard_unsafe_reason() {
     }')
   fi
 
+  # --- Rule 3 scope: is /api/tasks/ present OUTSIDE every redirect target? --
+  # The prefilter above answers "does /api/tasks/ appear anywhere at all", on
+  # the RAW text and for the reason stated there: a legitimate curl carries its
+  # endpoint inside quotes. Rule 3 needs a strictly narrower answer, because
+  # `curl https://example.com/x > /tmp/api/tasks/9/complete` is an ordinary curl
+  # whose OUTPUT PATH resembles the API, and refusing it is the false positive
+  # that teaches an agent to route around the guard.
+  #
+  # Computed ONCE, here, on $_g_joined -- heredoc bodies stripped and
+  # continuations joined, but NOT quote-blanked. That basis is load-bearing.
+  # Asking this question of the blanked SEGMENTS instead makes every Stride curl
+  # whose URL is quoted invisible to Rule 3 -- which is the shape the skills
+  # document, so the rule would have permitted precisely the call it exists to
+  # refuse. Rules 1 and 2 never re-derive Stride-ness at all; they take it from
+  # the prefilter and judge only shape on the blanked text. This is as close to
+  # that structure as a rule about redirect TARGETS can get.
+  #
+  # Above the ceiling it is forced to 1, so the oversized path stays monotone
+  # with the note above: it may only add matches, never remove one.
+  _g_scope=1
+  if [ "$_g_oversize" = "0" ]; then
+    _g_scope=0
+    _g_srest="$_g_joined"
+    while : ; do
+      case "$_g_srest" in *">"*) : ;; *) break ;; esac
+      case "${_g_srest%%>*}" in */api/tasks/*) _g_scope=1; break ;; esac
+      _g_srest="${_g_srest#*>}"
+      # Drop this redirect's target word. Whatever follows it is judged on the
+      # next pass, so a URL written after a redirect is still seen.
+      _g_srest="${_g_srest#"${_g_srest%%[! |>]*}"}"
+      case "$_g_srest" in *' '*) _g_srest="${_g_srest#* }" ;; *) _g_srest='' ;; esac
+    done
+    if [ "$_g_scope" = "0" ]; then
+      case "$_g_srest" in */api/tasks/*) _g_scope=1 ;; esac
+    fi
+  fi
+
   # --- Split into COMMAND SEGMENTS ----------------------------------------
   # `;`, `&&` and `||` end one command and begin another. Judging the whole
   # string instead is how a flag belonging to an unrelated neighbour gets
@@ -5375,6 +5412,86 @@ stride_guard_unsafe_reason() {
       done
       [ -n "$_g_hit" ] && break
     done
+
+    # --- Rule 3: never redirect stdout away from the pipeline --------------
+    # A stdout redirect takes the body off stdout exactly as -o does, so it is
+    # the same failure written in different syntax -- and it is the one form the
+    # first two rules left open, which is how a completion curl written as
+    # `curl ... /complete -d @p.json > resp.json` was permitted while the hook
+    # went blind and the session ended with claimable work still in Ready.
+    #
+    # Judged by walking the segment left to right one '>' at a time with
+    # parameter expansion only. No second scanner and no character loop: the
+    # quote blanking above has already erased every '>' that was payload rather
+    # than syntax, and a bash character walk is the cost the 4000-char ceiling
+    # exists to bound. Above that ceiling this rule inherits the same stateless
+    # raw-text scan Rules 1 and 2 do, for the same reason.
+    #
+    # A '>' is a STDOUT redirect UNLESS a file descriptor other than 1 stands as
+    # its own word immediately before it -- which is exactly how the shell reads
+    # it. `2>`, `2>>` and `2>&1` leave the body on stdout, so refusing them
+    # would be a false positive, and a false positive here teaches an agent to
+    # route around the guard rather than to fix the call. `>&2` IS refused: it
+    # moves the body to stderr, which is the same blindness reached by a
+    # different route, and it needs no special case, because it carries no fd
+    # prefix and the plain path already has it.
+    #
+    # Whether this segment is a Stride call at all is NOT re-derived here --
+    # $_g_scope answered that once, before the segment split, on unblanked text.
+    # Deriving it from $_g_seg would be wrong: segments are quote-blanked, and a
+    # legitimate curl quotes its endpoint.
+    #
+    # One residual false positive, stated rather than papered over: process
+    # substitution as a stderr target -- `2> >(tee err.log)` -- is refused. A
+    # space stands between its two '>' characters, so the second is judged on
+    # its own and carries no fd. It is accepted: the shape is vanishingly rare
+    # in a Stride API curl, and this guard is required to err on the refusing
+    # side. `2> err.log` and `2>&1`, which are the shapes agents actually
+    # write, are permitted.
+    #
+    # Guarded on an empty $_g_hit so a segment that already tripped Rule 1 or
+    # Rule 2 keeps the message it renders today, and on $_g_scope so a redirect
+    # TARGET that merely resembles an API path is not read as a Stride call.
+    if [ -z "$_g_hit" ] && [ "$_g_scope" = "1" ]; then
+      _g_rrest="$_g_seg"
+      _g_adj=0
+      while : ; do
+        case "$_g_rrest" in *">"*) : ;; *) break ;; esac
+        _g_before="${_g_rrest%%>*}"
+        _g_rrest="${_g_rrest#*>}"
+        # The second '>' of an fd-qualified `2>>` was already judged by the
+        # first, and arrives with nothing standing between the two.
+        if [ "$_g_adj" = "1" ] && [ -z "$_g_before" ]; then _g_adj=0; continue; fi
+        _g_adj=0
+        # Walk back over the digits written immediately before the '>'. Capped:
+        # a pathological digit run costs a constant, and falling out of the cap
+        # lands on the REFUSING side, the only direction this guard may err.
+        _g_pre="$_g_before"
+        _g_fd=''
+        _g_fdn=0
+        while [ "$_g_fdn" -lt 8 ]; do
+          case "$_g_pre" in
+            *[0-9]) _g_fd="${_g_pre#"${_g_pre%?}"}$_g_fd"
+                    _g_pre="${_g_pre%?}"
+                    _g_fdn=$((_g_fdn + 1)) ;;
+            *) break ;;
+          esac
+        done
+        if [ -n "$_g_fd" ]; then
+          # Digits are only a file descriptor when they stand as their own word.
+          # In `.../api/tasks/1>out.json` the 1 belongs to the URL, and the
+          # shell redirects stdout there too.
+          _g_lead="${_g_pre#"${_g_pre%?}"}"
+          case "$_g_lead" in
+            ''|' ')
+              if [ "$_g_fd" != "1" ]; then _g_adj=1; continue; fi
+              ;;
+          esac
+        fi
+        _g_hit=redirect
+        break
+      done
+    fi
   done
   case "$_g_oldopts" in *f*) : ;; *) set +f ;; esac
 
@@ -5382,6 +5499,7 @@ stride_guard_unsafe_reason() {
     flag)   printf 'flag';   return 0 ;;
     remote) printf 'remote'; return 0 ;;
     pipe)   printf 'pipe';   return 0 ;;
+    redirect) printf 'redirect'; return 0 ;;
   esac
   return 1
 }
@@ -5393,6 +5511,8 @@ if [ "$PHASE" = "pre" ]; then
       STRIDE_GUARD_MSG="Refused: this Stride API curl uses -O/--remote-name, which writes the body to a file instead of stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. The rule is stated for -o/--output, and -O is refused for the same reason rather than as a separate rule: it takes the body off stdout. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
     elif [ "$STRIDE_GUARD_KIND" = "flag" ]; then
       STRIDE_GUARD_MSG="Refused: this Stride API curl uses -o/--output, which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so hiding it drops the diff silently and the task completes with an empty changed_files and no error. Rule: never -o/--output, never pipe into a transformer (jq, head, awk, grep, sed), always pipe into tee. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
+    elif [ "$STRIDE_GUARD_KIND" = "redirect" ]; then
+      STRIDE_GUARD_MSG="Refused: this Stride API curl redirects stdout away from the pipeline (>, >>, 1>, &>, &>>, >| or >&2), which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. Redirecting stderr alone is fine: 2> and 2>&1 leave the body on stdout, and stdout is the only stream the hook reads. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
     else
       STRIDE_GUARD_MSG="Refused: this Stride API curl pipes into a transformer (jq, head, awk, grep or sed), which alters or truncates what the Stride hook reads from stdout. The hook needs the response verbatim to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. tee is the one blessed pipe, because it passes stdout through unchanged. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
     fi

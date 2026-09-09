@@ -10885,7 +10885,7 @@ fi
 # Test Group 32: W2131 -- the unsafe Stride API curl guard
 # ============================================================
 #
-# The three curl invocation rules are stated in three skills and were still
+# The four curl invocation rules are stated in three skills and were still
 # broken under load. The failure is SILENT: the hook reads the API response off
 # stdout to capture the diff and refresh the env cache, so hiding stdout drops
 # the diff and the task completes with an empty changed_files and no error.
@@ -10955,7 +10955,7 @@ assert_exit "32: a grep pipe is refused" 2 "$G32_RC"
 g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | sed s/a/b/'
 assert_exit "32: a sed pipe is refused" 2 "$G32_RC"
 
-# --- Allowed: rule 3, tee is the one blessed pipe -------------------------
+# --- Allowed: rule 4, tee is the one blessed pipe -------------------------
 g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/1/complete | tee .stride/.last-api-response.json'
 assert_exit "32: a tee pipe is allowed" 0 "$G32_RC"
 
@@ -11130,6 +11130,174 @@ assert_exit "32: a backslash-continued curl is judged as one command" 2 "$G32_RC
 
 g32_run 'curl -sS \\\n  -X PATCH https://www.stridelikeaboss.com/api/tasks/1/complete \\\n  -d @payload.json \\\n  | tee r.json'
 assert_exit "32: a backslash-continued compliant curl is allowed" 0 "$G32_RC"
+
+# --- Refused: rule 3, stdout redirection (W2174) --------------------------
+# The one shape the first two rules left open, and the one most natural to
+# type. `curl ... /complete -d @p.json > resp.json` was permitted, the hook read
+# an empty stdout, no loop state was written, and the Stop gate went blind.
+S32C='https://www.stridelikeaboss.com/api/tasks/1/complete'
+g32_run "curl -sS $S32C > out.json"
+assert_exit "32: > redirects stdout and is refused" 2 "$G32_RC"
+
+g32_run "curl -sS $S32C >out.json"
+assert_exit "32: an attached >FILE with no space is refused" 2 "$G32_RC"
+
+g32_run "curl -sS $S32C >> out.json"
+assert_exit "32: >> (append) is refused" 2 "$G32_RC"
+
+g32_run "curl -sS $S32C 1> out.json"
+assert_exit "32: 1> is refused" 2 "$G32_RC"
+
+g32_run "curl -sS $S32C 1>> out.json"
+assert_exit "32: 1>> is refused" 2 "$G32_RC"
+
+g32_run "curl -sS $S32C &> out.json"
+assert_exit "32: &> is refused" 2 "$G32_RC"
+
+g32_run "curl -sS $S32C &>> out.json"
+assert_exit "32: &>> is refused" 2 "$G32_RC"
+
+g32_run "curl -sS $S32C >| out.json"
+assert_exit "32: >| (noclobber override) is refused" 2 "$G32_RC"
+
+g32_run "curl -sS $S32C > /dev/null"
+assert_exit "32: > /dev/null is refused (it is still a hidden response)" 2 "$G32_RC"
+
+# >&2 carries no fd prefix, so the plain path already has it. It is refused for
+# the same reason -O is: the body leaves stdout, which is the only stream read.
+g32_run "curl -sS $S32C >&2"
+assert_exit "32: >&2 is refused (stdout moved to stderr is still off stdout)" 2 "$G32_RC"
+
+g32_run "curl -sS $S32C 1>&2"
+assert_exit "32: 1>&2 is refused" 2 "$G32_RC"
+
+# tee passes stdout through, and then the redirect takes it away again.
+g32_run "curl -sS $S32C | tee r.json > g.json"
+assert_exit "32: a redirect after tee still hides the body" 2 "$G32_RC"
+
+# A legitimate Stride curl QUOTES its endpoint -- that is the shape the skills
+# document and the reason the prefilter runs on raw text. Every assertion above
+# builds its command from a bare $S32C, so without these the whole rule could be
+# blind to the only form agents actually write and the suite would still be
+# green. These are the regression pin for that.
+g32_run 'curl -sS \"https://www.stridelikeaboss.com/api/tasks/1/complete\" > out.json'
+assert_exit "32: a double-quoted URL with a redirect is refused" 2 "$G32_RC"
+
+g32_run "curl -sS 'https://www.stridelikeaboss.com/api/tasks/1/complete' >> out.json"
+assert_exit "32: a single-quoted URL with a redirect is refused" 2 "$G32_RC"
+
+# The completion call exactly as stride-completing-tasks and stride-workflow
+# write it, with the redirect substituted for the blessed tee.
+g32_run 'curl -sS -X PATCH \"$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim\" -H \"Authorization: Bearer $STRIDE_API_TOKEN\" -d @payload.json > /tmp/resp.json'
+assert_exit "32: the documented completion call with a redirect is refused" 2 "$G32_RC"
+
+g32_run 'curl -sS -X PATCH \"$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim\" -d @payload.json | tee \"$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\"'
+assert_exit "32: the documented completion call with tee is still allowed" 0 "$G32_RC"
+
+# --- Allowed: stderr redirection leaves the body on stdout -----------------
+# Refusing these would be a false positive, and a false positive here teaches an
+# agent to route around the guard rather than to fix the call.
+g32_run "curl -sS $S32C 2> err.log"
+assert_exit "32: 2> alone is allowed (stderr redirection leaves the body on stdout)" 0 "$G32_RC"
+
+g32_run "curl -sS $S32C 2>> err.log"
+assert_exit "32: 2>> alone is allowed" 0 "$G32_RC"
+
+g32_run "curl -sS $S32C 2>&1"
+assert_exit "32: 2>&1 alone is allowed" 0 "$G32_RC"
+
+g32_run "curl -sS $S32C 3> other.log"
+assert_exit "32: a non-stdout fd (3>) is allowed" 0 "$G32_RC"
+
+g32_run "curl -sS $S32C 2>&1 | tee r.json"
+assert_exit "32: tee with 2>&1 on the curl is still allowed" 0 "$G32_RC"
+
+# A redirect written after 2> is still the curl's stdout.
+g32_run "curl -sS $S32C 2> err.log > out.json"
+assert_exit "32: a real > after a 2> is still refused" 2 "$G32_RC"
+
+# --- Allowed: the redirect belongs to a different command ------------------
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | tee r.json && echo done > log.txt'
+assert_exit "32: a redirect after && belongs to the neighbour and is allowed" 0 "$G32_RC"
+
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | tee r.json ; echo done > log.txt'
+assert_exit "32: a redirect after ; belongs to the neighbour and is allowed" 0 "$G32_RC"
+
+g32_run 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | tee r.json\necho done > log.txt'
+assert_exit "32: a redirect on line 2 is not attributed to the curl" 0 "$G32_RC"
+
+# The prefilter only asks whether /api/tasks/ appears anywhere in the command,
+# so an ordinary curl whose OUTPUT PATH resembles the API reaches rule 3. It is
+# not a Stride call and must not be refused -- the same judgement Test Group 5's
+# 5an makes about routing.
+g32_run 'curl -X POST https://example.com/x -d @p.json > /tmp/api/tasks/9/complete'
+assert_exit "32: a redirect target that only looks like an API path is not a Stride curl" 0 "$G32_RC"
+
+g32_run 'curl -X POST https://example.com/x 2> err.log > /tmp/api/tasks/9/complete'
+assert_exit "32: the same, with a stderr redirect walked past first" 0 "$G32_RC"
+
+# ... but a real Stride URL plus an API-looking target is still the curl's own
+# stdout, and the redirect is judged on the segment minus its target word, so
+# the order the URL and the redirect are written in does not matter.
+g32_run "curl -sS $S32C > /tmp/api/tasks/9/out"
+assert_exit "32: a Stride curl with an API-looking redirect target is still refused" 2 "$G32_RC"
+
+g32_run "curl -sS > out.json $S32C"
+assert_exit "32: a redirect written before the URL is still refused" 2 "$G32_RC"
+
+# --- Rule order: rules 1 and 2 still win, so their messages are unchanged ---
+g32_run "curl -sS -o out.json $S32C > x.json"
+assert_exit "32: -o wins over a redirect in the same segment" 2 "$G32_RC"
+assert_contains "32: the -o refusal message is unchanged by rule 3" "uses -o/--output" "$G32_ERR"
+
+g32_run "curl -sS $S32C | jq . > x.json"
+assert_exit "32: a transformer pipe wins over a redirect" 2 "$G32_RC"
+assert_contains "32: the transformer refusal message is unchanged by rule 3" "transformer" "$G32_ERR"
+
+# --- Edge cases named by the task's testing_strategy ----------------------
+# The false-positive control for the new rule, exactly as the -o case above is
+# for rule 1: quote blanking is pre-existing, but rule 3 is what is being pinned.
+g32_run 'curl -sS -d {\"note\":\"a > b\"} https://www.stridelikeaboss.com/api/tasks/1/complete | tee x.json'
+assert_exit "32: a > inside a quoted payload is not a redirect" 0 "$G32_RC"
+
+g32_run 'curl -sS -X PATCH https://www.stridelikeaboss.com/api/tasks/1/complete -d @- <<EOF | tee x.json\n{\"s\":\"a > b\"}\nEOF'
+assert_exit "32: a > inside a heredoc body is not a redirect" 0 "$G32_RC"
+
+g32_run 'curl -sS -X PATCH https://www.stridelikeaboss.com/api/tasks/1/complete -d @- <<EOF > out.json\n{\"s\":\"x\"}\nEOF'
+assert_exit "32: a real redirect on a heredoc curl is still refused" 2 "$G32_RC"
+
+g32_run 'curl -sS \\\n  https://www.stridelikeaboss.com/api/tasks/1/complete \\\n  > out.json'
+assert_exit "32: a redirect split off by a backslash continuation is refused" 2 "$G32_RC"
+
+# Above the 4000-character ceiling the guard scans raw text: heredoc stripping
+# and quote blanking are both skipped, so the scan can only gain false positives
+# and never lose a real hit. Rule 3 inherits that unchanged -- which is why the
+# quoted-payload case is NOT re-asserted here; it false-positives by design, and
+# the comment on the ceiling in stride-hook.sh is the record of that trade-off.
+G32_PAD=$(printf '%4100s' '' | tr ' ' x)
+g32_run "curl -sS -X PATCH $S32C -d note=$G32_PAD > out.json"
+assert_exit "32: a redirect past the oversize ceiling is still refused" 2 "$G32_RC"
+
+g32_run "curl -sS -X PATCH $S32C -d note=$G32_PAD | tee r.json"
+assert_exit "32: a compliant curl past the oversize ceiling is still allowed" 0 "$G32_RC"
+
+# --- The redirect refusal message, and the token ---------------------------
+g32_run "curl -sS -H Authorization:Bearer_stride_dev_G32RSECRET $S32C > g32redirtarget.json"
+assert_exit "32: a token-bearing redirect command is refused" 2 "$G32_RC"
+assert_contains "32: the redirect refusal names the redirect" "redirects stdout" "$G32_ERR"
+assert_contains "32: the redirect refusal points at the tee form" "tee" "$G32_ERR"
+assert_contains "32: the redirect refusal names the blessed capture path" "last-api-response" "$G32_ERR"
+assert_contains "32: the redirect refusal says stderr alone is fine" "2>&1" "$G32_ERR"
+
+# The command carries a Bearer token AND a distinctive redirect target; neither
+# stream may echo either, so a failure on either half is a leak.
+if printf '%s%s' "$G32_OUT" "$G32_ERR" | grep -q 'G32RSECRET\|g32redirtarget'; then
+  echo -e "  ${RED}FAIL${RESET}: 32: the redirect refusal echoed the command"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 32: the redirect refusal never echoes the command"
+  PASS=$((PASS + 1))
+fi
 
 
 # ============================================================

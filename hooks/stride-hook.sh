@@ -134,6 +134,12 @@ write_loop_state() {
 record_loop_state_for_completion() {
   local _payload _src="" _ident _needs _sid _json
 
+  # Both of these record nothing and are DELIBERATELY quiet, unlike the absent
+  # body handled below. The first is not a completion at all, so there is
+  # nothing to say about it. The second fires on every hook invocation on a
+  # machine without jq, which would make the message constant noise rather than
+  # a signal -- and a machine without jq cannot write the loop state by any
+  # path, so the condition is a property of the install, not of this call.
   [ "${HOOK_NAME:-}" = "before_review" ] || return 0
   [ "${HAS_JQ:-false}" = "true" ] || return 0
 
@@ -180,9 +186,31 @@ record_loop_state_for_completion() {
     # body of `false` or `null` — both perfectly well-formed — would be
     # announced as unparsable, and an ABSENT body would exit 4 on no input and
     # be announced as a parse failure that never happened. `empty` fails only
-    # on a genuine parse error, and the -n guard keeps "no body at all" out of
-    # a channel that claims a body failed to parse.
-    if [ -n "$_payload" ] && ! printf '%s' "$_payload" | jq empty > /dev/null 2>&1; then
+    # on a genuine parse error, and the empty-body branch below keeps "no body
+    # at all" out of a channel that claims a body failed to parse.
+    #
+    # A THIRD case, and the one this branch used to pass over in silence: no
+    # body at all. That is not the 422 the paragraph above excuses -- a 422
+    # arrives WITH a well-formed error body, which parses, records nothing, and
+    # correctly says nothing. An absent body means the response never reached
+    # this hook, so there was never anything to record, and the silence was
+    # itself the defect: .stride/.loop-state.json is not written, and the Stop
+    # gate reads a missing file as "nothing to gate on" and PERMITS the stop
+    # (stride-stop-gate.sh, its no-loop-state branch). A session can then end
+    # with claimable work still in Ready and nothing anywhere saying why. That
+    # is what happened on D306, and the reason diagnosing it cost a full
+    # session was that no channel reported it.
+    #
+    # The announcement fires for an ABSENT tool_response and for an
+    # EMPTY-BUT-PRESENT one alike, deliberately. unwrap_tool_response collapses
+    # both to the empty string, so this branch could not separate them without
+    # re-reading $INPUT -- and it should not, because they are one condition
+    # reached by two routes: no body got here, no loop state exists, and the
+    # operator's fix is the same for both. There is nothing for the two to be
+    # confused about when their treatment is identical.
+    if [ -z "$_payload" ]; then
+      printf 'stride-hook: no completion response reached this hook, so no loop state was recorded and the Stop gate cannot see this completion. Send the completion curl with its stdout intact: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"\n' >&2
+    elif ! printf '%s' "$_payload" | jq empty > /dev/null 2>&1; then
       printf 'stride-hook: completion response was unparsable; no loop state recorded\n' >&2
     fi
     return 0
@@ -190,6 +218,12 @@ record_loop_state_for_completion() {
 
   _ident=$(printf '%s' "$_src" | jq -r '.data.identifier' 2>/dev/null || echo "")
   _needs=$(printf '%s' "$_src" | jq -r '.data.needs_review' 2>/dev/null || echo "")
+  # Also deliberately quiet, and reachable only by a body that already passed
+  # loop_state_payload_ok and then carried an unsafe identifier or a
+  # non-boolean needs_review. A body that reaches here is a server contract
+  # violation rather than an operator mistake, so there is no action to name --
+  # unlike the absent body above, where the operator's own curl is both the
+  # cause and the fix.
   loop_state_safe "$_ident" || return 0
   case "$_needs" in true|false) ;; *) return 0 ;; esac
 
@@ -206,6 +240,12 @@ record_loop_state_for_completion() {
     --arg sid "$_sid" \
     '{identifier: $ident, needs_review: $needs, completed_at: $ts, session_id: $sid}' \
     2>/dev/null) || return 0
+  # The last two quiet paths, and quiet because they are unreachable in
+  # practice rather than because a message would be noise: $_needs is already
+  # pinned to the literal true or false by the case above, and $_ident has
+  # passed loop_state_safe, so this jq cannot fail on its inputs and cannot
+  # produce empty output. They stay as belt and braces against a future edit
+  # loosening one of those guards, which is the only way either could fire.
   [ -n "$_json" ] || return 0
 
   write_loop_state "$_json"

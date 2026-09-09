@@ -1524,6 +1524,10 @@ function Get-OwnCallPayload {
 # Self-gates on before_review — the hook that fires AFTER a /complete succeeds.
 # Never writes to the stdout stream: this script emits exactly one JSON
 # document, so any diagnostic would corrupt it.
+# Kept in step with the shell half: W2176 added the absent-body announcement to
+# both halves in the same change. The shell twin is
+# record_loop_state_for_completion in hooks/stride-hook.sh; the two emit the same
+# two messages on the same stream for the same three conditions.
 function Write-LoopStateForCompletion {
     param([string]$InputJson, $ResponsePayload)
 
@@ -1579,6 +1583,19 @@ function Write-LoopStateForCompletion {
         # failure, so an ABSENT body would be announced as one that failed to
         # parse. A body of `false` or `null` parses fine and stays quiet, which
         # is what the bash twin's `jq empty` also does.
+        #
+        # A THIRD case, and the one this branch used to pass over in silence: no
+        # body at all. That is not the 422 excused above -- a 422 arrives WITH a
+        # well-formed error body, which parses, records nothing, and correctly
+        # says nothing. An absent body means the response never reached this
+        # hook, so nothing could be recorded, and the Stop gate reads the missing
+        # file as "nothing to gate on" and PERMITS the stop. A session can then
+        # end with claimable work still in Ready and nothing saying why.
+        #
+        # An empty string is falsy here, so an ABSENT tool_response and an
+        # EMPTY-BUT-PRESENT one reach the same announcement -- deliberately, and
+        # exactly as the shell twin does. They are one condition by two routes:
+        # no body arrived, no loop state exists, one fix.
         $rawOwn = Get-OwnCallRawBody -InputJson $InputJson
         if ($rawOwn) {
             $ownParsed = $true
@@ -1586,6 +1603,8 @@ function Write-LoopStateForCompletion {
             if (-not $ownParsed) {
                 [Console]::Error.WriteLine('stride-hook: completion response was unparsable; no loop state recorded')
             }
+        } else {
+            [Console]::Error.WriteLine('stride-hook: no completion response reached this hook, so no loop state was recorded and the Stop gate cannot see this completion. Send the completion curl with its stdout intact: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"')
         }
         return
     }

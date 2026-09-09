@@ -25,6 +25,52 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Fixed — an unrecordable loop state is now announced instead of returning silently (W2176)
+
+`record_loop_state_for_completion` in `hooks/stride-hook.sh` announced on stderr
+only when the completion body was present but **unparsable**. When the body was
+**absent** — exactly what a redirected or `-o`'d curl produces — it returned 0
+saying nothing, so no `.stride/.loop-state.json` was written and the Stop gate,
+which reads a missing file as "nothing to gate on", permitted the stop. A
+session could end with claimable work still in Ready and no channel reporting
+why. That silence is why diagnosing D306 took a full session.
+
+The absent-body path now announces, naming what was not recorded, the
+consequence (the Stop gate cannot see this completion), and the fix (send the
+completion curl with its stdout intact). The message is a static string: neither
+the response body nor the command — both of which carry a Bearer token — is
+quoted.
+
+**Three other paths record nothing and stay quiet on purpose, and now say so in
+the code rather than by omission.** A plain 422 arrives with a well-formed error
+body, parses, and correctly records nothing; announcing every failed completion
+would be the noise that trains an operator to ignore the channel. A hook that is
+not `before_review` is not a completion. A machine without `jq` cannot write the
+loop state by any path, so the condition is a property of the install rather
+than of the call. A test now pins the 422 case to announcing *nothing at all*,
+where it previously only pinned that it was not called unparsable.
+
+**One clarification, because the distinction is easy to get backwards.**
+`unwrap_tool_response` collapses an absent `tool_response` and an
+empty-but-present one to the same empty string, so this branch cannot separate
+them without re-reading its input — and it should not. They are one condition
+reached by two routes: no body arrived, no loop state exists, and the operator's
+fix is identical. The announcement therefore fires for both.
+
+**Both halves, in one change.** `Write-LoopStateForCompletion` in
+`hooks/stride-hook.ps1` had the identical gap and gets the identical
+announcement, so the two halves emit the same two messages on the same stream
+for the same three conditions. An earlier draft of this entry recorded the
+PowerShell half as a known divergence to be closed later, on the stated grounds
+that its mirrored test pinned the silence and would need changing too. Both
+grounds were wrong: test `34l` asserted only that an absent body is not
+announced as *unparsable*, and the new message contains no such word, so it
+stayed green untouched — and W2175 immediately above is a precedent for closing
+a cross-half gap rather than recording one, for the reason it gives there, that
+`stride-hook.sh` execs `powershell.exe` on native Windows so the PowerShell half
+runs on real machines. `34l` has since been extended to pin the announcement
+rather than merely tolerate it.
+
 ### Added — the PowerShell half now carries the same curl guard, redirect rule included (W2175)
 
 **The determination, against the premise.** The task asked whether

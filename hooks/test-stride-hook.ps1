@@ -11160,6 +11160,41 @@ Assert-Eq "34l: an absent tool_response writes no loop state" 'False' "$(Test-G3
 # The diagnostic channel must stay QUIET here: there was no body at all, so
 # announcing a parse failure would claim something that never happened.
 Assert-NotContains "34l: an absent body is not announced as unparsable" 'unparsable' $g34r.Stderr
+# ...but it is not SILENT either. W2176: no body reached the hook, so no loop
+# state exists and the Stop gate -- which reads a missing file as "nothing to
+# gate on" -- permits the stop. Saying nothing is what let a session end with
+# claimable work still in Ready. Kept in step with the shell twin's 33w.
+Assert-Contains "34l: an absent body is announced" 'no completion response reached this hook' $g34r.Stderr
+Assert-Contains "34l: the announcement names the consequence for the Stop gate" 'Stop gate cannot see this completion' $g34r.Stderr
+Assert-NotContains "34l: the announcement never echoes the command" 'payload.json' $g34r.Stderr
+
+# An EMPTY-BUT-PRESENT body reaches the same announcement: an empty string is
+# falsy, so both routes land on one condition with one fix, as in the shell half.
+$g34d = New-G34Project 'l2'
+$g34r = Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd '') -Phase 'post' -ProjectDir $g34d
+Assert-Exit "34l: an empty-but-present body does not fail the hook" 0 $g34r.ExitCode
+Assert-Contains "34l: an empty-but-present body is announced on the same channel" 'no completion response reached this hook' $g34r.Stderr
+
+# A plain 422 arrives with a well-formed error body, records nothing correctly,
+# and must announce NOTHING -- not merely avoid the unparsable wording.
+$g34d = New-G34Project 'l3'
+$g34r = Invoke-HookScript -InputJson (New-G34Input 's' $g34CompleteCmd '{"errors":{"base":["bad"]}}') -Phase 'post' -ProjectDir $g34d
+Assert-Eq "34l: a plain 422 announces nothing at all" '' "$($g34r.Stderr.Trim())"
+
+# The announcement is a static literal, so no part of the token-bearing command
+# may reach either stream. The shell twin pins this at 33w; without the same pin
+# here, a later edit that interpolated the command into THIS half would ship
+# green while the same edit on the shell side failed. Pointed at loopback rather
+# than the production base URL, deliberately: the header below is written in the
+# realistic `Bearer <value>` shape so it actually exercises token resolution,
+# and a fixture that both resolves a token and names a real host is one careless
+# edit away from a suite that talks to production.
+$g34d = New-G34Project 'l4'
+$g34TokCmd = "curl -sS -X PATCH http://localhost:9/api/tasks/99/complete -H `"Authorization: Bearer stride_dev_G34LSECRETVALUE`" -d @p.json | tee r.json"
+$g34r = Invoke-HookScript -InputJson (@{ session_id = 's'; tool_input = @{ command = $g34TokCmd } } | ConvertTo-Json -Compress -Depth 4) -Phase 'post' -ProjectDir $g34d
+Assert-Exit "34l: a token-bearing absent-body command does not fail the hook" 0 $g34r.ExitCode
+Assert-NotContains "34l: the announcement never echoes the token on stderr" 'G34LSECRETVALUE' $g34r.Stderr
+Assert-NotContains "34l: the announcement never echoes the token on stdout" 'G34LSECRETVALUE' $g34r.Stdout
 
 # 34m: the full claim -> complete -> claim cycle the gate actually observes.
 $g34d = New-G34Project 'm'

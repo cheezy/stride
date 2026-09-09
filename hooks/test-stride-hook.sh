@@ -11709,6 +11709,104 @@ else
   PASS=$((PASS + 1))
 fi
 
+# 33w: an ABSENT completion body is announced. This is the case 33v's guard
+# deliberately kept out of the "unparsable" channel and which then fell through
+# to silence — the D306 shape, where a redirected or -o'd curl means the
+# response never reaches the hook at all. No loop state is written, and the
+# Stop gate reads a missing file as "nothing to gate on" and PERMITS the stop,
+# so the loop can end with claimable work still in Ready. The silence was the
+# defect: it is why diagnosing D306 cost a full session.
+G33_D=$(g33_proj w)
+G33_ERR=$(jq -nc --arg c "$G33_COMPLETE_CMD" '{session_id:"s",tool_input:{command:$c}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+assert_contains "33w: an absent completion body is announced" \
+  "no completion response reached this hook" "$G33_ERR"
+assert_contains "33w: the announcement names the consequence for the Stop gate" \
+  "Stop gate cannot see this completion" "$G33_ERR"
+assert_contains "33w: the announcement names the fix" \
+  "tee" "$G33_ERR"
+
+# The absent path must still record nothing rather than a half-written file.
+if [ -f "$G33_D/$G33_STATE" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 33w: an absent body must not write a loop state"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33w: an absent body writes no loop state"
+  PASS=$((PASS + 1))
+fi
+
+# An EMPTY-BUT-PRESENT body reaches the same announcement, and deliberately so:
+# unwrap_tool_response collapses both to the empty string, and the two have the
+# same consequence — no body got here, so no loop state exists either way. The
+# task's pitfall warns against confusing them; they are not confused, they are
+# one condition reached by two routes, with one fix.
+G33_D=$(g33_proj w2)
+G33_ERR=$(g33_input "s" "$G33_COMPLETE_CMD" '' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+assert_contains "33w: an empty-but-present body is announced on the same channel" \
+  "no completion response reached this hook" "$G33_ERR"
+
+# It must not be announced as UNPARSABLE — that channel claims a body arrived
+# and failed to parse, which is a different and misleading thing to say.
+if echo "$G33_ERR" | grep -q 'unparsable'; then
+  echo -e "  ${RED}FAIL${RESET}: 33w: an absent body must not be announced as unparsable"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33w: an absent body is not announced as unparsable"
+  PASS=$((PASS + 1))
+fi
+
+# The hook runs post-completion: the server has already accepted the work, so no
+# path here may fail it. Announcing is best-effort and must still exit 0.
+G33_D=$(g33_proj w3)
+jq -nc --arg c "$G33_COMPLETE_CMD" '{session_id:"s",tool_input:{command:$c}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+assert_exit "33w: announcing an absent body still exits 0 (best-effort)" 0 "$?"
+
+# The command carries a Bearer token and the announcement is a static string,
+# so neither the command nor any body content may appear on either stream.
+G33_D=$(g33_proj w4)
+G33_TOKCMD="curl -sS -X PATCH $G33_URL/api/tasks/99/complete -H Authorization:Bearer_stride_dev_G33WSECRET -d @payload.json | tee r.json"
+G33_BOTH=$(jq -nc --arg c "$G33_TOKCMD" '{session_id:"s",tool_input:{command:$c}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1)
+if echo "$G33_BOTH" | grep -q 'G33WSECRET'; then
+  echo -e "  ${RED}FAIL${RESET}: 33w: the announcement leaked the token"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33w: the announcement never echoes the token"
+  PASS=$((PASS + 1))
+fi
+
+# 33v2 above pins that a 422 is not called UNPARSABLE. Now that a second channel
+# exists, pin the stronger property the distinction actually rests on: a 422
+# announces NOTHING. It arrives with a well-formed error body, records nothing
+# correctly, and saying so on every failed completion would be the noise that
+# trains an operator to ignore the channel.
+G33_D=$(g33_proj w5)
+G33_ERR=$(g33_input "s" "$G33_COMPLETE_CMD" '{"errors":{"base":["bad"]}}' \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+if [ -n "$G33_ERR" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 33w: a plain 422 must announce nothing at all"
+  echo "    actual stderr: $G33_ERR"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33w: a plain 422 announces nothing at all"
+  PASS=$((PASS + 1))
+fi
+
+# And a successful completion stays quiet too — the announcement is for the
+# cases that record nothing, not a running commentary.
+G33_D=$(g33_proj w6)
+G33_ERR=$(g33_input "s" "$G33_COMPLETE_CMD" "$G33_OK" \
+  | CLAUDE_PROJECT_DIR="$G33_D" bash "$HOOK_SCRIPT" post 2>&1 >/dev/null)
+if [ -n "$G33_ERR" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 33w: a successful completion must announce nothing"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 33w: a successful completion announces nothing"
+  PASS=$((PASS + 1))
+fi
+
 # ============================================================
 # Test Group 34: W2124 Stop gate — refuse to end a session while
 # a claimable task remains

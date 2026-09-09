@@ -12398,11 +12398,15 @@ done
 # has no reachable fixture. 34h4 exercises the WRITE failure on an existing
 # directory, which is the reachable half. Asserting the shape keeps the arm from
 # regressing to a bare failure that would block instead of permit.
-assert_eq "[bash-only] 34aa: the counter mkdir permits rather than failing closed" "1" \
+# W2178 added a second block condition with its own counter write, so there are
+# now TWO such arms. Both are asserted, and the second assertion counts the arms
+# whose very next line permits rather than checking only the last one — with two
+# instances, a tail-based check could pass while the other arm failed closed.
+assert_eq "[bash-only] 34aa: the counter mkdir permits rather than failing closed" "2" \
   "$(grep -c 'mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null \\' "$STOP_GATE" | tr -d ' ')"
-assert_contains "[bash-only] 34aa: and its failure arm reports rather than exiting bare" \
-  "permit_undetermined" \
-  "$(grep -A1 'mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null \\' "$STOP_GATE" | tail -1)"
+assert_eq "[bash-only] 34aa: and EVERY failure arm reports rather than exiting bare" "2" \
+  "$(grep -A1 'mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null \\' "$STOP_GATE" \
+     | grep -c 'permit_undetermined' | tr -d ' ')"
 
 # 34p: the Windows delegation shim must PERMIT when the .ps1 is missing.
 # stride-skill-gate.sh's equivalent branches exit 2; copied verbatim into a Stop
@@ -12411,6 +12415,328 @@ assert_contains "[bash-only] 34aa: and its failure arm reports rather than exiti
 # runs. This asserts the divergence is present.
 assert_eq "34p: the shim permits when the .ps1 is missing" "2" \
   "$(awk '/Windows detected but/,/exit 0/' "$STOP_GATE" | grep -c 'exit 0')"
+
+# --- W2178: the second block condition, a claim held and never completed -----
+# Loop state is written only by a COMPLETION, so a session that claimed a task
+# and stopped before finishing it was invisible to every assertion above. That
+# is the most damaging stop there is, and it was observed in the field before
+# this condition existed.
+#
+# $1 = project dir, $2 = identifier, $3 = TASK_STATUS value
+g34_env() {
+  printf "TASK_IDENTIFIER='%s'\nTASK_STATUS='%s'\n" "$2" "$3" > "$1/.stride-env-cache"
+}
+# The field projection the gate asks for. $1=identifier $2=status
+# $3=claim_expires_at (already quoted, or the bare word null) $4=completed_by_id
+g34_show() {
+  printf '{"data":{"id":9,"identifier":"%s","status":"%s","claim_expires_at":%s,"completed_by_id":%s}}' \
+    "$1" "$2" "$3" "$4"
+}
+# Fixed offsets from now, never a timing-sensitive sleep: D241 was filed by
+# reading a load-induced wall-clock failure as a code defect.
+G34_FUT=$(date -u -v+30M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+30 min' +%Y-%m-%dT%H:%M:%SZ)
+G34_PAST=$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-30 min' +%Y-%m-%dT%H:%M:%SZ)
+
+# 34q: the block itself.
+G34_P=$(g34_proj q); G34_S="$TMPDIR_TEST/g34-q"
+g34_env "$G34_P" W2178 in_progress
+g34_stub "$G34_S" "$(g34_show W2178 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q: a held, uncompleted claim blocks the stop" 2 "$G34_RC"
+assert_contains "34q: the block names the HELD task, not a claimable one" "W2178" "$G34_ERR"
+assert_contains "34q: stdout carries a block decision" '"decision":"block"' "$G34_OUT"
+
+# The endpoint, the projection and both curl bounds — asserted on the logged
+# args rather than by timing.
+assert_contains "34q: it asks the show endpoint for the held task" \
+  "/api/tasks/W2178?fields=status,claim_expires_at,completed_by_id" "$(cat "$G34_S/curl.log")"
+assert_contains "34q: the call is connect-bounded" "connect-timeout 3" "$(cat "$G34_S/curl.log")"
+assert_contains "34q: the call is total-time-bounded" "max-time 5" "$(cat "$G34_S/curl.log")"
+# Exclusivity: this branch must never also ask /api/tasks/next.
+if grep -q '/api/tasks/next' "$G34_S/curl.log"; then
+  echo -e "  ${RED}FAIL${RESET}: 34q: the held-claim branch must not also call /api/tasks/next"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34q: at most one API call — /api/tasks/next is not called"
+  PASS=$((PASS + 1))
+fi
+# AC8 on both streams: the token must not reach either.
+if printf '%s%s' "$G34_OUT" "$G34_ERR" | grep -q "$G34_TOKEN"; then
+  echo -e "  ${RED}FAIL${RESET}: 34q: the held-claim block leaked the token"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34q: the held-claim block never echoes the token"
+  PASS=$((PASS + 1))
+fi
+
+# 34q2: THE REGRESSION THIS CONDITION IS MOST LIKELY TO CAUSE.
+# completion_changeset moves a completed task to Review and sets
+# completed_by_id but NEVER touches :status, so a task completed with
+# needs_review true still reads in_progress with a live claim expiry. Blocking
+# on status alone would refuse sanctioned terminal state 2 — the outcome the
+# design ranks worst. completed_by_id is what separates the two.
+G34_P=$(g34_proj q2); G34_S="$TMPDIR_TEST/g34-q2"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" "$(g34_show W1 in_progress "\"$G34_FUT\"" 7)" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q2: a completed task still reading in_progress permits (state 2 shape)" 0 "$G34_RC"
+assert_contains "34q2: and says why" "already been completed" "$G34_ERR"
+
+# 34q3: the ordinary end of a session — the auto-done completion leaves
+# TASK_STATUS='completed' in the cache, so the pre-filter exits with NO call.
+# This is the assertion that keeps the exit path free on nearly every stop.
+G34_P=$(g34_proj q3); G34_S="$TMPDIR_TEST/g34-q3"
+g34_env "$G34_P" W1 completed
+g34_stub "$G34_S" '{}' 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q3: TASK_STATUS not in_progress permits" 0 "$G34_RC"
+if [ -f "$G34_S/curl.log" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 34q3: the pre-filter must not spend an API call"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34q3: the pre-filter spends no API call"
+  PASS=$((PASS + 1))
+fi
+
+# 34q4: no env-cache at all — the pre-W2178 path, still silent and still free.
+G34_P=$(g34_proj q4); G34_S="$TMPDIR_TEST/g34-q4"
+g34_stub "$G34_S" '{}' 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q4: no env-cache permits" 0 "$G34_RC"
+assert_eq "34q4: and says nothing at all" "" "$G34_ERR"
+if [ -f "$G34_S/curl.log" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 34q4: no env-cache must spend no API call"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34q4: no env-cache spends no API call"
+  PASS=$((PASS + 1))
+fi
+
+# 34q5: completed, unclaimed, and expired all permit — "read the current state
+# rather than the fact that a claim once happened".
+G34_P=$(g34_proj q5); G34_S="$TMPDIR_TEST/g34-q5"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" "$(g34_show W1 completed "\"$G34_FUT\"" null)" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q5: a completed task permits" 0 "$G34_RC"
+
+G34_P=$(g34_proj q6); G34_S="$TMPDIR_TEST/g34-q6"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" "$(g34_show W1 open null null)" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q6: an unclaimed task permits" 0 "$G34_RC"
+
+G34_P=$(g34_proj q7); G34_S="$TMPDIR_TEST/g34-q7"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" "$(g34_show W1 in_progress "\"$G34_PAST\"" null)" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q7: an EXPIRED claim permits (the server counts it as claimable)" 0 "$G34_RC"
+assert_contains "34q7: and says why" "expired" "$G34_ERR"
+
+# 34q8: the fail-open matrix.
+G34_P=$(g34_proj q8); G34_S="$TMPDIR_TEST/g34-q8"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" '' 000 7
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q8: a transport failure permits" 0 "$G34_RC"
+
+G34_P=$(g34_proj q9); G34_S="$TMPDIR_TEST/g34-q9"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" '{"error":"nf"}' 404
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q9: a 404 permits (it is NOT state 1 — this call never asks the queue)" 0 "$G34_RC"
+assert_contains "34q9: and does not claim a sanctioned state" "unsanctioned" "$G34_ERR"
+
+G34_P=$(g34_proj q10); G34_S="$TMPDIR_TEST/g34-q10"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" '{}' 500
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q10: a 500 permits" 0 "$G34_RC"
+
+G34_P=$(g34_proj q11); G34_S="$TMPDIR_TEST/g34-q11"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" 'not json' 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q11: an unparsable body permits" 0 "$G34_RC"
+
+G34_P=$(g34_proj q12); G34_S="$TMPDIR_TEST/g34-q12"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" "$(g34_show W9 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q12: an answer for a DIFFERENT task permits" 0 "$G34_RC"
+assert_contains "34q12: and says so" "different task" "$G34_ERR"
+
+G34_P=$(g34_proj q13); G34_S="$TMPDIR_TEST/g34-q13"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" "$(g34_show W1 in_progress null null)" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q13: a null claim expiry permits" 0 "$G34_RC"
+
+G34_P=$(g34_proj q14); G34_S="$TMPDIR_TEST/g34-q14"
+g34_env "$G34_P" W1 in_progress
+g34_stub "$G34_S" "$(g34_show W1 in_progress '"tomorrow"' null)" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q14: a non-ISO claim expiry permits" 0 "$G34_RC"
+
+G34_P=$(g34_proj q15); G34_S="$TMPDIR_TEST/g34-q15"
+g34_env "$G34_P" W1 in_progress
+rm -f "$G34_P/.stride_auth.md"
+g34_stub "$G34_S" '{}' 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q15: no credentials permits" 0 "$G34_RC"
+
+# 34q16: a malformed pointer never reaches the network. A space fails the
+# charset; a dot segment would be normalised away by curl and aim the request
+# at another path, so it is refused by name.
+for _bad in "W 1" ".." "."; do
+  G34_P=$(g34_proj "q16$(printf '%s' "$_bad" | tr -d ' .')x"); G34_S="$TMPDIR_TEST/g34-q16"
+  rm -rf "$G34_S"
+  printf "TASK_IDENTIFIER='%s'\nTASK_STATUS='in_progress'\n" "$_bad" > "$G34_P/.stride-env-cache"
+  g34_stub "$G34_S" '{}' 200
+  g34_run "$G34_P" "$G34_S"
+  assert_exit "34q16: a malformed TASK_IDENTIFIER ('$_bad') permits" 0 "$G34_RC"
+  if [ -f "$G34_S/curl.log" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 34q16: '$_bad' must not reach the network"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 34q16: '$_bad' never reaches the network"
+    PASS=$((PASS + 1))
+  fi
+done
+
+# 34q17: the SAME budget, under a namespaced key. 2, 2, then yield — and the
+# spent record is retained, exactly as the completion condition's is.
+G34_P=$(g34_proj q17); G34_S="$TMPDIR_TEST/g34-q17"
+g34_env "$G34_P" W2178 in_progress
+g34_stub "$G34_S" "$(g34_show W2178 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G34_P" "$G34_S"; G34_R1=$G34_RC
+g34_run "$G34_P" "$G34_S"; G34_R2=$G34_RC
+g34_run "$G34_P" "$G34_S"; G34_R3=$G34_RC
+assert_eq "34q17: the held-claim budget refuses twice then yields" "2 2 0" \
+  "$G34_R1 $G34_R2 $G34_R3"
+assert_eq "34q17: the spent record is retained, not deleted" "held:W2178 2" \
+  "$(cat "$G34_P/.stride/.stop-gate-blocks" 2>/dev/null | tr -d '\n')"
+
+# 34q18: the key is namespaced so the two conditions cannot eat each other's
+# budget. After spending the held-claim budget on W2178, a COMPLETION of that
+# same task must still get its own two blocks.
+g34_state "$G34_P" W2178 false
+g34_stub "$G34_S" '{"data":{"identifier":"W99"}}' 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q18: a completion of the same task keeps its own budget" 2 "$G34_RC"
+
+# 34q19: STRIDE_ALLOW_STOP is honoured before any of this, and spends no call.
+G34_P=$(g34_proj q19); G34_S="$TMPDIR_TEST/g34-q19"
+g34_env "$G34_P" W2178 in_progress
+g34_stub "$G34_S" "$(g34_show W2178 in_progress "\"$G34_FUT\"" null)" 200
+G34_OUT=$(printf '{}' | STRIDE_ALLOW_STOP=1 CLAUDE_PROJECT_DIR="$G34_P" PATH="$G34_S:$PATH" \
+  bash "$STOP_GATE" 2>"$TMPDIR_TEST/g34.err")
+assert_exit "34q19: STRIDE_ALLOW_STOP permits a held claim" 0 "$?"
+
+# 34q20: terminal states 3 and 4 are decided BEFORE either block condition, so
+# a halt or a recorded error still permits with a claim held and no call spent.
+G34_TS_NOW=$(date -u +%s)
+for _kind in halt error; do
+  G34_P=$(g34_proj "q20$_kind"); G34_S="$TMPDIR_TEST/g34-q20$_kind"
+  rm -rf "$G34_S"
+  g34_env "$G34_P" W2178 in_progress
+  if [ "$_kind" = "halt" ]; then
+    printf '{"kind":"halt","session_id":"unknown","recorded_at_epoch":%s}' "$G34_TS_NOW" \
+      > "$G34_P/.stride/.terminal-state.json"
+  else
+    printf '{"kind":"error","session_id":"unknown","recorded_at_epoch":%s,"exit_code":1,"step":"after_doing"}' \
+      "$G34_TS_NOW" > "$G34_P/.stride/.terminal-state.json"
+  fi
+  g34_stub "$G34_S" "$(g34_show W2178 in_progress "\"$G34_FUT\"" null)" 200
+  g34_run "$G34_P" "$G34_S"
+  assert_exit "34q20: a recorded '$_kind' permits over a held claim" 0 "$G34_RC"
+  if [ -f "$G34_S/curl.log" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 34q20: '$_kind' must be decided without an API call"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 34q20: '$_kind' is decided without an API call"
+    PASS=$((PASS + 1))
+  fi
+done
+
+# 34q21: a STALE terminal-state record must not switch the gate off — it falls
+# through to the held-claim condition rather than permitting.
+G34_P=$(g34_proj q21); G34_S="$TMPDIR_TEST/g34-q21"
+g34_env "$G34_P" W2178 in_progress
+printf '{"kind":"halt","session_id":"unknown","recorded_at_epoch":%s}' "$((G34_TS_NOW - 99999))" \
+  > "$G34_P/.stride/.terminal-state.json"
+g34_stub "$G34_S" "$(g34_show W2178 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q21: a stale halt record does not disable the held-claim gate" 2 "$G34_RC"
+
+# 34q22: a TRUNCATED response must not put server bytes on stderr.
+# The status is recovered by splitting the capture on its last newline, which
+# only yields curl's -w value when curl exited 0 and appended it. On a
+# --max-time abort (exit 28) the partial, SERVER-WRITTEN body is still in the
+# capture and the split hands back its tail instead. Unshaped, that lands
+# verbatim on this hook's stderr. Both call sites shape it to three digits
+# first, and both are pinned here so a refactor that drops either arm cannot
+# leave the suite green.
+# $1 = stub dir — emits a partial body and NO trailing status, then exits 28.
+g34_stub_truncated() {
+  local _dir="$1"
+  mkdir -p "$_dir"
+  cat > "$_dir/curl" << 'G34TRUNC'
+#!/usr/bin/env bash
+echo "ARGS: $*" >> "CURLLOGPATH"
+printf '{"data":{"note":"G34TRUNCMARKER"}'
+exit 28
+G34TRUNC
+  sed -i.bak "s|CURLLOGPATH|$_dir/curl.log|" "$_dir/curl" && rm -f "$_dir/curl.bak"
+  chmod +x "$_dir/curl"
+}
+
+# The held-claim call site.
+G34_P=$(g34_proj q22); G34_S="$TMPDIR_TEST/g34-q22"
+rm -rf "$G34_S"
+g34_env "$G34_P" W2178 in_progress
+g34_stub_truncated "$G34_S"
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q22: a truncated held-claim response permits (fails open)" 0 "$G34_RC"
+assert_contains "34q22: and reports the truncation rather than the body" \
+  "the API response was truncated" "$G34_ERR"
+if printf '%s%s' "$G34_OUT" "$G34_ERR" | grep -q 'G34TRUNCMARKER'; then
+  echo -e "  ${RED}FAIL${RESET}: 34q22: server body bytes reached an output stream"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34q22: server body bytes never reach an output stream"
+  PASS=$((PASS + 1))
+fi
+
+# The completion call site, so the two cannot diverge.
+G34_P=$(g34_proj q23); G34_S="$TMPDIR_TEST/g34-q23"
+rm -rf "$G34_S"
+g34_state "$G34_P" W2123 false
+g34_stub_truncated "$G34_S"
+g34_run "$G34_P" "$G34_S"
+assert_exit "34q23: a truncated completion response permits (fails open)" 0 "$G34_RC"
+assert_contains "34q23: and reports the truncation rather than the body" \
+  "the API response was truncated" "$G34_ERR"
+if printf '%s%s' "$G34_OUT" "$G34_ERR" | grep -q 'G34TRUNCMARKER'; then
+  echo -e "  ${RED}FAIL${RESET}: 34q23: server body bytes reached an output stream"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 34q23: server body bytes never reach an output stream"
+  PASS=$((PASS + 1))
+fi
+
+# 34q24: the PowerShell half carries a Bearer token and Windows PowerShell 5.1
+# PRESERVES the Authorization header across redirects, where 6+ strips it. curl
+# is invoked without -L, so following redirects there would be a cross-half
+# divergence in exactly the token-containment property. Asserted on the source
+# text, following 34aa's precedent, because a live 3xx needs no listener to pin
+# a property that is really about the flag being present at every call site.
+# The `^[^#]*` anchor counts PARAMETER uses only — the explanatory comment above
+# the call also names the flag, and counting it made the two totals disagree by
+# one while every call was in fact bounded.
+assert_eq "34q24: every PowerShell request bounds redirects" \
+  "$(grep -c 'Invoke-WebRequest' "$SCRIPT_DIR/stride-stop-gate.ps1" | tr -d ' ')" \
+  "$(grep -c '^[^#]*-MaximumRedirection 0' "$SCRIPT_DIR/stride-stop-gate.ps1" | tr -d ' ')"
 
 
 # ============================================================

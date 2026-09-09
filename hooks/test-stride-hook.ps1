@@ -11615,6 +11615,203 @@ if (Wait-ForListener -Port $g35Port) {
 }
 Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
 
+# --- W2178: the second block condition, a claim held and never completed -----
+# Loop state is written only by a COMPLETION, so a session that claimed a task
+# and stopped before finishing it was invisible to every assertion above. The
+# mirror of the shell suite's 34q family.
+function Set-G35Env {
+    param([string]$Dir, [string]$Identifier, [string]$Status)
+    Set-Content -Path (Join-Path $Dir '.stride-env-cache') -Encoding UTF8 `
+        -Value "TASK_IDENTIFIER='$Identifier'`nTASK_STATUS='$Status'"
+}
+function New-G35Show {
+    param([string]$Identifier, [string]$Status, [string]$Expiry, [string]$CompletedBy = 'null')
+    $e = if ($Expiry) { """$Expiry""" } else { 'null' }
+    return "{""data"":{""id"":9,""identifier"":""$Identifier"",""status"":""$Status"",""claim_expires_at"":$e,""completed_by_id"":$CompletedBy}}"
+}
+# Fixed offsets from now, never a timing-sensitive sleep. Rendered with
+# InvariantCulture for the same reason the gate does: a non-Gregorian host
+# culture would otherwise produce a year the gate cannot match.
+$g35Fut = [DateTime]::UtcNow.AddMinutes(30).ToString("yyyy-MM-ddTHH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+$g35Past = [DateTime]::UtcNow.AddMinutes(-30).ToString("yyyy-MM-ddTHH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+
+# 35q: the block itself.
+$g35Port = 18951
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body (New-G35Show 'W2178' 'in_progress' $g35Fut)
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'q' "http://localhost:$g35Port"
+    Set-G35Env -Dir $g35d -Identifier 'W2178' -Status 'in_progress'
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q: a held, uncompleted claim blocks the stop" 2 $g35r.ExitCode
+    Assert-Contains "35q: the block names the HELD task" 'W2178' $g35r.Stdout
+    Assert-NotContains "35q: the token reaches neither stream" $g35Token ($g35r.Stdout + $g35r.Stderr)
+} else {
+    Write-Host "  SKIP: 35q: listener did not come up on port $g35Port"
+}
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# 35q2: THE REGRESSION THIS CONDITION IS MOST LIKELY TO CAUSE. The server's
+# completion_changeset sets completed_by_id and moves the task to Review but
+# NEVER touches :status, so a task completed with needs_review true still reads
+# in_progress with a live expiry. Blocking on status alone would refuse
+# sanctioned terminal state 2 — the outcome this design ranks worst.
+$g35Port = 18952
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body (New-G35Show 'W1' 'in_progress' $g35Fut '7')
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'q2' "http://localhost:$g35Port"
+    Set-G35Env -Dir $g35d -Identifier 'W1' -Status 'in_progress'
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q2: a completed task still reading in_progress permits" 0 $g35r.ExitCode
+    Assert-Contains "35q2: and says why" 'already been completed' $g35r.Stderr
+} else {
+    Write-Host "  SKIP: 35q2: listener did not come up on port $g35Port"
+}
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# 35q3: the pre-filter. TASK_STATUS not in_progress, and no env cache at all,
+# both permit with NO network call — the path taken on nearly every stop. No
+# listener is started, so a call would fail the assertion by hanging the gate
+# into its own timeout and still permitting; the point is that it returns fast
+# and silent.
+$g35d = New-G35Project 'q3' "http://localhost:18953"
+Set-G35Env -Dir $g35d -Identifier 'W1' -Status 'completed'
+$g35r = Invoke-G35Gate -ProjectDir $g35d
+Assert-Exit "35q3: TASK_STATUS not in_progress permits" 0 $g35r.ExitCode
+Assert-Eq "35q3: and says nothing at all" '' "$($g35r.Stderr.Trim())"
+
+$g35d = New-G35Project 'q4' "http://localhost:18953"
+$g35r = Invoke-G35Gate -ProjectDir $g35d
+Assert-Exit "35q4: no env-cache permits" 0 $g35r.ExitCode
+Assert-Eq "35q4: and says nothing at all" '' "$($g35r.Stderr.Trim())"
+
+# 35q5: completed, unclaimed and expired all permit.
+$g35Port = 18954
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body (New-G35Show 'W1' 'completed' $g35Fut)
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'q5' "http://localhost:$g35Port"
+    Set-G35Env -Dir $g35d -Identifier 'W1' -Status 'in_progress'
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q5: a completed task permits" 0 $g35r.ExitCode
+} else { Write-Host "  SKIP: 35q5" }
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+$g35Port = 18955
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body (New-G35Show 'W1' 'open' '')
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'q6' "http://localhost:$g35Port"
+    Set-G35Env -Dir $g35d -Identifier 'W1' -Status 'in_progress'
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q6: an unclaimed task permits" 0 $g35r.ExitCode
+} else { Write-Host "  SKIP: 35q6" }
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# The expiry case is also the parity pin for a real cross-half divergence:
+# ConvertFrom-Json on this half yields a [DateTime] rather than the string the
+# server sent, so a string-only read left the expiry empty and permitted EVERY
+# held claim while the shell half blocked correctly.
+$g35Port = 18956
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body (New-G35Show 'W1' 'in_progress' $g35Past)
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'q7' "http://localhost:$g35Port"
+    Set-G35Env -Dir $g35d -Identifier 'W1' -Status 'in_progress'
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q7: an EXPIRED claim permits" 0 $g35r.ExitCode
+    Assert-Contains "35q7: and says why" 'expired' $g35r.Stderr
+} else { Write-Host "  SKIP: 35q7" }
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# 35q8: the fail-open matrix.
+$g35Port = 18957
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 404 -Body '{"error":"nf"}'
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'q8' "http://localhost:$g35Port"
+    Set-G35Env -Dir $g35d -Identifier 'W1' -Status 'in_progress'
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q8: a 404 permits (it is NOT state 1 — this call never asks the queue)" 0 $g35r.ExitCode
+    Assert-Contains "35q8: and does not claim a sanctioned state" 'unsanctioned' $g35r.Stderr
+} else { Write-Host "  SKIP: 35q8" }
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+$g35Port = 18958
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 500 -Body '{}'
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'q9' "http://localhost:$g35Port"
+    Set-G35Env -Dir $g35d -Identifier 'W1' -Status 'in_progress'
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q9: a 500 permits" 0 $g35r.ExitCode
+} else { Write-Host "  SKIP: 35q9" }
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+$g35Port = 18959
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body 'not json'
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'q10' "http://localhost:$g35Port"
+    Set-G35Env -Dir $g35d -Identifier 'W1' -Status 'in_progress'
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q10: an unparsable body permits" 0 $g35r.ExitCode
+} else { Write-Host "  SKIP: 35q10" }
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+$g35Port = 18960
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body (New-G35Show 'W9' 'in_progress' $g35Fut)
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'q11' "http://localhost:$g35Port"
+    Set-G35Env -Dir $g35d -Identifier 'W1' -Status 'in_progress'
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q11: an answer for a DIFFERENT task permits" 0 $g35r.ExitCode
+    Assert-Contains "35q11: and says so" 'different task' $g35r.Stderr
+} else { Write-Host "  SKIP: 35q11" }
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# No credentials, and a malformed pointer: neither reaches the network.
+$g35d = New-G35Project 'q12' "http://localhost:18961"
+Set-G35Env -Dir $g35d -Identifier 'W1' -Status 'in_progress'
+Remove-Item -LiteralPath (Join-Path $g35d '.stride_auth.md') -Force
+$g35r = Invoke-G35Gate -ProjectDir $g35d
+Assert-Exit "35q12: no credentials permits" 0 $g35r.ExitCode
+
+foreach ($bad in @('W 1', '..', '.')) {
+    $g35d = New-G35Project "q13$($bad -replace '[^A-Za-z0-9]','')x" "http://localhost:18961"
+    Set-Content -Path (Join-Path $g35d '.stride-env-cache') -Encoding UTF8 `
+        -Value "TASK_IDENTIFIER='$bad'`nTASK_STATUS='in_progress'"
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q13: a malformed TASK_IDENTIFIER ('$bad') permits without a call" 0 $g35r.ExitCode
+    Assert-Eq "35q13: ('$bad') says nothing at all" '' "$($g35r.Stderr.Trim())"
+}
+
+# 35q14: the SAME budget under a namespaced key — 2, 2, then yield, with the
+# spent record retained.
+$g35Port = 18962
+$g35Job = Start-G35Listener -Port $g35Port -StatusCode 200 -Body (New-G35Show 'W2178' 'in_progress' $g35Fut) -Requests 4
+if (Wait-ForListener -Port $g35Port) {
+    $g35d = New-G35Project 'q14' "http://localhost:$g35Port"
+    Set-G35Env -Dir $g35d -Identifier 'W2178' -Status 'in_progress'
+    $r1 = (Invoke-G35Gate -ProjectDir $g35d).ExitCode
+    $r2 = (Invoke-G35Gate -ProjectDir $g35d).ExitCode
+    $r3 = (Invoke-G35Gate -ProjectDir $g35d).ExitCode
+    Assert-Eq "35q14: the held-claim budget refuses twice then yields" '2 2 0' "$r1 $r2 $r3"
+    Assert-Eq "35q14: the spent record is retained, not deleted" 'held:W2178 2' `
+        "$((Get-Content -LiteralPath (Join-Path $g35d '.stride/.stop-gate-blocks') -Raw).Trim())"
+} else { Write-Host "  SKIP: 35q14" }
+Remove-Job -Job $g35Job -Force -ErrorAction SilentlyContinue
+
+# 35q15: terminal states 3 and 4 are decided BEFORE either block condition, so
+# a halt or a recorded error still permits with a claim held.
+$g35Epoch = [int][double]::Parse(([DateTimeOffset][DateTime]::UtcNow).ToUnixTimeSeconds().ToString())
+foreach ($kind in @('halt', 'error')) {
+    $g35d = New-G35Project "q15$kind" "http://localhost:18963"
+    Set-G35Env -Dir $g35d -Identifier 'W2178' -Status 'in_progress'
+    $rec = if ($kind -eq 'halt') {
+        "{""kind"":""halt"",""session_id"":""unknown"",""recorded_at_epoch"":$g35Epoch}"
+    } else {
+        "{""kind"":""error"",""session_id"":""unknown"",""recorded_at_epoch"":$g35Epoch,""exit_code"":1,""step"":""after_doing""}"
+    }
+    Set-Content -Path (Join-Path $g35d '.stride/.terminal-state.json') -Encoding UTF8 -Value $rec
+    $g35r = Invoke-G35Gate -ProjectDir $g35d
+    Assert-Exit "35q15: a recorded '$kind' permits over a held claim" 0 $g35r.ExitCode
+    Assert-Contains "35q15: and names the sanctioned state ('$kind')" 'sanctioned terminal state' $g35r.Stderr
+}
+
 
 # ============================================================
 # Test Group 36: W2125 — the four terminal states, PowerShell half

@@ -50,6 +50,14 @@ $BlockCounterFile = Join-Path $ProjectDir '.stride/.stop-gate-blocks'
 # an explicit user halt, and an unrecoverable error. The full contract is in
 # skills/stride-workflow/terminal-states.md.
 $TerminalStateFile = Join-Path $ProjectDir '.stride/.terminal-state.json'
+# (W2178) Written only by stride-hook; read here as a POINTER, never as a fact:
+# its TASK_IDENTIFIER survives a completion, an unclaim, and the session that
+# wrote it. The live task is the fact.
+$EnvCacheFile = Join-Path $ProjectDir '.stride-env-cache'
+# BLOCK CONDITIONS (two, mutually exclusive — see the shell half's header for
+# the full statement). The loop-state file's presence selects which applies, so
+# at most ONE API call is made on any path: an unfollowed completion, or a held
+# claim that was never completed.
 
 # How many times this gate refuses ONE unfollowed completion before letting the
 # session go. The intended path needs exactly one block — the claim that
@@ -120,6 +128,28 @@ function Get-BlockCount {
     if (-not [int]::TryParse($parts[1], [ref]$n)) { return 0 }
     if ($n -lt 0) { return 0 }
     return $n
+}
+
+function Resolve-StrideApiUrl {
+    $auth = Join-Path $ProjectDir '.stride_auth.md'
+    $url = ''
+    if (Test-Path -LiteralPath $auth) {
+        $line = Get-Content -LiteralPath $auth | Where-Object { $_ -match '\*\*API URL:\*\*' } | Select-Object -First 1
+        if ($line -and $line -match 'https?://[A-Za-z0-9._:/-]+') { $url = $Matches[0] }
+    }
+    return $url
+}
+
+# The production `**API Token:**` line, deliberately NOT `**Local API Token:**`.
+# Never logged.
+function Resolve-StrideApiToken {
+    $auth = Join-Path $ProjectDir '.stride_auth.md'
+    $token = ''
+    if (Test-Path -LiteralPath $auth) {
+        $line = Get-Content -LiteralPath $auth | Where-Object { $_ -match '\*\*API Token:\*\*' } | Select-Object -First 1
+        if ($line -and $line -match '`([^`]+)`') { $token = $Matches[1] }
+    }
+    return $token
 }
 
 # Same charset rule the writer enforces (loop_state_safe / Test-LoopStateSafe).
@@ -308,10 +338,196 @@ if (Test-Path -LiteralPath $TerminalStateFile) {
     }
 }
 
-# --- AC3: no loop state, nothing to gate on ---
+# --- No loop state: nothing to gate on, OR a claim is still held (W2178) ---
+#
+# The loop-state file is written by a completion and cleared by ANY claim, so
+# its presence names the LAST lifecycle event. Present -> a completion, and the
+# W2124 condition below applies unchanged. Absent -> a claim with no completion
+# after it, which is the second block condition. The two are the sides of one
+# file test, so they are mutually exclusive and the gate still makes AT MOST
+# ONE bounded API call on every path.
 if (-not (Test-Path -LiteralPath $LoopStateFile)) {
-    Reset-BlockCounter
-    exit 0
+    # LOCAL PRE-FILTER, and a filter rather than the evidence. Both keys are
+    # refreshed only at claim time or from a hook's own server-supplied env, and
+    # a claim whose response did not parse KEEPS the previous task's values -- so
+    # a passing pre-filter proves nothing, and a failing one costs only a missed
+    # gate, which is the safe side. What it buys is the thing an exit-path hook
+    # cannot afford to lose: on the overwhelming majority of stops it is one
+    # file read and no network.
+    $heldIdent = ''
+    $heldInProgress = $false
+    if (Test-Path -LiteralPath $EnvCacheFile) {
+        foreach ($line in (Get-Content -LiteralPath $EnvCacheFile -ErrorAction SilentlyContinue)) {
+            # The writer single-quote escapes values. Anchored and case-sensitive,
+            # matching the shell half's grep exactly so the two cannot disagree.
+            if (-not $heldIdent -and $line -cmatch "\ATASK_IDENTIFIER='([A-Za-z0-9_.:-]{1,64})'\z") {
+                $heldIdent = $Matches[1]
+            }
+            if ($line -ceq "TASK_STATUS='in_progress'") { $heldInProgress = $true }
+        }
+    }
+    # A dot segment passes the charset and would be normalised away by the URL,
+    # aiming the request at a different path. Refused by name.
+    if ($heldIdent -eq '.' -or $heldIdent -eq '..') { $heldIdent = '' }
+    # Test-IdentifierShaped as a second gate, so a change to either shape rule
+    # cannot silently make the halves disagree.
+    if ((-not $heldIdent) -or (-not (Test-IdentifierShaped -Value $heldIdent)) -or (-not $heldInProgress)) {
+        # The pre-existing path, unchanged and still silent.
+        Reset-BlockCounter
+        exit 0
+    }
+
+    $heldBase = Resolve-StrideApiUrl
+    $heldToken = Resolve-StrideApiToken
+    if ((-not $heldBase) -or (-not $heldToken)) {
+        Exit-PermitUndetermined -Why 'no API URL or token could be resolved'
+    }
+
+    # Same shape as the completion branch's call: -UseBasicParsing and NOT
+    # -SkipHttpErrorCheck, which is 7.0+ and denylisted for 5.1 (D277), so a
+    # non-2xx throws and is caught below. Carries forward the documented
+    # divergence that this half has ONE timeout bound where the shell half has
+    # two.
+    $heldStatus = ''
+    $heldExpiry = ''
+    $heldCompletedBy = $null
+    $heldHasCompletedBy = $false
+    $heldIdentEcho = ''
+    try {
+        $heldResp = Invoke-WebRequest `
+            -Uri "$heldBase/api/tasks/$heldIdent`?fields=status,claim_expires_at,completed_by_id" `
+            -Headers @{ Authorization = "Bearer $heldToken" } `
+            -UseBasicParsing -TimeoutSec 5 -MaximumRedirection 0 -ErrorAction Stop
+        $heldStatusCode = [int]$heldResp.StatusCode
+        $heldBody = [string]$heldResp.Content
+    } catch {
+        $heldThrown = 0
+        try {
+            if ($_.Exception.PSObject.Properties.Match('Response').Count -gt 0 -and
+                $null -ne $_.Exception.Response) {
+                $heldThrown = [int]$_.Exception.Response.StatusCode
+            }
+        } catch {
+            $heldThrown = 0
+        }
+        # A 404 here is NOT state 1. State 1 is a statement about the Ready
+        # queue, which this call never asks about. It means the pointer names
+        # nothing this token can see, so no claim is held and the record is dead.
+        if ($heldThrown -eq 404) {
+            Reset-BlockCounter
+            Exit-PermitUndetermined -Why 'the claimed task could not be found'
+        }
+        if ($heldThrown -ne 0) {
+            Exit-PermitUndetermined -Why "the API answered $heldThrown"
+        }
+        Exit-PermitUndetermined -Why 'the API could not be reached, or the request timed out'
+    }
+    # No 404 arm here, deliberately -- without -SkipHttpErrorCheck every non-2xx
+    # THROWS and is handled in the catch above. What IS reachable is a 2xx that
+    # is not 200 (a 201, 202 or 204), which establishes nothing about a held
+    # claim. The shell half permits the same shape at its own non-200 test, and
+    # omitting this arm was a divergence rather than a simplification.
+    if ($heldStatusCode -ne 200) {
+        Exit-PermitUndetermined -Why "the API answered $heldStatusCode"
+    }
+    if (-not $heldBody) {
+        Exit-PermitUndetermined -Why 'the API returned an empty body'
+    }
+    try {
+        $heldDoc = $heldBody | ConvertFrom-Json -ErrorAction Stop
+        $heldData = $heldDoc.data
+        # Set-StrictMode -Version Latest makes reading an absent property a
+        # terminating error, so every field is probed before it is read.
+        # -is [string], not a bare cast: a NUMERIC identifier would satisfy the
+        # cast and compare equal below, where the shell half's jq equality
+        # refuses it. Same rule as the completion branch's own type check.
+        if ($heldData.PSObject.Properties.Match('identifier').Count -gt 0 -and
+            $heldData.identifier -is [string]) {
+            $heldIdentEcho = [string]$heldData.identifier
+        }
+        if ($heldData.PSObject.Properties.Match('status').Count -gt 0) {
+            $heldStatus = [string]$heldData.status
+        }
+        # ConvertFrom-Json on this half does NOT hand back the string the server
+        # sent: it recognises the ISO-8601 shape and yields a [DateTime]. The
+        # shell half compares the raw text, so taking only the string case here
+        # left the expiry empty on every real response and permitted every held
+        # claim -- the halves agreeing on the code and disagreeing on the
+        # behaviour. Both types are handled, and a DateTime is rendered back to
+        # the same fixed-width UTC text the shell half compares.
+        if ($heldData.PSObject.Properties.Match('claim_expires_at').Count -gt 0) {
+            if ($heldData.claim_expires_at -is [string]) {
+                $heldExpiry = [string]$heldData.claim_expires_at
+            } elseif ($heldData.claim_expires_at -is [DateTime]) {
+                $heldExpiry = ([DateTime]$heldData.claim_expires_at).ToUniversalTime().ToString(
+                    "yyyy-MM-ddTHH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+            }
+        }
+        if ($heldData.PSObject.Properties.Match('completed_by_id').Count -gt 0) {
+            $heldHasCompletedBy = $true
+            $heldCompletedBy = $heldData.completed_by_id
+        }
+    } catch {
+        Exit-PermitUndetermined -Why 'the claimed task response could not be parsed'
+    }
+    # The projection always carries id and identifier, so the answer can be
+    # checked against the question. A gate that cannot say which task it is
+    # refusing over must not refuse.
+    if ($heldIdentEcho -cne $heldIdent) {
+        Exit-PermitUndetermined -Why 'the API answered for a different task'
+    }
+
+    # THREE conditions, each separately load-bearing -- see the shell half for
+    # the reasoning, which was verified against the server rather than assumed.
+    if ($heldStatus -cne 'in_progress') {
+        Reset-BlockCounter
+        Exit-PermitUndetermined -Why 'the claimed task is no longer in progress'
+    }
+    if ($heldHasCompletedBy -and $null -ne $heldCompletedBy) {
+        Reset-BlockCounter
+        Exit-PermitUndetermined -Why 'the claimed task has already been completed'
+    }
+    # Fixed-width ISO-8601 UTC on both sides, compared ORDINALLY as text.
+    # InvariantCulture and CompareOrdinal are both load-bearing: a th-TH host
+    # renders the year as 2569 under the current culture, and PowerShell's own
+    # -gt on strings is culture-aware, so either default would read every claim
+    # as unexpired. The shell half compares the same two fixed-width strings.
+    if ($heldExpiry -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\z') {
+        Reset-BlockCounter
+        Exit-PermitUndetermined -Why 'the claimed task records no usable claim expiry'
+    }
+    $heldNow = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+    if ([string]::CompareOrdinal($heldExpiry, $heldNow) -le 0) {
+        Reset-BlockCounter
+        Exit-PermitUndetermined -Why 'the claim on the task has expired'
+    }
+
+    # --- The SAME re-block budget, namespaced by fact rather than by file ---
+    # The key is held:<IDENT>, not the bare identifier, so a session that burned
+    # its budget refusing a held claim on W1 does not then find the budget spent
+    # when it completes W1 and skip a real gate. One counter, one file, two keys.
+    $heldKey = "held:$heldIdent"
+    $heldCount = Get-BlockCount -Key $heldKey
+    if (($heldCount + 1) -gt $MaxBlocks) {
+        [Console]::Error.WriteLine("stride-stop-gate: already refused this stop $heldCount time(s) for $heldIdent")
+        Exit-PermitUndetermined -Why 'the re-block budget for this held claim is spent'
+    }
+    # WRITE FIRST, AND PERMIT IF THE WRITE FAILS -- a block this gate cannot
+    # count is a block it cannot bound, and an unbounded block wedges the
+    # session.
+    try {
+        $heldDir = Split-Path -Parent $BlockCounterFile
+        if (-not (Test-Path -LiteralPath $heldDir)) {
+            New-Item -ItemType Directory -Path $heldDir -Force -ErrorAction Stop | Out-Null
+        }
+        Set-Content -LiteralPath $BlockCounterFile -Value ("{0} {1}" -f $heldKey, ($heldCount + 1)) `
+            -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Exit-PermitUndetermined -Why 'the block count could not be recorded, and an uncounted block cannot be bounded'
+    }
+
+    # The identifier named is the HELD task -- the one the agent must act on.
+    Invoke-Block -Reason "Stride: this session cannot end yet. Task $heldIdent is still claimed by this session and was never completed. Complete it with the stride:stride-workflow skill, or release it with POST /api/tasks/$heldIdent/unclaim — either clears this gate. To stop anyway, stop again — this gate refuses at most $MaxBlocks time(s) for one held claim — or set STRIDE_ALLOW_STOP=1."
 }
 
 # --- AC6, plus every malformed-file case, in one rule ---
@@ -357,27 +573,6 @@ if (-not (Test-IdentifierShaped -Value $completedIdent)) {
 }
 
 # --- The network leg, reached only when the local evidence already says block ---
-function Resolve-StrideApiUrl {
-    $auth = Join-Path $ProjectDir '.stride_auth.md'
-    $url = ''
-    if (Test-Path -LiteralPath $auth) {
-        $line = Get-Content -LiteralPath $auth | Where-Object { $_ -match '\*\*API URL:\*\*' } | Select-Object -First 1
-        if ($line -and $line -match 'https?://[A-Za-z0-9._:/-]+') { $url = $Matches[0] }
-    }
-    return $url
-}
-
-# The production `**API Token:**` line, deliberately NOT `**Local API Token:**`.
-# Never logged.
-function Resolve-StrideApiToken {
-    $auth = Join-Path $ProjectDir '.stride_auth.md'
-    $token = ''
-    if (Test-Path -LiteralPath $auth) {
-        $line = Get-Content -LiteralPath $auth | Where-Object { $_ -match '\*\*API Token:\*\*' } | Select-Object -First 1
-        if ($line -and $line -match '`([^`]+)`') { $token = $Matches[1] }
-    }
-    return $token
-}
 
 $apiBase = Resolve-StrideApiUrl
 $token = Resolve-StrideApiToken
@@ -387,12 +582,21 @@ if (-not $apiBase -or -not $token) { Exit-PermitUndetermined -Why 'no API URL or
 # -UseBasicParsing and NOT -SkipHttpErrorCheck: that parameter is 7.0+ and is
 # denylisted for 5.1 compatibility (D277), so a non-2xx THROWS on both hosts
 # and is caught below, which is the permit path anyway.
+#
+# -MaximumRedirection 0 because this request carries a Bearer token and Windows
+# PowerShell 5.1 -- the runtime this file targets -- PRESERVES the Authorization
+# header across redirects, including cross-origin ones; header stripping arrived
+# only in PowerShell 6. Without it a 302 from the configured host replays the
+# user's token to a host of the redirector's choosing. curl is invoked without
+# -L on the other half, so following redirects here was also a divergence in
+# exactly the token-containment property this gate is required to hold. A 3xx
+# now throws into the catch and permits, matching curl.
 $statusCode = 0
 $body = ''
 try {
     $resp = Invoke-WebRequest -Uri "$apiBase/api/tasks/next" `
         -Headers @{ Authorization = "Bearer $token" } `
-        -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+        -UseBasicParsing -TimeoutSec 5 -MaximumRedirection 0 -ErrorAction Stop
     $statusCode = [int]$resp.StatusCode
     $body = [string]$resp.Content
 } catch {

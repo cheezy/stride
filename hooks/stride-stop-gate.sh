@@ -9,16 +9,32 @@
 # state machine resolves itself: block -> agent claims -> claim clears the
 # state -> the next stop is permitted.
 #
-# INPUT CONTRACT — $CLAUDE_PROJECT_DIR/.stride/.loop-state.json, written on a
+# INPUT CONTRACT — two files, and they carry different weight.
+# .stride-env-cache is a POINTER, never a fact: its TASK_IDENTIFIER survives a
+# completion, an unclaim, and the session that wrote it, and a claim whose
+# response did not parse leaves the PREVIOUS task's values in place. It is used
+# only to decide whether to ask the server, and the server's answer is the fact.
+#
+# $CLAUDE_PROJECT_DIR/.stride/.loop-state.json, written on a
 # successful completion and cleared on ANY claim. Exactly four keys:
 #   {"identifier":"W123","needs_review":false,"completed_at":"<ISO8601-Z>","session_id":"<id>"}
 # Its presence means: a completion happened and no claim has followed it yet.
 # Its ABSENCE means there is nothing to gate on, which is the common case and
 # the cheapest path through this script — one file test and no network.
 #
-# BLOCK CONDITION (the only one):
-#   the loop-state file exists AND its needs_review is the JSON boolean false
-#   AND GET /api/tasks/next answers 200 with a non-empty .data.identifier.
+# BLOCK CONDITIONS (two, and mutually exclusive). The loop-state file's
+# presence selects which applies, so at most ONE API call is made on any path:
+#   1. UNFOLLOWED COMPLETION — the loop-state file exists AND its needs_review
+#      is the JSON boolean false AND GET /api/tasks/next answers 200 with a
+#      non-empty .data.identifier.
+#   2. HELD CLAIM (W2178) — the loop-state file does NOT exist AND
+#      .stride-env-cache names an identifier-shaped TASK_IDENTIFIER with
+#      TASK_STATUS='in_progress' AND GET /api/tasks/:id?fields=... answers 200
+#      for that same task with status in_progress, a null completed_by_id, and
+#      a claim_expires_at still in the future.
+#   Condition 2 exists because loop state is written only by a COMPLETION, so a
+#   session that claims a task and stops before finishing it was invisible to
+#   condition 1 — the most damaging stop of all, and the one actually observed.
 #
 # PERMIT — everything else, without exception. Named, because "fails open" is
 # a claim that has to be discharged case by case:
@@ -31,6 +47,13 @@
 #     and "non-200" are the same wire event and both permit here.
 #   - a 200 whose body is not JSON, or carries no usable identifier
 #   - the re-block guard's budget is spent, or its own state cannot be written
+#   and, for the held-claim condition specifically:
+#   - no .stride-env-cache, or no identifier-shaped TASK_IDENTIFIER in it, or a
+#     TASK_IDENTIFIER of `.` or `..`, or TASK_STATUS is not 'in_progress'
+#     (these four are the silent, zero-call path taken on nearly every stop)
+#   - the held task is not in_progress, or carries a completed_by_id, or its
+#     claim has expired, or it records no usable expiry
+#   - the API answers for a different task than the one asked about
 #
 # The harness helps: only exit 2 blocks. A timeout, a crash, a non-zero exit,
 # or malformed stdout all permit the stop. Every permit path below is still
@@ -64,6 +87,13 @@ BLOCK_COUNTER_FILE="$PROJECT_DIR/.stride/.stop-gate-blocks"
 # file: they already follow from the loop-state file plus the API. The full
 # contract is in skills/stride-workflow/terminal-states.md.
 TERMINAL_STATE_FILE="$PROJECT_DIR/.stride/.terminal-state.json"
+# (W2178) Written only by stride-hook.sh, and read here as a POINTER, never as
+# a fact: its TASK_IDENTIFIER survives a completion, an unclaim, and the session
+# that wrote it, and a claim whose response did not parse leaves the PREVIOUS
+# task's values in place. The live task is the fact. NEVER sourced -- it carries
+# server-controlled values, and this gate parses one line rather than executing
+# a file.
+ENV_CACHE_FILE="$PROJECT_DIR/.stride-env-cache"
 
 # How many times this gate will refuse ONE unfollowed completion before letting
 # the session go. The intended path needs exactly one block — the claim that
@@ -149,6 +179,27 @@ if [ "${STRIDE_ALLOW_STOP:-}" = "1" ]; then
   # sanctioned state was established" is exactly what the record should show.
   permit_undetermined "STRIDE_ALLOW_STOP=1 was set"
 fi
+
+# Resolvers duplicated from stride-hook.sh:791-816 rather than sourced: sourcing
+# that file would execute 6,000 lines of file-scope code on every Stop event.
+# Both functions are pure and stable.
+resolve_stride_api_url() {
+  local _auth="$PROJECT_DIR/.stride_auth.md" _url=""
+  if [ -f "$_auth" ]; then
+    _url=$(grep -E '\*\*API URL:\*\*' "$_auth" | grep -oE 'https?://[A-Za-z0-9._:/-]+' | head -n 1 || true)
+  fi
+  printf '%s' "$_url"
+}
+
+# The production `**API Token:**` line, deliberately NOT `**Local API Token:**`
+# (the pattern does not match the longer label). Prints the token; never logs it.
+resolve_stride_api_token() {
+  local _auth="$PROJECT_DIR/.stride_auth.md" _tok=""
+  if [ -f "$_auth" ]; then
+    _tok=$(grep -E '\*\*API Token:\*\*' "$_auth" | grep -oE '`[^`]+`' | head -n 1 | tr -d '`' || true)
+  fi
+  printf '%s' "$_tok"
+}
 
 # --- Counter helpers ---
 # Plain text, one line, "<identifier> <count>". Not JSON: the read then needs
@@ -295,10 +346,164 @@ if [ -f "$TERMINAL_STATE_FILE" ]; then
   fi
 fi
 
-# --- AC3: no loop state, nothing to gate on ---
+# --- No loop state: nothing to gate on, OR a claim is still held (W2178) ---
+#
+# The loop-state file is written by a completion and cleared by ANY claim, so
+# its presence names the LAST lifecycle event. Present -> a completion, and the
+# W2124 condition below applies unchanged. Absent -> a claim with no completion
+# after it, which is the second block condition. The two are the sides of one
+# file test, so they are mutually exclusive and the gate still makes AT MOST
+# ONE bounded API call on every path.
 if [ ! -f "$LOOP_STATE_FILE" ]; then
-  reset_block_counter
-  exit 0
+  # LOCAL PRE-FILTER, and a filter rather than the evidence. Both keys are
+  # refreshed only at claim time or from a hook's own server-supplied env, and
+  # a claim whose response did not parse KEEPS the previous task's values -- so
+  # a passing pre-filter proves nothing, and a failing one costs only a missed
+  # gate, which is the safe side. What it buys is the thing an exit-path hook
+  # cannot afford to lose: on the overwhelming majority of stops it is one grep
+  # and no network, exactly as before this condition existed.
+  #
+  # The pattern IS the shape check. The writer single-quote escapes values, so
+  # an identifier renders as TASK_IDENTIFIER='W123'; the anchored charset is
+  # the one the identifier tests below already enforce, so a non-conforming
+  # value is never extracted rather than extracted and then rejected.
+  HELD_IDENT=$(grep -m1 -E "^TASK_IDENTIFIER='[A-Za-z0-9_.:-]{1,64}'$" \
+    "$ENV_CACHE_FILE" 2>/dev/null | sed -e "s/^TASK_IDENTIFIER='//" -e "s/'$//" || printf '')
+  # A dot segment passes the charset and would be normalised away by curl,
+  # aiming the request at a different path. Refused by name.
+  case "$HELD_IDENT" in '.'|'..') HELD_IDENT='' ;; esac
+  if [ -z "$HELD_IDENT" ] \
+    || ! grep -qE "^TASK_STATUS='in_progress'$" "$ENV_CACHE_FILE" 2>/dev/null; then
+    # The pre-existing path, unchanged and still silent: this fires on every
+    # Stop in every project that is not mid-claim, and a line here would be
+    # gate chatter on every stop in the repository.
+    reset_block_counter
+    exit 0
+  fi
+
+  # --- The bounded call, bounded the same three ways as the one below ---
+  command -v curl > /dev/null 2>&1 || permit_undetermined "curl is not available"
+  _held_base=$(resolve_stride_api_url)
+  _held_token=$(resolve_stride_api_token)
+  if [ -z "$_held_base" ] || [ -z "$_held_token" ]; then
+    permit_undetermined "no API URL or token could be resolved"
+  fi
+  # A field projection, not the full document. curl's own stderr is discarded
+  # so it can never reach this hook's stderr, and the token reaches only the
+  # header argument.
+  _held_resp=$(curl -s --connect-timeout 3 --max-time 5 -w '\n%{http_code}' \
+    -H "Authorization: Bearer $_held_token" \
+    "$_held_base/api/tasks/$HELD_IDENT?fields=status,claim_expires_at,completed_by_id" \
+    2>/dev/null || printf '')
+  [ -n "$_held_resp" ] \
+    || permit_undetermined "the API could not be reached, or the request timed out"
+  _held_code="${_held_resp##*$'\n'}"
+  _held_body="${_held_resp%$'\n'*}"
+  # The status is recovered by splitting on the last newline, which only yields
+  # curl's -w value when curl exited 0 and appended it. On a truncated response
+  # (--max-time 5 against a slow or large body exits 28) the partial,
+  # SERVER-WRITTEN body is still in $_held_resp and this split hands back its
+  # tail instead. Unshaped, that lands verbatim on stderr in the message below.
+  # Shape it first: three digits or nothing. This mirrors the PowerShell half,
+  # which casts to [int] and so was never exposed.
+  case "$_held_code" in
+    [0-9][0-9][0-9]) ;;
+    *) permit_undetermined "the API response was truncated" ;;
+  esac
+  if [ "$_held_code" != "200" ]; then
+    # A 404 here is NOT state 1. State 1 is a statement about the Ready queue,
+    # which this call never asks about. It means the pointer names nothing this
+    # token can see, so no claim is held and the record is dead.
+    if [ "$_held_code" = "404" ]; then
+      reset_block_counter
+      permit_undetermined "the claimed task could not be found"
+    fi
+    if [ "$_held_code" = "000" ]; then
+      permit_undetermined "the API could not be reached, or the request timed out"
+    fi
+    permit_undetermined "the API answered $_held_code"
+  fi
+  printf '%s' "$_held_body" | jq -e 'type == "object"' > /dev/null 2>&1 \
+    || permit_undetermined "the claimed task response could not be parsed"
+  # The projection always carries id and identifier, so the answer can be
+  # checked against the question. A gate that cannot say which task it is
+  # refusing over must not refuse.
+  printf '%s' "$_held_body" \
+    | jq -e --arg id "$HELD_IDENT" 'try (.data.identifier == $id) catch false' > /dev/null 2>&1 \
+    || permit_undetermined "the API answered for a different task"
+
+  # THREE conditions, each separately load-bearing. Verified against the server
+  # in this repository rather than assumed:
+  #   status -- necessary but NOT sufficient. completion_changeset sets
+  #     completed_by_id and moves the task to Review but NEVER touches :status,
+  #     so a task completed with needs_review true sits in Review still reading
+  #     in_progress. Blocking on status alone would refuse sanctioned terminal
+  #     state 2, which the pitfalls rank as the worst outcome here.
+  #   completed_by_id -- the discriminator that separates a held claim from a
+  #     completion awaiting review. Set on BOTH completion paths.
+  #   claim_expires_at -- the server's own claimable set is
+  #     `status == :open or (status == :in_progress and claim_expires_at < now)`,
+  #     so an expired claim is already released to whoever asks next and is not
+  #     held. It also gives the whole condition a hard staleness ceiling: no
+  #     env cache older than the claim window can produce a block.
+  if ! printf '%s' "$_held_body" \
+    | jq -e 'try (.data.status == "in_progress") catch false' > /dev/null 2>&1; then
+    reset_block_counter
+    permit_undetermined "the claimed task is no longer in progress"
+  fi
+  if ! printf '%s' "$_held_body" \
+    | jq -e 'try ((.data | has("completed_by_id") | not) or .data.completed_by_id == null) catch false' \
+      > /dev/null 2>&1; then
+    reset_block_counter
+    permit_undetermined "the claimed task has already been completed"
+  fi
+  # Fixed-width ISO-8601 UTC on both sides, compared as TEXT. No date
+  # arithmetic and no `date -d`, which is GNU-only and would make this branch
+  # behave differently on macOS than on Linux. The server renders
+  # :utc_datetime at second precision, so the value is exactly 20 characters
+  # and lexical order IS chronological order. Anything not of that shape
+  # permits.
+  _held_exp=$(printf '%s' "$_held_body" \
+    | jq -r 'try (if (.data.claim_expires_at | type) == "string" then .data.claim_expires_at else "" end) catch ""' \
+      2>/dev/null || printf '')
+  case "$_held_exp" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+    *) reset_block_counter
+       permit_undetermined "the claimed task records no usable claim expiry" ;;
+  esac
+  _held_now=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')
+  [ -n "$_held_now" ] || permit_undetermined "the current time could not be read"
+  if ! [ "$_held_exp" \> "$_held_now" ]; then
+    reset_block_counter
+    permit_undetermined "the claim on the task has expired"
+  fi
+
+  # --- The SAME re-block budget, namespaced by fact rather than by file ---
+  # The key is held:<IDENT>, not the bare identifier. The two branches state
+  # two different facts about the same task, and with a bare key a session that
+  # burned its budget refusing a held claim on W1 would then find the budget
+  # already spent when it completed W1 and skip a real gate. One counter, one
+  # file, two keys.
+  _held_key="held:$HELD_IDENT"
+  _held_count=$(read_block_count "$_held_key")
+  if [ "$((_held_count + 1))" -gt "$STOP_GATE_MAX_BLOCKS" ]; then
+    printf 'stride-stop-gate: already refused this stop %s time(s) for %s\n' \
+      "$_held_count" "$HELD_IDENT" >&2
+    permit_undetermined "the re-block budget for this held claim is spent"
+  fi
+  # WRITE FIRST, AND PERMIT IF THE WRITE FAILS -- the same rule and the same
+  # reason as the completion branch: a block this gate cannot count is a block
+  # it cannot bound, and an unbounded block wedges the session.
+  mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null \
+    || permit_undetermined "the .stride directory could not be created"
+  if ! printf '%s %s\n' "$_held_key" "$((_held_count + 1))" > "$BLOCK_COUNTER_FILE" 2>/dev/null; then
+    permit_undetermined "the block count could not be recorded, and an uncounted block cannot be bounded"
+  fi
+
+  # The identifier named is the HELD task -- the one the agent must act on.
+  # Note the deliberate inversion from the completion branch, which names the
+  # CLAIMABLE task and never the completed one.
+  emit_block "Stride: this session cannot end yet. Task ${HELD_IDENT} is still claimed by this session and was never completed. Complete it with the stride:stride-workflow skill, or release it with POST /api/tasks/${HELD_IDENT}/unclaim — either clears this gate. To stop anyway, stop again — this gate refuses at most ${STOP_GATE_MAX_BLOCKS} time(s) for one held claim — or set STRIDE_ALLOW_STOP=1."
 fi
 
 # --- AC6: the last completion needs human review, so the loop legitimately stops ---
@@ -338,27 +543,6 @@ esac
 # --- The network leg, reached only when the local evidence already says block ---
 command -v curl > /dev/null 2>&1 || permit_undetermined "curl is not available"
 
-# Resolvers duplicated from stride-hook.sh:791-816 rather than sourced: sourcing
-# that file would execute 6,000 lines of file-scope code on every Stop event.
-# Both functions are pure and stable.
-resolve_stride_api_url() {
-  local _auth="$PROJECT_DIR/.stride_auth.md" _url=""
-  if [ -f "$_auth" ]; then
-    _url=$(grep -E '\*\*API URL:\*\*' "$_auth" | grep -oE 'https?://[A-Za-z0-9._:/-]+' | head -n 1 || true)
-  fi
-  printf '%s' "$_url"
-}
-
-# The production `**API Token:**` line, deliberately NOT `**Local API Token:**`
-# (the pattern does not match the longer label). Prints the token; never logs it.
-resolve_stride_api_token() {
-  local _auth="$PROJECT_DIR/.stride_auth.md" _tok=""
-  if [ -f "$_auth" ]; then
-    _tok=$(grep -E '\*\*API Token:\*\*' "$_auth" | grep -oE '`[^`]+`' | head -n 1 | tr -d '`' || true)
-  fi
-  printf '%s' "$_tok"
-}
-
 _api_base=$(resolve_stride_api_url)
 _token=$(resolve_stride_api_token)
 if [ -z "$_api_base" ] || [ -z "$_token" ]; then
@@ -381,6 +565,13 @@ _resp=$(curl -s --connect-timeout 3 --max-time 5 -w '\n%{http_code}' \
 
 _code="${_resp##*$'\n'}"
 _body="${_resp%$'\n'*}"
+# Shaped for the same reason as the held-claim call above: on a truncated
+# response this split yields the server-written body's tail rather than curl's
+# status, and it reaches stderr below.
+case "$_code" in
+  [0-9][0-9][0-9]) ;;
+  *) permit_undetermined "the API response was truncated" ;;
+esac
 
 # --- AC4 and AC5: any non-200. An empty Ready queue answers 404 with an
 # {"error": ...} body, so both criteria are discharged by this one test. The

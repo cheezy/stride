@@ -25,6 +25,75 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Added — the Stop gate now refuses a session end while a claim is held (W2178)
+
+The gate blocked on one condition: `.stride/.loop-state.json` exists, its
+`needs_review` is `false`, and `GET /api/tasks/next` answers 200 with an
+identifier. Loop state is written only by a **completion**, so a session that
+claimed a task and stopped before finishing it was invisible to it — the most
+damaging stop there is, and one actually observed rather than hypothesised.
+
+A second condition covers it. The two are **mutually exclusive**: a claim clears
+the loop-state file and a completion writes it, so its presence names the last
+lifecycle event and selects which condition applies. The gate therefore still
+makes **at most one** API call on any path, and on the overwhelming majority of
+stops it makes none — a local pre-filter on `.stride-env-cache` exits silently
+before the network when no claim is outstanding.
+
+**Three fields decide it, and each is separately load-bearing.** The block
+requires `status` `in_progress`, a **null `completed_by_id`**, and a
+`claim_expires_at` still in the future.
+
+- `status` alone is **not** sufficient. The server's `completion_changeset`
+  moves a completed task to Review and sets `completed_by_id` but **never
+  touches `:status`**, so a task completed with `needs_review: true` sits in
+  Review still reading `in_progress` with a live claim expiry. Blocking on
+  status alone would have refused sanctioned terminal state 2 — a stop that
+  should be allowed and is not, which this design ranks as the worst outcome
+  available to it.
+- `claim_expires_at` matters because the server's own claimable set is
+  `status == :open or (status == :in_progress and claim_expires_at < now)`. An
+  expired claim is already released to whoever asks next, so it is not held.
+  It also gives the whole condition a hard 60-minute staleness ceiling.
+
+`.stride-env-cache` is read as a **pointer, never a fact**: its
+`TASK_IDENTIFIER` survives a completion, an unclaim, and the session that wrote
+it, and a claim whose response did not parse leaves the previous task's values
+in place. The live task is what decides — which is also what covers an unclaim,
+since no local artifact is cleared on one.
+
+**One counter, two keys.** The held-claim condition shares the existing
+`.stride/.stop-gate-blocks` budget under a `held:` key prefix rather than
+getting a second counter, so a budget spent refusing a held claim on a task does
+not then silently skip a real gate when that same task is completed. It refuses
+at most twice and retains the spent record, exactly as the completion condition
+does.
+
+**Everything else permits**, and each case is tested: no cache pointer, a
+pointer that is not identifier-shaped or is a `.`/`..` segment, `TASK_STATUS`
+not `in_progress`, no credentials, transport failure, timeout, any non-200 (a
+404 here is **not** state 1 — this call never asks about the queue), an
+unparsable body, an answer naming a different task, and a held task that is
+completed, unclaimed or expired. All four sanctioned terminal states still
+permit, and the two recorded ones are decided before either condition without
+spending a call.
+
+**A cross-half divergence caught before it shipped.** `ConvertFrom-Json` on the
+PowerShell half does not return the string the server sent: it recognises the
+ISO-8601 shape and yields a `[DateTime]`. A string-only read left the expiry
+empty and permitted **every** held claim while the shell half blocked
+correctly — the two halves agreeing on the code and disagreeing on the
+behaviour. Both types are handled and the value is rendered back to the same
+fixed-width UTC text the shell half compares, ordinally and under
+InvariantCulture so a non-Gregorian host culture cannot read every claim as
+unexpired.
+
+**One residual, accepted and bounded.** A task re-claimed by another agent after
+our claim expired is indistinguishable from a held claim: `assigned_to` is not
+projectable, and widening the projection would cross a deliberate server-side
+boundary. It needs a 60-minute-old cache plus a live re-claim, and it is bounded
+to two refusals.
+
 ### Fixed — an unrecordable loop state is now announced instead of returning silently (W2176)
 
 `record_loop_state_for_completion` in `hooks/stride-hook.sh` announced on stderr

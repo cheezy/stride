@@ -10624,9 +10624,9 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
 # Test Group 33: W2131 — the unsafe Stride API curl guard
 # ============================================================
 #
-# Mirror of the bash suite's Test Group 32, minus the stdout-redirection cases
-# it gained in W2174 -- the PowerShell guard does not carry that rule yet, and
-# W2175 settles it. The four curl invocation rules are stated in three skills
+# Mirror of the bash suite's Test Group 32, redirect cases included: W2175
+# closed the one-rule gap this group used to record, so the two halves now pin
+# the same shapes. The four curl invocation rules are stated in three skills
 # and were still broken under load. The failure is
 # SILENT: the hook reads the API response off stdout to capture the diff and
 # refresh the env cache, so hiding stdout drops the diff and the task completes
@@ -10823,6 +10823,175 @@ Assert-Exit "33: a backslash-continued curl is judged as one command" 2 $r.ExitC
 
 $r = Invoke-G33 "curl -sS \`n  -X PATCH https://www.stridelikeaboss.com/api/tasks/1/complete \`n  -d @payload.json \`n  | tee r.json"
 Assert-Exit "33: a backslash-continued compliant curl is allowed" 0 $r.ExitCode
+
+# --- Refused: rule 3, stdout redirection (W2175) --------------------------
+# The rule the shell half gained in W2174 and this half was one short of. The
+# guard was never absent here; it enforced rules 1 and 2 and returned three
+# refusal kinds where the shell half returned four.
+$g33C = 'https://www.stridelikeaboss.com/api/tasks/1/complete'
+
+# A legitimate Stride curl QUOTES its endpoint -- the shape the skills document,
+# and the reason the prefilter runs on raw text. Every other assertion below
+# builds from a bare $g33C, so these two are what pin the scope pre-pass to
+# unblanked text: computed on the blanked segments instead, the whole rule goes
+# blind to the only form agents actually write and this group stays green.
+# Written first for that reason.
+$r = Invoke-G33 'curl -sS "https://www.stridelikeaboss.com/api/tasks/1/complete" > out.json'
+Assert-Exit "33: a double-quoted URL with a redirect is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS 'https://www.stridelikeaboss.com/api/tasks/1/complete' >> out.json"
+Assert-Exit "33: a single-quoted URL with a redirect is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim" -H "Authorization: Bearer $STRIDE_API_TOKEN" -d @payload.json > /tmp/resp.json'
+Assert-Exit "33: the documented completion call with a redirect is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=slim" -d @payload.json | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
+Assert-Exit "33: the documented completion call with tee is still allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C > out.json"
+Assert-Exit "33: > redirects stdout and is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C >out.json"
+Assert-Exit "33: an attached >FILE with no space is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C >> out.json"
+Assert-Exit "33: >> (append) is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C 1> out.json"
+Assert-Exit "33: 1> is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C 1>> out.json"
+Assert-Exit "33: 1>> is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C &> out.json"
+Assert-Exit "33: &> is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C &>> out.json"
+Assert-Exit "33: &>> is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C >| out.json"
+Assert-Exit "33: >| (noclobber override) is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C > /dev/null"
+Assert-Exit "33: > /dev/null is refused (it is still a hidden response)" 2 $r.ExitCode
+
+# >&2 carries no fd prefix, so the plain path already has it. Refused for the
+# same reason -O is: the body leaves stdout, the only stream the hook reads.
+$r = Invoke-G33 "curl -sS $g33C >&2"
+Assert-Exit "33: >&2 is refused (stdout moved to stderr is still off stdout)" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C 1>&2"
+Assert-Exit "33: 1>&2 is refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C | tee r.json > g.json"
+Assert-Exit "33: a redirect after tee still hides the body" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C 2> err.log > out.json"
+Assert-Exit "33: a real > after a 2> is still refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C > /tmp/api/tasks/9/out"
+Assert-Exit "33: a Stride curl with an API-looking redirect target is still refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS > out.json $g33C"
+Assert-Exit "33: a redirect written before the URL is still refused" 2 $r.ExitCode
+
+# Digits that are not their own word are not a file descriptor -- the 1 belongs
+# to the URL, and the shell redirects stdout there too.
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/1>out.json'
+Assert-Exit "33: a digit inside the URL is not a descriptor and the redirect is refused" 2 $r.ExitCode
+
+# A descriptor run longer than the 8-digit bound lands on the REFUSING side,
+# matching the shell half's cap rather than diverging from it.
+$r = Invoke-G33 "curl -sS $g33C 123456789> f"
+Assert-Exit "33: a descriptor run past the 8-digit bound is refused" 2 $r.ExitCode
+
+# --- Allowed: stderr redirection leaves the body on stdout -----------------
+# Refusing these would be a false positive, and a false positive here teaches an
+# agent to route around the guard rather than to fix the call.
+$r = Invoke-G33 "curl -sS $g33C 2> err.log"
+Assert-Exit "33: 2> alone is allowed (stderr redirection leaves the body on stdout)" 0 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C 2>> err.log"
+Assert-Exit "33: 2>> alone is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C 2>&1"
+Assert-Exit "33: 2>&1 alone is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C 3> other.log"
+Assert-Exit "33: a non-stdout fd (3>) is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C 10> other.log"
+Assert-Exit "33: a multi-digit non-stdout fd (10>) is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C 12345678> f"
+Assert-Exit "33: a descriptor run exactly at the 8-digit bound is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS $g33C 2>&1 | tee r.json"
+Assert-Exit "33: tee with 2>&1 on the curl is still allowed" 0 $r.ExitCode
+
+# --- Allowed: the redirect belongs to a different command ------------------
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | tee r.json && echo done > log.txt'
+Assert-Exit "33: a redirect after && belongs to the neighbour and is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/next | tee r.json ; echo done > log.txt'
+Assert-Exit "33: a redirect after ; belongs to the neighbour and is allowed" 0 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS https://www.stridelikeaboss.com/api/tasks/next | tee r.json`necho done > log.txt"
+Assert-Exit "33: a redirect on line 2 is not attributed to the curl" 0 $r.ExitCode
+
+# --- Allowed: the redirect TARGET only resembles an API path ---------------
+# The prefilter asks whether /api/tasks/ appears anywhere; this is an ordinary
+# curl whose OUTPUT PATH resembles the API, and the scope pre-pass is what keeps
+# it out. Mirrors the shell suite's 5an fixture.
+$r = Invoke-G33 'curl -X POST https://example.com/x -d @p.json > /tmp/api/tasks/9/complete'
+Assert-Exit "33: a redirect target that only looks like an API path is not a Stride curl" 0 $r.ExitCode
+
+$r = Invoke-G33 'curl -X POST https://example.com/x 2> err.log > /tmp/api/tasks/9/complete'
+Assert-Exit "33: the same, with a stderr redirect walked past first" 0 $r.ExitCode
+
+# --- Edge cases -----------------------------------------------------------
+# The false-positive control for the new rule, exactly as the -o case above is
+# for rule 1: quote blanking is pre-existing, but rule 3 is what is being pinned.
+$r = Invoke-G33 'curl -sS -d ''{"note":"a > b"}'' https://www.stridelikeaboss.com/api/tasks/1/complete | tee x.json'
+Assert-Exit "33: a > inside a quoted payload is not a redirect" 0 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS \`n  https://www.stridelikeaboss.com/api/tasks/1/complete \`n  > out.json"
+Assert-Exit "33: a redirect split off by a backslash continuation is refused" 2 $r.ExitCode
+
+# Above the ceiling the guard scans raw text: heredoc stripping and quote
+# blanking are both skipped, so the scan can only gain false positives and never
+# lose a real hit. Rule 3 and the scope pre-pass inherit that unchanged.
+$g33Pad = 'x' * 4100
+$r = Invoke-G33 "curl -sS -X PATCH $g33C -d note=$g33Pad > out.json"
+Assert-Exit "33: a redirect past the oversize ceiling is still refused" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS -X PATCH $g33C -d note=$g33Pad | tee r.json"
+Assert-Exit "33: a compliant curl past the oversize ceiling is still allowed" 0 $r.ExitCode
+
+# --- Rule order: rules 1 and 2 still win, so their messages are unchanged ---
+$r = Invoke-G33 "curl -sS -o out.json $g33C > x.json"
+Assert-Exit "33: -o wins over a redirect in the same segment" 2 $r.ExitCode
+Assert-Contains "33: the -o refusal message is unchanged by rule 3" "uses -o/--output" $r.Stderr
+
+$r = Invoke-G33 "curl -sS $g33C | jq . > x.json"
+Assert-Exit "33: a transformer pipe wins over a redirect" 2 $r.ExitCode
+Assert-Contains "33: the transformer refusal message is unchanged by rule 3" "transformer" $r.Stderr
+
+# --- The redirect refusal message, and the token ---------------------------
+# The wording assertions read STDERR, never STDOUT. Stderr is written raw;
+# stdout goes through ConvertTo-Json, and Windows PowerShell 5.1 escapes '>' to
+# \u003e where PowerShell 7 leaves it literal -- so a '>'-bearing needle
+# asserted against stdout would be green on the development host and red on the
+# shipping one. The one stdout assertion below is deliberately free of < > and &.
+$r = Invoke-G33 "curl -sS -H Authorization:Bearer_stride_dev_G33RSECRET $g33C > g33redirtarget.json"
+Assert-Exit "33: a token-bearing redirect command is refused" 2 $r.ExitCode
+Assert-Contains "33: the redirect refusal names the redirect" "redirects stdout" $r.Stderr
+Assert-Contains "33: the redirect refusal points at the tee form" "tee" $r.Stderr
+Assert-Contains "33: the redirect refusal names the blessed capture path" "last-api-response" $r.Stderr
+Assert-Contains "33: the redirect refusal says stderr alone is fine" "2>&1" $r.Stderr
+Assert-Contains "33: the redirect refusal carries a block decision on stdout" '"decision":"block"' $r.Stdout
+Assert-NotContains "33: the redirect refusal never echoes the token" "G33RSECRET" ($r.Stdout + $r.Stderr)
+Assert-NotContains "33: the redirect refusal never echoes the redirect target" "g33redirtarget" ($r.Stdout + $r.Stderr)
 
 # ============================================================
 # Test Group 34: W2123 — loop state recorded on completion

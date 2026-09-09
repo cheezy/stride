@@ -2265,11 +2265,12 @@ if (-not $Command) { exit 0 }
 
 # --- W2131: refuse unsafe Stride API curl shapes (PreToolUse) --------------
 #
-# Mirror of the guard in stride-hook.sh, with one KNOWN DIVERGENCE: W2174 added
-# a third rule there refusing shell stdout redirection, and this half does not
-# carry it yet -- W2175 settles that. So this guard enforces two of the four
-# curl invocation rules, not three. The four rules are stated in
-# stride-claiming-tasks, stride-workflow and stride-completing-tasks.
+# Mirror of the guard in stride-hook.sh. W2174 added a third rule there refusing
+# shell stdout redirection; W2175 determined that this half already carried the
+# other two -- the guard was never absent here, only one rule short -- and added
+# the third. The two halves now enforce the same three code-enforced rules and
+# return the same four refusal kinds. The four curl invocation rules are stated
+# in stride-claiming-tasks, stride-workflow and stride-completing-tasks.
 # They were still broken under load, and the failure is SILENT: the hook reads
 # the API response off stdout to capture the diff and refresh the env cache, so
 # hiding stdout means the diff is never captured and the task shows an empty
@@ -2380,6 +2381,40 @@ function Get-StrideUnsafeCurlKind {
         $flat = (($joined -split '\r?\n') | ForEach-Object { & $blankLine $_ }) -join "`n"
     }
 
+    # --- Rule 3 scope: is /api/tasks/ present OUTSIDE every redirect target? --
+    # The prefilter above answers "does /api/tasks/ appear anywhere at all", on
+    # the RAW text and for the reason stated there. Rule 3 needs a strictly
+    # narrower answer, because `curl https://example.com/x >
+    # /tmp/api/tasks/9/complete` is an ordinary curl whose OUTPUT PATH resembles
+    # the API, and refusing it is the false positive that teaches an agent to
+    # route around the guard.
+    #
+    # Computed ONCE, here, on $joined -- heredoc bodies stripped and
+    # continuations joined, but NOT quote-blanked. THAT BASIS IS LOAD-BEARING.
+    # Asking this of the blanked segments instead makes every Stride curl whose
+    # URL is quoted invisible to Rule 3 -- the shape the skills document, so the
+    # rule would permit precisely the call it exists to refuse. Rules 1 and 2
+    # never re-derive Stride-ness; they take it from the prefilter and judge only
+    # shape on blanked text. This is as close to that as a rule about redirect
+    # TARGETS can get.
+    #
+    # `>[ |>]*[^ ]*` erases each redirect operator together with its TARGET WORD
+    # and nothing else: the operator, any run of following spaces, pipes or '>'
+    # characters, then the one word that is the target. A LITERAL space, not
+    # \s -- the bash half terminates a target word on a space only, and $joined
+    # still carries newlines.
+    #
+    # -clike, matching the prefilter's -cnotlike above: PowerShell's -like family
+    # is case-INSENSITIVE by default, which would widen scope to /API/TASKS/.
+    #
+    # Above the ceiling it is forced true, so the oversized path stays monotone
+    # with the note above: it may only add matches, never remove one.
+    if ($oversize) {
+        $inScope = $true
+    } else {
+        $inScope = (($joined -creplace '>[ |>]*[^ ]*', ' ') -clike '*/api/tasks/*')
+    }
+
     # --- Split into COMMAND SEGMENTS ---
     # `;`, `&&` and `||` end one command and begin another. Judging the whole
     # string instead is how a flag belonging to an unrelated neighbour gets
@@ -2429,6 +2464,47 @@ function Get-StrideUnsafeCurlKind {
             # which is case-sensitive, so `| JQ` must not match here either.
             if ($StrideGuardTransformers -ccontains $word) { return 'pipe' }
         }
+
+        # --- Rule 3: never redirect stdout away from the pipeline ---
+        # A stdout redirect takes the body off stdout exactly as -o does -- the
+        # same failure in different syntax, and the one form the first two rules
+        # left open.
+        #
+        # A '>' is a STDOUT redirect UNLESS a file descriptor other than 1 stands
+        # as its own word immediately before it, which is how the shell reads it.
+        # `2>`, `2>>`, `2>&1` and `3>` leave the body on stdout, so refusing them
+        # would be a false positive -- and a false positive here teaches an agent
+        # to route around the guard rather than to fix the call. `>&2` IS
+        # refused: it moves the body to stderr, the same blindness by a different
+        # route, and it needs no special case.
+        #
+        # Where stride-hook.sh walks the segment one '>' at a time with parameter
+        # expansion, this half ERASES every PERMITTED fd redirect and asks
+        # whether a '>' survives. Same verdict on every shape that half pins:
+        # `2>>` is consumed by one match, so its adjacency flag needs no
+        # counterpart here; a 9-digit run cannot match at all and so lands on the
+        # REFUSING side exactly as the 8-digit cap does there; and
+        # `2> >(tee err.log)` is refused, the same residual false positive that
+        # half documents. A .NET regex is the right tool on this side -- the
+        # constraints that pushed the other half away from one do not exist here,
+        # and the engine is identical on PowerShell 5.1 and 7.
+        #
+        #   (?<![^ ])   the digits stand as their own word: start of segment, or
+        #               preceded by a space. A LITERAL space, not \s.
+        #   (?!1>)      fd 1 IS stdout, so `1>` and `1>>` are never erased.
+        #   [0-9]{1,8}  digits that are not their own word are not a descriptor,
+        #               so `.../api/tasks/1>out.json` is still refused.
+        #   >>?         `2>` and `2>>` are one permitted redirect each.
+        #
+        # Gated on $inScope so a redirect TARGET that merely resembles an API
+        # path is not read as a Stride call, and placed LAST so any segment that
+        # already returned under Rule 1 or Rule 2 keeps the message it renders
+        # today.
+        if ($inScope) {
+            if ((($seg -creplace '(?<![^ ])(?!1>)[0-9]{1,8}>>?', ' ') -clike '*>*')) {
+                return 'redirect'
+            }
+        }
     }
 
     return ''
@@ -2441,6 +2517,15 @@ if ($Phase -eq 'pre') {
             $guardMsg = 'Refused: this Stride API curl uses -O/--remote-name, which writes the body to a file instead of stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. The rule is stated for -o/--output, and -O is refused for the same reason rather than as a separate rule: it takes the body off stdout. Use: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
         } elseif ($guardKind -eq 'flag') {
             $guardMsg = 'Refused: this Stride API curl uses -o/--output, which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so hiding it drops the diff silently and the task completes with an empty changed_files and no error. Rule: never -o/--output, never pipe into a transformer (jq, head, awk, grep, sed), always pipe into tee. Use: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
+        } elseif ($guardKind -eq 'redirect') {
+            # NOTE for Windows PowerShell 5.1: this is the first refusal message
+            # in either half containing '<', '>' or '&'. 5.1's ConvertTo-Json
+            # escapes those as \u003c / \u003e / \u0026 where PowerShell 7 does
+            # not. Any JSON reader decodes them back, so the block decision is
+            # identical -- but the suite asserts this wording on STDERR, which is
+            # written raw below, because a '>'-bearing needle asserted against
+            # stdout would be green on a 7 host and red on a 5.1 one.
+            $guardMsg = 'Refused: this Stride API curl redirects stdout away from the pipeline (>, >>, 1>, &>, &>> or >&2), which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. Redirecting stderr alone is fine: 2> and 2>&1 leave the body on stdout, and stdout is the only stream the hook reads. Use: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
         } else {
             $guardMsg = 'Refused: this Stride API curl pipes into a transformer (jq, head, awk, grep or sed), which alters or truncates what the Stride hook reads from stdout. The hook needs the response verbatim to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. tee is the one blessed pipe, because it passes stdout through unchanged. Use: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
         }

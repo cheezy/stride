@@ -25,6 +25,50 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Added — the PowerShell half now carries the same curl guard, redirect rule included (W2175)
+
+**The determination, against the premise.** The task asked whether
+`hooks/stride-hook.ps1` implements the curl guard at all, because a grep for
+guard-shaped names had come back with only unrelated hits. It does, and it
+always did: `Get-StrideUnsafeCurlKind` has been there since W2131, enforcing
+Rule 1 (`-o`/`--output`/`-O`/`--remote-name`) and Rule 2 (transformer pipe),
+with the same prefilter, heredoc strip, 4000-character ceiling, quote blanking,
+continuation join and segment split as the shell half. What was missing was Rule
+3 and the scope pre-pass it depends on — **a one-rule gap, not an absent
+guard.** It is recorded here rather than only in the task because a
+determination that lives outside the repository is invisible to the next
+maintainer.
+
+**It was a live gap, not a theoretical one.** `hooks/hooks.json` registers only
+the shell entry and carries no OS conditional; `hooks/stride-hook.sh` execs
+`powershell.exe` on native Windows, so this code runs on real machines. Closing
+it has effect where documenting it as a limitation would not have.
+
+**What landed.** Rule 3, the scope pre-pass, the fourth refusal kind
+`redirect`, and its refusal message word for word from the shell half, so the
+two do not diverge in vocabulary.
+
+**The mechanism differs; the behaviour does not.** The shell half walks a
+segment one `>` at a time with parameter expansion, carrying an adjacency flag
+and an 8-digit cap, because POSIX parameter expansion has no regex and a bash
+character walk is the cost its ceiling exists to bound. Neither constraint
+applies here, so this half erases every *permitted* file-descriptor redirect
+with one .NET regex and asks whether a `>` survives — no character walk, no
+adjacency flag. Same verdict on every shape the other half pins, including
+`2>>`, a descriptor run past the digit bound, and the `2> >(tee err.log)`
+residual false positive both halves accept.
+
+**The shell half is untouched.**
+
+**One Windows PowerShell 5.1 note.** This is the first refusal message in either
+half containing `<`, `>` or `&`, and 5.1's `ConvertTo-Json` escapes those as
+`\u003c` / `\u003e` / `\u0026` where PowerShell 7 does not. Any JSON reader
+decodes them back, so the block decision is unaffected. It matters to the suite,
+not to production: the redirect wording is asserted on stderr, which is written
+raw, because a `>`-bearing needle asserted against stdout would be green on a
+PowerShell 7 host and red on a 5.1 one, and nothing in this repository executes
+the hook under 5.1.
+
 ### Added — the curl guard now refuses shell stdout redirection (W2174)
 
 `stride_guard_unsafe_reason` in `hooks/stride-hook.sh` enforced two of the three
@@ -85,8 +129,7 @@ Bearer token and is never interpolated, stored or echoed.
 
 `README.md` and the three skills that enumerated "three rules" now say four.
 
-**Not ported to PowerShell.** `hooks/stride-hook.ps1` keeps the two-rule guard,
-so the two halves diverge until W2175 settles it.
+**Ported to PowerShell by W2175, below.**
 
 ### Added — a canon anchor beside the Stop gate, which had none (D306)
 

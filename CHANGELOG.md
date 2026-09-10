@@ -25,6 +25,62 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — the Stop gate's re-block budget, examined and deliberately kept at 2 (W2179)
+
+The budget was chosen when the design principle was "wedging a session is worse
+than missing a gate". This release adds a stronger requirement — the loop must
+continue until no claimable task remains — and the two read as being in tension,
+because the gate yields at all. That tension had never been decided on the
+record. It is decided now, and the decision is **no change**, for two reasons
+worth stating rather than rediscovering.
+
+**The budget is per-state, not per-session.** The counter keys on the completed
+identifier, or on `held:<identifier>`, and its file holds one line — so a
+different key reads as zero and a **new** completion or claim gets a fresh
+budget. "Refuses twice then yields" describes one unresolved state, never a
+session-wide allowance of two early stops. To keep stopping early an agent would
+have to keep resolving states, which is to say keep making progress. Verified
+executably: after a held claim's budget is spent, a *different* held claim gets
+a fresh 2-2-0.
+
+**The budget has never been what failed.** Every early stop this goal was filed
+for was the gate *blind*, not out of budget — a completion whose response was
+redirected away so no loop state was written, and a claim abandoned mid-task
+where no loop state exists yet at all. In both the gate permitted on the
+**first** attempt with a full budget, so no larger number would have refused
+either. The requirement is served by making the gate **see** more stops, which
+the sibling changes in this release did, not by making it refuse the same
+visible stop more times.
+
+**The risk accepted, named:** a working gate still permits an early stop on the
+third attempt against one state it can see. Preferred to the alternative,
+because a large or unbounded budget makes a genuinely stuck session expensive to
+leave, while an agent willing to spend three refusals is equally willing to set
+`STRIDE_ALLOW_STOP=1` — so a bigger number only penalises the honest case.
+
+**The alternative declined:** a per-condition budget, with more refusals for a
+held claim than an unfollowed completion. A held claim already self-heals when
+it expires and the task returns to the queue; an unfollowed completion has by
+definition already recorded its work. Neither needs more insistence, and a
+second number would have to be reasoned about for behaviour nobody wanted.
+
+Also recorded: `STRIDE_STOP_GATE_MAX_BLOCKS=0` is a valid unsigned integer, so
+it is honoured and disables the gate outright. It falls out of the override
+validation rather than being designed, and it is why a modest budget costs a
+stuck user so little — which is also why it is now **pinned by assertions on
+both conditions**, alongside the contrast that `=off` is *not* a way to disable
+the gate. Documenting it as a way out without a test holding it would have been
+a guarantee resting on an accident.
+
+And the escape hatches are **not interchangeable across the two conditions**,
+which the previous wording obscured. `STRIDE_ALLOW_STOP=1` and `MAX_BLOCKS=0`
+work against either. Deleting `.stride/.loop-state.json` frees an unfollowed
+completion *only* — a held claim is blocked precisely because that file is
+absent, so deleting it is inert there. A held claim is freed by resolving it,
+completing or unclaiming, which is what its own block message names.
+
+No behaviour changed.
+
 ### Fixed — a comment that overstated what the curl guard enforces (W2177)
 
 The Tier 2 branch of `record_loop_state_for_completion` justified itself with:

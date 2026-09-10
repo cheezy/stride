@@ -12738,6 +12738,38 @@ assert_eq "34q24: every PowerShell request bounds redirects" \
   "$(grep -c 'Invoke-WebRequest' "$SCRIPT_DIR/stride-stop-gate.ps1" | tr -d ' ')" \
   "$(grep -c '^[^#]*-MaximumRedirection 0' "$SCRIPT_DIR/stride-stop-gate.ps1" | tr -d ' ')"
 
+# 34q25: MAX_BLOCKS=0 disables the gate outright, on BOTH conditions.
+# The task's own edge case, and W2179 promoted it from an accident of the
+# override validation to a documented way out — so it needs pinning, or the
+# documentation guarantees something no test holds. 0 is a valid unsigned
+# integer, so it is honoured where `off` and `abc` are not.
+G34_P=$(g34_proj q25); G34_S="$TMPDIR_TEST/g34-q25"
+rm -rf "$G34_S"
+g34_env "$G34_P" W2178 in_progress
+g34_stub "$G34_S" "$(g34_show W2178 in_progress "\"$G34_FUT\"" null)" 200
+G34_OUT=$(printf '{}' | STRIDE_STOP_GATE_MAX_BLOCKS=0 CLAUDE_PROJECT_DIR="$G34_P" PATH="$G34_S:$PATH" \
+  bash "$STOP_GATE" 2>"$TMPDIR_TEST/g34.err")
+assert_exit "34q25: MAX_BLOCKS=0 permits a held claim on the FIRST attempt" 0 "$?"
+
+G34_P=$(g34_proj q26); G34_S="$TMPDIR_TEST/g34-q26"
+rm -rf "$G34_S"
+g34_state "$G34_P" W2123 false
+g34_stub "$G34_S" '{"data":{"identifier":"W2124"}}' 200
+G34_OUT=$(printf '{}' | STRIDE_STOP_GATE_MAX_BLOCKS=0 CLAUDE_PROJECT_DIR="$G34_P" PATH="$G34_S:$PATH" \
+  bash "$STOP_GATE" 2>"$TMPDIR_TEST/g34.err")
+assert_exit "34q26: MAX_BLOCKS=0 permits an unfollowed completion on the FIRST attempt" 0 "$?"
+
+# And the contrast that makes 0 meaningful rather than a typo: a NON-numeric
+# override falls back to the default and still refuses, so `=off` does not
+# disable the gate. Pinned here beside 0 so the two cannot drift apart.
+G34_P=$(g34_proj q27); G34_S="$TMPDIR_TEST/g34-q27"
+rm -rf "$G34_S"
+g34_env "$G34_P" W2178 in_progress
+g34_stub "$G34_S" "$(g34_show W2178 in_progress "\"$G34_FUT\"" null)" 200
+G34_OUT=$(printf '{}' | STRIDE_STOP_GATE_MAX_BLOCKS=off CLAUDE_PROJECT_DIR="$G34_P" PATH="$G34_S:$PATH" \
+  bash "$STOP_GATE" 2>"$TMPDIR_TEST/g34.err")
+assert_exit "34q27: MAX_BLOCKS=off is NOT a way to disable the gate" 2 "$?"
+
 
 # ============================================================
 # Test Group 35: W2125 the four sanctioned terminal states

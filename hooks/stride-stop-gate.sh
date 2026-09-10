@@ -95,11 +95,68 @@ TERMINAL_STATE_FILE="$PROJECT_DIR/.stride/.terminal-state.json"
 # a file.
 ENV_CACHE_FILE="$PROJECT_DIR/.stride-env-cache"
 
-# How many times this gate will refuse ONE unfollowed completion before letting
-# the session go. The intended path needs exactly one block — the claim that
-# follows clears the loop state — so 2 leaves a single block of margin for a
-# benign second stop without ever feeling like a wedge to someone who genuinely
-# wants to leave. Wedging a session is strictly worse than missing a gate.
+# How many times this gate will refuse ONE unresolved state before letting the
+# session go. The intended path needs exactly one block — the claim or the
+# completion that follows clears the state — so 2 leaves a single block of
+# margin for a benign second stop without ever feeling like a wedge to someone
+# who genuinely wants to leave. Wedging a session is strictly worse than
+# missing a gate.
+#
+# (W2179) EXAMINED AND DELIBERATELY UNCHANGED, because the goal that added the
+# second block condition also raised a stronger requirement — the loop must
+# continue until no claimable task remains — and that reads at first as being
+# in tension with a budget that yields at all. It is a smaller tension than it
+# looks, for two reasons that are worth stating rather than rediscovering.
+#
+# FIRST, THE BUDGET IS PER-STATE, NOT PER-SESSION. read_block_count keys on the
+# completed identifier, or on `held:<identifier>`, and the counter file holds
+# one line — so a different key reads as zero and a NEW completion or a NEW
+# claim gets a fresh budget. "Refuses twice then yields" is a statement about
+# one unresolved state, never a session-wide allowance of two early stops. To
+# keep stopping early an agent would have to keep resolving states, which is to
+# say keep making progress, which is what the requirement actually wants.
+#
+# SECOND, THE BUDGET HAS NEVER BEEN WHAT FAILED. Every early stop this goal was
+# filed for was the gate BLIND, not the gate out of budget: a completion whose
+# response was redirected away so no loop state was written, and a claim
+# abandoned mid-task where no loop state exists yet at all. In both the gate
+# permitted on the FIRST attempt with a full budget, so no larger budget would
+# have refused either. The requirement is served by making the gate SEE more
+# stops — which the sibling tasks did — not by making it refuse the same
+# visible stop more times.
+#
+# THE RISK ACCEPTED, NAMED: with 2, a fully working gate still permits an early
+# stop on the third attempt against one state it can see. An agent determined
+# to stop early on a state the gate sees can therefore do it. That is accepted,
+# because the alternative costs more than it buys: a large or unbounded budget
+# makes a genuinely stuck session expensive to leave, and an agent willing to
+# spend three refusals is equally willing to set STRIDE_ALLOW_STOP=1 — which
+# works against either condition, unlike deleting the loop-state file; see the
+# note below — so a bigger number only penalises the honest case. A
+# budget that only a cooperative agent respects gains nothing from being
+# larger. There are in fact THREE documented ways out, not two, and the third
+# falls straight out of the validation below rather than being designed:
+# STRIDE_STOP_GATE_MAX_BLOCKS=0 is a valid unsigned integer, so it is honoured,
+# and it disables the gate outright — verified, it permits on the first attempt.
+# Anyone who wants the gate off has a numeric way to say so, which is a better
+# outcome than the `=off` attempt this validation exists to catch.
+#
+# The hatches are NOT interchangeable across the two conditions, and saying
+# otherwise would send a stuck user to a no-op. STRIDE_ALLOW_STOP=1 and
+# MAX_BLOCKS=0 work against either. Deleting the loop-state file frees an
+# unfollowed completion only — a held claim is blocked precisely BECAUSE that
+# file is absent, so deleting it is inert there. A held claim is freed by
+# resolving it (complete, or unclaim, which is what its block message names) or
+# by removing the .stride-env-cache pointer this condition reads.
+#
+# THE ALTERNATIVE DECLINED: making the budget conditional on which condition
+# fired, with more refusals for a held claim than for an unfollowed completion.
+# Declined because the held-claim case is the one that already self-heals — the
+# claim expires and the task returns to the queue — so its cost is bounded
+# without extra refusals, while an unfollowed completion has by definition
+# already recorded its work. Neither is the shape that needs more insistence,
+# and a per-condition budget would add a second number to reason about for no
+# behaviour anyone wanted.
 STOP_GATE_MAX_BLOCKS=2
 # VALIDATE THE OVERRIDE, or it becomes the wedge this guard exists to prevent.
 # An unvalidated value reaches `[ "$n" -gt "$MAX" ]`, where a non-numeric right

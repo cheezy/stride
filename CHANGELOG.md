@@ -23,7 +23,7 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.78.0] - 2026-09-10
 
 ### Added — an end-to-end proof that the loop cannot exit early (W2180)
 

@@ -13905,6 +13905,351 @@ fi
 
 
 # ============================================================
+# Test Group 42: W2180 -- end to end, the loop cannot exit early
+# ============================================================
+# Every fix in this goal is unit-tested in its own group. This group exists
+# because the property the user actually asked for is not any one of them: once
+# claiming starts, the session continues until no claimable task remains. That
+# property lives in the SEAMS between three scripts -- the pre-phase guard that
+# keeps the response on stdout, the post-phase writer that records loop state
+# from it, and the Stop gate that reads that record -- and each of those can be
+# individually correct while the chain is broken. D306 was exactly that: three
+# correct components and a silent hole between them.
+#
+# So this group drives the REAL scripts in sequence rather than reimplementing
+# their logic, and every refusal is paired with a NEGATIVE CONTROL that must
+# permit. The controls are the point. A gate that refuses a sanctioned stop is
+# a worse failure than the one this goal fixes, and an assertion that only ever
+# sees refusals cannot tell a working gate from one welded shut.
+
+echo ""
+echo "=== Test Group 42: W2180 end-to-end loop continuation ==="
+
+G42_URL='https://www.stridelikeaboss.com'
+G42_TOKEN='stride_dev_FAKE_G42_SENTINEL'
+
+# The stray-write canary is a BEFORE/AFTER comparison, not a presence check, and
+# that distinction is load-bearing. The directories it watches include $PWD,
+# which when the suite is run from the repository root IS the live project --
+# exactly where a real Stride session legitimately writes these files. A
+# presence check would attribute a pre-existing record to this group. Recording
+# the state first means the assertion says what it means: the group CREATED
+# nothing.
+g42_watch_state() {
+  local _d _out=''
+  for _d in "$@"; do
+    _out="$_out$([ -f "$_d/.stride/.loop-state.json" ] && printf 'L' || printf '-')"
+    _out="$_out$([ -f "$_d/.stride/.stop-gate-blocks" ] && printf 'B' || printf '-')"
+  done
+  printf '%s' "$_out"
+}
+G42_WATCH_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+G42_WATCH_BEFORE=$(g42_watch_state "$G42_WATCH_ROOT" "$PWD")
+G42_COMPLETE="curl -sS -X PATCH $G42_URL/api/tasks/77/complete -d @payload.json | tee r.json"
+G42_REDIRECT="curl -sS -X PATCH $G42_URL/api/tasks/77/complete -d @payload.json > resp.json"
+G42_OK='{"data":{"id":77,"identifier":"W7701","needs_review":false},"hooks":[{"name":"before_review"}]}'
+G42_OK_REVIEW='{"data":{"id":77,"identifier":"W7701","needs_review":true},"hooks":[{"name":"before_review"}]}'
+
+# A project carrying BOTH files the chain needs: .stride.md so the guard and the
+# router engage at all, and a .stride_auth.md with a SYNTHETIC token. The real
+# .stride_auth.md must never enter this suite.
+g42_proj() {
+  local _d="$TMPDIR_TEST/w2180-$1"
+  rm -rf "$_d"; mkdir -p "$_d/.stride"
+  printf '## before_doing\n```bash\n```\n\n## before_review\n```bash\n```\n' > "$_d/.stride.md"
+  printf '# auth\n- **API URL:** `%s`\n- **API Token:** `%s`\n' "$G42_URL" "$G42_TOKEN" > "$_d/.stride_auth.md"
+  printf '%s' "$_d"
+}
+
+# The stop-gate's curl, stubbed exactly as Group 34 does it.
+g42_stub() {
+  local _dir="$1" _body="$2" _code="$3"
+  rm -rf "$_dir"; mkdir -p "$_dir"
+  cat > "$_dir/curl" << G42CURL
+#!/usr/bin/env bash
+echo "ARGS: \$*" >> "$_dir/curl.log"
+printf '%s\n%s' '$_body' '$_code'
+exit 0
+G42CURL
+  chmod +x "$_dir/curl"
+}
+
+# Drive the REAL pre-phase guard on a command.
+g42_guard() {
+  printf '{"tool_input":{"command":"%s"}}' "$1" \
+    | CLAUDE_PROJECT_DIR="$2" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+}
+
+# Drive the REAL post-phase hook, which is what writes the loop state.
+# Built with jq, not a quote-only sed: hand-escaping only `"` malforms the
+# input the moment a body carries a backslash, a newline or a control
+# character, and a malformed body makes the hook write nothing -- which would
+# look like a failing assertion for the wrong reason. jq is already required by
+# the scripts under test, so this adds no dependency.
+g42_post() {
+  jq -nc --arg c "$1" --arg r "$2" \
+    '{session_id:"g42",tool_input:{command:$c},tool_response:{stdout:$r}}' \
+    | CLAUDE_PROJECT_DIR="$3" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+}
+
+# Drive the REAL Stop gate.
+# CLAUDE_SESSION_ID is unset DELIBERATELY, not incidentally. The terminal-state
+# records below carry session_id "unknown", and the gate falls back to
+# CLAUDE_SESSION_ID when the hook input carries none; a runtime that exported a
+# real session id would make those records read as foreign, and 42e/42f would
+# fail for a reason unrelated to what they test. Unsetting it here makes the
+# dependency the suite's own rather than the environment's.
+g42_stop() {
+  G42_OUT=$(printf '{}' | env -u CLAUDE_SESSION_ID CLAUDE_PROJECT_DIR="$1" PATH="$2:$PATH" \
+    bash "$STOP_GATE" 2>"$TMPDIR_TEST/g42.err")
+  G42_RC=$?
+  G42_ERR=$(cat "$TMPDIR_TEST/g42.err")
+}
+
+# --- AC1: a redirected completion is refused BEFORE it runs -----------------
+# The D306 shape. Paired immediately with its control, because "the guard
+# refuses things" is worthless without "and permits the compliant form".
+G42_P=$(g42_proj a)
+g42_guard "$G42_REDIRECT" "$G42_P"
+assert_exit "42a: a redirected completion curl is refused before it runs" 2 "$?"
+g42_guard "$G42_COMPLETE" "$G42_P"
+assert_exit "42a CONTROL: the same completion with tee is permitted" 0 "$?"
+
+# --- AC2: a completion writes loop state, and the gate then refuses ---------
+# This is the chain the goal exists to close: the response reaches stdout, the
+# post phase records it, and the gate reads that record and refuses while Ready
+# still has work. Three scripts, one property.
+G42_P=$(g42_proj b); G42_S="$TMPDIR_TEST/g42-b"
+g42_post "$G42_COMPLETE" "$G42_OK" "$G42_P"
+if [ -f "$G42_P/.stride/.loop-state.json" ]; then
+  echo -e "  ${GREEN}PASS${RESET}: 42b: a successful completion writes loop state"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 42b: a successful completion must write loop state"
+  FAIL=$((FAIL + 1))
+fi
+g42_stub "$G42_S" '{"data":{"identifier":"W7702"}}' 200
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42b: and the gate then refuses a stop while Ready has work" 2 "$G42_RC"
+assert_contains "42b: naming the CLAIMABLE task, not the completed one" "W7702" "$G42_ERR"
+if printf '%s' "$G42_ERR" | grep -q 'W7701'; then
+  echo -e "  ${RED}FAIL${RESET}: 42b: the block must not name the completed task"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 42b: and never the completed one"
+  PASS=$((PASS + 1))
+fi
+
+# 42b CONTROL: the identical loop state, with Ready EMPTY. If this also blocked,
+# 42b would be proving nothing but "the gate always refuses".
+G42_P=$(g42_proj b2); G42_S="$TMPDIR_TEST/g42-b2"
+g42_post "$G42_COMPLETE" "$G42_OK" "$G42_P"
+g42_stub "$G42_S" '{"error":"no task"}' 404
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42b CONTROL: the same completion permits once Ready is empty" 0 "$G42_RC"
+assert_contains "42b CONTROL: and names sanctioned terminal state 1" "state 1" "$G42_ERR"
+
+# --- AC3: a held, uncompleted claim is refused ------------------------------
+# The shape loop state cannot see, because loop state only exists after a
+# COMPLETION. This is the stop that was invisible before W2178.
+# The env-cache pointer here is written by a REAL claim driven through the
+# hook, not by printf. That is deliberate: the seam this group exists to cover
+# is writer-to-gate, and a hand-authored fixture tests the gate against the
+# suite's idea of the file rather than against what the writer actually
+# produces. The remaining printf fixtures below (the terminal-state records)
+# have no such writer on this path and are noted as the narrower coverage they
+# are.
+G42_P=$(g42_proj c); G42_S="$TMPDIR_TEST/g42-c"
+G42_CLAIM="curl -sS -X POST $G42_URL/api/tasks/claim -d @c.json | tee r.json"
+G42_CLAIM_BODY='{"data":{"id":78,"identifier":"W7703","status":"in_progress","needs_review":false},"hook":{"name":"before_doing","env":{"TASK_ID":"78","TASK_IDENTIFIER":"W7703","TASK_STATUS":"in_progress"}}}'
+g42_post "$G42_CLAIM" "$G42_CLAIM_BODY" "$G42_P"
+if grep -q "TASK_IDENTIFIER='W7703'" "$G42_P/.stride-env-cache" 2>/dev/null; then
+  echo -e "  ${GREEN}PASS${RESET}: 42c: a real claim writes the env-cache pointer the gate reads"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 42c: the claim did not write the pointer, so the seam is untested"
+  FAIL=$((FAIL + 1))
+  printf "TASK_IDENTIFIER='W7703'\nTASK_STATUS='in_progress'\n" > "$G42_P/.stride-env-cache"
+fi
+G42_FUT=$(date -u -v+30M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+30 min' +%Y-%m-%dT%H:%M:%SZ)
+g42_stub "$G42_S" "{\"data\":{\"id\":78,\"identifier\":\"W7703\",\"status\":\"in_progress\",\"claim_expires_at\":\"$G42_FUT\",\"completed_by_id\":null}}" 200
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42c: a held, uncompleted claim is refused a stop" 2 "$G42_RC"
+assert_contains "42c: naming the held task" "W7703" "$G42_ERR"
+
+# 42c CONTROL: the identical local state, but the server says the task is done.
+# "Read the current state rather than the fact that a claim once happened."
+G42_P=$(g42_proj c2); G42_S="$TMPDIR_TEST/g42-c2"
+printf "TASK_IDENTIFIER='W7703'\nTASK_STATUS='in_progress'\n" > "$G42_P/.stride-env-cache"
+g42_stub "$G42_S" "{\"data\":{\"id\":78,\"identifier\":\"W7703\",\"status\":\"completed\",\"claim_expires_at\":\"$G42_FUT\",\"completed_by_id\":null}}" 200
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42c CONTROL: a claim the server says is finished permits" 0 "$G42_RC"
+
+# --- AC4/AC5: the sanctioned terminal states, each with its control ----------
+# 42d: needs_review=true is state 2 and permits. Its control is the SAME flow
+# with needs_review=false, which must block -- otherwise 42d proves only that
+# the gate is off.
+G42_P=$(g42_proj d); G42_S="$TMPDIR_TEST/g42-d"
+g42_post "$G42_COMPLETE" "$G42_OK_REVIEW" "$G42_P"
+g42_stub "$G42_S" '{"data":{"identifier":"W7702"}}' 200
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42d: a needs_review completion permits" 0 "$G42_RC"
+assert_contains "42d: and names sanctioned terminal state 2" "state 2" "$G42_ERR"
+
+G42_P=$(g42_proj d2); G42_S="$TMPDIR_TEST/g42-d2"
+g42_post "$G42_COMPLETE" "$G42_OK" "$G42_P"
+g42_stub "$G42_S" '{"data":{"identifier":"W7702"}}' 200
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42d CONTROL: the same flow without needs_review is refused" 2 "$G42_RC"
+
+# 42e: an explicit halt is state 3 and permits, even with a claim held. Its
+# control is a STALE halt record, which must NOT switch the gate off -- that is
+# the direction the design ranks worst.
+G42_NOW=$(date -u +%s)
+G42_P=$(g42_proj e); G42_S="$TMPDIR_TEST/g42-e"
+printf "TASK_IDENTIFIER='W7703'\nTASK_STATUS='in_progress'\n" > "$G42_P/.stride-env-cache"
+printf '{"kind":"halt","session_id":"unknown","recorded_at_epoch":%s}' "$G42_NOW" \
+  > "$G42_P/.stride/.terminal-state.json"
+g42_stub "$G42_S" "{\"data\":{\"id\":78,\"identifier\":\"W7703\",\"status\":\"in_progress\",\"claim_expires_at\":\"$G42_FUT\",\"completed_by_id\":null}}" 200
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42e: an explicit halt permits even with a claim held" 0 "$G42_RC"
+assert_contains "42e: and names sanctioned terminal state 3" "state 3" "$G42_ERR"
+
+G42_P=$(g42_proj e2); G42_S="$TMPDIR_TEST/g42-e2"
+printf "TASK_IDENTIFIER='W7703'\nTASK_STATUS='in_progress'\n" > "$G42_P/.stride-env-cache"
+printf '{"kind":"halt","session_id":"unknown","recorded_at_epoch":%s}' "$((G42_NOW - 99999))" \
+  > "$G42_P/.stride/.terminal-state.json"
+g42_stub "$G42_S" "{\"data\":{\"id\":78,\"identifier\":\"W7703\",\"status\":\"in_progress\",\"claim_expires_at\":\"$G42_FUT\",\"completed_by_id\":null}}" 200
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42e CONTROL: a STALE halt record does not switch the gate off" 2 "$G42_RC"
+
+# 42f: a recorded unrecoverable error is state 4 and permits. Its control is a
+# MALFORMED record, which must fall through rather than permit -- a record that
+# does not parse establishes no sanctioned state.
+G42_P=$(g42_proj f); G42_S="$TMPDIR_TEST/g42-f"
+printf "TASK_IDENTIFIER='W7703'\nTASK_STATUS='in_progress'\n" > "$G42_P/.stride-env-cache"
+printf '{"kind":"error","session_id":"unknown","recorded_at_epoch":%s,"exit_code":1,"step":"after_doing"}' \
+  "$G42_NOW" > "$G42_P/.stride/.terminal-state.json"
+g42_stub "$G42_S" "{\"data\":{\"id\":78,\"identifier\":\"W7703\",\"status\":\"in_progress\",\"claim_expires_at\":\"$G42_FUT\",\"completed_by_id\":null}}" 200
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42f: a recorded unrecoverable error permits" 0 "$G42_RC"
+assert_contains "42f: and names sanctioned terminal state 4" "state 4" "$G42_ERR"
+
+G42_P=$(g42_proj f2); G42_S="$TMPDIR_TEST/g42-f2"
+printf "TASK_IDENTIFIER='W7703'\nTASK_STATUS='in_progress'\n" > "$G42_P/.stride-env-cache"
+printf 'not json at all' > "$G42_P/.stride/.terminal-state.json"
+g42_stub "$G42_S" "{\"data\":{\"id\":78,\"identifier\":\"W7703\",\"status\":\"in_progress\",\"claim_expires_at\":\"$G42_FUT\",\"completed_by_id\":null}}" 200
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42f CONTROL: a malformed record establishes no state and does not permit" 2 "$G42_RC"
+
+# --- The property itself: a session runs to exhaustion ----------------------
+# The seven cases above are the parts. This is the whole: a claim is held and
+# the stop is refused; the completion is recorded and the stop is STILL refused
+# because Ready has more; the last completion is recorded and Ready is empty, so
+# the stop is finally permitted under state 1. Same project directory
+# throughout, driven through the real scripts, so it exercises the transitions
+# rather than three unrelated fixtures.
+G42_P=$(g42_proj loop); G42_S="$TMPDIR_TEST/g42-loop"
+
+printf "TASK_IDENTIFIER='W7703'\nTASK_STATUS='in_progress'\n" > "$G42_P/.stride-env-cache"
+g42_stub "$G42_S" "{\"data\":{\"id\":78,\"identifier\":\"W7703\",\"status\":\"in_progress\",\"claim_expires_at\":\"$G42_FUT\",\"completed_by_id\":null}}" 200
+g42_stop "$G42_P" "$G42_S"
+G42_STEP1=$G42_RC
+
+g42_post "$G42_COMPLETE" "$G42_OK" "$G42_P"
+g42_stub "$G42_S" '{"data":{"identifier":"W7704"}}' 200
+g42_stop "$G42_P" "$G42_S"
+G42_STEP2=$G42_RC
+
+g42_stub "$G42_S" '{"error":"no task"}' 404
+g42_stop "$G42_P" "$G42_S"
+G42_STEP3=$G42_RC
+
+assert_eq "42g: claim held -> refused; completed with work left -> refused; Ready empty -> permitted" \
+  "2 2 0" "$G42_STEP1 $G42_STEP2 $G42_STEP3"
+assert_contains "42g: and the permitted stop is state 1, not an unsanctioned one" "state 1" "$G42_ERR"
+
+# 42g CONTROL: the same THREE steps, same stubs, same order -- with the local
+# state that drives each refusal removed. No env-cache pointer for step 1, and
+# no completion before steps 2 and 3, so the gate has nothing to gate on.
+# All three must permit.
+#
+# The control deliberately does NOT use STRIDE_ALLOW_STOP=1. That short-circuits
+# before any state logic runs, so it would prove only that the escape hatch
+# works -- it could not discriminate a refusal driven by the state from one
+# driven by anything else, which is precisely what this control is for. Varying
+# the state and leaving the machinery intact is the only way the pair means
+# what it claims.
+G42_P=$(g42_proj loop2); G42_S="$TMPDIR_TEST/g42-loop2"
+g42_stub "$G42_S" "{\"data\":{\"id\":78,\"identifier\":\"W7703\",\"status\":\"in_progress\",\"claim_expires_at\":\"$G42_FUT\",\"completed_by_id\":null}}" 200
+g42_stop "$G42_P" "$G42_S"; G42_CTL1=$G42_RC
+g42_stub "$G42_S" '{"data":{"identifier":"W7704"}}' 200
+g42_stop "$G42_P" "$G42_S"; G42_CTL2=$G42_RC
+g42_stub "$G42_S" '{"error":"no task"}' 404
+g42_stop "$G42_P" "$G42_S"; G42_CTL3=$G42_RC
+assert_eq "42g CONTROL: the same sequence with no claim and no completion permits throughout" \
+  "0 0 0" "$G42_CTL1 $G42_CTL2 $G42_CTL3"
+
+# --- AC8: the suite leaves nothing behind, and leaks no token ---------------
+# security_considerations names both explicitly.
+#
+# The leak canary watches TWO directories, not one. A stray write would land
+# wherever the scripts resolve PROJECT_DIR, which is "${CLAUDE_PROJECT_DIR:-.}"
+# -- the CWD when the variable is unset. Watching only the repo root assumes the
+# suite was invoked from there, and watches a directory nothing could write when
+# it was not.
+assert_eq "42h: the group creates no gate state outside its temp fixtures" \
+  "$G42_WATCH_BEFORE" "$(g42_watch_state "$G42_WATCH_ROOT" "$PWD")"
+
+# 42h CONTROL: prove the canary can fire. Round 1 found it watching the wrong
+# directory and round 2 found it unable to fail at all -- the same shape of
+# defect as the token grep, one assertion above. Create the record it looks for
+# in a scratch directory and require the comparison to notice.
+G42_CANARY="$TMPDIR_TEST/g42-canary"
+rm -rf "$G42_CANARY"; mkdir -p "$G42_CANARY/.stride"
+G42_CANARY_BEFORE=$(g42_watch_state "$G42_CANARY")
+printf '{}' > "$G42_CANARY/.stride/.loop-state.json"
+if [ "$(g42_watch_state "$G42_CANARY")" = "$G42_CANARY_BEFORE" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 42h CONTROL: the canary cannot detect a created record and is vacuous"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 42h CONTROL: the canary detects a created record"
+  PASS=$((PASS + 1))
+fi
+
+# The token check must inspect a BLOCK path. An earlier version read whatever
+# g42_stop had left in G42_OUT/G42_ERR, which by this point was 42g's step 3 --
+# a PERMIT whose stderr is a fixed string from permit_state. No block message,
+# no authenticated call, nothing that could carry a token: the grep could not
+# match under any behaviour, working or broken, and the assertion passed for
+# free. Drive a held-claim block explicitly, which is the path that BOTH makes
+# the authenticated request and emits a message.
+G42_P=$(g42_proj h); G42_S="$TMPDIR_TEST/g42-h"
+printf "TASK_IDENTIFIER='W7703'\nTASK_STATUS='in_progress'\n" > "$G42_P/.stride-env-cache"
+g42_stub "$G42_S" "{\"data\":{\"id\":78,\"identifier\":\"W7703\",\"status\":\"in_progress\",\"claim_expires_at\":\"$G42_FUT\",\"completed_by_id\":null}}" 200
+g42_stop "$G42_P" "$G42_S"
+assert_exit "42h: the token case reaches a block path (precondition)" 2 "$G42_RC"
+if printf '%s%s' "$G42_OUT" "$G42_ERR" | grep -q "$G42_TOKEN"; then
+  echo -e "  ${RED}FAIL${RESET}: 42h: the block path leaked the token"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 42h: the block path never echoes the token"
+  PASS=$((PASS + 1))
+fi
+
+# 42h CONTROL: prove the grep above CAN fail. Without this, a check that never
+# matches is indistinguishable from one that never could -- which is the exact
+# defect the assertion above was fixed for. Plant the sentinel in the captured
+# streams and require the same test to catch it.
+G42_PLANT="$G42_OUT$G42_ERR $G42_TOKEN"
+if printf '%s' "$G42_PLANT" | grep -q "$G42_TOKEN"; then
+  echo -e "  ${GREEN}PASS${RESET}: 42h CONTROL: the leak check detects a planted token"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${RESET}: 42h CONTROL: the leak check cannot detect a token and is vacuous"
+  FAIL=$((FAIL + 1))
+fi
+# ============================================================
 # Summary
 # ============================================================
 echo ""

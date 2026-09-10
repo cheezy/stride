@@ -25,6 +25,60 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Added — an end-to-end proof that the loop cannot exit early (W2180)
+
+Every other change in this release is unit-tested in its own group. None of them
+tests the property the requirement is actually about: once claiming starts, the
+session continues until no claimable task remains. That property lives in the
+**seams** between three scripts — the pre-phase guard that keeps the response on
+stdout, the post-phase writer that records loop state from it, and the Stop gate
+that reads that record — and each can be individually correct while the chain is
+broken. D306 was exactly that: three correct components and a silent hole
+between them.
+
+Test Group 42 drives the **real scripts in sequence** rather than
+reimplementing their logic, and **every refusal is paired with a negative
+control that must permit**. The controls are the point: a gate that refuses a
+sanctioned stop is a worse failure than the one being fixed, and a group that
+only ever sees refusals cannot tell a working gate from one welded shut.
+
+Seven cases, each with its control: a redirected completion refused before it
+runs (control: the same call with `tee` permitted); a completion that writes
+loop state and then a stop refused while Ready has work (control: the same
+completion permitted once Ready is empty); a held, uncompleted claim refused
+(control: a claim the server reports finished, permitted); `needs_review`
+permitting as state 2 (control: the same flow without it, refused); an explicit
+halt permitting as state 3 even with a claim held (control: a *stale* halt
+record, which must not switch the gate off); a recorded error permitting as
+state 4 (control: a malformed record, which establishes no state); and the whole
+sequence — claim held, refused; completed with work left, refused; Ready empty,
+permitted — controlled by the same three steps with the state that drives each
+refusal removed. That control deliberately does *not* use the escape hatch:
+`STRIDE_ALLOW_STOP=1` short-circuits before any state logic runs, so it would
+show only that the hatch works and could not tell a state-driven refusal from
+any other kind, which is the whole job of a control here.
+
+**The controls were themselves checked against the pre-fix code**, which is what
+makes them more than decoration. Run against the previously released hooks, the
+redirected completion **permits** where it now refuses, the held claim
+**permits** where it now refuses, and the old post phase writes **no loop state
+at all** from a redirected completion — the D306 hole, reproduced on demand.
+Each new assertion therefore fails against the behaviour it was written to
+detect, rather than passing vacuously.
+
+The group also asserts what the security considerations require, and the first
+draft of those two assertions is worth recording because review caught it: the
+token check originally inspected whatever the last stop had left in its capture
+variables, which by that point was a *permit* — a path with no block message and
+no authenticated call, so the check could not match under any behaviour and
+passed for free. It now drives a held-claim block explicitly, which is the path
+that both makes the request and emits a message, and it carries its own control
+that plants the sentinel and requires the same test to catch it. A check that
+never matches is otherwise indistinguishable from one that never could. The
+stray-write canary likewise watches the working directory as well as the repo
+root, since `PROJECT_DIR` resolves to the CWD when `CLAUDE_PROJECT_DIR` is unset
+and watching only the repo root assumes an invocation the suite cannot rely on.
+
 ### Changed — the Stop gate's re-block budget, examined and deliberately kept at 2 (W2179)
 
 The budget was chosen when the design principle was "wedging a session is worse

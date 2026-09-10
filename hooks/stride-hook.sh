@@ -167,14 +167,38 @@ record_loop_state_for_completion() {
     # because omitting it has already led two readers to opposite wrong
     # conclusions: one that this block is unreachable dead weight, the other
     # that extract_response_payload's "saved to" branch covers the case
-    # instead. Neither is right. The completion curl is REQUIRED to end in
-    # `| tee .stride/.last-api-response.json` — the W2131 pre-phase guard
-    # refuses the call otherwise — and capture_canonical_response writes the
-    # same file, so by the time this runs the snapshot carries THIS response,
-    # untruncated, not the previous claim's. (The "saved to" branch cannot
-    # substitute: read_canonical_response runs FIRST inside
-    # extract_response_payload, so a non-empty snapshot preempts it.) Tier 2 is
-    # the only path that records anything on a harness-truncated large success.
+    # instead. Neither is right — but the reason has to be stated exactly,
+    # because an earlier version of this comment overstated it and that
+    # overstatement is what kept the guard's gap from being noticed: the code
+    # appeared to say the case was already handled.
+    #
+    # WHAT IS FALSE: that the W2131 guard REQUIRES the tee. It does not. It
+    # refuses only the shapes that take the body off stdout — `-o`/`--output`/
+    # `-O`, a transformer pipe, and (W2174) a shell stdout redirect. A bare
+    # completion curl with no tee at all is permitted.
+    #
+    # WHAT IS TRUE, AND WHY THE TEE STILL MATTERS: this branch is reached only
+    # when the harness truncated a large success, and capture_canonical_response
+    # deliberately declines to write a truncated payload (its `jq -e .` gate,
+    # so that a truncated blob can never overwrite a good tee'd file). So on
+    # exactly this path the fallback writer does NOT refresh the snapshot. With
+    # a tee the snapshot is this response, written by the shell before the hook
+    # ran. WITHOUT one, the snapshot still holds the PREVIOUS call's payload.
+    # The tee is therefore load-bearing for the truncation fallback after all —
+    # it is what lets Tier 2 record anything — even though nothing enforces it.
+    #
+    # WHICH MEANS TIER 2'S SAFETY DOES NOT REST ON THE TEE. It rests on the two
+    # guards above, which are checked on every entry and refuse a snapshot that
+    # cannot be shown to belong to this completion. That is precisely what
+    # happened on D306: the completion was written with a redirect instead of a
+    # tee, the snapshot still held the CLAIM, and Tier 2 correctly declined it
+    # rather than recording a completion that never happened. The tee governs
+    # whether Tier 2 can help; the guards govern whether it can be wrong.
+    #
+    # (The "saved to" branch cannot substitute: read_canonical_response runs
+    # FIRST inside extract_response_payload, so a non-empty snapshot preempts
+    # it.) Tier 2 is the only path that records anything on a harness-truncated
+    # large success.
     _src="${RESPONSE_PAYLOAD:-}"
   fi
   if [ -z "$_src" ]; then
@@ -5550,7 +5574,7 @@ if [ "$PHASE" = "pre" ]; then
     if [ "$STRIDE_GUARD_KIND" = "remote" ]; then
       STRIDE_GUARD_MSG="Refused: this Stride API curl uses -O/--remote-name, which writes the body to a file instead of stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. The rule is stated for -o/--output, and -O is refused for the same reason rather than as a separate rule: it takes the body off stdout. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
     elif [ "$STRIDE_GUARD_KIND" = "flag" ]; then
-      STRIDE_GUARD_MSG="Refused: this Stride API curl uses -o/--output, which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so hiding it drops the diff silently and the task completes with an empty changed_files and no error. Rule: never -o/--output, never pipe into a transformer (jq, head, awk, grep, sed), always pipe into tee. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
+      STRIDE_GUARD_MSG="Refused: this Stride API curl uses -o/--output, which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so hiding it drops the diff silently and the task completes with an empty changed_files and no error. Convention: never -o/--output, never pipe into a transformer (jq, head, awk, grep, sed), always pipe into tee -- this guard refuses the first two and cannot require the third. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
     elif [ "$STRIDE_GUARD_KIND" = "redirect" ]; then
       STRIDE_GUARD_MSG="Refused: this Stride API curl redirects stdout away from the pipeline (>, >>, 1>, &>, &>>, >| or >&2), which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. Redirecting stderr alone is fine: 2> and 2>&1 leave the body on stdout, and stdout is the only stream the hook reads. Use: curl ... | tee \"\$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json\""
     else

@@ -1549,13 +1549,32 @@ function Write-LoopStateForCompletion {
         # it, because omitting it has already led two readers to opposite wrong
         # conclusions: one that this block is unreachable dead weight, the
         # other that the "saved to" persisted-output branch covers the case
-        # instead. Neither is right. The completion curl is REQUIRED to end in
-        # `| tee .stride/.last-api-response.json` (the W2131 pre-phase guard
-        # refuses it otherwise) and Save-CanonicalResponse writes the same
-        # file, so the snapshot carries THIS response, untruncated. The
-        # "saved to" branch cannot substitute: Read-CanonicalResponse runs
+        # instead. Neither is right, and an earlier version of this comment
+        # overstated the reason — which is what kept the guard's gap from
+        # being noticed, since the code appeared to say it was handled.
+        #
+        # WHAT IS FALSE: that the W2131 guard REQUIRES the tee. It does not. It
+        # refuses only the shapes that take the body off stdout —
+        # `-o`/`--output`/`-O`, a transformer pipe, and (W2174/W2175) a shell
+        # stdout redirect. A bare completion curl with no tee is permitted.
+        #
+        # WHAT IS TRUE: this branch is reached only on a harness-truncated
+        # large success, and Save-CanonicalResponse declines to write a payload
+        # that does not parse, so it does NOT refresh the snapshot on this very
+        # path. With a tee the snapshot is this response; without one it still
+        # holds the PREVIOUS call's payload. The tee is load-bearing for the
+        # truncation fallback even though nothing enforces it.
+        #
+        # SO TIER 2'S SAFETY RESTS ON THE TWO GUARDS ABOVE, not on the tee:
+        # they refuse a snapshot that cannot be shown to belong to this
+        # completion. On D306 the completion used a redirect, the snapshot
+        # still held the CLAIM, and Tier 2 correctly declined it. The tee
+        # governs whether Tier 2 can help; the guards govern whether it can be
+        # wrong.
+        #
+        # (The "saved to" branch cannot substitute: Read-CanonicalResponse runs
         # FIRST inside Get-ResponsePayload, so a non-empty snapshot preempts
-        # it. Tier 2 is the only path that records anything on a
+        # it.) Tier 2 is the only path that records anything on a
         # harness-truncated large success.
         $routeId = ''
         if ($StrideRoute -and $StrideRoute.PSObject.Properties.Name -contains 'TaskId') {
@@ -2535,7 +2554,7 @@ if ($Phase -eq 'pre') {
         if ($guardKind -eq 'remote') {
             $guardMsg = 'Refused: this Stride API curl uses -O/--remote-name, which writes the body to a file instead of stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so the diff is dropped silently and the task completes with an empty changed_files and no error. The rule is stated for -o/--output, and -O is refused for the same reason rather than as a separate rule: it takes the body off stdout. Use: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
         } elseif ($guardKind -eq 'flag') {
-            $guardMsg = 'Refused: this Stride API curl uses -o/--output, which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so hiding it drops the diff silently and the task completes with an empty changed_files and no error. Rule: never -o/--output, never pipe into a transformer (jq, head, awk, grep, sed), always pipe into tee. Use: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
+            $guardMsg = 'Refused: this Stride API curl uses -o/--output, which removes the response from stdout. The Stride hook reads that response to capture your file diff and refresh the env cache, so hiding it drops the diff silently and the task completes with an empty changed_files and no error. Convention: never -o/--output, never pipe into a transformer (jq, head, awk, grep, sed), always pipe into tee -- this guard refuses the first two and cannot require the third. Use: curl ... | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"'
         } elseif ($guardKind -eq 'redirect') {
             # NOTE for Windows PowerShell 5.1: this is the first refusal message
             # in either half containing '<', '>' or '&'. 5.1's ConvertTo-Json

@@ -25,6 +25,47 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Fixed — a comment that overstated what the curl guard enforces (W2177)
+
+The Tier 2 branch of `record_loop_state_for_completion` justified itself with:
+"The completion curl is REQUIRED to end in `| tee …` — the W2131 pre-phase guard
+refuses the call otherwise." That was **false as written**. The guard refuses
+the shapes that take the body off stdout — `-o`/`--output`/`-O`, a transformer
+pipe, and now a shell redirect — and has never required a `tee`. A bare `curl`
+with no `tee` at all is permitted, because it leaves the response on stdout,
+which is the property the hook actually needs.
+
+The overstatement mattered more than a wrong comment usually does: it was the
+stated reason Tier 2 was safe, so the code appeared to say the redirect case was
+already handled, and that is part of why the guard's gap went unnoticed until it
+cost a session. A comment that overstates a guarantee is worse than no comment.
+
+**The precise truth is sharper than either version, and the first attempt at
+this correction got it wrong too.** The `tee` IS load-bearing for the truncation
+fallback — just not because anything enforces it. This branch is reached only
+when the harness truncated a large success, and `capture_canonical_response`
+deliberately declines to write a payload that does not parse, so that a
+truncated blob can never overwrite a good tee'd file. On exactly this path the
+fallback writer therefore does **not** refresh the snapshot: with a `tee` the
+snapshot is this response, and without one it still holds the previous call's
+payload. So the `tee` governs whether Tier 2 can *help*, while the two guards —
+a `hooks` array and a matching task id — govern whether it can be *wrong*. That
+is what actually made the field failure safe: the completion used a redirect,
+the snapshot held the claim, and Tier 2 declined it.
+
+Both halves are corrected — the same sentence was restated verbatim in
+`hooks/stride-hook.ps1`, which a fix to the shell half alone would have left
+standing. The D226 staleness reasoning is preserved untouched: the two guards
+(`.hooks` must be an array, and the task id must match) are what make Tier 2
+safe rather than any property of the tee, and they are what correctly declined
+the stale claim snapshot in the field.
+
+`README.md` carried the same overstatement in a different form — it listed
+"always pipe into `tee`" among rules "enforced by a PreToolUse guard". It now
+says plainly which of the four the guard enforces and which is a convention.
+
+No behaviour changed.
+
 ### Added — the Stop gate now refuses a session end while a claim is held (W2178)
 
 The gate blocked on one condition: `.stride/.loop-state.json` exists, its

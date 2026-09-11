@@ -724,10 +724,21 @@ verifies.
 
 **Applicability.** Required of every port whose runtime can refuse a session end;
 read the `applies_to` rows below for which ports those are rather than taking it
-from this sentence. A port whose runtime *can* block but which has not wired a
-gate yet is `required` and reports MISSING until it does — `applies_to` records
-what a port must carry, never what it currently carries, and the MISSING cells
-this entry opens are its work list. **`stride-pi`, `stride-opencode` and
+from this sentence. What a `required` cell asks for is an anchor beside the
+port's own statement of how its runtime ends a session; the `anchor` check finds
+that comment and reads no further, so an `ok` cell certifies that the port has
+stated its position and never that a gate is wired. **Three shapes satisfy it.**
+A port that has wired a gate records how a stop is refused. A port that has not
+wired one *yet* is `required` and reports MISSING until it carries that
+statement — `applies_to` records what a port must carry, never what it currently
+carries, and the MISSING cells this entry opens are its work list. **And a port
+whose runtime can refuse but which ships no gate deliberately owes the same
+statement, saying why none is wired here:** `stride-lite` and
+`stride-copilot-lite` are that case. Both runtimes honour a stop decision, so
+neither is `not_applicable`; both render task markdown and call no API, so the
+condition a gate refuses on — a finished task with claimable work still queued —
+has no signal to read. Each records that beside its anchor, and each cell reads
+`ok` on the strength of the statement. **`stride-pi`, `stride-opencode` and
 `stride-opencode-lite` are recorded `not_applicable`, with their grounds as their
 reason:** their runtimes observe a session end but cannot refuse one, so there is
 no refusal for the rule to govern. Those rows are the sanctioned shape of a
@@ -760,7 +771,21 @@ because it is why a gate present elsewhere in the fleet will never appear there.
 ```
 
 **History.** v1 — authored from the G420 stop-gate porting research, with the
-stdout-document requirement inherited from the D238 fix.
+stdout-document requirement inherited from the D238 fix. D308 amended the
+Applicability paragraph to name the capable-but-ungated case and to disclose what
+the `anchor` check can certify, **deliberately without a version bump**. The
+Versioning rule's own test settles it: editorial rewording does not bump the
+version, and a port carrying this rule correctly before the edit still carries it
+correctly after — all six anchor-bearing ports were read, four documenting a
+wired gate and two a deliberate non-gate, and none needs an edit. The supporting
+facts agree: `check`, `check_hint` and every `applies_to` row are unchanged
+(the JSON block hashes byte-identical either side of the change), the two cells the case
+describes (`stride-lite`, `stride-copilot-lite`) read `ok` both before and after,
+and the amended sentences correct a description of what MISSING tracks rather
+than move the rule underneath it. A bump would have marked all six shipped port
+anchors stale — `stride`, `stride-codex`, `stride-copilot`, `stride-copilot-lite`,
+`stride-gemini` and `stride-lite` — and owed seven edits counting this file's own,
+for no change in what any port must carry.
 
 ### 7. Two review rounds is the ceiling, and the second verifies rather than re-reviews — `review-round-cap`
 

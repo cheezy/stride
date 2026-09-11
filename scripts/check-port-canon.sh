@@ -1033,6 +1033,21 @@ self_test() {
   st_assert "an anchor in a catalog whose source port is not_applicable is UNEXPECTED" 1 "$rc" \
     "UNEXPECTED: catalog .* its source port does not owe this rule" "$out"
 
+  # --- the deferred arm of the same derivation, and the fallback named rather
+  # --- than left to be covered incidentally by the alpha/beta fixtures above.
+  sed 's/"not_applicable"/"deferred"/' "$tmp/cn.md" > "$tmp/cnd.md"
+  printf 'x\n' > "$tmp/cn/stride-codex-marketplace/plugins/stride-codex/vend.md"
+  out="$(st_run "$tmp/cnd.md" "$tmp/cn")"; rc=$?
+  st_assert "a catalog whose source port is deferred is not asked for an anchor" 0 "$rc" \
+    "" "$out"
+  # The fallback: a catalog whose last segment matches no registry port keeps the
+  # old unconditional behaviour. Named here so a future fixture using a real port
+  # id cannot move these assertions onto the derived path unnoticed.
+  printf 'x\n' > "$tmp/c/stride-codex-marketplace/plugins/stride-codex/vend.md"
+  out="$(st_run "$tmp/k.md" "$tmp/c")"; rc=$?
+  st_assert "a catalog whose segment matches no registry port keeps the unconditional rule" 1 "$rc" \
+    "MISSING: catalog stride-codex-marketplace" "$out"
+
   # --- the property check: both fence characters, the unclosed verdict, and
   # --- the version binding that makes UNVERIFIABLE possible.
   st_canon "$tmp/p1.md" 1 required 1 property fence-nesting

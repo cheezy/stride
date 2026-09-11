@@ -2297,6 +2297,18 @@ function Invoke-SelfTestBody {
     $r = Invoke-StRun -Canon "$Tmp/cn.md" -PortsParent "$Tmp/cn"
     St-Assert "an anchor in a catalog whose source port is not_applicable is UNEXPECTED" 1 $r.ExitCode "UNEXPECTED: catalog .* its source port does not owe this rule" $r.Output
 
+    # --- the deferred arm, and the fallback named rather than left incidental.
+    Set-StFile -Path "$Tmp/cnd.md" -Text ((Get-Content -Raw "$Tmp/cn.md") -replace '"not_applicable"', '"deferred"')
+    Set-StFile -Path "$cn/vend.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/cnd.md" -PortsParent "$Tmp/cn"
+    St-Assert "a catalog whose source port is deferred is not asked for an anchor" 0 $r.ExitCode "" $r.Output
+    # The fallback: a catalog whose last segment matches no registry port keeps
+    # the old unconditional behaviour. Named so a future fixture using a real
+    # port id cannot move these assertions onto the derived path unnoticed.
+    Set-StFile -Path "$cx/vend.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/k.md" -PortsParent "$Tmp/c"
+    St-Assert "a catalog whose segment matches no registry port keeps the unconditional rule" 1 $r.ExitCode "MISSING: catalog stride-codex-marketplace" $r.Output
+
     # --- the property check: both fence characters, the unclosed verdict, and
     # --- the version binding that makes UNVERIFIABLE possible.
     New-StCanon -Path "$Tmp/p1.md" -Schema 1 -BetaStatus 'required' -Version '1' -Check 'property' -Id 'fence-nesting'

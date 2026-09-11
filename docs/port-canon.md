@@ -1270,18 +1270,26 @@ rather than taking it from this sentence. What a `required` cell asks for is an
 anchor beside the port's own statement of how the call must be invoked — the
 `anchor` check finds that comment and reads no further, so an `ok` cell certifies
 that the port has stated the rule and never that a guard is wired or that it
-refuses anything. **Five rows are narrowed, on two distinct structural facts, and
-the difference between them is the point.** `stride-lite`, `stride-copilot-lite`
-and `stride-opencode-lite` issue no Stride API request at all: with no call there
-is no reply, and a rule about preserving one has no subject there — an absence of
+refuses anything. **Three rows are narrowed, and all three rest on the same
+structural fact:** `stride-lite`, `stride-copilot-lite` and
+`stride-opencode-lite` issue no Stride API request at all. With no call there is
+no reply, and a rule about preserving one has no subject there — an absence of
 the traffic the rule inspects, not an unfinished port, and not an absence of
-anywhere to enforce it. `stride-opencode` and `stride-pi` do call the API, but
-never read the diff out of a reply: each computes its snapshot by running `git`
-and uploads it on its own transport, so concealing a reply cannot empty or
-corrupt the diff's content. Both carry a live exposure on the diff's
-*destination*, filed as **D309**; that is a different mechanism, this entry
-neither covers nor fixes it, and it must not be read as grounds for a `required`
-row here. Each narrowed row carries its own reopen condition.
+anywhere to enforce it. Each carries its own reopen condition.
+
+**`stride-opencode` and `stride-pi` are `required`, and the reason is worth
+stating because an earlier draft of this entry got it wrong.** Neither port
+parses the *diff* out of a reply — each computes its snapshot by running `git`
+and uploads it on its own transport — so it is tempting to narrow them on that
+ground alone. But the mechanism this entry names is not the diff alone: it is the
+reply being the source of the diff **or of the claim-derived task identity**, and
+both ports do take that identity from a response body. That identity is the
+upload's destination whenever the completion URL carries no numeric id, which is
+how a concealed claim reply sends a diff to the previous task — **D309**. So they
+owe the rule, they state it (each records its position under W2185), and D309
+tracks the distance between stating it and being guarded against it. Narrowing
+them would have required a reopen condition that could never fire, because the
+condition it would have named is already true today.
 
 ```json
 {
@@ -1300,8 +1308,8 @@ row here. Each narrowed row carries its own reopen condition.
     {"port": "stride-copilot-lite",   "status": "not_applicable",  "variant": "", "reason": "This plugin issues no Stride API request. Its hooks/hooks.json registers tool hooks only and intercepts no Stride call, and nothing in the tree makes one, so there is no reply to conceal and nothing for the rule to stand in front of. Reopen the day this port gains a completion call, which is the day it gains a reply worth preserving."},
     {"port": "stride-gemini",         "status": "required",        "variant": "", "reason": ""},
     {"port": "stride-lite",           "status": "not_applicable",  "variant": "", "reason": "This plugin writes task markdown and calls no board: it POSTs to nothing, so no API reply passes through it and a rule about preserving one has no subject in that repository. The absence is of the traffic the rule inspects, not of a place to enforce it. Reopen if this port ever learns to claim or complete against a Stride server."},
-    {"port": "stride-opencode",       "status": "not_applicable",  "variant": "", "reason": "This port never parses a diff out of an API reply: capture.ts shells git itself and the upload goes out on the plugin's own fetch(), so concealing a reply cannot empty or corrupt the snapshot and the harm this rule prevents is unreachable on its content path. Its separate exposure on the diff's destination -- a digit-only task-id pattern falling back to a claim-derived cache -- is filed as D309, a different mechanism and not grounds for a required row here. Reopen if the plugin ever takes the diff or the base ref from a response body."},
-    {"port": "stride-pi",             "status": "not_applicable",  "variant": "", "reason": "The snapshot here is computed by running git as a child process and reading git's stdout, the upload is this extension's own fetch(), and the base ref comes from git rev-parse HEAD on every claim, so no part of the diff is read from an API reply and an unresolvable base is loud rather than silent. Its destination exposure -- the digit-only id regex and the stale env-cache fallback -- is D309, a routing defect this entry neither covers nor fixes. Reopen if the bridge ever sources the diff or the base ref from a response body."},
+    {"port": "stride-opencode",       "status": "required",        "variant": "", "reason": ""},
+    {"port": "stride-pi",             "status": "required",        "variant": "", "reason": ""},
     {"port": "stride-opencode-lite",  "status": "not_applicable",  "variant": "", "reason": "Nothing in this tree talks to a Stride server: it reads no auth file, needs no token, and can neither claim nor complete against a board, so there is no reply to hide and the rule has nothing here to govern. Reopen the moment this plugin gains a call whose response is worth reading."}
   ]
 }

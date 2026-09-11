@@ -1186,7 +1186,7 @@ whole fleet by W2135.
 > paragraph — a generated file, or a fenced block, which the anchor scan already
 > excludes — since that is the shape that would earn `not_applicable` here.
 
-### 11. A Stride API call must leave its reply on stdout wherever the reply is what the diff is parsed from — `stdout-preservation-guard`
+### 11. A Stride API call must leave its reply on stdout wherever the reply is what the diff or the task's identity is read from — `stdout-preservation-guard`
 
 <!-- canon:stdout-preservation-guard v1 -->
 
@@ -1209,9 +1209,12 @@ reaching for the shape that hides the body, because it looks like it worked.
 **Three things are constitutive of the rule rather than incidental to it.**
 First, **the obligation attaches to the mechanism, not to the fleet.** It binds a
 port whose runtime reads a Stride reply off stdout to recover the diff or the
-task's identity. A port that computes its diff from local `git` and uploads it
-on its own transport is not exposed on the diff's *content*, and nothing here
-obliges it; a port that issues no Stride request at all has no reply to conceal.
+task's identity. Either limb is enough. A port that computes its diff from local
+`git` and uploads it on its own transport is not exposed on the diff's
+*content* — but if it still takes the claim-derived task identity from a reply,
+it is exposed on the other limb and is obliged, because that identity is where
+the diff is sent. Only a port that issues no Stride request at all has no reply
+to conceal and so owes nothing here.
 Read the `applies_to` rows for which ports those are rather than taking it from
 this paragraph. Second, **the permitted set is the port's to decide, and only the
 harm is portable.** A port that resolves a canonical response file back may
@@ -1241,10 +1244,11 @@ precisely what it covers. It records a concealed *claim* reply leaving a stale,
 claim-derived task identity in place, so a later diff uploads against the
 previous task and returns 2xx with nothing to notice — in `stride-opencode` and
 `stride-pi`, by way of a digit-only task-id pattern and an env-cache fallback.
-That is a concealed reply producing a silent wrong outcome, which is this rule's
-harm class; it is **not** this rule's mechanism, which is the reply being the
-source the diff is *parsed from*. Those two ports are narrowed below for exactly
-that distinction, and citing D309 here is not a claim that they owe the rule.
+That is a concealed reply producing a silent wrong outcome, and it is this
+rule's mechanism on the identity limb rather than the diff limb: the reply is the
+source of the task identity even where it is not the source of the diff. Those
+two ports are recorded `required` below on exactly that ground, and D309 is the
+distance between their stating the rule and being guarded against it.
 
 **The content mechanism has shipped fixes but no defect id, and that departure is
 disclosed rather than papered over.** It was found and closed as guard work under
@@ -1265,8 +1269,9 @@ seen. A port recorded `not_applicable` below owes no anchor at all, and one foun
 there is UNEXPECTED.
 
 **Applicability.** Required of every port whose runtime reads a Stride API reply
-off stdout to recover the diff; read the rows below for which ports those are
-rather than taking it from this sentence. What a `required` cell asks for is an
+off stdout to recover the diff **or the claim-derived task identity** — either
+limb obliges it; read the rows below for which ports those are rather than taking
+it from this sentence. What a `required` cell asks for is an
 anchor beside the port's own statement of how the call must be invoked — the
 `anchor` check finds that comment and reads no further, so an `ok` cell certifies
 that the port has stated the rule and never that a guard is wired or that it

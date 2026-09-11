@@ -273,9 +273,9 @@
 #      fleet runs stay byte-identical to each other and to the pre-change
 #      baseline.
 #
-# The suite is at 155 cases (153 in the PowerShell half; the gap is the two
-# [bash-only] cases). The current fleet baseline is exit 1 with
-# ok 94, missing 5, stale 0, unexpected 0, defect 42, unverifiable 0, 7 cells
+# The suite is at 159 cases (157 in the PowerShell half; the gap is the two
+# [bash-only] cases). The current fleet baseline is exit 0 with
+# ok 115, missing 0, stale 0, unexpected 0, defect 0, unverifiable 0, 11 cells
 # not applicable and 0 deferred.
 #
 # (W2136 moved it there, and the move is the checker working rather than a
@@ -1040,13 +1040,19 @@ self_test() {
   out="$(st_run "$tmp/cnd.md" "$tmp/cn")"; rc=$?
   st_assert "a catalog whose source port is deferred is not asked for an anchor" 0 "$rc" \
     "" "$out"
-  # The fallback: a catalog whose last segment matches no registry port keeps the
-  # old unconditional behaviour. Named here so a future fixture using a real port
-  # id cannot move these assertions onto the derived path unnoticed.
-  printf 'x\n' > "$tmp/c/stride-codex-marketplace/plugins/stride-codex/vend.md"
-  out="$(st_run "$tmp/k.md" "$tmp/c")"; rc=$?
+  # The fallback, isolated to the catalog leg. The registry here is the cn.md
+  # fixture's single `stride-codex` port, narrowed -- but the catalog is placed
+  # under a segment that matches NO registry port, so the derivation must not
+  # fire and the unconditional rule must still report it MISSING. The port tree
+  # is clean, so the exit code is driven by the catalog alone rather than being
+  # over-determined by port findings, which is what made an earlier version of
+  # this case weaker than the one it duplicated.
+  mkdir -p "$tmp/cn/stride-copilot-marketplace/plugins/stride-copilot"
+  printf 'x\n' > "$tmp/cn/stride-copilot-marketplace/plugins/stride-copilot/v.md"
+  printf 'x\n' > "$tmp/cn/stride-codex-marketplace/plugins/stride-codex/vend.md"
+  out="$(st_run "$tmp/cn.md" "$tmp/cn")"; rc=$?
   st_assert "a catalog whose segment matches no registry port keeps the unconditional rule" 1 "$rc" \
-    "MISSING: catalog stride-codex-marketplace" "$out"
+    "MISSING: catalog stride-copilot-marketplace/plugins/stride-copilot" "$out"
 
   # --- the property check: both fence characters, the unclosed verdict, and
   # --- the version binding that makes UNVERIFIABLE possible.

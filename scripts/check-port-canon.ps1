@@ -2302,12 +2302,17 @@ function Invoke-SelfTestBody {
     Set-StFile -Path "$cn/vend.md" -Text "x`n"
     $r = Invoke-StRun -Canon "$Tmp/cnd.md" -PortsParent "$Tmp/cn"
     St-Assert "a catalog whose source port is deferred is not asked for an anchor" 0 $r.ExitCode "" $r.Output
-    # The fallback: a catalog whose last segment matches no registry port keeps
-    # the old unconditional behaviour. Named so a future fixture using a real
-    # port id cannot move these assertions onto the derived path unnoticed.
-    Set-StFile -Path "$cx/vend.md" -Text "x`n"
-    $r = Invoke-StRun -Canon "$Tmp/k.md" -PortsParent "$Tmp/c"
-    St-Assert "a catalog whose segment matches no registry port keeps the unconditional rule" 1 $r.ExitCode "MISSING: catalog stride-codex-marketplace" $r.Output
+    # The fallback, isolated to the catalog leg, matching the bash half: the
+    # cn.md registry holds only `stride-codex`, so a catalog under a segment
+    # matching no registry port must not trigger the derivation and must still
+    # report MISSING. The port tree is clean, so exit 1 comes from the catalog
+    # rather than being over-determined by port findings.
+    $cn2 = "$Tmp/cn/stride-copilot-marketplace/plugins/stride-copilot"
+    New-StDir @($cn2)
+    Set-StFile -Path "$cn2/v.md" -Text "x`n"
+    Set-StFile -Path "$cn/vend.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/cn.md" -PortsParent "$Tmp/cn"
+    St-Assert "a catalog whose segment matches no registry port keeps the unconditional rule" 1 $r.ExitCode "MISSING: catalog stride-copilot-marketplace/plugins/stride-copilot" $r.Output
 
     # --- the property check: both fence characters, the unclosed verdict, and
     # --- the version binding that makes UNVERIFIABLE possible.

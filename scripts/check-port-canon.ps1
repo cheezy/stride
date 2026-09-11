@@ -1733,6 +1733,35 @@ function Invoke-CanonCheck {
         }
         foreach ($e in $entries) {
             if ($e.Check -ceq 'property') { continue }
+            # W2187: a catalog is a COPY of a port, so it owes exactly what its
+            # source port owes. This loop used to judge every entry against
+            # every catalog without reading the port's applies_to row, which
+            # was harmless only because no entry had yet narrowed a vendored
+            # port. The first to do so would have reported a MISSING the port
+            # does not owe -- and unsatisfiably, since an anchor added to the
+            # vendored tree to silence it would make the PORT cell UNEXPECTED.
+            # The bash half carries the same derivation, with the same fallback
+            # and the same message text.
+            $cport = Split-Path -Leaf $cat
+            $castatus = $null
+            foreach ($row in $e.AppliesTo) { if ($row.Port -ceq $cport) { $castatus = $row.Status; break } }
+            if ($castatus -ceq 'deferred') {
+                Add-Record -Kind 'deferred' -Indent '  ' -Message ''
+                continue
+            }
+            if ($castatus -ceq 'not_applicable') {
+                $naHits = @(Sort-HitsOrdinal (@($cfound.Hits | Where-Object { $_.Id -ceq $e.Id })))
+                if ($naHits.Count -gt 0) {
+                    foreach ($hit in $naHits) {
+                        Add-Record -Kind 'UNEXPECTED' -Indent '  ' `
+                            -Message "catalog $cat -- $($e.Id) at $($hit.Where) -- its source port does not owe this rule" `
+                            -Work "catalog $cat`: remove the $($e.Id) anchor at $($hit.Where); its source port does not owe that rule" -Subject 'catalog'
+                    }
+                } else {
+                    Add-Record -Kind 'na' -Indent '  ' -Message "catalog $cat -- $($e.Id) -- its source port does not owe this rule"
+                }
+                continue
+            }
             # D293 finding 1, same fix on the vendored-catalog side: judge every
             # anchor for the id rather than whichever the walk returned first.
             $hits = @(Sort-HitsOrdinal (@($cfound.Hits | Where-Object { $_.Id -ceq $e.Id })))
@@ -2235,6 +2264,38 @@ function Invoke-SelfTestBody {
     Set-StFile -Path "$Tmp/c/beta/b.md"  -Text "<!-- canon:rule-one v2 -->`n"
     $r = Invoke-StRun -Canon "$Tmp/cs.md" -PortsParent "$Tmp/c"
     St-Assert "a stale catalog copy is a finding" 1 $r.ExitCode "STALE: catalog stride-codex-marketplace" $r.Output
+
+    # --- W2187: a catalog owes what its source port owes. The cases above use
+    # --- alpha/beta, which match no catalog segment, so they still exercise
+    # --- the unconditional fallback; these two register a port whose id IS the
+    # --- catalog's last segment, which is what the derivation keys on. Same
+    # --- two directions and same message text as the bash half.
+    $cn = "$Tmp/cn/stride-codex-marketplace/plugins/stride-codex"
+    New-StDir @("$Tmp/cn/stride-codex", $cn)
+    Set-StFile -Path "$Tmp/cn/stride-codex/p.md" -Text "x`n"
+    Set-StFile -Path "$Tmp/cn.md" -Text (@(
+        '# canon'
+        '```json'
+        '{ "canon_schema_version": 1,'
+        '  "ports": ['
+        '    {"id": "stride-codex", "family": "f", "dir": "stride-codex", "exists": true, "note": ""}'
+        '  ] }'
+        '```'
+        '### r'
+        '<!-- canon:rule-one v1 -->'
+        '```json'
+        '{ "id": "rule-one", "version": 1, "status": "active", "superseded_by": null,'
+        '  "provenance": "quoted", "defects": ["D1"], "check": "anchor", "check_hint": "h",'
+        '  "applies_to": ['
+        '    {"port": "stride-codex", "status": "not_applicable", "variant": "", "reason": "r"} ] }'
+        '```'
+    ) -join "`n") 
+    Set-StFile -Path "$cn/vend.md" -Text "x`n"
+    $r = Invoke-StRun -Canon "$Tmp/cn.md" -PortsParent "$Tmp/cn"
+    St-Assert "a catalog whose source port is not_applicable owes no anchor" 0 $r.ExitCode "not applicable: catalog stride-codex-marketplace" $r.Output
+    Set-StFile -Path "$cn/vend.md" -Text "<!-- canon:rule-one v1 -->`n"
+    $r = Invoke-StRun -Canon "$Tmp/cn.md" -PortsParent "$Tmp/cn"
+    St-Assert "an anchor in a catalog whose source port is not_applicable is UNEXPECTED" 1 $r.ExitCode "UNEXPECTED: catalog .* its source port does not owe this rule" $r.Output
 
     # --- the property check: both fence characters, the unclosed verdict, and
     # --- the version binding that makes UNVERIFIABLE possible.

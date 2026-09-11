@@ -997,6 +997,42 @@ self_test() {
   out="$(st_run "$tmp/cs.md" "$tmp/c")"; rc=$?
   st_assert "a stale catalog copy is a finding" 1 "$rc" "STALE: catalog stride-codex-marketplace" "$out"
 
+  # --- W2187: a catalog is a COPY of a port, so it owes what its source port
+  # --- owes. Before this, the loop judged every entry against every catalog
+  # --- without reading the port's row -- invisible until an entry narrowed a
+  # --- vendored port, which none had. These two cases pin both directions.
+  # --- The fixture registers a port whose id equals the catalog's last path
+  # --- segment, which is what the derivation keys on; the cases above keep
+  # --- using alpha/beta, which match no catalog, and so still exercise the
+  # --- unconditional fallback.
+  mkdir -p "$tmp/cn/stride-codex" "$tmp/cn/stride-codex-marketplace/plugins/stride-codex"
+  printf 'x\n' > "$tmp/cn/stride-codex/p.md"
+  {
+    echo "# canon"
+    echo "${f3}json"
+    echo '{ "canon_schema_version": 1,'
+    echo '  "ports": ['
+    echo '    {"id": "stride-codex", "family": "f", "dir": "stride-codex", "exists": true, "note": ""}'
+    echo '  ] }'
+    echo "${f3}"
+    echo "### r"
+    echo "<!-- canon:rule-one v1 -->"
+    echo "${f3}json"
+    echo '{ "id": "rule-one", "version": 1, "status": "active", "superseded_by": null,'
+    echo '  "provenance": "quoted", "defects": ["D1"], "check": "anchor", "check_hint": "h",'
+    echo '  "applies_to": ['
+    echo '    {"port": "stride-codex", "status": "not_applicable", "variant": "", "reason": "r"} ] }'
+    echo "${f3}"
+  } > "$tmp/cn.md"
+  printf 'x\n' > "$tmp/cn/stride-codex-marketplace/plugins/stride-codex/vend.md"
+  out="$(st_run "$tmp/cn.md" "$tmp/cn")"; rc=$?
+  st_assert "a catalog whose source port is not_applicable owes no anchor" 0 "$rc" \
+    "not applicable: catalog stride-codex-marketplace" "$out"
+  printf '<!-- canon:rule-one v1 -->\n' > "$tmp/cn/stride-codex-marketplace/plugins/stride-codex/vend.md"
+  out="$(st_run "$tmp/cn.md" "$tmp/cn")"; rc=$?
+  st_assert "an anchor in a catalog whose source port is not_applicable is UNEXPECTED" 1 "$rc" \
+    "UNEXPECTED: catalog .* its source port does not owe this rule" "$out"
+
   # --- the property check: both fence characters, the unclosed verdict, and
   # --- the version binding that makes UNVERIFIABLE possible.
   st_canon "$tmp/p1.md" 1 required 1 property fence-nesting
@@ -3173,6 +3209,43 @@ for cat in $CATALOGS; do
     ever="$(field "$eline" 4)"
     echk="$(field "$eline" 7)"
     [ "$echk" = "property" ] && continue
+    # W2187: a catalog is a COPY of a port, so it owes exactly what its source
+    # port owes and nothing else. Until now this loop judged every entry
+    # against every catalog without ever reading the port's applies_to row.
+    # That was harmless only by accident -- no entry had yet narrowed a
+    # vendored port, so the question never arose. The first one to do so
+    # (stdout-preservation-guard, narrowing stride-copilot-lite on the
+    # structural fact that it calls no API) would have made this loop report a
+    # MISSING against the catalog that the port itself does not owe. Worse, it
+    # was unsatisfiable: adding an anchor to the vendored tree to silence it
+    # would have made the PORT cell UNEXPECTED, since a narrowed port may not
+    # carry one. The two verdicts are mutually exclusive, so no arrangement of
+    # files could have gone green. Derive the catalog's cell from the source
+    # row instead.
+    #
+    # The catalog's last path segment is its port id for every registered
+    # catalog. When it matches no registry port -- which is the case for the
+    # synthetic fixtures the self-tests build -- fall back to the old
+    # unconditional behaviour, so those cases keep asserting exactly what they
+    # asserted before.
+    cport="${cat##*/}"
+    castatus="$(echo "$RECORDS" | awk -F'\t' -v e="$eid" -v p="$cport" \
+      '$1=="APPLY" && $2==e && $4==p {print $5; exit}')"
+    if [ "$castatus" = "deferred" ]; then
+      record deferred "  " ""; continue
+    fi
+    if [ "$castatus" = "not_applicable" ]; then
+      na_hits="$(echo "$CFOUND" | grep "^$eid	" | LC_ALL=C sort)"
+      if [ -n "$na_hits" ]; then
+        for hit in $na_hits; do
+          record UNEXPECTED "  " "catalog $cat -- $eid at $(field "$hit" 3) -- its source port does not owe this rule" \
+            "catalog $cat: remove the $eid anchor at $(field "$hit" 3); its source port does not owe that rule" catalog
+        done
+      else
+        record na "  " "catalog $cat -- $eid -- its source port does not owe this rule"
+      fi
+      continue
+    fi
     # D293 finding 1, same fix on the vendored-catalog side: judge every anchor
     # for the id rather than whichever one find returned first.
     anchor_hits="$(echo "$CFOUND" | grep "^$eid	" | LC_ALL=C sort)"

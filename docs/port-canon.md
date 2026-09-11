@@ -1186,6 +1186,132 @@ whole fleet by W2135.
 > paragraph — a generated file, or a fenced block, which the anchor scan already
 > excludes — since that is the shape that would earn `not_applicable` here.
 
+### 11. A Stride API call must leave its reply on stdout wherever the reply is what the diff is parsed from — `stdout-preservation-guard`
+
+<!-- canon:stdout-preservation-guard v1 -->
+
+**Substance.** In the runtimes that recover a task's per-file diff by parsing a
+Stride API reply, that reply is not a convenience echo: it is the input. The
+hook reads the completion body off the tool's **stdout** to capture
+`changed_files` and to refresh the claim-derived task identity. A port in that
+position must refuse the invocation shapes that take the body off stdout —
+`-o`/`--output` and `-O`/`--remote-name`, a stdout redirect (`>`, `>>`, `1>`,
+`>|`, `&>`, `>&2`), and a pipe whose next stage consumes rather than passes
+through — on the Stride endpoints it intercepts.
+
+**The harm is the silence.** A hidden reply does not fail: the call returns 2xx,
+the task completes, the review queue shows `changed_files: []`, and nothing
+distinguishes that from a task that changed no files. There is no non-zero exit,
+no log line, and no difference an agent can see between the guarded and the
+unguarded run — which is exactly the condition under which an agent keeps
+reaching for the shape that hides the body, because it looks like it worked.
+
+**Three things are constitutive of the rule rather than incidental to it.**
+First, **the obligation attaches to the mechanism, not to the fleet.** It binds a
+port whose runtime reads a Stride reply off stdout to recover the diff or the
+task's identity. A port that computes its diff from local `git` and uploads it
+on its own transport is not exposed on the diff's *content*, and nothing here
+obliges it; a port that issues no Stride request at all has no reply to conceal.
+Read the `applies_to` rows for which ports those are rather than taking it from
+this paragraph. Second, **the permitted set is the port's to decide, and only the
+harm is portable.** A port that resolves a canonical response file back may
+permit a write to exactly that file; a port with no such file may permit none.
+What crosses ports is the obligation and the failure it prevents — never a flag
+list, which D240 would make a voicing claim. Third, **the rule reads the file
+descriptor, not the operator.** `2>`, `2>>` and `2>&1` leave the body on stdout
+and must not be refused; refusing them is a false positive that teaches an agent
+to route around the guard, and `>&2` is refused precisely because it moves the
+body off stdout by a different spelling.
+
+**What a port owes, concretely.** Its own markdown must state, where an agent is
+told how to make the call, which shapes hide the reply and what is lost when one
+does — naming the silence rather than describing it as an error. Where the
+runtime exposes a pre-tool interception point, the statement is backed by a
+guard rather than left as advice; where it does not, the statement stands alone
+and says so. The check below sees only the statement.
+
+**Provenance.** **Synthesized from shipped fixes — not quoted.** No port states
+this as a cross-port rule; each states its own version of it, in its own idiom,
+about its own runtime. The substance above was assembled by reading the four
+shipped guards against the failures that forced them, and is disclosed as
+authored here rather than presented as a citation.
+
+**Defect trace.** **D309** is the one shipped defect id, and it is cited for
+precisely what it covers. It records a concealed *claim* reply leaving a stale,
+claim-derived task identity in place, so a later diff uploads against the
+previous task and returns 2xx with nothing to notice — in `stride-opencode` and
+`stride-pi`, by way of a digit-only task-id pattern and an env-cache fallback.
+That is a concealed reply producing a silent wrong outcome, which is this rule's
+harm class; it is **not** this rule's mechanism, which is the reply being the
+source the diff is *parsed from*. Those two ports are narrowed below for exactly
+that distinction, and citing D309 here is not a claim that they owe the rule.
+
+**The content mechanism has shipped fixes but no defect id, and that departure is
+disclosed rather than papered over.** It was found and closed as guard work under
+`W2174` — the redirect hole in `stride`, observed in the field: with stdout
+redirected the hook recovered no response body, no loop state was written, and
+the stop gate went blind and let a session end with claimable work still in
+Ready — and then ported under `W2181`, `W2182` and `W2183` to the codex, copilot
+and gemini ports, each with its own permitted set. `stop-hook-capability` is this
+file's one sanctioned precedent for an entry admitted ahead of a defect id, and
+this entry follows it on the same terms: no id is invented, the departure is
+stated here, and a reader should weigh the entry accordingly. Every mechanism
+claim above is checkable against the shipped guard in the port it describes.
+
+**Port-side anchor.** Beside the port's own statement of how a Stride API call
+must be invoked — the paragraph that tells an agent which shapes hide the reply.
+The anchor scan reads markdown only, so an anchor placed in a hook script is not
+seen. A port recorded `not_applicable` below owes no anchor at all, and one found
+there is UNEXPECTED.
+
+**Applicability.** Required of every port whose runtime reads a Stride API reply
+off stdout to recover the diff; read the rows below for which ports those are
+rather than taking it from this sentence. What a `required` cell asks for is an
+anchor beside the port's own statement of how the call must be invoked — the
+`anchor` check finds that comment and reads no further, so an `ok` cell certifies
+that the port has stated the rule and never that a guard is wired or that it
+refuses anything. **Five rows are narrowed, on two distinct structural facts, and
+the difference between them is the point.** `stride-lite`, `stride-copilot-lite`
+and `stride-opencode-lite` issue no Stride API request at all: with no call there
+is no reply, and a rule about preserving one has no subject there — an absence of
+the traffic the rule inspects, not an unfinished port, and not an absence of
+anywhere to enforce it. `stride-opencode` and `stride-pi` do call the API, but
+never read the diff out of a reply: each computes its snapshot by running `git`
+and uploads it on its own transport, so concealing a reply cannot empty or
+corrupt the diff's content. Both carry a live exposure on the diff's
+*destination*, filed as **D309**; that is a different mechanism, this entry
+neither covers nor fixes it, and it must not be read as grounds for a `required`
+row here. Each narrowed row carries its own reopen condition.
+
+```json
+{
+  "id": "stdout-preservation-guard",
+  "version": 1,
+  "status": "active",
+  "superseded_by": null,
+  "provenance": "synthesized-from-shipped-fixes",
+  "defects": ["D309"],
+  "check": "anchor",
+  "check_hint": "Anchor sits beside the port's own statement of how a Stride API call must be invoked -- the paragraph that names the shapes which hide the reply and what is lost when one is used. The anchor scan reads markdown only: every guard in this fleet is implemented in a hook shell or PowerShell script, which the scan never opens, so an anchor placed in one is not found and no verdict here is evidence about a guard at all. An ok cell certifies that the port states the rule in its markdown -- never that a guard exists, that it refuses anything, or that what it refuses matches this entry. A port recorded not_applicable owes no anchor, and an anchor found on one is UNEXPECTED.",
+  "applies_to": [
+    {"port": "stride",                "status": "required",        "variant": "", "reason": ""},
+    {"port": "stride-codex",          "status": "required",        "variant": "", "reason": ""},
+    {"port": "stride-copilot",        "status": "required",        "variant": "", "reason": ""},
+    {"port": "stride-copilot-lite",   "status": "not_applicable",  "variant": "", "reason": "This plugin issues no Stride API request. Its hooks/hooks.json registers tool hooks only and intercepts no Stride call, and nothing in the tree makes one, so there is no reply to conceal and nothing for the rule to stand in front of. Reopen the day this port gains a completion call, which is the day it gains a reply worth preserving."},
+    {"port": "stride-gemini",         "status": "required",        "variant": "", "reason": ""},
+    {"port": "stride-lite",           "status": "not_applicable",  "variant": "", "reason": "This plugin writes task markdown and calls no board: it POSTs to nothing, so no API reply passes through it and a rule about preserving one has no subject in that repository. The absence is of the traffic the rule inspects, not of a place to enforce it. Reopen if this port ever learns to claim or complete against a Stride server."},
+    {"port": "stride-opencode",       "status": "not_applicable",  "variant": "", "reason": "This port never parses a diff out of an API reply: capture.ts shells git itself and the upload goes out on the plugin's own fetch(), so concealing a reply cannot empty or corrupt the snapshot and the harm this rule prevents is unreachable on its content path. Its separate exposure on the diff's destination -- a digit-only task-id pattern falling back to a claim-derived cache -- is filed as D309, a different mechanism and not grounds for a required row here. Reopen if the plugin ever takes the diff or the base ref from a response body."},
+    {"port": "stride-pi",             "status": "not_applicable",  "variant": "", "reason": "The snapshot here is computed by running git as a child process and reading git's stdout, the upload is this extension's own fetch(), and the base ref comes from git rev-parse HEAD on every claim, so no part of the diff is read from an API reply and an unresolvable base is loud rather than silent. Its destination exposure -- the digit-only id regex and the stale env-cache fallback -- is D309, a routing defect this entry neither covers nor fixes. Reopen if the bridge ever sources the diff or the base ref from a response body."},
+    {"port": "stride-opencode-lite",  "status": "not_applicable",  "variant": "", "reason": "Nothing in this tree talks to a Stride server: it reads no auth file, needs no token, and can neither claim nor complete against a board, so there is no reply to hide and the rule has nothing here to govern. Reopen the moment this plugin gains a call whose response is worth reading."}
+  ]
+}
+```
+
+**History.** v1 — authored under W2187 from the four shipped guards (the W2174
+redirect refusal in `stride`, and its W2181, W2182 and W2183 ports to codex,
+copilot and gemini) and from D309, and admitted on the prospective grounds its
+Defect trace discloses.
+
 ## Discovery — how a maintainer reaches this file
 
 **The edit-site back-reference is installed (D283), and this section records

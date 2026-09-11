@@ -619,6 +619,7 @@ The full derivation (exit-0/stdout chain, D234 durable-file design, D227 forbidd
 
 If `after_doing` fails (PreToolUse returns exit 2), fix the issue and retry the curl. The hooks fire again automatically.
 
+<!-- canon:stdout-preservation-guard v1 -->
 **Curl invocation rules — preserve stdout, or your file diffs are silently dropped.** The hook captures the `changed_files` diff and refreshes the env cache (`TASK_ID`, `TASK_BASE_REF`) by reading the API response off the Bash tool's **stdout**. Hide that response and the hook goes blind — the diff is never captured and the task shows `changed_files: []` in Review with **no error**. For **every** claim and complete curl: (1) **never** `-o`/`--output` or a stdout redirect, (2) **never** pipe into a transformer (`jq`/`head`/`awk`/`grep`/`sed`), (3) **always** pipe into `tee` (the one blessed pipe — it passes stdout through unchanged *and* persists the truncation fallback). The `?response_view=slim` on the complete curl degrades safely: an older server ignores the parameter and echoes the full task, which the hook reads identically — token cost only, never correctness:
 
 ```bash
@@ -627,6 +628,8 @@ curl -sS -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=sli
   -d @payload.json \
   | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"
 ```
+
+**Canon-governed — entry `stdout-preservation-guard` in `stride/docs/port-canon.md`.** That entry registers this rule as one every port whose runtime parses a Stride reply must carry. A change to its substance owes a version bump in **two** places before the next release: that entry in the canon, and this file's own `<!-- canon:stdout-preservation-guard ... -->` anchor above.
 
 ### Hook Environment Variables
 

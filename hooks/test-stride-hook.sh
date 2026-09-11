@@ -11245,6 +11245,41 @@ assert_exit "32: a Stride curl with an API-looking redirect target is still refu
 g32_run "curl -sS > out.json $S32C"
 assert_exit "32: a redirect written before the URL is still refused" 2 "$G32_RC"
 
+# --- An ESCAPED `>` is not an operator, and used to hide a real one ---------
+# `--data-urlencode n=a\>` passes a literal `>` to curl and redirects nothing.
+# NOTE ON THE BACKSLASHES BELOW: g32_run interpolates its argument straight into
+# a JSON document with no escaping, so the string it is handed must already be
+# JSON-escaped. A single `\>` would reach the hook as the invalid JSON escape
+# `\>`, the parse would fail, and the case would pass or fail for a reason that
+# has nothing to do with the guard. Each backslash is therefore doubled here;
+# the command the guard actually sees is `n=a\>`, and `n=a\\>` in the even-run
+# case below.
+# Rule 3's scope walk split on it anyway, dropped the word after it -- the URL --
+# and so found no /api/tasks/ outside a redirect target. Scope went to 0, rule 3
+# was skipped, and the genuine `> r.json` after it was PERMITTED. That is the
+# D306 shape returning by a different route: a completion written with a redirect,
+# the hook blind, the session ending with the task still in Doing. Measured as a
+# real permit against the previous revision, both for `>` and for `>>`.
+g32_run "curl -sS --data-urlencode n=a\\\\> $S32C > r.json"
+assert_exit "32: an escaped > cannot hide a real redirect behind it" 2 "$G32_RC"
+assert_contains "32: and it is reported as the redirect it is" "redirect" "$G32_ERR"
+
+g32_run "curl -sS --data-urlencode n=a\\\\> $S32C >> r.json"
+assert_exit "32: the same for an appending redirect" 2 "$G32_RC"
+
+# The other direction, which the scope loss had been masking: with no real
+# redirect anywhere, an escaped `>` must not be read as one. Refusing this is the
+# false positive that teaches an agent to route around the guard.
+g32_run "curl -sS --data-urlencode n=a\\\\> $S32C | tee r.json"
+assert_exit "32: an escaped > alone is not a redirect" 0 "$G32_RC"
+
+# ODD/EVEN is the whole distinction. `\\>` is an escaped BACKSLASH followed by a
+# real operator, so the `>` after it still redirects and is still refused -- a
+# neutraliser that blanked every `\>` pair without counting the run would permit
+# this one.
+g32_run "curl -sS $S32C --data-urlencode n=a\\\\\\\\> r.json"
+assert_exit "32: but an escaped BACKSLASH leaves the > an operator" 2 "$G32_RC"
+
 # --- Rule order: rules 1 and 2 still win, so their messages are unchanged ---
 g32_run "curl -sS -o out.json $S32C > x.json"
 assert_exit "32: -o wins over a redirect in the same segment" 2 "$G32_RC"

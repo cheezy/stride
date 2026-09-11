@@ -10895,6 +10895,30 @@ Assert-Exit "33: a Stride curl with an API-looking redirect target is still refu
 $r = Invoke-G33 "curl -sS > out.json $g33C"
 Assert-Exit "33: a redirect written before the URL is still refused" 2 $r.ExitCode
 
+# --- An ESCAPED `>` is not an operator, and used to hide a real one ---------
+# `--data-urlencode n=a\>` passes a literal `>` to curl and redirects nothing.
+# The Rule 3 scope replace split on it anyway and erased the word after it -- the
+# URL -- so no /api/tasks/ was left outside a redirect target, scope went false,
+# Rule 3 was skipped, and the genuine `> r.json` after it was PERMITTED. The
+# bash half measured the same permit on the same shape. PowerShell has no
+# backslash escape, so a single `\` here is literally one backslash, and
+# Invoke-G33 JSON-escapes it on the way in.
+$r = Invoke-G33 "curl -sS --data-urlencode n=a\> $g33C > r.json"
+Assert-Exit "33: an escaped > cannot hide a real redirect behind it" 2 $r.ExitCode
+
+$r = Invoke-G33 "curl -sS --data-urlencode n=a\> $g33C >> r.json"
+Assert-Exit "33: the same for an appending redirect" 2 $r.ExitCode
+
+# The other direction, which the scope loss had been masking: with no real
+# redirect, an escaped `>` must not be read as one.
+$r = Invoke-G33 "curl -sS --data-urlencode n=a\> $g33C | tee r.json"
+Assert-Exit "33: an escaped > alone is not a redirect" 0 $r.ExitCode
+
+# ODD/EVEN is the whole distinction: `\\>` is an escaped BACKSLASH followed by a
+# real operator, so that `>` still redirects and is still refused.
+$r = Invoke-G33 "curl -sS $g33C --data-urlencode n=a\\> r.json"
+Assert-Exit "33: but an escaped BACKSLASH leaves the > an operator" 2 $r.ExitCode
+
 # Digits that are not their own word are not a file descriptor -- the 1 belongs
 # to the URL, and the shell redirects stdout there too.
 $r = Invoke-G33 'curl -sS https://www.stridelikeaboss.com/api/tasks/1>out.json'

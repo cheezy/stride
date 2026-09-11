@@ -2419,6 +2419,47 @@ function Get-StrideUnsafeCurlKind {
         $flat = (($joined -split '\r?\n') | ForEach-Object { & $blankLine $_ }) -join "`n"
     }
 
+function Get-StrideGuardEscapedGtBlanked {
+    # A `>` the shell never reads as an operator, neutralised so no walk reads it
+    # as one either. `--data-urlencode n=a\>` hands curl a LITERAL `>` and
+    # redirects nothing; the scope walk used to blank the word after it (the URL,
+    # when it stands there) and the redirect rule used to call it a redirect.
+    #
+    # ODD/EVEN is the distinction a `-replace` cannot make: `\>` is a literal
+    # `>`, while `\\>` is an escaped BACKSLASH followed by a real operator. Only
+    # an odd run of backslashes escapes the `>`, so the run has to be counted.
+    #
+    # Length-preserving, like every other pass over this view: the escaping
+    # backslash and the `>` become two spaces, so the raw/blanked pairing offsets
+    # still line up. Quote state is untouched -- a backslash is blanked only when
+    # a `>` follows it, never when a quote does.
+    param([string]$Text)
+    $out = [System.Text.StringBuilder]::new($Text)
+    $n = $Text.Length
+    $i = 0
+    while ($i -lt $n) {
+        if ($Text[$i] -ne '\') { $i++; continue }
+        $k = 0
+        while ($i + $k -lt $n -and $Text[$i + $k] -eq '\') { $k++ }
+        if (($k % 2) -eq 1 -and $i + $k -lt $n -and $Text[$i + $k] -eq '>') {
+            $out[$i + $k - 1] = ' '
+            $out[$i + $k]     = ' '
+        }
+        $i = $i + $k
+    }
+    return $out.ToString()
+}
+
+    # Neutralise every backslash-escaped `>` before either consumer sees it:
+    # the Rule 3 scope test below reads $joined, and $flat -- which Rule 3 itself
+    # walks -- was derived from it above. One pass, both walks. This closes a
+    # MEASURED false permit: an escaped `>` standing before the URL made the
+    # scope replace erase the URL as though it were a redirect target, scope went
+    # false, Rule 3 was skipped, and a genuine `> r.json` after it was permitted
+    # -- the D306 shape returning by another route.
+    $joined = Get-StrideGuardEscapedGtBlanked -Text $joined
+    $flat   = Get-StrideGuardEscapedGtBlanked -Text $flat
+
     # --- Rule 3 scope: is /api/tasks/ present OUTSIDE every redirect target? --
     # The prefilter above answers "does /api/tasks/ appear anywhere at all", on
     # the RAW text and for the reason stated there. Rule 3 needs a strictly

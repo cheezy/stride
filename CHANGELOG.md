@@ -23,6 +23,43 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.79.0] - 2026-09-10
+
+### Fixed — an escaped `>` could hide a real redirect from Rule 3
+
+`--data-urlencode n=a\>` hands curl a **literal** `>`: the shell passes the
+character through and redirects nothing. Rule 3's scope walk split on it anyway.
+It treats every `>` as a redirect operator and erases the word after it as that
+operator's target — and when the escaped `>` stands just before the URL, the word
+erased **is** the URL. With no `/api/tasks/` left outside a redirect target,
+`$_g_scope` went to `0`, Rule 3 was skipped entirely, and a genuine `> r.json`
+written after it was **PERMITTED**.
+
+That is the D306 failure returning by a different route: a completion call whose
+body never reaches stdout, the hook blind, `.stride/.loop-state.json` never
+written, and the session ending with the task still in Doing — silently, which is
+the whole reason Rule 3 exists. Measured as a real permit against 1.78.0, for
+both `>` and `>>`, on both halves.
+
+The same character had a second, opposite effect that the first one masked: the
+redirect rule read it as an operator and would have refused a command that
+redirects nothing at all. The two errors cancelled, so neither was visible from
+the outside.
+
+Both are fixed upstream of either walk rather than in each of them. Every
+backslash-escaped `>` is neutralised in the operator view before Rule 3's scope
+test and before the segment walk that Rule 3 itself uses — one pass, so the two
+can no longer disagree about what a `>` is. **Odd/even is the distinction, and it
+is why this is not a `-replace`:** `\>` is a literal `>`, while `\\>` is an
+escaped backslash followed by a real operator, so only an odd run of backslashes
+escapes the `>`. The pass is length-preserving, like every other pass over this
+view, so the raw/blanked pairing offsets still line up; and it never touches a
+backslash unless a `>` follows it, so quote state is untouched.
+
+Four cases pin it in each half: the two masked permits, the over-refusal the
+scope loss was hiding, and the even-run control that a naive pair-blanking
+neutraliser would get wrong.
+
 ## [1.78.0] - 2026-09-10
 
 ### Added — an end-to-end proof that the loop cannot exit early (W2180)

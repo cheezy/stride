@@ -249,6 +249,8 @@ top issues (6 of 6):
 }
 ```
 
+**Counter-example — evidence that does not verify.** Suppose the same dispatch had also carried `"base_ref"` and `"head"`, and `git log --format='%h %s' <base_ref>..<head>` listed a commit `a1b2c3d Commit the retry helper`. The commit the third criterion asks for is then **not absent from the range** — it already exists — so leg (a) fails and the carve-out does not apply. The row is emitted as an ordinary `not_met` judged on its merits (or `met`, if that commit satisfies it), any `not_met` is paired with an `acceptance_criteria` issue, and nothing in `evidence` begins with the sentinel. The same holds when `head` does not match the repo's own `git rev-parse HEAD`, when `base_ref` disagrees with the base the hook would select from `.stride-env-cache` or that file is missing, or when only one of the two keys was sent: unverified evidence fails leg (a) rather than being ignored. A dispatch that sends neither key — an older orchestrator, or a nested-repo commit — is judged on the assertion alone, as in the example above.
+
 **Worked example — the returned summary for that same review.** Note the conditional ` (1 pending commit)` suffix on the `acceptance_criteria:` line, which is what stops `approved` beside a `not_met` tally reading as a contradiction. A review dispatched without `commit_pending` omits that suffix entirely and renders exactly as it did before the carve-out existed:
 
 ```text

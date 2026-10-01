@@ -23,6 +23,24 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.80.0] - 2026-10-01
+
+### Fixed — the reviewer verifies a commit_pending assertion instead of trusting it (D303)
+
+The commit-pending carve-out let a review excuse a commit-only acceptance criterion on the orchestrator's word that the commit was still ahead — the party the carve-out benefits. `commit_pending` may now carry `base_ref` and `head`, and the reviewer checks them itself rather than taking them on trust: each must be a bare hex object name before it enters a command, `head` must be the repository's own `HEAD`, `base_ref` must be the base the hook's diff capture would select for the task under review from `.stride-env-cache` (a missing cache fails rather than skips), and `base_ref` must be an ancestor of `head`. Leg (a) then also requires the criterion's commit to be absent from `base_ref..head`. Unverifiable evidence, or a lone key, fails leg (a). A dispatch with neither key behaves exactly as before, which is also the stated contract for a nested-repository commit. `commit_pending_scope_ok` is unchanged, and the residuals — an empty range proves no matching commit was made, not that one will be; omission still reaches the assertion-only path; the cache is editable — are written into the contract.
+
+### Added — stdout-preservation-guard registered as canon entry 11 (W2187)
+
+A rule that lived only in completed tasks is now one the fleet drift check reports on. All nine ports carry a row; the three lite ports are narrowed on the structural fact that they issue no Stride request at all, while stride-opencode and stride-pi owe the rule because their claim-derived task identity is read from a reply even though their diff is not. The check is an anchor check, and its hint says plainly that an ok cell certifies the port states the rule, never that a guard exists. The checker also now derives a vendored catalog's cell from its source port's row — a catalog is a copy of a port and owes exactly what that port owes — which a narrowed, vendored port made necessary.
+
+### Fixed — stop-hook-capability's Applicability admits the capable-but-ungated case (D308)
+
+The paragraph said a capable port with no gate reports MISSING until it wires one, but the anchor check never tracked gate-wiring. It now names the third shape — stride-lite and stride-copilot-lite are capable, ship no gate deliberately because they call no API, and read ok on the strength of their statement — and says what an ok cell can actually certify. Editorial; no entry version moved.
+
+### Added — a release runbook for this repository (W2173)
+
+`RELEASE.md` records how this plugin is released: `.claude-plugin/plugin.json` holds the version, the changelog's shape has been mixed (work-commit-opened headings and `[Unreleased]` stamps both appear), `stride-marketplace` must be synced afterwards under its own ritual, and the one-line check for whether the changelog's top heading is already tagged. Documentation only.
+
 ## [1.79.0] - 2026-09-10
 
 ### Fixed — an escaped `>` could hide a real redirect from Rule 3

@@ -152,13 +152,16 @@ assert_eq() {
 
 assert_contains() {
   local label="$1" needle="$2" haystack="$3"
-  if echo "$haystack" | grep -qF "$needle"; then
+  # A here-string, not `echo | grep -q`: grep -q exits on the first match, and
+  # under pipefail the writer's EPIPE on a haystack larger than the pipe buffer
+  # (task-reviewer.md is ~76 KB) turned a real match into a spurious FAIL.
+  if grep -qF -- "$needle" <<< "$haystack"; then
     echo -e "  ${GREEN}PASS${RESET}: $label"
     PASS=$((PASS + 1))
   else
     echo -e "  ${RED}FAIL${RESET}: $label"
     echo "    expected to contain: $needle"
-    echo "    actual: $(echo "$haystack" | head -5)"
+    echo "    actual: $(head -5 <<< "$haystack")"
     FAIL=$((FAIL + 1))
   fi
 }

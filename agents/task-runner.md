@@ -104,7 +104,10 @@ gate — that is a finding to report in your record, not a shortcut to take.**
    restate or reinterpret them here. Nested dispatch is verified to work end to
    end, so "I am already a subagent" is not a reason to inline. Count every
    nested dispatch into `telemetry.nested_dispatches` and sum the token totals
-   the harness reports back to you into `nested_tokens`.
+   the harness reports back to you into `nested_tokens`. Your claim writes
+   `.stride/.task-<IDENTIFIER>.json` exactly as the main loop's does, so pass
+   your explorer, planner and reviewer `TASK_FILE` as Steps 3 and 5 say rather
+   than retyping the body you fetched.
 
 5. **Implement.** This is the one phase you perform yourself rather than
    delegate — `stride-workflow` Step 4. Use repo-relative paths in anything you

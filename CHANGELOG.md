@@ -23,7 +23,7 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.82.0] - 2026-10-02
 
 ### Changed — the security specialist's full result goes to a file under `.stride/` and the main loop gets a few lines (W2284)
 
@@ -34,7 +34,7 @@ Specialist results returned to the main loop totalled 1.94 MB (median 8.1 KB, ma
 - **Cleanup** (`review-block-extraction.md`): `"$STRIDE_DIR/.security-$IDENT-r"*` (the result, its `.inline.json` fallback, and a temp copy a killed write leaves) joins the per-attempt artifacts cleared at claim and deleted at Step 7 once the PATCH has succeeded.
 - **Mirrors**: `stride-subagent-workflow`, `reference.md`'s Step 5 flow and the README; `stride-workflow/SKILL.md` is unchanged — its pointer defers the body to the sibling.
 - **Pinned**: bash hook-suite Group 49 (text pins, plus the read fence extracted and run against fixtures: file, inline fallback, NOT WRITTEN, a decoy path, symlink, two values, absent) and PowerShell Group 43 (text twins).
-- **Pairs with** `stride-security-review`'s [Unreleased] result-file contract; an older plugin ignores the variable and the inline path is unchanged.
+- **Pairs with** `stride-security-review` 2.6.0's result-file contract; an older plugin ignores the variable and the inline path is unchanged.
 
 ### Changed — the security specialist re-checks only what the fixes could have moved and carries every other verdict over (W2281)
 

@@ -14581,6 +14581,165 @@ assert_contains "43l: the Step 7 artifact cleanup deletes the task file" \
   '.task-$IDENT.json' "$(grep -n 'Step 7 only' "$SCRIPT_DIR/../skills/stride-workflow/review-block-extraction.md")"
 
 # ============================================================
+# Test Group 44: W2255 -- no Stop-gate block while a stride subagent runs
+# ============================================================
+# Claude Code's Stop input carries background_tasks (measured on 2.1.287: each
+# running subagent is {id, type:"subagent", status:"running", agent_type}). A
+# held claim whose stride subagent is still running is a legitimate end of turn
+# -- the agent is waiting for it -- so the gate permits and names it, for at
+# most STOP_PENDING_MAX_SECS per wait. Every permit below has a CONTROL with the
+# same fixture that still blocks, and every permit asserts the bounded API call
+# was never made.
+echo ""
+echo "=== Test Group 44: W2255 pending stride subagent (bash) ==="
+
+g44_case() { # $1=name $2=stdin -> sets G34_OUT G34_RC G34_ERR; G44_S = stub dir
+  G44_P=$(g34_proj "w2255-$1"); G44_S="$TMPDIR_TEST/g44-$1"; rm -rf "$G44_S"
+  g34_env "$G44_P" W2255 in_progress
+  g34_stub "$G44_S" "$(g34_show W2255 in_progress "\"$G34_FUT\"" null)" 200
+  g34_run "$G44_P" "$G44_S" "$2"
+}
+g44_unhit() { # $1=label: the stub was NOT called
+  if [ -f "$G44_S/curl.log" ]; then
+    echo -e "  ${RED}FAIL${RESET}: $1"; FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: $1"; PASS=$((PASS + 1))
+  fi
+}
+g44_bt() { # $1=agent_type $2=status $3=id -> one background_tasks entry
+  jq -nc --arg a "$1" --arg s "$2" --arg i "$3" \
+    '{id:$i, type:"subagent", status:$s, description:"G44-DESCRIPTION-TEXT", agent_type:$a}'
+}
+
+# 44a: a running stride reviewer permits, names it, and makes no API call.
+g44_case a "{\"background_tasks\":[$(g44_bt stride:task-reviewer running a1b2c3)]}"
+assert_exit "44a: a running stride subagent permits the stop" 0 "$G34_RC"
+assert_contains "44a: and names the pending agent" "stride:task-reviewer (a1b2c3)" "$G34_ERR"
+assert_contains "44a: and the held task" "W2255" "$G34_ERR"
+g44_unhit "44a: and makes no API call"
+assert_eq "44a: the task's description text is never printed" "absent" \
+  "$(printf '%s' "$G34_ERR" | grep -q 'G44-DESCRIPTION-TEXT' && echo present || echo absent)"
+# 44b CONTROL: the identical fixture with no background tasks still blocks.
+g44_case b '{}'
+assert_exit "44b CONTROL: the same held claim with nothing running still blocks" 2 "$G34_RC"
+g44_case b2 '{"background_tasks":[]}'
+assert_exit "44b CONTROL: and an empty background_tasks list blocks" 2 "$G34_RC"
+# 44c: a subagent that is no longer running does not count.
+g44_case c "{\"background_tasks\":[$(g44_bt stride:task-reviewer completed a1b2c3)]}"
+assert_exit "44c: a finished subagent does not permit" 2 "$G34_RC"
+# 44d: a non-stride subagent does not count.
+g44_case d "{\"background_tasks\":[$(g44_bt general-purpose running a1b2c3)]}"
+assert_exit "44d: a running non-stride subagent does not permit" 2 "$G34_RC"
+# 44e: an agent_type or id outside the anchored charset does not count and is
+# never echoed.
+g44_case e "{\"background_tasks\":[$(g44_bt 'stride:x; touch pwned' running a1b2c3)]}"
+assert_exit "44e: a malformed agent_type does not permit" 2 "$G34_RC"
+assert_eq "44e: and is never echoed" "absent" \
+  "$(printf '%s' "$G34_ERR" | grep -q 'touch pwned' && echo present || echo absent)"
+g44_case e2 "{\"background_tasks\":[$(g44_bt stride:task-reviewer running 'a1
+b2')]}"
+assert_exit "44e: a malformed id does not permit" 2 "$G34_RC"
+# 44f: the generic Plan agent stride dispatches counts.
+g44_case f "{\"background_tasks\":[$(g44_bt Plan running p1)]}"
+assert_exit "44f: a running Plan agent permits" 0 "$G34_RC"
+g44_unhit "44f: and makes no API call"
+# 44g: several pending agents across stride's plugins are all named.
+g44_case g "{\"background_tasks\":[$(g44_bt stride-security-review:security-reviewer running s1),$(g44_bt stride:task-explorer running e1)]}"
+assert_exit "44g: two pending stride agents permit" 0 "$G34_RC"
+assert_contains "44g: naming the security reviewer" "stride-security-review:security-reviewer (s1)" "$G34_ERR"
+assert_contains "44g: and the explorer" "stride:task-explorer (e1)" "$G34_ERR"
+g44_unhit "44g: and makes no API call"
+# 44h: a malformed background_tasks value blocks rather than aborting open.
+g44_case h '{"background_tasks":"running"}'
+assert_exit "44h: a non-array background_tasks blocks" 2 "$G34_RC"
+# 44j: only the exact agent types stride dispatches count -- never a prefix.
+g44_case j "{\"background_tasks\":[$(g44_bt stride-evil:x running a1)]}"
+assert_exit "44j: a stride-prefixed agent type stride does not dispatch blocks" 2 "$G34_RC"
+# 44k: strict parsing -- every malformed shape blocks, in both halves alike.
+g44_case k '{"background_tasks":{"k":{"id":"a","type":"subagent","status":"running","agent_type":"Plan"}}}'
+assert_exit "44k: an object-valued background_tasks blocks" 2 "$G34_RC"
+g44_case k2 '{"background_tasks":[{"id":"a","type":["subagent"],"status":"running","agent_type":"Plan"}]}'
+assert_exit "44k: an array-valued type blocks" 2 "$G34_RC"
+g44_case k3 '{"background_tasks":[{"id":"a","type":"SUBAGENT","status":"RUNNING","agent_type":"Plan"}]}'
+assert_exit "44k: a differently-cased type and status block" 2 "$G34_RC"
+# 44m: a wait is bounded in time -- a subagent still reported running after the
+# window is treated as hung and the gate applies.
+g44_seed() { # $1=project $2=identifier $3=seconds ago [$4=agents key, default a1]
+  printf '{"identifier":"%s","agents":"%s","since_epoch":%s}\n' "$2" "${4:-a1}" "$(( $(date -u +%s) - $3 ))" > "$1/.stride/.stop-pending-since.json"
+}
+G44_P=$(g34_proj w2255-m); G44_S="$TMPDIR_TEST/g44-m"; rm -rf "$G44_S"
+g34_env "$G44_P" W2255 in_progress; g44_seed "$G44_P" W2255 3600
+g34_stub "$G44_S" "$(g34_show W2255 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G44_P" "$G44_S" "{\"background_tasks\":[$(g44_bt stride:task-reviewer running a1)]}"
+assert_exit "44m: a wait past the window blocks" 2 "$G34_RC"
+assert_contains "44m: and says the subagent is treated as hung" "treating it as hung" "$G34_ERR"
+# 44m CONTROL: the same seed inside the window still permits.
+G44_P=$(g34_proj w2255-m2); G44_S="$TMPDIR_TEST/g44-m2"; rm -rf "$G44_S"
+g34_env "$G44_P" W2255 in_progress; g44_seed "$G44_P" W2255 60
+g34_stub "$G44_S" "$(g34_show W2255 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G44_P" "$G44_S" "{\"background_tasks\":[$(g44_bt stride:task-reviewer running a1)]}"
+assert_exit "44m CONTROL: a wait inside the window permits" 0 "$G34_RC"
+g44_unhit "44m CONTROL: and makes no API call"
+# 44n: the first permit records an identifier and an integer, nothing else.
+g44_case n "{\"background_tasks\":[$(g44_bt stride:task-reviewer running a1)]}"
+assert_eq "44n: the wait record holds exactly identifier, agents and since_epoch" '["agents","identifier","since_epoch"]' \
+  "$(jq -c 'keys' "$G44_P/.stride/.stop-pending-since.json" 2>/dev/null)"
+assert_eq "44n: for the held task" "W2255" "$(jq -r '.identifier' "$G44_P/.stride/.stop-pending-since.json" 2>/dev/null)"
+# 44o: a stop with nothing pending clears the record, so each wait is fresh.
+G44_P=$(g34_proj w2255-o); G44_S="$TMPDIR_TEST/g44-o"; rm -rf "$G44_S"
+g34_env "$G44_P" W2255 in_progress; g44_seed "$G44_P" W2255 60
+g34_stub "$G44_S" "$(g34_show W2255 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G44_P" "$G44_S" '{}'
+assert_eq "44o: a stop with nothing pending clears the wait record" "absent" \
+  "$([ -e "$G44_P/.stride/.stop-pending-since.json" ] && echo present || echo absent)"
+# 44p: a record for another task does not count against this one.
+G44_P=$(g34_proj w2255-p); G44_S="$TMPDIR_TEST/g44-p"; rm -rf "$G44_S"
+g34_env "$G44_P" W2255 in_progress; g44_seed "$G44_P" W1111 3600
+g34_stub "$G44_S" "$(g34_show W2255 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G44_P" "$G44_S" "{\"background_tasks\":[$(g44_bt stride:task-reviewer running a1)]}"
+assert_exit "44p: another task's stale record does not block this wait" 0 "$G34_RC"
+assert_eq "44p: and is replaced by this task's" "W2255" "$(jq -r '.identifier' "$G44_P/.stride/.stop-pending-since.json" 2>/dev/null)"
+g44_unhit "44p: and makes no API call"
+# 44r: a later wait in the same claim (the reviewer after the explorer) is a
+# new wait with its own window, even with no empty stop between them.
+G44_P=$(g34_proj w2255-r); G44_S="$TMPDIR_TEST/g44-r"; rm -rf "$G44_S"
+g34_env "$G44_P" W2255 in_progress; g44_seed "$G44_P" W2255 3600 e1
+g34_stub "$G44_S" "$(g34_show W2255 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G44_P" "$G44_S" "{\"background_tasks\":[$(g44_bt stride:task-reviewer running r1)]}"
+assert_exit "44r: a new pending agent after an old wait gets its own window" 0 "$G34_RC"
+assert_eq "44r: and the record now names it" "r1" "$(jq -r '.agents' "$G44_P/.stride/.stop-pending-since.json" 2>/dev/null)"
+g44_unhit "44r: and makes no API call"
+# 44s: a wait that cannot be recorded cannot be bounded, so it does not permit.
+G44_P=$(g34_proj w2255-s); G44_S="$TMPDIR_TEST/g44-s"; rm -rf "$G44_S"
+g34_env "$G44_P" W2255 in_progress; mkdir -p "$G44_P/.stride/.stop-pending-since.json"
+g34_stub "$G44_S" "$(g34_show W2255 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G44_P" "$G44_S" "{\"background_tasks\":[$(g44_bt stride:task-reviewer running a1)]}"
+assert_exit "44s: an unrecordable wait blocks rather than permitting unbounded" 2 "$G34_RC"
+assert_contains "44s: and says the wait could not be recorded" "could not be recorded" "$G34_ERR"
+# 44t: a fractional since_epoch is not a valid record in either half: a new wait.
+G44_P=$(g34_proj w2255-t); G44_S="$TMPDIR_TEST/g44-t"; rm -rf "$G44_S"
+g34_env "$G44_P" W2255 in_progress
+printf '{"identifier":"W2255","agents":"a1","since_epoch":%s.5}\n' "$(( $(date -u +%s) - 3600 ))" > "$G44_P/.stride/.stop-pending-since.json"
+g34_stub "$G44_S" "$(g34_show W2255 in_progress "\"$G34_FUT\"" null)" 200
+g34_run "$G44_P" "$G44_S" "{\"background_tasks\":[$(g44_bt stride:task-reviewer running a1)]}"
+assert_exit "44t: a fractional since_epoch starts a new wait" 0 "$G34_RC"
+# 44q: the completion branch is untouched: an unfollowed completion still
+# blocks while a stride agent runs (the subagent outlived the task).
+G44_P=$(g34_proj w2255-q); G44_S="$TMPDIR_TEST/g44-q"; rm -rf "$G44_S"
+g34_state "$G44_P" W2255 false
+g34_stub "$G44_S" '{"data":{"identifier":"W2256","needs_review":false}}' 200
+g34_run "$G44_P" "$G44_S" "{\"background_tasks\":[$(g44_bt stride:task-reviewer running a1)]}"
+assert_exit "44q: an unfollowed completion still blocks while a stride agent runs" 2 "$G34_RC"
+
+# 44i: no held claim -> the pre-existing silent permit, unchanged.
+G44_P=$(g34_proj w2255-i); G44_S="$TMPDIR_TEST/g44-i"; rm -rf "$G44_S"
+g34_stub "$G44_S" '{}' 200
+g34_run "$G44_P" "$G44_S" "{\"background_tasks\":[$(g44_bt stride:task-reviewer running a1)]}"
+assert_exit "44i: with no held claim the gate permits as before" 0 "$G34_RC"
+assert_eq "44i: silently, as before" "" "$G34_ERR"
+g44_unhit "44i: and makes no API call"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

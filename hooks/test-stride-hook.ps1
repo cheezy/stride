@@ -12454,6 +12454,115 @@ $g37Rbe = Join-Path $ScriptDir '../skills/stride-workflow/review-block-extractio
 Assert-Contains "37l: the Step 7 artifact cleanup deletes the task file" '.task-$IDENT.json' ((Get-Content -LiteralPath $g37Rbe | Where-Object { $_ -match 'Step 7 only' }) -join "`n")
 
 # ============================================================
+# Test Group 38: W2255 — no Stop-gate block while a stride subagent runs, PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 44. Every case points the gate at a LIVE
+# listener that would answer "held, in progress, not expired" — so a permit can
+# only mean the new branch fired, and each permit has a CONTROL that blocks. The
+# completion-branch case (bash 44q) is bash-only: it needs a /next listener.
+Write-Host ""
+Write-Host "=== Test Group 38: W2255 pending stride subagent (PowerShell) ==="
+
+function New-G38Bt {
+    param([string]$AgentType, [string]$Status, [string]$Id)
+    return ([ordered]@{ id = $Id; type = 'subagent'; status = $Status; description = 'G38-DESCRIPTION-TEXT'; agent_type = $AgentType } | ConvertTo-Json -Compress)
+}
+function Invoke-G38Case {
+    param([string]$Name, [string]$Stdin, [int]$Port)
+    $d = New-G35Project "w2255-$Name" "http://localhost:$Port"
+    Set-G35Env -Dir $d -Identifier 'W2255' -Status 'in_progress'
+    return (Invoke-G35Gate -ProjectDir $d -StdinJson $Stdin)
+}
+$g38Port = 18971
+$g38Fut = [DateTime]::UtcNow.AddMinutes(30).ToString("yyyy-MM-ddTHH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+$g38Job = Start-G35Listener -Port $g38Port -StatusCode 200 -Body (New-G35Show 'W2255' 'in_progress' $g38Fut) -Requests 40
+if (Wait-ForListener -Port $g38Port) {
+    $r = Invoke-G38Case -Name 'a' -Port $g38Port -Stdin ('{"background_tasks":[' + (New-G38Bt 'stride:task-reviewer' 'running' 'a1b2c3') + ']}')
+    Assert-Exit "38a: a running stride subagent permits the stop" 0 $r.ExitCode
+    Assert-Contains "38a: and names the pending agent" 'stride:task-reviewer (a1b2c3)' $r.Stderr
+    Assert-Contains "38a: and the held task" 'W2255' $r.Stderr
+    Assert-NotContains "38a: the task's description text is never printed" 'G38-DESCRIPTION-TEXT' ($r.Stdout + $r.Stderr)
+
+    $r = Invoke-G38Case -Name 'b' -Port $g38Port -Stdin '{}'
+    Assert-Exit "38b CONTROL: the same held claim with nothing running still blocks" 2 $r.ExitCode
+    $r = Invoke-G38Case -Name 'b2' -Port $g38Port -Stdin '{"background_tasks":[]}'
+    Assert-Exit "38b CONTROL: and an empty background_tasks list blocks" 2 $r.ExitCode
+
+    $r = Invoke-G38Case -Name 'c' -Port $g38Port -Stdin ('{"background_tasks":[' + (New-G38Bt 'stride:task-reviewer' 'completed' 'a1b2c3') + ']}')
+    Assert-Exit "38c: a finished subagent does not permit" 2 $r.ExitCode
+    $r = Invoke-G38Case -Name 'd' -Port $g38Port -Stdin ('{"background_tasks":[' + (New-G38Bt 'general-purpose' 'running' 'a1b2c3') + ']}')
+    Assert-Exit "38d: a running non-stride subagent does not permit" 2 $r.ExitCode
+    $r = Invoke-G38Case -Name 'e' -Port $g38Port -Stdin ('{"background_tasks":[' + (New-G38Bt 'stride:x; touch pwned' 'running' 'a1b2c3') + ']}')
+    Assert-Exit "38e: a malformed agent_type does not permit" 2 $r.ExitCode
+    Assert-NotContains "38e: and is never echoed" 'touch pwned' $r.Stderr
+    $r = Invoke-G38Case -Name 'e2' -Port $g38Port -Stdin ('{"background_tasks":[' + (New-G38Bt 'stride:task-reviewer' 'running' "a1`nb2") + ']}')
+    Assert-Exit "38e: a malformed id does not permit" 2 $r.ExitCode
+    $r = Invoke-G38Case -Name 'f' -Port $g38Port -Stdin ('{"background_tasks":[' + (New-G38Bt 'Plan' 'running' 'p1') + ']}')
+    Assert-Exit "38f: a running Plan agent permits" 0 $r.ExitCode
+    $r = Invoke-G38Case -Name 'g' -Port $g38Port -Stdin ('{"background_tasks":[' + (New-G38Bt 'stride-security-review:security-reviewer' 'running' 's1') + ',' + (New-G38Bt 'stride:task-explorer' 'running' 'e1') + ']}')
+    Assert-Exit "38g: two pending stride agents permit" 0 $r.ExitCode
+    Assert-Contains "38g: naming the security reviewer" 'stride-security-review:security-reviewer (s1)' $r.Stderr
+    Assert-Contains "38g: and the explorer" 'stride:task-explorer (e1)' $r.Stderr
+    $r = Invoke-G38Case -Name 'h' -Port $g38Port -Stdin '{"background_tasks":"running"}'
+    Assert-Exit "38h: a non-array background_tasks blocks" 2 $r.ExitCode
+
+    $r = Invoke-G38Case -Name 'j' -Port $g38Port -Stdin ('{"background_tasks":[' + (New-G38Bt 'stride-evil:x' 'running' 'a1') + ']}')
+    Assert-Exit "38j: a stride-prefixed agent type stride does not dispatch blocks" 2 $r.ExitCode
+    $r = Invoke-G38Case -Name 'k' -Port $g38Port -Stdin '{"background_tasks":{"k":{"id":"a","type":"subagent","status":"running","agent_type":"Plan"}}}'
+    Assert-Exit "38k: an object-valued background_tasks blocks" 2 $r.ExitCode
+    $r = Invoke-G38Case -Name 'k2' -Port $g38Port -Stdin '{"background_tasks":[{"id":"a","type":["subagent"],"status":"running","agent_type":"Plan"}]}'
+    Assert-Exit "38k: an array-valued type blocks" 2 $r.ExitCode
+    $r = Invoke-G38Case -Name 'k3' -Port $g38Port -Stdin '{"background_tasks":[{"id":"a","type":"SUBAGENT","status":"RUNNING","agent_type":"Plan"}]}'
+    Assert-Exit "38k: a differently-cased type and status block" 2 $r.ExitCode
+
+    function Set-G38Seed {
+        param([string]$Dir, [string]$Identifier, [int]$Ago, [string]$Agents = 'a1', [string]$Suffix = '')
+        $e = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $Ago
+        [System.IO.File]::WriteAllText((Join-Path $Dir '.stride/.stop-pending-since.json'), "{""identifier"":""$Identifier"",""agents"":""$Agents"",""since_epoch"":$e$Suffix}`n")
+    }
+    $one = '{"background_tasks":[' + (New-G38Bt 'stride:task-reviewer' 'running' 'a1') + ']}'
+    $d = New-G35Project 'w2255-m' "http://localhost:$g38Port"; Set-G35Env -Dir $d -Identifier 'W2255' -Status 'in_progress'; Set-G38Seed -Dir $d -Identifier 'W2255' -Ago 3600
+    $r = Invoke-G35Gate -ProjectDir $d -StdinJson $one
+    Assert-Exit "38m: a wait past the window blocks" 2 $r.ExitCode
+    Assert-Contains "38m: and says the subagent is treated as hung" 'treating it as hung' $r.Stderr
+    $d = New-G35Project 'w2255-m2' "http://localhost:$g38Port"; Set-G35Env -Dir $d -Identifier 'W2255' -Status 'in_progress'; Set-G38Seed -Dir $d -Identifier 'W2255' -Ago 60
+    $r = Invoke-G35Gate -ProjectDir $d -StdinJson $one
+    Assert-Exit "38m CONTROL: a wait inside the window permits" 0 $r.ExitCode
+    $d = New-G35Project 'w2255-n' "http://localhost:$g38Port"; Set-G35Env -Dir $d -Identifier 'W2255' -Status 'in_progress'
+    $r = Invoke-G35Gate -ProjectDir $d -StdinJson $one
+    $rec = [System.IO.File]::ReadAllText((Join-Path $d '.stride/.stop-pending-since.json'))
+    Assert-Contains "38n: the wait record names the held task" '"identifier":"W2255"' $rec
+    Assert-Eq "38n: and holds exactly identifier, agents and since_epoch" 'agents,identifier,since_epoch' ((($rec | ConvertFrom-Json).PSObject.Properties.Name | Sort-Object) -join ',')
+    $d = New-G35Project 'w2255-o' "http://localhost:$g38Port"; Set-G35Env -Dir $d -Identifier 'W2255' -Status 'in_progress'; Set-G38Seed -Dir $d -Identifier 'W2255' -Ago 60
+    $r = Invoke-G35Gate -ProjectDir $d -StdinJson '{}'
+    Assert-Eq "38o: a stop with nothing pending clears the wait record" 'False' ([string](Test-Path -LiteralPath (Join-Path $d '.stride/.stop-pending-since.json')))
+    $d = New-G35Project 'w2255-p' "http://localhost:$g38Port"; Set-G35Env -Dir $d -Identifier 'W2255' -Status 'in_progress'; Set-G38Seed -Dir $d -Identifier 'W1111' -Ago 3600
+    $r = Invoke-G35Gate -ProjectDir $d -StdinJson $one
+    Assert-Exit "38p: another task's stale record does not block this wait" 0 $r.ExitCode
+    $d = New-G35Project 'w2255-r' "http://localhost:$g38Port"; Set-G35Env -Dir $d -Identifier 'W2255' -Status 'in_progress'; Set-G38Seed -Dir $d -Identifier 'W2255' -Ago 3600 -Agents 'e1'
+    $r = Invoke-G35Gate -ProjectDir $d -StdinJson ('{"background_tasks":[' + (New-G38Bt 'stride:task-reviewer' 'running' 'r1') + ']}')
+    Assert-Exit "38r: a new pending agent after an old wait gets its own window" 0 $r.ExitCode
+    Assert-Contains "38r: and the record now names it" '"agents":"r1"' ([System.IO.File]::ReadAllText((Join-Path $d '.stride/.stop-pending-since.json')))
+    $d = New-G35Project 'w2255-s' "http://localhost:$g38Port"; Set-G35Env -Dir $d -Identifier 'W2255' -Status 'in_progress'
+    New-Item -ItemType Directory -Force -Path (Join-Path $d '.stride/.stop-pending-since.json') | Out-Null
+    $r = Invoke-G35Gate -ProjectDir $d -StdinJson $one
+    Assert-Exit "38s: an unrecordable wait blocks rather than permitting unbounded" 2 $r.ExitCode
+    Assert-Contains "38s: and says the wait could not be recorded" 'could not be recorded' $r.Stderr
+    $d = New-G35Project 'w2255-t' "http://localhost:$g38Port"; Set-G35Env -Dir $d -Identifier 'W2255' -Status 'in_progress'; Set-G38Seed -Dir $d -Identifier 'W2255' -Ago 3600 -Suffix '.5'
+    $r = Invoke-G35Gate -ProjectDir $d -StdinJson $one
+    Assert-Exit "38t: a fractional since_epoch starts a new wait" 0 $r.ExitCode
+    $r = Invoke-G38Case -Name 'u' -Port $g38Port -Stdin ('[' + $one + ']')
+    Assert-Exit "38u: a top-level array Stop input blocks, as in bash" 2 $r.ExitCode
+} else {
+    Write-Host "  SKIP: 38a-38h: listener did not come up on port $g38Port"
+}
+Remove-Job -Job $g38Job -Force -ErrorAction SilentlyContinue
+$g38d = New-G35Project 'w2255-i' 'http://localhost:1'
+$r = Invoke-G35Gate -ProjectDir $g38d -StdinJson ('{"background_tasks":[' + (New-G38Bt 'stride:task-reviewer' 'running' 'a1') + ']}')
+Assert-Exit "38i: with no held claim the gate permits as before" 0 $r.ExitCode
+Assert-Eq "38i: silently, as before" '' $r.Stderr
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

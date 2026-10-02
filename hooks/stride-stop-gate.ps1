@@ -377,6 +377,95 @@ if (-not (Test-Path -LiteralPath $LoopStateFile)) {
         exit 0
     }
 
+    # (W2255) A stride subagent is still running while this claim is held —
+    # the twin of the bash branch; read its comment for the measured
+    # background_tasks shape, the exact-type allow-list and the time bound.
+    # Strict on purpose: an array only, string fields, case-SENSITIVE exact
+    # matches, so both halves agree on every malformed shape.
+    $pendingTypes = @('stride:task-explorer', 'stride:task-reviewer', 'stride:task-decomposer',
+        'stride:task-enricher', 'stride:task-runner', 'stride:hook-diagnostician',
+        'stride-security-review:security-reviewer', 'stride-exploratory-testing:explorer',
+        'stride-exploratory-testing:charter-generator', 'Plan')
+    $pending = @()
+    $pendingIds = @()
+    if ($rawInput -and $rawInput.TrimStart().StartsWith('{')) {
+        try {
+            $pendIn = $rawInput | ConvertFrom-Json
+            if ($pendIn -is [PSCustomObject] -and $pendIn.PSObject.Properties.Match('background_tasks').Count -gt 0 -and
+                $pendIn.background_tasks -is [System.Array]) {
+                foreach ($bt in $pendIn.background_tasks) {
+                    if ($bt -isnot [PSCustomObject]) { continue }
+                    $props = $bt.PSObject.Properties.Name
+                    if (-not (($props -contains 'type') -and ($props -contains 'status') -and ($props -contains 'agent_type') -and ($props -contains 'id'))) { continue }
+                    if (($bt.type -isnot [string]) -or ($bt.status -isnot [string]) -or ($bt.agent_type -isnot [string]) -or ($bt.id -isnot [string])) { continue }
+                    if (($bt.type -cne 'subagent') -or ($bt.status -cne 'running')) { continue }
+                    if ($pendingTypes -cnotcontains $bt.agent_type) { continue }
+                    if ($bt.id -cnotmatch '\A[A-Za-z0-9_-]{1,64}\z') { continue }
+                    $pending += ('{0} ({1})' -f $bt.agent_type, $bt.id)
+                    $pendingIds += $bt.id
+                }
+            }
+        } catch {
+            $pending = @()
+            $pendingIds = @()
+        }
+    }
+    $stopPendingFile = Join-Path $ProjectDir '.stride/.stop-pending-since.json'
+    $stopPendingMaxSecs = 1800
+    if ($pending.Count -gt 0) {
+        $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $idsSorted = [string[]]@($pendingIds)
+        [Array]::Sort($idsSorted, [StringComparer]::Ordinal)
+        $agentsKey = ($idsSorted -join ',')
+        $since = $null
+        try {
+            if (Test-Path -LiteralPath $stopPendingFile -PathType Leaf) {
+                $spRaw = Get-Content -Raw -LiteralPath $stopPendingFile
+                if ($spRaw -and $spRaw.TrimStart().StartsWith('{')) {
+                    $sp = $spRaw | ConvertFrom-Json
+                    $spNames = $sp.PSObject.Properties.Name
+                    if ($sp -is [PSCustomObject] -and ($spNames -contains 'identifier') -and ($spNames -contains 'agents') -and
+                        ($spNames -contains 'since_epoch') -and ($sp.identifier -is [string]) -and ($sp.agents -is [string]) -and
+                        ($sp.identifier -ceq $heldIdent) -and ($sp.agents -ceq $agentsKey)) {
+                        $e = $sp.since_epoch
+                        if ((($e -is [int]) -or ($e -is [long]) -or (($e -is [double]) -and ([math]::Floor($e) -eq $e))) -and $e -ge 0) {
+                            $since = [long]$e
+                        }
+                    }
+                }
+            }
+        } catch { $since = $null }
+        $recorded = $true
+        if ($null -eq $since) {
+            $since = $nowEpoch
+            $recorded = $false
+            if (-not ((Test-Path -LiteralPath $stopPendingFile) -and -not (Test-Path -LiteralPath $stopPendingFile -PathType Leaf))) {
+                $spTmp = $null
+                try {
+                    $spDir = Join-Path $ProjectDir '.stride'
+                    if (-not (Test-Path -LiteralPath $spDir)) { New-Item -ItemType Directory -Force -Path $spDir -ErrorAction Stop | Out-Null }
+                    $spTmp = Join-Path $spDir ("stop-pending.{0}.tmp" -f ([System.IO.Path]::GetRandomFileName()))
+                    [System.IO.File]::WriteAllText($spTmp, (([ordered]@{ identifier = $heldIdent; agents = $agentsKey; since_epoch = $nowEpoch } | ConvertTo-Json -Compress) + "`n"))
+                    Move-Item -LiteralPath $spTmp -Destination $stopPendingFile -Force -ErrorAction Stop
+                    $recorded = $true
+                } catch {
+                    if ($spTmp -and (Test-Path -LiteralPath $spTmp)) { Remove-Item -LiteralPath $spTmp -Force -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+        $waited = $nowEpoch - $since
+        if (-not $recorded) {
+            [Console]::Error.WriteLine(("stride-stop-gate: a stride subagent is running for {0}, but its wait could not be recorded, so it cannot be time-bounded; applying the gate" -f $heldIdent))
+        } elseif ($waited -ge 0 -and $waited -le $stopPendingMaxSecs) {
+            [Console]::Error.WriteLine(("stride-stop-gate: permitting the stop: {0} still holds a claim and a stride subagent is still running: {1}. Its completion re-invokes the session, and this gate applies again then." -f $heldIdent, ($pending -join ', ')))
+            exit 0
+        } else {
+            [Console]::Error.WriteLine(("stride-stop-gate: a stride subagent has been pending for {0} for over {1} seconds; treating it as hung and applying the gate" -f $heldIdent, $stopPendingMaxSecs))
+        }
+    } else {
+        Remove-Item -LiteralPath $stopPendingFile -Force -ErrorAction SilentlyContinue
+    }
+
     $heldBase = Resolve-StrideApiUrl
     $heldToken = Resolve-StrideApiToken
     if ((-not $heldBase) -or (-not $heldToken)) {

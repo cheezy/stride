@@ -32,6 +32,9 @@
 #      TASK_STATUS='in_progress' AND GET /api/tasks/:id?fields=... answers 200
 #      for that same task with status in_progress, a null completed_by_id, and
 #      a claim_expires_at still in the future.
+#      (W2255) Not when the Stop input's background_tasks lists a RUNNING
+#      stride agent or Plan agent, for at most STOP_PENDING_MAX_SECS per wait:
+#      that stop is the agent waiting for its own subagent.
 #   Condition 2 exists because loop state is written only by a COMPLETION, so a
 #   session that claims a task and stops before finishing it was invisible to
 #   condition 1 — the most damaging stop of all, and the one actually observed.
@@ -94,6 +97,10 @@ TERMINAL_STATE_FILE="$PROJECT_DIR/.stride/.terminal-state.json"
 # server-controlled values, and this gate parses one line rather than executing
 # a file.
 ENV_CACHE_FILE="$PROJECT_DIR/.stride-env-cache"
+# (W2255) When a held-claim stop was first permitted for a pending subagent, and
+# how long such a wait may last before the gate treats the subagent as hung.
+STOP_PENDING_FILE="$PROJECT_DIR/.stride/.stop-pending-since.json"
+STOP_PENDING_MAX_SECS=1800
 
 # How many times this gate will refuse ONE unresolved state before letting the
 # session go. The intended path needs exactly one block — the claim or the
@@ -436,6 +443,80 @@ if [ ! -f "$LOOP_STATE_FILE" ]; then
     # gate chatter on every stop in the repository.
     reset_block_counter
     exit 0
+  fi
+
+  # (W2255) A stride subagent is still running while this claim is held.
+  # Claude Code's Stop input carries `background_tasks` -- measured on 2.1.287:
+  # each running subagent appears as {id, type: "subagent", status: "running",
+  # agent_type}, and the list is empty once it finishes. The agent's turn ended
+  # to wait for it, and its completion notification re-invokes the agent, which
+  # meets this gate again. Two bounds keep this from becoming an escape:
+  #   - only the exact agent types stride dispatches count (plus the generic
+  #     Plan agent its planner step uses), compared as whole strings, never a
+  #     prefix -- the list cannot say which task an agent serves, so the type
+  #     is the only identity it carries;
+  #   - a WAIT is bounded in time. A wait is one held claim plus one set of
+  #     pending agent ids. Its first permit records {identifier, agents,
+  #     since_epoch} -- identifiers and an integer, nothing else -- in
+  #     .stride/.stop-pending-since.json, and permits stop once that wait passes
+  #     STOP_PENDING_MAX_SECS, so a subagent that hangs while still reported
+  #     running cannot hold the gate open. A different set of pending agents
+  #     (the reviewer after the explorer) is a new wait with its own window, and
+  #     any stop with nothing pending clears the record. If the record cannot be
+  #     written, the gate does not permit: it falls through to the counted block.
+  # Parsing is strict on purpose (arrays only, string fields, exact matches):
+  # the bash and PowerShell halves must agree on every malformed shape, and
+  # every malformed shape falls through to the block below. Only the type and
+  # id are printed, never the agent's description.
+  _pending=$(printf '%s' "$INPUT" | jq -r '
+    try ([ (.background_tasks | if type == "array" then .[] else empty end) | objects
+           | select((.type | type) == "string" and .type == "subagent")
+           | select((.status | type) == "string" and .status == "running")
+           | select((.id | type) == "string" and (.id | test("\\A[A-Za-z0-9_-]{1,64}\\z")))
+           | select(.agent_type as $a | ($a | type) == "string"
+                    and ([ "stride:task-explorer", "stride:task-reviewer", "stride:task-decomposer",
+                           "stride:task-enricher", "stride:task-runner", "stride:hook-diagnostician",
+                           "stride-security-review:security-reviewer",
+                           "stride-exploratory-testing:explorer",
+                           "stride-exploratory-testing:charter-generator", "Plan" ] | index([$a])) != null)
+           | [.agent_type, .id] ]
+         | if length == 0 then "" else
+             ((map("\(.[0]) (\(.[1]))") | join(", ")) + "\t" + (map(.[1]) | sort | join(","))) end)
+    catch ""' 2>/dev/null || printf '')
+  if [ -n "$_pending" ]; then
+    _pending_ids=${_pending#*$'\t'}
+    _pending=${_pending%%$'\t'*}
+    _now=$(date -u +%s)
+    _since=$(jq -r --arg id "$HELD_IDENT" --arg ag "$_pending_ids" '
+      try (if type == "object" and .identifier == $id and .agents == $ag
+              and ((.since_epoch | type) == "number") and .since_epoch >= 0
+              and .since_epoch == (.since_epoch | floor)
+           then .since_epoch else empty end) catch empty' "$STOP_PENDING_FILE" 2>/dev/null || printf '')
+    _recorded=1
+    case "$_since" in ( '' | *[!0-9]* )
+      _since=$_now; _recorded=0
+      if [ -e "$STOP_PENDING_FILE" ] && [ ! -f "$STOP_PENDING_FILE" ]; then :
+      elif mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null && _sp_tmp=$(mktemp "$PROJECT_DIR/.stride/stop-pending.XXXXXX" 2>/dev/null); then
+        if jq -nc --arg id "$HELD_IDENT" --arg ag "$_pending_ids" --argjson e "$_now" \
+             '{identifier: $id, agents: $ag, since_epoch: $e}' > "$_sp_tmp" 2>/dev/null \
+           && mv -f "$_sp_tmp" "$STOP_PENDING_FILE" 2>/dev/null; then
+          _recorded=1
+        else
+          rm -f "$_sp_tmp" 2>/dev/null
+        fi
+      fi ;;
+    esac
+    _waited=$((_now - _since))
+    if [ "$_recorded" -ne 1 ]; then
+      printf 'stride-stop-gate: a stride subagent is running for %s, but its wait could not be recorded, so it cannot be time-bounded; applying the gate\n' "$HELD_IDENT" >&2
+    elif [ "$_waited" -ge 0 ] && [ "$_waited" -le "$STOP_PENDING_MAX_SECS" ]; then
+      printf 'stride-stop-gate: permitting the stop: %s still holds a claim and a stride subagent is still running: %s. Its completion re-invokes the session, and this gate applies again then.\n' "$HELD_IDENT" "$_pending" >&2
+      exit 0
+    else
+      printf 'stride-stop-gate: a stride subagent has been pending for %s for over %s seconds; treating it as hung and applying the gate\n' "$HELD_IDENT" "$STOP_PENDING_MAX_SECS" >&2
+    fi
+  else
+    rm -f "$STOP_PENDING_FILE" 2>/dev/null
   fi
 
   # --- The bounded call, bounded the same three ways as the one below ---

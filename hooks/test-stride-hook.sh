@@ -14770,6 +14770,119 @@ else
 fi
 
 # ============================================================
+# Test Group 46: W2277 -- the deep security review's findings reach issues[]
+# ============================================================
+# The specialist's findings[] map into issues[] (critical/high -> critical,
+# medium -> important, low/info -> completion_notes), and a partial/unmitigated
+# verdict escalates at its backing finding's severity -- critical when unbacked.
+# The old always-Critical wording is gone from the sub-step and its mirror.
+echo ""
+echo "=== Test Group 46: W2277 security findings mapping (bash) ==="
+G46_OSR="$SCRIPT_DIR/../skills/stride-workflow/optional-security-review.md"
+G46_CT="$SCRIPT_DIR/../skills/stride-completing-tasks/SKILL.md"
+G46_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+if [ -f "$G46_OSR" ] && [ -f "$G46_CT" ] && [ -f "$G46_SUB" ]; then
+  assert_contains "46a: the sub-step captures findings[] beside the verdicts" \
+    'Capture the returned `consideration_verdicts` and `findings[]`' "$(cat "$G46_OSR")"
+  assert_contains "46b: critical/high map to critical, medium to important" \
+    'critical: "critical", high: "critical", medium: "important"' "$(cat "$G46_OSR")"
+  assert_contains "46c: low/info map to minor for escalation" \
+    'low: "minor", info: "minor"' "$(cat "$G46_OSR")"
+  assert_contains "46d: a high or critical finding is never downgraded" \
+    'A `high` or `critical` finding is never mapped below `critical`.' "$(cat "$G46_OSR")"
+  assert_contains "46e: low/info findings go to completion_notes, not issues[]" \
+    '**not** an `issues[]` entry: record each in `completion_notes` by severity, `vulnerability_class` and `file:line` only' "$(cat "$G46_OSR")"
+  assert_contains "46f: a duplicate keeps the higher severity" \
+    'keep one entry at the higher of the two severities' "$(cat "$G46_OSR")"
+  assert_contains "46g: counts move by the net change only" \
+    'move only by the net change' "$(cat "$G46_OSR")"
+  assert_contains "46h: escalation severity comes from the backing finding" \
+    'its severity comes from the finding that backs it' "$(cat "$G46_OSR")"
+  assert_contains "46i: an unbacked verdict still escalates critical" \
+    'an unbacked, malformed or unmatched verdict never escalates below `critical`' "$(cat "$G46_OSR")"
+  assert_contains "46j: the jq defaults an unbacked verdict to critical" \
+    'severity: ($b // "critical")' "$(cat "$G46_OSR")"
+  assert_contains "46k: a security issue is never merely recorded" \
+    'is never merely recorded, at any severity' "$(cat "$G46_OSR")"
+  assert_contains "46l: finding text is redacted" \
+    'finding text embedded a credential]' "$(cat "$G46_OSR")"
+  assert_contains "46m: the completion self-check states the mapping" \
+    'Specialist `findings[]` feed `issues[]` too, as `category: "security"`' "$(cat "$G46_CT")"
+  assert_contains "46n: and the unbacked-critical rule" \
+    'an unbacked one stays `critical`' "$(cat "$G46_CT")"
+  assert_contains "46o: the subagent-workflow mirror escalates at the backing severity" \
+    "at its backing finding's mapped severity" "$(cat "$G46_SUB")"
+  assert_eq "46p: the mirror's always-Critical wording is gone" "0" \
+    "$(grep -cF 'appends a `category: security` Critical issue' "$G46_SUB" | tr -d ' ')"
+  assert_eq "46q: the sub-step's always-critical wording is gone" "0" \
+    "$(grep -cF 'entry to `issues[]` describing the un-addressed consideration' "$G46_OSR" | tr -d ' ')"
+
+  # 46r-46z: behavioural pins -- extract the fenced jq from the contract itself
+  # and run it against small $MERGED fixtures, as Groups 36/37 do for
+  # review-block-extraction.md, so a wording-intact but broken update goes red.
+  G46_JQ=$(awk '/One jq update on `\$MERGED`/{f=1} f&&/^  ```bash/{g=1;next} g&&/^  ```/{exit} g' "$G46_OSR" | sed 's/^  //')
+  assert_eq "46r: the mapping jq was extractable from the contract" "yes" \
+    "$(printf '%s' "$G46_JQ" | grep -q 'SPECIALIST_FINDINGS' && echo yes || echo no)"
+  G46_DIR=$(mktemp -d "${TMPDIR:-/tmp}/stride-g46.XXXXXX")
+  g46_run() { # $1=findings JSON -> the updated merged object on stdout, or ABORT
+    printf '%s' '{"status":"approved","issue_counts":{"critical":0,"important":0,"minor":1},"issues_found":1,"issues":[{"severity":"minor","category":"security","file":"lib/a.ex","line":10,"description":"reviewer"}],"security_considerations":{"status":"passed","considerations":[{"consideration":"c1","status":"partial","evidence":"lib/b.ex:5","note":"n"},{"consideration":"c2","status":"unmitigated","evidence":"none","note":"n"},{"consideration":"c3","status":"mitigated","evidence":"lib/c.ex:1","note":"n"}]}}' \
+      > "$G46_DIR/merged.json"
+    if MERGED="$G46_DIR/merged.json" SPECIALIST_FINDINGS="$1" eval "$G46_JQ" 2>/dev/null; then
+      cat "$G46_DIR/merged.json"
+    else
+      echo ABORT
+    fi
+  }
+  G46_OUT=$(g46_run '[{"severity":"high","file":"lib/a.ex","line":10},{"severity":"low","file":"lib/b.ex","line":5},{"severity":"medium","file":"lib/z.ex","line":"7"},{"severity":"info","file":"lib/q.ex","line":1}]')
+  assert_eq "46s: a high finding upgrades a reviewer duplicate to one critical" "critical/1" \
+    "$(printf '%s' "$G46_OUT" | jq -r '[.issues[] | select(.file == "lib/a.ex" and .line == 10)] | "\(.[0].severity)/\(length)"' 2>/dev/null || echo ABORT)"
+  assert_eq "46t: a medium finding outside the considerations maps important" "important" \
+    "$(printf '%s' "$G46_OUT" | jq -r '.issues[] | select(.file == "lib/z.ex") | .severity' 2>/dev/null || echo ABORT)"
+  assert_eq "46u: a low-backed partial escalates minor, not critical" "minor" \
+    "$(printf '%s' "$G46_OUT" | jq -r '.issues[] | select(.file == "lib/b.ex") | .severity' 2>/dev/null || echo ABORT)"
+  assert_eq "46v: an unbacked unmitigated verdict escalates critical" "critical" \
+    "$(printf '%s' "$G46_OUT" | jq -r '.issues[] | select(.file == "") | .severity' 2>/dev/null || echo ABORT)"
+  assert_eq "46w: info never reaches issues[], counts match, section failed" "0/true/failed" \
+    "$(printf '%s' "$G46_OUT" | jq -r '"\([.issues[] | select(.file == "lib/q.ex")] | length)/\(.issues_found == (.issues | length))/\(.security_considerations.status)"' 2>/dev/null || echo ABORT)"
+  assert_eq "46x: a whitespace-padded HIGH still maps critical" "critical" \
+    "$(g46_run '[{"severity":" HIGH\n","file":"lib/x.ex","line":3}]' | jq -r '.issues[] | select(.file == "lib/x.ex") | .severity' 2>/dev/null || echo ABORT)"
+  assert_eq "46y: an unknown severity maps critical, never below" "critical" \
+    "$(g46_run '[{"severity":"bogus","file":"lib/y.ex","line":2}]' | jq -r '.issues[] | select(.file == "lib/y.ex") | .severity' 2>/dev/null || echo ABORT)"
+  assert_eq "46z: malformed findings escalate critical instead of aborting" "2/critical" \
+    "$(g46_run 'null' | jq -r '"\([.issues[] | select(.file == "")] | length)/\(.issues[] | select(.file == "lib/b.ex") | .severity)"' 2>/dev/null || echo ABORT)"
+  assert_eq "46z: an unset SPECIALIST_FINDINGS is malformed, never 'no findings'" "2" \
+    "$( (unset SPECIALIST_FINDINGS; printf '%s' '{"issues":[],"security_considerations":{"status":"passed","considerations":[{"consideration":"c","status":"partial","evidence":"none","note":"n"}]}}' > "$G46_DIR/merged.json"; MERGED="$G46_DIR/merged.json" eval "$G46_JQ" 2>/dev/null && jq -r '[.issues[] | select(.severity == "critical")] | length' "$G46_DIR/merged.json") || echo ABORT)"
+  assert_eq "46z: non-JSON findings fail closed instead of aborting" "critical" \
+    "$(g46_run 'not json at all' | jq -r '.issues[] | select(.file == "lib/b.ex") | .severity' 2>/dev/null || echo ABORT)"
+  assert_eq "46z: an explicit [] is no findings, not an anomaly" "1" \
+    "$(g46_run '[]' | jq -r '[.issues[] | select(.file == "")] | length' 2>/dev/null || echo ABORT)"
+  g46_fixture() { # $1=merged JSON $2=findings JSON -> updated merged object, or ABORT
+    printf '%s' "$1" > "$G46_DIR/merged.json"
+    if MERGED="$G46_DIR/merged.json" SPECIALIST_FINDINGS="$2" eval "$G46_JQ" 2>/dev/null; then
+      cat "$G46_DIR/merged.json"
+    else
+      echo ABORT
+    fi
+  }
+  G46_ONE='{"issues":[],"security_considerations":{"status":"passed","considerations":[{"consideration":"c","status":"%s","evidence":"%s","note":"n"}]}}'
+  G46_LOW='[{"severity":"low","file":"lib/a.ex","line":12}]'
+  # shellcheck disable=SC2059
+  assert_eq "46aa: a non-canonical verdict status escalates, never reads as mitigated" "minor/failed" \
+    "$(g46_fixture "$(printf "$G46_ONE" ' Partial' 'lib/a.ex:12')" "$G46_LOW" | jq -r '"\(.issues[0].severity)/\(.security_considerations.status)"' 2>/dev/null || echo ABORT)"
+  # shellcheck disable=SC2059
+  assert_eq "46ab: backticked file:line:col evidence still finds its low backing" "minor:lib/a.ex:12" \
+    "$(g46_fixture "$(printf "$G46_ONE" 'partial' '`lib/a.ex:12:5`')" "$G46_LOW" | jq -r '.issues[0] | "\(.severity):\(.file):\(.line)"' 2>/dev/null || echo ABORT)"
+  # shellcheck disable=SC2059
+  assert_eq "46ac: every cited location backs, the highest severity wins" "critical" \
+    "$(g46_fixture "$(printf "$G46_ONE" 'partial' 'lib/a.ex:12, lib/b.ex:40')" '[{"severity":"low","file":"lib/a.ex","line":12},{"severity":"high","file":"lib/b.ex","line":40}]' | jq -r '[.issues[] | select(.file == "lib/a.ex")][0].severity' 2>/dev/null || echo ABORT)"
+  assert_eq "46ad: a non-canonical existing severity is never overwritten downward" "Critical/1" \
+    "$(g46_fixture '{"issue_counts":{"critical":1,"important":0,"minor":0},"issues":[{"severity":"Critical","category":"security","file":"lib/a.ex","line":12}],"security_considerations":{"status":"failed","considerations":[{"consideration":"c","status":"partial","evidence":"lib/a.ex:12","note":"n"}]}}' "$G46_LOW" | jq -r '"\(.issues[0].severity)/\(.issues | length)"' 2>/dev/null || echo ABORT)"
+  rm -rf "$G46_DIR"
+else
+  echo "  SKIP: Group 46 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

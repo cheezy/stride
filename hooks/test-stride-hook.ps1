@@ -12588,6 +12588,42 @@ if ((Test-Path -LiteralPath $g39Gate) -and (Test-Path -LiteralPath $g39Sub) -and
 }
 
 # ============================================================
+# Test Group 40: W2277 - the deep security review's findings reach issues[], PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 46.
+Write-Host ""
+Write-Host "=== Test Group 40: W2277 security findings mapping (PowerShell) ==="
+$g40Osr = Join-Path $ScriptDir '../skills/stride-workflow/optional-security-review.md'
+$g40Ct  = Join-Path $ScriptDir '../skills/stride-completing-tasks/SKILL.md'
+$g40Sub = Join-Path $ScriptDir '../skills/stride-subagent-workflow/SKILL.md'
+if ((Test-Path -LiteralPath $g40Osr) -and (Test-Path -LiteralPath $g40Ct) -and (Test-Path -LiteralPath $g40Sub)) {
+    $g40OsrText = Get-Content -LiteralPath $g40Osr -Raw
+    $g40CtText  = Get-Content -LiteralPath $g40Ct -Raw
+    $g40SubText = Get-Content -LiteralPath $g40Sub -Raw
+    Assert-Contains "40a: the sub-step captures findings[] beside the verdicts" 'Capture the returned `consideration_verdicts` and `findings[]`' $g40OsrText
+    Assert-Contains "40b: critical/high map to critical, medium to important" 'critical: "critical", high: "critical", medium: "important"' $g40OsrText
+    Assert-Contains "40c: low/info map to minor for escalation" 'low: "minor", info: "minor"' $g40OsrText
+    Assert-Contains "40d: a high or critical finding is never downgraded" 'A `high` or `critical` finding is never mapped below `critical`.' $g40OsrText
+    Assert-Contains "40e: low/info findings go to completion_notes, not issues[]" '**not** an `issues[]` entry: record each in `completion_notes` by severity, `vulnerability_class` and `file:line` only' $g40OsrText
+    Assert-Contains "40f: a duplicate keeps the higher severity" 'keep one entry at the higher of the two severities' $g40OsrText
+    Assert-Contains "40g: counts move by the net change only" 'move only by the net change' $g40OsrText
+    Assert-Contains "40h: escalation severity comes from the backing finding" 'its severity comes from the finding that backs it' $g40OsrText
+    Assert-Contains "40i: an unbacked verdict still escalates critical" 'an unbacked, malformed or unmatched verdict never escalates below `critical`' $g40OsrText
+    Assert-Contains "40j: the jq defaults an unbacked verdict to critical" 'severity: ($b // "critical")' $g40OsrText
+    Assert-Contains "40k: a security issue is never merely recorded" 'is never merely recorded, at any severity' $g40OsrText
+    Assert-Contains "40l: finding text is redacted" 'finding text embedded a credential]' $g40OsrText
+    Assert-Contains "40m: the completion self-check states the mapping" 'Specialist `findings[]` feed `issues[]` too, as `category: "security"`' $g40CtText
+    Assert-Contains "40n: and the unbacked-critical rule" 'an unbacked one stays `critical`' $g40CtText
+    Assert-Contains "40o: the subagent-workflow mirror escalates at the backing severity" 'at its backing finding''s mapped severity' $g40SubText
+    $g40Sub0 = @(Get-Content -LiteralPath $g40Sub | Where-Object { $_.Contains('appends a `category: security` Critical issue') }).Count
+    Assert-Eq "40p: the mirror's always-Critical wording is gone" '0' ([string]$g40Sub0)
+    $g40Osr0 = @(Get-Content -LiteralPath $g40Osr | Where-Object { $_.Contains('entry to `issues[]` describing the un-addressed consideration') }).Count
+    Assert-Eq "40q: the sub-step's always-critical wording is gone" '0' ([string]$g40Osr0)
+} else {
+    Write-Host "  SKIP: Group 40 contract files not found"
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

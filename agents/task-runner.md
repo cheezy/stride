@@ -54,7 +54,8 @@ gate — that is a finding to report in your record, not a shortcut to take.**
      5.5 skip — which is that step's own safe default, not a degradation.
    - **Skip Step 1.** The dispatcher already discovered the task. You do not
      enrich — moving the enrichment gate is not yours to do — but note the
-     consequence: Step 1 places that gate *before* the claim, while you claim
+     consequence: in dispatcher mode the dispatcher runs that gate on the
+     task body it fetched before dispatching you, while you claim
      first and fetch second, so a task too sparse to implement is discovered
      only once you already hold it. Return `failed` with
      `failure.kind: "not_implementable"` and a `follow_ups` entry, and

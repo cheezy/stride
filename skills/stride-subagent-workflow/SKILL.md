@@ -17,7 +17,7 @@ Sub-skills are dispatched by the orchestrator only.
 **If you just claimed a Stride task and are about to start implementation, you MUST invoke this skill first.**
 
 This skill contains the decision matrix that determines which agents to dispatch:
-- `stride:task-enricher` — Enrich a sparse task with key_files, patterns, testing strategy, etc. **before claiming**
+- `stride:task-enricher` — Enrich a sparse task with key_files, patterns, testing strategy, etc. **before work starts**
 - `stride:task-explorer` — Read key_files and discover patterns before coding
 - `stride:task-reviewer` — Review your changes against acceptance criteria before completion
 - `stride:task-decomposer` — Break goals into properly-sized subtasks
@@ -95,7 +95,7 @@ Use this matrix to determine which subagents to dispatch based on task attribute
 
 ## Pre-Claim: Enrichment (Sparse Tasks)
 
-**When:** During the orchestrator's Step 1 enrichment check, BEFORE claiming. Triggered when the task has empty `key_files` OR missing `testing_strategy` OR empty `verification_steps` OR blank `acceptance_criteria`.
+**When:** During the orchestrator's Step 1 enrichment check: inline, on the claim's full body, before any work; in dispatcher mode, on the `GET /api/tasks/:id` body, before dispatching. Triggered when the task has empty `key_files` OR missing `testing_strategy` OR empty `verification_steps` OR blank `acceptance_criteria`.
 
 **What to do:** Dispatch the `stride:task-enricher` agent, passing the sparse task fields.
 

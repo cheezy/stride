@@ -321,10 +321,21 @@ fix applies to them at all.
 **Problem.** Each task body arrived twice: once from `next` (7–9 KB) and again
 from `claim` (8–11 KB).
 
-**Planned change.** Discovery calls `GET /api/tasks/next?response_view=slim`,
-which returns only the identifier-level acknowledgement (about 82 bytes). The
-full task body comes from the claim response, which the hooks already read. The
-enrichment check moves to after the claim, because it needs the full fields.
+**Planned change.** Discovery calls `GET /api/tasks/next?response_view=slim`.
+That returns the 11-key task summary (id, identifier, title, type, status,
+priority, complexity, dependencies, created_by_agent, parent_id,
+claim_expires_at), not the body. An older server ignores the parameter and
+returns the full task.
+- The full task body comes from the claim response, which the hooks already
+  read.
+- The enrichment check moves to after the claim, because it needs fields the
+  summary lacks.
+- Dispatcher mode's size gate needs `key_files`, so only that opted-in path
+  fetches `GET /api/tasks/:id`.
+- A runtime that runs `before_doing` before the claim also fetches
+  `GET /api/tasks/:id` first.
+- The Stop gate's own `next` call goes slim too; it reads only the status code
+  and the identifier.
 
 **Port needs.** Nothing on the host side; this is skill text plus the server's
 existing slim view. Every port can take it. Ports that run the enrichment check

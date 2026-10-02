@@ -683,7 +683,7 @@ if (-not $apiBase -or -not $token) { Exit-PermitUndetermined -Why 'no API URL or
 $statusCode = 0
 $body = ''
 try {
-    $resp = Invoke-WebRequest -Uri "$apiBase/api/tasks/next" `
+    $resp = Invoke-WebRequest -Uri "$apiBase/api/tasks/next?response_view=slim" `
         -Headers @{ Authorization = "Bearer $token" } `
         -UseBasicParsing -TimeoutSec 5 -MaximumRedirection 0 -ErrorAction Stop
     $statusCode = [int]$resp.StatusCode

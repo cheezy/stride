@@ -66,8 +66,8 @@ STEP 0: Prerequisites
   |
   v
 STEP 1: Task Discovery
-  GET /api/tasks/next
-  Review task details
+  GET /api/tasks/next?response_view=slim (a summary)
+  Review the full task from the Step 2 claim
   Needs enrichment? --> YES --> Invoke stride-enriching-tasks
   |
   v
@@ -239,7 +239,7 @@ CLAUDE CODE WORKFLOW:
 │     mention missing .gitignore entries (.stride/ + .stride_auth.md unconditionally,
 │     .exploratory/ only when the exploratory plugin is installed — never edit it yourself);
 │     plugin installed → collect the exploratory authorized/non-prod affirmative HERE or never
-├─ 1. Discovery: GET /api/tasks/next, review task, enrich if needed
+├─ 1. Discovery: GET /api/tasks/next?response_view=slim; review and enrich from the claim's full body
 ├─ 1.5 Dispatcher Mode (optional, gated):
 │     ├─ No opt-in / non-Claude-Code → Skip, run 2-8 inline (default)
 │     ├─ No stride:task-runner agent → Skip inline AND record that isolation was unavailable

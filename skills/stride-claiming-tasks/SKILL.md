@@ -149,17 +149,17 @@ Before claiming any task, verify these files exist:
 ### Claude Code (Automatic Hooks)
 
 1. **Verify prerequisites** - Check .stride_auth.md and .stride.md exist
-2. **Find available task** - Call `GET /api/tasks/next`
-3. **Review task details** - Read description, acceptance criteria, key files
-4. **Check task completeness** - If key_files is empty OR testing_strategy is missing OR verification_steps is empty, invoke stride-enriching-tasks to enrich the task before proceeding (see Enrichment Check below)
-5. **Call `POST /api/tasks/claim` directly** - Include `before_doing_result` with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}`. The hooks.json PostToolUse hook will automatically execute `.stride.md` `## before_doing` commands after the claim succeeds.
-6. **If the automatic hook fails:** Claude Code will report the failure from stride-hook.sh. Fix the issue and retry.
-7. **Task claimed?** BEGIN IMPLEMENTATION IMMEDIATELY
+2. **Find available task** - Call `GET /api/tasks/next?response_view=slim`. It returns a summary (identifier, type, complexity, dependencies), not the body; an older server returns the full task, which also works
+3. **Call `POST /api/tasks/claim` directly** - Include `before_doing_result` with `{"exit_code": 0, "output": "Executed by Claude Code hooks system", "duration_ms": 0}`. The hooks.json PostToolUse hook will automatically execute `.stride.md` `## before_doing` commands after the claim succeeds.
+4. **If the automatic hook fails:** Claude Code will report the failure from stride-hook.sh. Fix the issue and retry.
+5. **Review task details** - Read the full task from the claim response: description, acceptance criteria, key files
+6. **Check task completeness** - If key_files is empty OR testing_strategy is missing OR verification_steps is empty, invoke stride-enriching-tasks to enrich the task before starting work (see Enrichment Check below)
+7. **Task claimed and complete?** BEGIN IMPLEMENTATION IMMEDIATELY
 
 ### Other Environments (Manual Hooks)
 
 1. **Verify prerequisites** - Check .stride_auth.md and .stride.md exist
-2. **Find available task** - Call `GET /api/tasks/next`
+2. **Find available task** - Call `GET /api/tasks/next?response_view=slim`, then `GET /api/tasks/:id` for the full body: here before_doing runs before the claim, so the body is needed first
 3. **Review task details** - Read description, acceptance criteria, key files
 4. **Check task completeness** - If key_files is empty OR testing_strategy is missing OR verification_steps is empty, invoke stride-enriching-tasks to enrich the task before proceeding (see Enrichment Check below)
 5. **Read .stride.md before_doing section** - Get the setup command
@@ -181,9 +181,14 @@ Prerequisites Check
     ↓ YES
 .stride.md exists? ─NO→ Ask user to create
     ↓ YES
-Call GET /api/tasks/next
+Call GET /api/tasks/next?response_view=slim
     ↓
-Review task details
+Call POST /api/tasks/claim directly
+(hooks.json PostToolUse auto-executes before_doing)
+    ↓
+Automatic hook failed? ─YES→ Fix Issues → Retry claim
+    ↓ NO
+Review the full task from the claim response
     ↓
 Task well-specified? ─NO→ Invoke stride-enriching-tasks
 (key_files, testing_strategy,       ↓
@@ -191,11 +196,6 @@ Task well-specified? ─NO→ Invoke stride-enriching-tasks
     ↓ YES                          ↓
     ←──────────────────────────────←
     ↓
-Call POST /api/tasks/claim directly
-(hooks.json PostToolUse auto-executes before_doing)
-    ↓
-Automatic hook failed? ─YES→ Fix Issues → Retry claim
-    ↓ NO
 BEGIN IMPLEMENTATION IMMEDIATELY
 ```
 
@@ -208,7 +208,7 @@ Prerequisites Check
     ↓ YES
 .stride.md exists? ─NO→ Ask user to create
     ↓ YES
-Call GET /api/tasks/next
+Call GET /api/tasks/next?response_view=slim, then GET /api/tasks/:id
     ↓
 Review task details
     ↓
@@ -252,9 +252,9 @@ After reviewing task details, check if the task has sufficient specification for
 1. Invoke the `stride-enriching-tasks` skill with the task's title and description
 2. The skill will explore the codebase and populate missing fields
 3. Use `PATCH /api/tasks/:id` to update the task with enriched fields
-4. Continue with the claiming process (before_doing hook)
+4. Continue: in Claude Code, start the work; in other environments, continue with the claiming process (before_doing hook)
 
-**Important:** Enrichment happens BEFORE the before_doing hook, not after. The enriched fields help the agent understand the task scope before starting work.
+**Important:** Enrichment happens before any work starts. In Claude Code it runs on the claim response's full body, since slim discovery carries no `key_files` or `testing_strategy`; in other environments it runs on the `GET /api/tasks/:id` body before the before_doing hook.
 
 ## Hook Execution Pattern
 
@@ -533,7 +533,7 @@ completions is guaranteed by the D119 fresh call regardless).
 ## Implementation Workflow
 
 1. **Verify prerequisites** - Ensure auth and hooks files exist
-2. **Get next task** - Call GET /api/tasks/next
+2. **Get next task** - Call GET /api/tasks/next?response_view=slim (a summary; the full body comes from the claim in Claude Code, or from GET /api/tasks/:id elsewhere)
 3. **Review task** - Read all task details thoroughly
 4. **Check task completeness** - If key_files/testing_strategy/verification_steps missing, invoke stride-enriching-tasks
 5. **Execute before_doing hook** - Run setup with timeout
@@ -550,20 +550,23 @@ CLAUDE CODE CLAIMING WORKFLOW (automatic hooks):
 ├─ 1. Verify .stride_auth.md exists ✓
 ├─ 2. Verify .stride.md exists ✓
 ├─ 3. Extract API token and URL ✓
-├─ 4. Call GET /api/tasks/next ✓
-├─ 5. Review task details ✓
-├─ 6. Check completeness → if minimal, invoke stride-enriching-tasks ✓
-├─ 7. Call POST /api/tasks/claim directly ✓
+├─ 4. Call GET /api/tasks/next?response_view=slim ✓
+├─ 5. Call POST /api/tasks/claim directly ✓
 │     (hooks.json auto-executes before_doing via stride-hook.sh)
-├─ 8. Automatic hook failed? → Fix issues, retry claim ✓
-└─ 9. Task claimed? → BEGIN IMPLEMENTATION IMMEDIATELY ✓
+├─ 6. Automatic hook failed? → Fix issues, retry claim ✓
+├─ 7. Review the full task from the claim response ✓
+├─ 8. Check completeness → if minimal, invoke stride-enriching-tasks ✓
+└─ 9. Task claimed and complete? → BEGIN IMPLEMENTATION IMMEDIATELY ✓
 
 🚨 DO NOT manually execute .stride.md commands in Claude Code
 🚨 DO NOT run separate Bash commands to "capture hook results"
 🚨 JUST make the curl call — hooks.json handles everything
 
 OTHER ENVIRONMENTS (manual hooks):
-├─ 1-6. Same as above ✓
+├─ 1-3. Same as above ✓
+├─ 4. Call GET /api/tasks/next?response_view=slim, then GET /api/tasks/:id ✓
+├─ 5. Review task details ✓
+├─ 6. Check completeness → if minimal, invoke stride-enriching-tasks ✓
 ├─ 7. Read before_doing hook from .stride.md ✓
 ├─ 8. Execute before_doing (600s timeout, blocking) ✓
 ├─ 9. Capture exit_code, output, duration_ms ✓

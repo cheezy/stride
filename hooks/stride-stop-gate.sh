@@ -696,7 +696,7 @@ fi
 # curl's own stderr is discarded so it can never reach this hook's stderr.
 _resp=$(curl -s --connect-timeout 3 --max-time 5 -w '\n%{http_code}' \
   -H "Authorization: Bearer $_token" \
-  "$_api_base/api/tasks/next" 2>/dev/null || printf '')
+  "$_api_base/api/tasks/next?response_view=slim" 2>/dev/null || printf '')
 
 # --- AC4: transport failure, DNS failure, or timeout ---
 [ -n "$_resp" ] || permit_undetermined "the API could not be reached, or the request timed out"

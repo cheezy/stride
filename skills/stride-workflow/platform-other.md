@@ -11,6 +11,8 @@ Read this whenever Platform Detection resolved to **Other Environments** — you
 
 ## Step 2: Claim the Task
 
+**Discovery is slim, so fetch the body first.** Step 1's `GET /api/tasks/next?response_view=slim` returns only a summary. Here `before_doing` and the enrichment check run before the claim, so first fetch the full task with `GET /api/tasks/:id`.
+
 ### Other Environments (manual hooks)
 
 1. Read `.stride.md` `## before_doing` section
@@ -64,7 +66,7 @@ Walk through your changes against:
 ```
 OTHER ENVIRONMENTS (Cursor, Windsurf, Continue):
 ├─ 0. Prerequisites: .stride_auth.md + .stride.md exist
-├─ 1. Discovery: GET /api/tasks/next, review task, enrich if needed
+├─ 1. Discovery: GET /api/tasks/next?response_view=slim, then GET /api/tasks/:id for the full body; review it and enrich if needed
 ├─ 2. Claim: Execute before_doing manually, then POST /api/tasks/claim
 ├─ 3. Explore (check decision matrix):
 │     ├─ Goal/large undecomposed → Break down manually → Create via API

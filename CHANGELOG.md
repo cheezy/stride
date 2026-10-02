@@ -25,6 +25,10 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — slim task discovery; the task body comes from the claim (W2256)
+
+Step 1 fetched the full next task (7–9 KB in the G439 session), and the claim then returned the same body again (8–11 KB). That is about 70 KB per 9 tasks entering the main context and being re-sent on every later request. Discovery now calls `GET /api/tasks/next?response_view=slim`, which returns the 11-key summary: identifier, type, complexity, dependencies and the rest. An older server ignores the parameter and returns the full task, and both shapes work. The full body is read from the claim response, which is unchanged and still full, as the hook needs. The enrichment check now runs on the claim's full body, before any work starts. Two paths still fetch the body by id. Dispatcher mode's size gate needs `key_files` and fetches `GET /api/tasks/:id` in that opted-in mode only. Other environments, where `before_doing` and enrichment run before the claim, fetch it first too. The Stop gate's own `next` call is now slim in both halves; it reads only the status code and `.data.identifier`. Updated: `stride-workflow` Step 1 and Step 1.5, `stride-claiming-tasks` (numbered flows, flowcharts, enrichment section and quick reference), `platform-other.md`, `reference.md`, and the porting guide's W2256 paragraph, which wrongly called the slim response an 82-byte acknowledgement.
+
 ### Fixed — the Stop gate no longer blocks while a stride subagent is still running (W2255)
 
 The Stop gate blocked 18 times in the G439 session and 106 times across the last 18 sessions. Every block sampled fired while an explorer or reviewer was still running in the background: the agent had ended its turn to wait, and the block only forced an extra full-context turn. Before implementing, the hook events were measured, because the documentation does not cover them. Two throwaway `claude -p` sessions on Claude Code 2.1.287, with project-local hooks logging every agent-related event, found the following:

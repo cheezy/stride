@@ -29,7 +29,7 @@ Exactly this, and nothing else:
 
 **You write no code, read no diff, open no task file, and carry no task body past this point.** Step 1 required you to review the task, so you are holding it when you arrive here; what you must not do is retain it, act on it, or pass it on. **If you find yourself writing code or reading a diff, you have stopped dispatching and started implementing.**
 
-**Enrichment matters more here, not less.** Step 1's enrichment gate is deliberately *pre-claim*, while the runner claims first and fetches second — so a sparse task dispatched unenriched costs a claim, a `not_implementable`, an unclaim and a wasted runner. Finish Step 1's enrichment before dispatching, and never dispatch a task whose enrichment did not complete.
+**Enrichment matters more here, not less.** Discovery is slim, so inline runs enrich from the claim's full body. In this mode you never claim: the runner claims first and fetches second, and it does not enrich. So a sparse task dispatched unenriched costs a claim, a `not_implementable`, an unclaim and a wasted runner. Run Step 1's enrichment check on the `GET /api/tasks/:id` body you fetched for the size gate, finish any enrichment before dispatching, and never dispatch a task whose enrichment did not complete.
 
 **Run no Bash between the dispatch and the record**, beyond the marker refresh below — and after the record, only the bounded confirmation read described under "Reading the record". `.stride-env-cache` and `.stride-changed-files.json` are shared filesystem state written by hooks firing on the *runner's* Bash calls; the dispatcher touching them mid-run is the stale-`TASK_ID` hazard the design sketch already records.
 

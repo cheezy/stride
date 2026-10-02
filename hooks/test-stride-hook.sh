@@ -14404,6 +14404,175 @@ else
   FAIL=$((FAIL + 1))
 fi
 # ============================================================
+# Test Group 43: W2248 -- the claimed task's own file
+# ============================================================
+# A 2xx claim whose own response proves the task identity writes the response's
+# data object to .stride/.task-<IDENTIFIER>.json, so later steps read the task
+# instead of retyping it. Every other claim outcome writes nothing and leaves an
+# earlier file untouched. The PowerShell half is Test Group 37 of its suite; the
+# cross-half byte comparison lives here because the ps1 suite cannot run bash.
+echo ""
+echo "=== Test Group 43: W2248 claimed task file (bash) ==="
+
+G43_URL="https://www.stridelikeaboss.com"
+G43_CLAIM_CMD="curl -sS -X POST $G43_URL/api/tasks/claim -d @c.json | tee r.json"
+G43_COMPLETE_CMD="curl -sS -X PATCH $G43_URL/api/tasks/77/complete -d @p.json | tee r.json"
+g43_input() { # $1=command $2=stdout payload
+  jq -nc --arg c "$1" --arg r "$2" '{session_id:"s",tool_input:{command:$c},tool_response:{stdout:$r}}'
+}
+g43_proj() {
+  local _d="$TMPDIR_TEST/w2248-$1"
+  rm -rf "$_d"; mkdir -p "$_d/.stride"
+  printf '## before_doing\n```bash\n```\n\n## before_review\n```bash\n```\n' > "$_d/.stride.md"
+  printf '%s' "$_d"
+}
+g43_claim() { # $1=project dir $2=stdout payload
+  g43_input "$G43_CLAIM_CMD" "$2" | CLAUDE_PROJECT_DIR="$1" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  echo $?
+}
+g43_absent() { # $1=label $2=path
+  if [ -e "$2" ]; then
+    echo -e "  ${RED}FAIL${RESET}: $1"; FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: $1"; PASS=$((PASS + 1))
+  fi
+}
+# The API emits compact JSON with raw UTF-8; quotes, a newline escape and
+# non-ASCII text are the shapes most likely to break a hand-rolled writer.
+G43_OK='{"data":{"id":77,"identifier":"W5001","title":"Say \"hi\"\nthen café — ok","acceptance_criteria":"one\ntwo","key_files":[{"file_path":"a/b.ex","position":0}],"needs_review":false,"inserted_at":"2026-10-02T14:20:41","claim_expires_at":"2026-10-02T17:00:33Z"},"hook":{"name":"before_doing"}}'
+G43_OK=$(printf '%s' "$G43_OK" | jq -c '.')   # raw UTF-8, as the API sends it
+
+if command -v jq > /dev/null 2>&1; then
+  # 43a: a 2xx claim writes the data object, compact, one trailing newline.
+  G43_D=$(g43_proj a)
+  assert_eq "43a: the claim hook still exits 0" "0" "$(g43_claim "$G43_D" "$G43_OK")"
+  assert_eq "43a: the task file is written under the identifier" "yes" \
+    "$([ -f "$G43_D/.stride/.task-W5001.json" ] && echo yes || echo no)"
+  printf '%s\n' "$(printf '%s' "$G43_OK" | jq -c '.data')" > "$TMPDIR_TEST/w2248-expected.json"
+  assert_eq "43a: it holds the response's data object byte for byte" "same" \
+    "$(cmp -s "$TMPDIR_TEST/w2248-expected.json" "$G43_D/.stride/.task-W5001.json" && echo same || echo differ)"
+  assert_eq "43a: and it parses as JSON with the acceptance criteria intact" "one
+two" "$(jq -r '.acceptance_criteria' "$G43_D/.stride/.task-W5001.json" 2>/dev/null)"
+  assert_eq "43a: no staging temp is left behind" "0" \
+    "$(find "$G43_D/.stride" -name 'task-file.*' | wc -l | tr -d ' ')"
+
+  # 43b: an identifier failing the anchored charset falls back to the numeric id
+  # and never builds a path from free text.
+  for g43_case in 'a.b' '../x' 'a/b' 'W1
+' ''; do
+    G43_D=$(g43_proj b)
+    g43_claim "$G43_D" "$(jq -nc --arg i "$g43_case" '{data:{id:77,identifier:$i}}')" > /dev/null
+    assert_eq "43b: identifier $(printf '%q' "$g43_case") falls back to the numeric id" "yes" \
+      "$([ -f "$G43_D/.stride/.task-77.json" ] && echo yes || echo no)"
+    assert_eq "43b: and writes exactly one task file" "1" \
+      "$(find "$G43_D" -name '.task-*' | wc -l | tr -d ' ')"
+  done
+  g43_absent "43b: a traversal identifier writes nothing outside .stride/" "$TMPDIR_TEST/x.json"
+
+  # 43c: neither a safe identifier nor a numeric id -> nothing, still exit 0.
+  G43_D=$(g43_proj c)
+  assert_eq "43c: an unnamable task still exits 0" "0" \
+    "$(g43_claim "$G43_D" '{"data":{"id":"7a","identifier":"x/y"}}')"
+  assert_eq "43c: and writes no task file" "0" \
+    "$(find "$G43_D/.stride" -name '.task-*' | wc -l | tr -d ' ')"
+
+  # 43d: a 422 claim writes nothing and leaves an earlier file byte-identical.
+  G43_D=$(g43_proj d)
+  printf 'EARLIER\n' > "$G43_D/.stride/.task-W5001.json"
+  g43_claim "$G43_D" '{"errors":{"identifier":["is not claimable"]}}' > /dev/null
+  assert_eq "43d: a 422 claim leaves the earlier file untouched" "EARLIER" \
+    "$(cat "$G43_D/.stride/.task-W5001.json")"
+
+  # 43e: THE D226 GUARD. A truncated claim stdout resolves the PREVIOUS claim
+  # from the canonical response file; that must not re-create its task file.
+  G43_D=$(g43_proj e)
+  printf '%s' '{"data":{"id":40,"identifier":"W4000"}}' > "$G43_D/.stride/.last-api-response.json"
+  g43_claim "$G43_D" '{"data":{"id":41,"identifier":"W4001","ti' > /dev/null
+  g43_absent "43e: a truncated claim does not write the previous claim's file" "$G43_D/.stride/.task-W4000.json"
+  g43_absent "43e: nor a file for the claim it could not prove" "$G43_D/.stride/.task-W4001.json"
+
+  # 43f: a missing .stride/ is created.
+  G43_D=$(g43_proj f); rm -rf "$G43_D/.stride"
+  g43_claim "$G43_D" "$G43_OK" > /dev/null
+  assert_eq "43f: a missing .stride/ is created and the file written" "yes" \
+    "$([ -f "$G43_D/.stride/.task-W5001.json" ] && echo yes || echo no)"
+
+  # 43g: a destination that is a directory is refused, not written into.
+  G43_D=$(g43_proj g); mkdir -p "$G43_D/.stride/.task-W5001.json"
+  assert_eq "43g: a directory destination still exits 0" "0" "$(g43_claim "$G43_D" "$G43_OK")"
+  assert_eq "43g: and nothing is moved inside it" "0" \
+    "$(find "$G43_D/.stride/.task-W5001.json" -mindepth 1 | wc -l | tr -d ' ')"
+  assert_eq "43g: and no staging temp survives" "0" \
+    "$(find "$G43_D/.stride" -name 'task-file.*' | wc -l | tr -d ' ')"
+
+  # 43h: a second claim writes its own file and keeps the first.
+  G43_D=$(g43_proj h)
+  g43_claim "$G43_D" "$G43_OK" > /dev/null
+  g43_claim "$G43_D" '{"data":{"id":78,"identifier":"W5002"}}' > /dev/null
+  assert_eq "43h: a second claim keeps the first task's file" "yes" \
+    "$([ -f "$G43_D/.stride/.task-W5001.json" ] && [ -f "$G43_D/.stride/.task-W5002.json" ] && echo yes || echo no)"
+
+  # 43i: only the claim route writes it; a completion never does.
+  G43_D=$(g43_proj i)
+  g43_input "$G43_COMPLETE_CMD" '{"data":{"id":77,"identifier":"W5001","needs_review":false}}' \
+    | CLAUDE_PROJECT_DIR="$G43_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  g43_absent "43i: a completion does not write a task file" "$G43_D/.stride/.task-W5001.json"
+
+  # 43j: an unwritable .stride/ is never fatal.
+  if [ "$(id -u)" != "0" ]; then
+    G43_D=$(g43_proj j); chmod 500 "$G43_D/.stride"
+    assert_eq "43j: an unwritable .stride/ still exits 0" "0" "$(g43_claim "$G43_D" "$G43_OK")"
+    chmod 755 "$G43_D/.stride"
+  else
+    echo "  SKIP: 43j: running as root, mode bits do not bind"
+  fi
+
+  # 43m: a 2xx re-claim REPLACES an existing file (the unclaim / expired-claim
+  # path), atomically, leaving the new content and no temp.
+  G43_D=$(g43_proj m)
+  printf 'OLD CONTENT\n' > "$G43_D/.stride/.task-W5001.json"
+  g43_claim "$G43_D" "$G43_OK" > /dev/null
+  assert_eq "43m: a 2xx re-claim replaces an existing task file" "same" \
+    "$(cmp -s "$TMPDIR_TEST/w2248-expected.json" "$G43_D/.stride/.task-W5001.json" && echo same || echo differ)"
+  assert_eq "43m: and leaves no staging temp" "0" \
+    "$(find "$G43_D/.stride" -name 'task-file.*' | wc -l | tr -d ' ')"
+
+  # 43n: a 404-shaped body writes nothing either.
+  G43_D=$(g43_proj n)
+  printf 'EARLIER\n' > "$G43_D/.stride/.task-W5001.json"
+  g43_claim "$G43_D" '{"error":"Task not found"}' > /dev/null
+  assert_eq "43n: a 404 claim leaves the earlier file untouched" "EARLIER" \
+    "$(cat "$G43_D/.stride/.task-W5001.json")"
+  assert_eq "43n: and writes no other task file" "1" \
+    "$(find "$G43_D/.stride" -name '.task-*' | wc -l | tr -d ' ')"
+
+  # 43o: a bare task object (no data wrapper) is written compact.
+  G43_D=$(g43_proj o)
+  g43_claim "$G43_D" '{ "id": 79, "identifier": "W5003", "title": "spaced out" }' > /dev/null
+  assert_eq "43o: a bare-object response is written compact" '{"id":79,"identifier":"W5003","title":"spaced out"}' \
+    "$(cat "$G43_D/.stride/.task-W5003.json" 2>/dev/null)"
+
+  # 43k: the two halves write byte-identical files for the same claim.
+  if command -v pwsh > /dev/null 2>&1; then
+    G43_D=$(g43_proj k)
+    g43_input "$G43_CLAIM_CMD" "$G43_OK" \
+      | CLAUDE_PROJECT_DIR="$G43_D" pwsh -NoProfile -File "$SCRIPT_DIR/stride-hook.ps1" post > /dev/null 2>&1
+    assert_eq "43k: the PowerShell half writes the same bytes as the bash half" "same" \
+      "$(cmp -s "$TMPDIR_TEST/w2248-expected.json" "$G43_D/.stride/.task-W5001.json" && echo same || echo differ)"
+    assert_eq "43k: and writes no byte-order mark" "no-bom" \
+      "$(head -c 3 "$G43_D/.stride/.task-W5001.json" | od -An -tx1 | tr -d ' \n' | grep -q '^efbbbf' && echo bom || echo no-bom)"
+  else
+    echo "  SKIP: 43k: pwsh not installed"
+  fi
+else
+  echo "  SKIP: 43a-43k: jq not installed (the bash claim block requires it and writes no task file without it)"
+fi
+
+# 43l: the Step 7 cleanup names the task file, so it lives one task, not the checkout.
+assert_contains "43l: the Step 7 artifact cleanup deletes the task file" \
+  '.task-$IDENT.json' "$(grep -n 'Step 7 only' "$SCRIPT_DIR/../skills/stride-workflow/review-block-extraction.md")"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

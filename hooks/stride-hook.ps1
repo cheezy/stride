@@ -1441,6 +1441,122 @@ function Test-LoopStatePayloadOk {
     return $true
 }
 
+# (W2248) The claimed task's own record, .stride/.task-<IDENTIFIER>.json — the
+# twin of the bash write_task_file; read its comment for why the file exists and
+# why only a claim that proved its own identity (D226) writes it.
+#
+# The content is the RAW text of the response's top-level `data` member, with
+# whitespace outside strings removed — never a ConvertTo-Json re-serialisation.
+# Re-serialising is not faithful here: PowerShell 7 coerces ISO timestamps to
+# DateTime and rewrites their offsets, drops some control escapes, and 5.1
+# escapes <>&. For the compact JSON the API emits this text matches the bash
+# twin's `jq -c '.data'` byte for byte, with one known exception: jq lower-cases
+# \u escapes, so a control character the API writes as \u001F differs in case.
+# The two files are always equal as JSON; consumers must compare them as JSON.
+function Get-TopLevelMemberJson {
+    param([string]$Text, [string]$Name)
+    if (-not $Text) { return $null }
+    $sb = New-Object System.Text.StringBuilder
+    $depth = 0; $inStr = $false; $esc = $false
+    $wantKey = $false; $strIsKey = $false; $strStart = -1; $pendingKey = $null
+    $capturing = $false; $capDepth = 0
+    for ($i = 0; $i -lt $Text.Length; $i++) {
+        $c = $Text[$i]
+        if ($capturing) {
+            if ($inStr) {
+                [void]$sb.Append($c)
+                if ($esc) { $esc = $false }
+                elseif ($c -eq [char]'\') { $esc = $true }
+                elseif ($c -eq [char]'"') { $inStr = $false }
+                continue
+            }
+            if ([char]::IsWhiteSpace($c)) { continue }
+            if ($capDepth -eq 0 -and $c -ne [char]'{') { return $null }
+            [void]$sb.Append($c)
+            if ($c -eq [char]'"') { $inStr = $true }
+            elseif ($c -eq [char]'{' -or $c -eq [char]'[') { $capDepth++ }
+            elseif ($c -eq [char]'}' -or $c -eq [char]']') {
+                $capDepth--
+                if ($capDepth -eq 0) { return $sb.ToString() }
+            }
+            continue
+        }
+        if ($inStr) {
+            if ($esc) { $esc = $false }
+            elseif ($c -eq [char]'\') { $esc = $true }
+            elseif ($c -eq [char]'"') {
+                $inStr = $false
+                if ($strIsKey) { $pendingKey = $Text.Substring($strStart, $i - $strStart); $wantKey = $false }
+            }
+            continue
+        }
+        if ($c -eq [char]'"') {
+            $inStr = $true; $strIsKey = ($depth -eq 1 -and $wantKey); $strStart = $i + 1
+        } elseif ($c -eq [char]'{' -or $c -eq [char]'[') {
+            $depth++
+            if ($depth -eq 1) { $wantKey = ($c -eq [char]'{') }
+        } elseif ($c -eq [char]'}' -or $c -eq [char]']') {
+            $depth--
+        } elseif ($c -eq [char]',' -and $depth -eq 1) {
+            $wantKey = $true
+        } elseif ($c -eq [char]':' -and $depth -eq 1) {
+            if ($pendingKey -ceq $Name) { $capturing = $true }
+            $pendingKey = $null
+        }
+    }
+    return $null
+}
+
+function Get-TaskFileStem {
+    param($Task)
+    if ($null -eq $Task) { return '' }
+    $props = $Task.PSObject.Properties.Name
+    if (($props -contains 'identifier') -and ($Task.identifier -is [string]) -and
+        ($Task.identifier -cmatch '\A[A-Za-z0-9_-]{1,64}\z')) {
+        return $Task.identifier
+    }
+    if ($props -contains 'id') {
+        $id = $Task.id
+        if (($id -is [int] -or $id -is [long]) -and $id -ge 0) { return [string]$id }
+        if (($id -is [string]) -and ($id -cmatch '\A[0-9]{1,20}\z')) { return $id }
+    }
+    return ''
+}
+
+function Write-TaskFile {
+    param($Task, [string]$Text)
+    $stem = Get-TaskFileStem $Task
+    if (-not $stem) {
+        [Console]::Error.WriteLine('stride-hook: the claimed task has no safe identifier or id; not writing the task file')
+        return
+    }
+    if (-not $Text) {
+        [Console]::Error.WriteLine('stride-hook: could not isolate the claimed task text; not writing the task file')
+        return
+    }
+    $dest = Join-Path (Join-Path $ProjectDir '.stride') (".task-{0}.json" -f $stem)
+    if ((Test-Path -LiteralPath $dest) -and -not (Test-Path -LiteralPath $dest -PathType Leaf)) {
+        [Console]::Error.WriteLine('stride-hook: task-file path is not a regular file; not recording')
+        return
+    }
+    $_tmp = $null
+    try {
+        $_dir = Join-Path $ProjectDir '.stride'
+        if (-not (Test-Path -LiteralPath $_dir)) {
+            New-Item -ItemType Directory -Force -Path $_dir -ErrorAction Stop | Out-Null
+        }
+        $_tmp = Join-Path $_dir ("task-file.{0}.tmp" -f ([System.IO.Path]::GetRandomFileName()))
+        # Two-argument WriteAllText is UTF-8 WITHOUT a byte-order mark on 5.1 and 7.
+        [System.IO.File]::WriteAllText($_tmp, $Text + "`n")
+        Move-Item -LiteralPath $_tmp -Destination $dest -Force -ErrorAction Stop
+    } catch {
+        [Console]::Error.WriteLine('stride-hook: could not write the task file; continuing')
+        if ($_tmp -and (Test-Path -LiteralPath $_tmp)) {
+            Remove-Item -LiteralPath $_tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # Atomic and never fatal, copying Write-HookResult's mechanics exactly: the
 # temp is staged in the DESTINATION directory so the move is a rename, a
 # failure leaves no temp behind, and nothing throws. $_tmp MUST be initialised
@@ -2799,6 +2915,43 @@ if ($HookName -eq 'before_doing') {
             # later: that comes from the cache, loaded AFTER the identity
             # write, so the two agree only when that write landed.
             $script:TaskOwnerId = $ownCallId
+            # (W2248) Only a claim whose own response proved the identity writes
+            # the task file. Take the RAW text of THIS call's response, never the
+            # canonical file (it survives across calls) and never a re-serialised
+            # object; an object-shaped tool_response has no raw text, so it falls
+            # back to ConvertTo-Json, the one lossy path.
+            $ownText = $null
+            if ($response -is [PSCustomObject] -and $response.PSObject.Properties.Name -contains 'stdout') {
+                $ownText = [string]$response.stdout
+            } elseif ($response -is [string]) {
+                $ownText = $response
+            }
+            $taskText = $null
+            if ($ownText) {
+                $taskText = Get-TopLevelMemberJson -Text $ownText -Name 'data'
+                if (-not $taskText -and ($ownObj.PSObject.Properties.Name -notcontains 'data')) {
+                    # A bare task object (no `data` wrapper): the whole text is the task.
+                    $taskText = Get-TopLevelMemberJson -Text ('{"data":' + $ownText + '}') -Name 'data'
+                }
+            } else {
+                $taskText = $taskJson | ConvertTo-Json -Depth 100 -Compress
+            }
+            # The scanner takes the FIRST top-level `data`; ConvertFrom-Json and
+            # the identity gate above take the last. Only write text whose own id
+            # is the id the gate proved, so a duplicate key cannot put one
+            # object's text under another object's name.
+            $textId = ''
+            if ($taskText) {
+                try {
+                    $textObj = $taskText | ConvertFrom-Json
+                    if ($textObj -and ($textObj.PSObject.Properties.Name -contains 'id')) { $textId = [string]$textObj.id }
+                } catch { $textId = '' }
+            }
+            if ($textId -and ($textId -eq $ownCallId)) {
+                Write-TaskFile -Task $taskJson -Text $taskText
+            } else {
+                [Console]::Error.WriteLine('stride-hook: the isolated task text does not carry the claimed id; not writing the task file')
+            }
         }
         # Equivalence with the bash gate, mapped branch by branch so a future
         # edit cannot break it silently:

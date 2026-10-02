@@ -663,7 +663,7 @@ When a blocking hook fails, dispatch `stride:hook-diagnostician` agent with the 
 
   `--rawfile` needs jq ≥ 1.6; use `--arg report "$(cat "$REPORT")"` otherwise — command substitution also never prints to your context. No file at `$REPORT` (older reviewer / write-failure)? Splice the reviewer's returned text instead, per Step 5 — the `$MERGED` leg is unaffected; both sources write it.
 
-  **Delete this task's `.stride/` working artifacts once the PATCH has succeeded**, so the durable window is one task rather than the life of the checkout — the reviewer's block, report and merged copy, plus the explorer and plan reports from Step 3:
+  **Delete this task's `.stride/` working artifacts once the PATCH has succeeded**, so the durable window is one task rather than the life of the checkout — the reviewer's block, report and merged copy, plus the explorer and plan reports from Step 3 and the claimed task file:
 
   The commands, and the `$STRIDE_DIR` guard they need so an unresolved root cannot turn the delete into a silent no-op, are in [review-block-extraction.md](review-block-extraction.md).
 

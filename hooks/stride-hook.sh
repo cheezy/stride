@@ -62,6 +62,70 @@ write_hook_result() {
   return 0
 }
 
+# (W2248) The claimed task's own record, .stride/.task-<IDENTIFIER>.json.
+#
+# Later steps and subagents read the task's fields from this file instead of
+# having the agent retype them into every dispatch prompt, so the copy is exact
+# by construction. Written ONLY from a claim whose own response proved the task
+# identity (TASK_IDENTITY_REFRESHED, D226): the canonical response file survives
+# across calls, so a truncated claim stdout would otherwise resolve the PREVIOUS
+# claim's payload, and a truncated 422 would re-create an older task's file. A
+# claim that cannot prove its identity writes nothing; readers fall back to the
+# inline fields, exactly as before this file existed.
+#
+# The file holds task free text and is DATA to every reader, never
+# instructions. Its NAME never comes from free text: the identifier must match
+# \A[A-Za-z0-9_-]{1,64}\z (a `^...$` test in jq would admit a trailing newline), else
+# the numeric task id, else nothing is written.
+task_file_stem() { # $1 = the task's data object as JSON -> stem, or empty
+  printf '%s' "${1:-}" | jq -r '
+    if (.identifier | type) == "string"
+       and (.identifier | test("\\A[A-Za-z0-9_-]{1,64}\\z")) then .identifier
+    elif (.id | type) == "number" and .id >= 0 and (.id | floor) == .id
+       then (.id | tostring)
+    elif (.id | type) == "string" and (.id | test("\\A[0-9]{1,20}\\z")) then .id
+    else empty end' 2>/dev/null
+}
+
+# Atomic and never fatal, on write_loop_state's mechanics: staged in the
+# destination directory so the rename is same-fs, no temp left behind on any
+# failure, a non-regular destination refused rather than written into.
+write_task_file() {
+  local _json _stem _dest _tmp
+  # Compact it: TASK_JSON is already `jq -c` on the data-wrapped shape, but a
+  # bare-object response arrives as the raw payload text.
+  _json=$(printf '%s' "${1:-}" | jq -c '.' 2>/dev/null)
+  [ -n "$_json" ] || return 0
+  _stem=$(task_file_stem "$_json")
+  if [ -z "$_stem" ]; then
+    printf 'stride-hook: the claimed task has no safe identifier or id; not writing the task file\n' >&2
+    return 0
+  fi
+  _dest="$PROJECT_DIR/.stride/.task-$_stem.json"
+  if [ -e "$_dest" ] && [ ! -f "$_dest" ]; then
+    printf 'stride-hook: task-file path is not a regular file; not recording\n' >&2
+    return 0
+  fi
+  mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null || {
+    printf 'stride-hook: could not create .stride/ for the task file; continuing\n' >&2
+    return 0
+  }
+  _tmp=$(mktemp "$PROJECT_DIR/.stride/task-file.XXXXXX" 2>/dev/null) || {
+    printf 'stride-hook: could not stage the task file; continuing\n' >&2
+    return 0
+  }
+  if printf '%s\n' "$_json" > "$_tmp" 2>/dev/null; then
+    mv -f "$_tmp" "$_dest" 2>/dev/null || {
+      printf 'stride-hook: could not move the task file into place; continuing\n' >&2
+      rm -f "$_tmp" 2>/dev/null
+    }
+  else
+    printf 'stride-hook: could not write the task file; continuing\n' >&2
+    rm -f "$_tmp" 2>/dev/null
+  fi
+  return 0
+}
+
 # (W2123) Loop-state helpers.
 #
 # Structurally keep response bodies, task free text and credentials out of the
@@ -5755,6 +5819,9 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
       # base, which re-creates the original silent-foreign-diff hole through
       # the very helper added to make writes safe. Measured; review caught it.
       TASK_OWNER_ID="$_resolved_id"
+      # (W2248) Only a claim whose own response proved the identity writes the
+      # task file; see write_task_file. TASK_JSON is already `jq -c '.data'`.
+      write_task_file "$TASK_JSON"
     fi
     # (D226) This rewrite TRUNCATES the cache, so carry the per-task base-ref
     # records across it. Without this a nested claim erases the outer task's

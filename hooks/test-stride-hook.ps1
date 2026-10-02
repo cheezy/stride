@@ -12325,6 +12325,135 @@ if ($IsWindows) {
 }
 
 # ============================================================
+# Test Group 37: W2248 — the claimed task's own file, PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 43 (which also holds the cross-half byte
+# comparison, since this suite cannot run bash). Assertions read the RAW file
+# text, never a parsed object: ConvertFrom-Json coerces timestamps.
+Write-Host ""
+Write-Host "=== Test Group 37: W2248 claimed task file (PowerShell) ==="
+
+$g37Url = 'https://www.stridelikeaboss.com'
+$g37ClaimCmd = "curl -sS -X POST $g37Url/api/tasks/claim -d @c.json | tee r.json"
+$g37CompleteCmd = "curl -sS -X PATCH $g37Url/api/tasks/77/complete -d @p.json | tee r.json"
+$g37E = [string][char]0x00E9
+$g37Data = '{"id":77,"identifier":"W5001","title":"Say \"hi\"\nthen caf' + $g37E + ' ok","acceptance_criteria":"one\ntwo","key_files":[{"file_path":"a/b.ex","position":0}],"needs_review":false,"inserted_at":"2026-10-02T14:20:41","claim_expires_at":"2026-10-02T17:00:33Z"}'
+$g37Ok = '{"data":' + $g37Data + ',"hook":{"name":"before_doing"}}'
+
+function Invoke-G37Claim {
+    param([string]$Dir, [string]$Stdout, [string]$Command = $g37ClaimCmd)
+    $in = New-G34Input -SessionId 's' -Command $Command -Stdout $Stdout
+    return (Invoke-HookScript -InputJson $in -Phase 'post' -ProjectDir $Dir)
+}
+function Get-G37Text {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '<absent>' }
+    return [System.IO.File]::ReadAllText($Path)
+}
+function Get-G37TaskFileCount {
+    param([string]$Dir)
+    return @(Get-ChildItem -Force -LiteralPath (Join-Path $Dir '.stride') -Filter '.task-*' -ErrorAction SilentlyContinue).Count
+}
+
+# 37a: a 2xx claim writes the data object's raw text with one trailing newline.
+$g37d = New-G34Project 'g37a'
+$g37r = Invoke-G37Claim -Dir $g37d -Stdout $g37Ok
+Assert-Exit "37a: the claim hook still exits 0" 0 $g37r.ExitCode
+$g37File = Join-Path $g37d '.stride/.task-W5001.json'
+Assert-Eq "37a: it holds the response's data object byte for byte" ($g37Data + "`n") (Get-G37Text $g37File)
+$g37Bytes = [System.IO.File]::ReadAllBytes($g37File)
+Assert-Eq "37a: and writes no byte-order mark" 'no-bom' $(if ($g37Bytes.Length -ge 3 -and $g37Bytes[0] -eq 0xEF -and $g37Bytes[1] -eq 0xBB -and $g37Bytes[2] -eq 0xBF) { 'bom' } else { 'no-bom' })
+Assert-Eq "37a: no staging temp is left behind" 0 @(Get-ChildItem -Force -LiteralPath (Join-Path $g37d '.stride') -Filter 'task-file.*').Count
+
+# 37b: an identifier failing the anchored charset falls back to the numeric id.
+foreach ($g37Case in @('a.b', '../x', 'a/b', "W1`n", '')) {
+    $g37d = New-G34Project 'g37b'
+    $g37Body = '{"data":{"id":77,"identifier":' + (ConvertTo-Json -Compress $g37Case) + '}}'
+    $null = Invoke-G37Claim -Dir $g37d -Stdout $g37Body
+    Assert-Eq "37b: identifier '$($g37Case -replace "`n", '\n')' falls back to the numeric id" $true (Test-Path -LiteralPath (Join-Path $g37d '.stride/.task-77.json') -PathType Leaf)
+    Assert-Eq "37b: and writes exactly one task file" 1 (Get-G37TaskFileCount $g37d)
+}
+
+# 37c: neither a safe identifier nor a numeric id -> nothing, still exit 0.
+$g37d = New-G34Project 'g37c'
+$g37r = Invoke-G37Claim -Dir $g37d -Stdout '{"data":{"id":"7a","identifier":"x/y"}}'
+Assert-Exit "37c: an unnamable task still exits 0" 0 $g37r.ExitCode
+Assert-Eq "37c: and writes no task file" 0 (Get-G37TaskFileCount $g37d)
+
+# 37d: a 422 claim writes nothing and leaves an earlier file byte-identical.
+$g37d = New-G34Project 'g37d'
+[System.IO.File]::WriteAllText((Join-Path $g37d '.stride/.task-W5001.json'), "EARLIER`n")
+$null = Invoke-G37Claim -Dir $g37d -Stdout '{"errors":{"identifier":["is not claimable"]}}'
+Assert-Eq "37d: a 422 claim leaves the earlier file untouched" "EARLIER`n" (Get-G37Text (Join-Path $g37d '.stride/.task-W5001.json'))
+
+# 37e: THE D226 GUARD — a truncated claim must not re-create the previous claim's file.
+$g37d = New-G34Project 'g37e'
+[System.IO.File]::WriteAllText((Join-Path $g37d '.stride/.last-api-response.json'), '{"data":{"id":40,"identifier":"W4000"}}')
+$null = Invoke-G37Claim -Dir $g37d -Stdout '{"data":{"id":41,"identifier":"W4001","ti'
+Assert-Eq "37e: a truncated claim does not write the previous claim's file" '<absent>' (Get-G37Text (Join-Path $g37d '.stride/.task-W4000.json'))
+Assert-Eq "37e: nor a file for the claim it could not prove" '<absent>' (Get-G37Text (Join-Path $g37d '.stride/.task-W4001.json'))
+
+# 37f: a missing .stride/ is created.
+$g37d = New-G34Project 'g37f'
+Remove-Item -Recurse -Force (Join-Path $g37d '.stride')
+$null = Invoke-G37Claim -Dir $g37d -Stdout $g37Ok
+Assert-Eq "37f: a missing .stride/ is created and the file written" ($g37Data + "`n") (Get-G37Text (Join-Path $g37d '.stride/.task-W5001.json'))
+
+# 37g: a destination that is a directory is refused, not written into.
+$g37d = New-G34Project 'g37g'
+New-Item -ItemType Directory -Force -Path (Join-Path $g37d '.stride/.task-W5001.json') | Out-Null
+$g37r = Invoke-G37Claim -Dir $g37d -Stdout $g37Ok
+Assert-Exit "37g: a directory destination still exits 0" 0 $g37r.ExitCode
+Assert-Eq "37g: and nothing is moved inside it" 0 @(Get-ChildItem -Force -LiteralPath (Join-Path $g37d '.stride/.task-W5001.json')).Count
+Assert-Eq "37g: and no staging temp survives" 0 @(Get-ChildItem -Force -LiteralPath (Join-Path $g37d '.stride') -Filter 'task-file.*').Count
+
+# 37h: a second claim writes its own file and keeps the first.
+$g37d = New-G34Project 'g37h'
+$null = Invoke-G37Claim -Dir $g37d -Stdout $g37Ok
+$null = Invoke-G37Claim -Dir $g37d -Stdout '{"data":{"id":78,"identifier":"W5002"}}'
+Assert-Eq "37h: a second claim keeps the first task's file" 2 (Get-G37TaskFileCount $g37d)
+
+# 37i: only the claim route writes it; a completion never does.
+$g37d = New-G34Project 'g37i'
+$null = Invoke-G37Claim -Dir $g37d -Command $g37CompleteCmd -Stdout '{"data":{"id":77,"identifier":"W5001","needs_review":false}}'
+Assert-Eq "37i: a completion does not write a task file" 0 (Get-G37TaskFileCount $g37d)
+
+# 37j: an unwritable .stride/ is never fatal.
+if ($IsWindows) {
+    Write-Host "  SKIP: 37j: unwritable .stride needs POSIX mode bits (bash 43j covers it)"
+} else {
+    $g37d = New-G34Project 'g37j'
+    & /bin/chmod 500 (Join-Path $g37d '.stride')
+    $g37r = Invoke-G37Claim -Dir $g37d -Stdout $g37Ok
+    & /bin/chmod 755 (Join-Path $g37d '.stride')
+    Assert-Exit "37j: an unwritable .stride/ still exits 0" 0 $g37r.ExitCode
+}
+
+# 37m: a 2xx re-claim REPLACES an existing file.
+$g37d = New-G34Project 'g37m'
+[System.IO.File]::WriteAllText((Join-Path $g37d '.stride/.task-W5001.json'), "OLD CONTENT`n")
+$null = Invoke-G37Claim -Dir $g37d -Stdout $g37Ok
+Assert-Eq "37m: a 2xx re-claim replaces an existing task file" ($g37Data + "`n") (Get-G37Text (Join-Path $g37d '.stride/.task-W5001.json'))
+Assert-Eq "37m: and leaves no staging temp" 0 @(Get-ChildItem -Force -LiteralPath (Join-Path $g37d '.stride') -Filter 'task-file.*').Count
+
+# 37n: a 404-shaped body writes nothing either.
+$g37d = New-G34Project 'g37n'
+[System.IO.File]::WriteAllText((Join-Path $g37d '.stride/.task-W5001.json'), "EARLIER`n")
+$null = Invoke-G37Claim -Dir $g37d -Stdout '{"error":"Task not found"}'
+Assert-Eq "37n: a 404 claim leaves the earlier file untouched" "EARLIER`n" (Get-G37Text (Join-Path $g37d '.stride/.task-W5001.json'))
+Assert-Eq "37n: and writes no other task file" 1 (Get-G37TaskFileCount $g37d)
+
+# 37o: a duplicate top-level `data` key cannot put one object's text under
+# another's name: the scanner takes the first, the identity gate the last.
+$g37d = New-G34Project 'g37o'
+$null = Invoke-G37Claim -Dir $g37d -Stdout '{"data":{"id":5,"identifier":"WA"},"data":{"id":77,"identifier":"W5001"}}'
+Assert-Eq "37o: a duplicate data key writes no task file" 0 (Get-G37TaskFileCount $g37d)
+
+# 37l: the Step 7 cleanup names the task file.
+$g37Rbe = Join-Path $ScriptDir '../skills/stride-workflow/review-block-extraction.md'
+Assert-Contains "37l: the Step 7 artifact cleanup deletes the task file" '.task-$IDENT.json' ((Get-Content -LiteralPath $g37Rbe | Where-Object { $_ -match 'Step 7 only' }) -join "`n")
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

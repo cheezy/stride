@@ -124,6 +124,10 @@ STEP 5: Code Review (Decision Matrix)
                   and dispatch task-reviewer plus, when it fires, the specialist
                   in ONE message; merge only after both return, then fix
                   Critical/Important issues
+                  (round 2+: re-dispatch the specialist only for $SCOPE --
+                  not mitigated, no path:line, or an evidence file the fixes
+                  touched; [] --> no dispatch; carry every other verdict
+                  verbatim from the prior round's $MERGED)
                   (specialist crashed, or verdicts malformed/absent/short of one
                   per consideration? fail closed, never a note alone: re-dispatch
                   once, then the SPECIALIST_FINDINGS=null update with a block,

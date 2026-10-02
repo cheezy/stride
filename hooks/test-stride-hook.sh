@@ -14925,6 +14925,220 @@ else
 fi
 
 # ============================================================
+# Test Group 48: W2281 -- scoped security re-dispatch and verdict carry-over
+# ============================================================
+# On a round after the first the specialist re-checks only the considerations
+# the fixes could have moved; every other verdict is carried verbatim from the
+# prior round's $MERGED. Both fences are extracted from the contract and run
+# against throwaway git repos and fixtures.
+echo ""
+echo "=== Test Group 48: W2281 scoped security re-dispatch (bash) ==="
+G48_OSR="$SCRIPT_DIR/../skills/stride-workflow/optional-security-review.md"
+G48_RBE="$SCRIPT_DIR/../skills/stride-workflow/review-block-extraction.md"
+G48_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G48_REF="$SCRIPT_DIR/../skills/stride-workflow/reference.md"
+G48_README="$SCRIPT_DIR/../README.md"
+if [ -f "$G48_OSR" ] && [ -f "$G48_RBE" ] && [ -f "$G48_SUB" ] && [ -f "$G48_REF" ] && [ -f "$G48_README" ]; then
+  assert_contains "48a: the re-dispatch section exists" \
+    '## Re-dispatch rounds: gate, scope, carry-over' "$(cat "$G48_OSR")"
+  assert_contains "48b: only what can have changed is re-checked" \
+    '**Re-check only what can have changed.**' "$(cat "$G48_OSR")"
+  assert_contains "48c: evidence with no path:line is in scope" \
+    'its `evidence` cites no `path:line`' "$(cat "$G48_OSR")"
+  assert_contains "48d: a touched evidence file is in scope" \
+    'touched by the fixes since round one' "$(cat "$G48_OSR")"
+  assert_contains "48e: an added file re-checks everything" \
+    '**a fix that added a file**' "$(cat "$G48_OSR")"
+  assert_contains "48f: changed paths are unfiltered" \
+    '**unfiltered**: unlike `FIX_CODE_PATHS`, a docs or test path counts' "$(cat "$G48_OSR")"
+  assert_contains "48g: an empty scope dispatches nothing" \
+    '**do not dispatch the specialist this round**' "$(cat "$G48_OSR")"
+  assert_contains "48h: the re-dispatch passes only the scope" \
+    'with **only the considerations in `$SCOPE`**' "$(cat "$G48_OSR")"
+  assert_contains "48i: carried verdicts are never re-typed" \
+    '**Carry over, never re-type.**' "$(cat "$G48_OSR")"
+  assert_contains "48j: a changed-evidence verdict is never carried" \
+    'a verdict whose evidence file changed is in scope by construction, so it is never carried' "$(cat "$G48_OSR")"
+  assert_contains "48k: the merge keeps one verdict per consideration" \
+    '**The merge assembles one verdict per task consideration**' "$(cat "$G48_OSR")"
+  assert_contains "48l: the subagent-workflow mirror carries over" \
+    'carrying every other verdict verbatim from the prior round' "$(cat "$G48_SUB")"
+  assert_contains "48m: the reference flow mirrors the scope" \
+    'round 2+: re-dispatch the specialist only for $SCOPE' "$(cat "$G48_REF")"
+  assert_contains "48n: the README mirrors the gate" \
+    're-dispatched only for the considerations whose prior verdict was not `mitigated`' "$(cat "$G48_README")"
+  assert_contains "48o2: an unresolvable cited path is unmeasured, never untouched" \
+    '**unmeasured, never untouched**' "$(cat "$G48_OSR")"
+  assert_contains "48o3: a revert to round one's content still counts as touched" \
+    'a fix that puts a file back exactly as round one had it still counts' "$(cat "$G48_OSR")"
+  assert_contains "48o4: the scope fence runs on every round" \
+    '**Compute `$SCOPE` before the dispatch, on every round**' "$(cat "$G48_OSR")"
+  assert_contains "48o6: symlinks and index-flagged entries never resolve" \
+    'a symlink (its target can change unseen), an assume-unchanged or skip-worktree entry' "$(cat "$G48_OSR")"
+  assert_contains "48o5: a cited path resolves only exactly" \
+    'never by a shared tail' "$(cat "$G48_OSR")"
+  assert_eq "48o: the replace-whatever-came-back wording is gone" "0" \
+    "$(grep -cF 'because the merge replaces the array with whatever came back' "$G48_OSR" | tr -d ' ')"
+
+  G48_SCOPE=$(awk '/^\*\*Compute `\$SCOPE` before the dispatch/{f=1} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' "$G48_OSR")
+  G48_MERGE=$(awk '/\*\*The merge assembles one verdict per task consideration\*\*/{f=1} f&&/^  ```bash/{g=1;next} g&&/^  ```/{exit} g' "$G48_OSR" | sed 's/^  //')
+  G48_FIX=$(awk '/^\*\*The fix-path classifier\./{f=1} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' "$G48_RBE")
+  assert_eq "48p: the scope, merge and classifier fences are extractable" "yes/yes/yes" \
+    "$(printf '%s' "$G48_SCOPE" | grep -q 'diff-filter=A' && echo yes || echo no)/$(printf '%s' "$G48_MERGE" | grep -q 'CONSIDERATION_VERDICTS' && echo yes || echo no)/$(printf '%s' "$G48_FIX" | grep -q 'fix_tree' && echo yes || echo no)"
+  assert_eq "48p2: Group 46's anchor still extracts the mapping fence first" "yes" \
+    "$(awk '/One jq update on `\$MERGED`/{f=1} f&&/^  ```bash/{g=1;next} g&&/^  ```/{exit} g' "$G48_OSR" | grep -q 'SPECIALIST_FINDINGS' && echo yes || echo no)"
+
+  G48_DIR=$(mktemp -d "${TMPDIR:-/tmp}/stride-g48.XXXXXX")
+  G48_TC='["c1","c2","c3","c4"]'
+  G48_PRIOR='{"status":"approved","issues":[],"security_considerations":{"status":"passed","considerations":[{"consideration":"c1","status":"mitigated","evidence":"`lib/a.ex:2`","note":"the reviewer words"},{"consideration":"c2","status":"partial","evidence":"lib/b.ex:1","note":"n"},{"consideration":"c3","status":"mitigated","evidence":"@REPO@/docs/c.md:1","note":"n"},{"consideration":"c4","status":"mitigated","evidence":"no change needed","note":"n"}]}}'
+  g48_scope() { # $1=fix script $2=prior JSON ("" for none) [$3=pre-gate script] -> $SCOPE
+    ( repo="$G48_DIR/repo-$RANDOM$RANDOM"
+      mkdir -p "$repo/lib" "$repo/docs" "$repo/.stride" && cd "$repo" || exit 1
+      git init -q . && git config user.email t@example.com && git config user.name t
+      printf 'a\n' > lib/a.ex; printf 'b\n' > lib/b.ex; printf 'c\n' > docs/c.md
+      mkdir -p 'src/routes/api' 'app/[id]' 'src/@types' config
+      printf 's\n' > 'src/routes/api/+server.ts'; printf 'p\n' > 'app/[id]/page.tsx'; printf 't\n' > 'src/@types/x.ts'
+      printf 'k\n' > config/secret.exs
+      mkdir -p '(auth)/lib' docker 'web app/lib'; printf 'q\n' > '(auth)/lib/a.ex'; printf 'e\n' > docker/.env; printf 's\n' > .env
+      printf 'w\n' > 'web app/lib/b.ex'; mkdir -p app/lib; printf 'v\n' > app/lib/b.ex; ln -s a.ex lib/link.ex
+      printf '.stride/\nconfig/secret.exs\n/.env\n' > .gitignore
+      git add -A >/dev/null && git commit -qm init
+      [ -n "$2" ] && printf '%s' "$2" | sed "s|@REPO@|$repo|g" > .stride/.reviewer-result-W4848-r1.json
+      STRIDE_DIR="$repo/.stride" IDENT=W4848 FIX_REPOS="$repo" FIX_STAGE=base
+      eval "$G48_FIX" >/dev/null 2>&1
+      eval "$1"
+      eval "${3:-:}"
+      MERGED="$STRIDE_DIR/.reviewer-result-W4848-r2.json"
+      TASK_CONSIDERATIONS="$G48_TC"
+      eval "$G48_SCOPE" >/dev/null 2>&1
+      printf '%s' "$SCOPE" | jq -c . 2>/dev/null || echo ABORT )
+  }
+  assert_eq "48q: mitigated+untouched is carried; partial and no-path re-checked" '["c2","c4"]' \
+    "$(g48_scope 'printf x >> lib/b.ex' "$G48_PRIOR")"
+  assert_eq "48r: a mitigated verdict whose evidence file changed is re-checked" '["c1","c2","c4"]' \
+    "$(g48_scope 'printf x >> lib/a.ex' "$G48_PRIOR")"
+  assert_eq "48s: a docs path counts; an absolute citation resolves and matches" '["c2","c3","c4"]' \
+    "$(g48_scope 'printf x >> docs/c.md' "$G48_PRIOR")"
+  assert_eq "48t: an added file re-checks everything" "$G48_TC" \
+    "$(g48_scope 'printf n > lib/new.ex' "$G48_PRIOR")"
+  assert_eq "48u: a .stride artifact is not an added file" '["c2","c4"]' \
+    "$(g48_scope 'printf x > .stride/.review-W4848-r2.json; printf x >> lib/b.ex' "$G48_PRIOR")"
+  assert_eq "48v: a missing fix base fails open" "$G48_TC" \
+    "$(g48_scope ':' "$G48_PRIOR" 'rm -f "$STRIDE_DIR/.review-fixbase-W4848.txt"')"
+  assert_eq "48w: an unknown fix base fails open" "$G48_TC" \
+    "$(g48_scope ':' "$G48_PRIOR" 'printf "unknown %s\n" "$PWD" > "$STRIDE_DIR/.review-fixbase-W4848.txt"')"
+  assert_eq "48x: no prior round fails open" "$G48_TC" \
+    "$(g48_scope ':' '')"
+  assert_eq "48y: a prior anomaly fails open" "$G48_TC" \
+    "$(g48_scope ':' "$(printf '%s' "$G48_PRIOR" | jq -c '.issues = [{"severity":"critical","category":"security","file":"","line":null,"description":"The deep security review returned a malformed findings[], so no finding could be mapped"}]')")"
+  assert_eq "48z: an unresolved STRIDE_DIR fails open" "$G48_TC" \
+    "$( (unset STRIDE_DIR; MERGED=x-r2.json; IDENT=W4848; TASK_CONSIDERATIONS="$G48_TC"; eval "$G48_SCOPE" >/dev/null 2>&1; printf '%s' "$SCOPE" | jq -c .) )"
+
+  g48_merge() { # $1=scope $2=reply verdicts [$3=prior JSON] -> merged considerations or REFUSED-*
+    ( printf '%s' "${3:-$G48_PRIOR}" > "$G48_DIR/prior.json"
+      printf '%s' '{"status":"approved","issues":[],"security_considerations":{"status":"passed","note":"r"}}' > "$G48_DIR/merged.json"
+      cp "$G48_DIR/merged.json" "$G48_DIR/before.json"
+      if MERGED="$G48_DIR/merged.json" PRIOR_MERGED="$G48_DIR/prior.json" TASK_CONSIDERATIONS="$G48_TC" \
+         SCOPE="$1" CONSIDERATION_VERDICTS="$2" eval "$G48_MERGE" 2>/dev/null; then
+        jq -c '.security_considerations.considerations' "$G48_DIR/merged.json"
+      elif cmp -s "$G48_DIR/merged.json" "$G48_DIR/before.json"; then
+        echo REFUSED-UNCHANGED
+      else
+        echo REFUSED-CHANGED
+      fi )
+  }
+  G48_REPLY='[{"consideration":"c2","status":"mitigated","evidence":"lib/b.ex:1","note":"fixed"},{"consideration":"c4","status":"mitigated","evidence":"lib/d.ex:3","note":"ok"}]'
+  assert_eq "48aa: a carried verdict is the prior object, unchanged" \
+    '{"consideration":"c1","status":"mitigated","evidence":"`lib/a.ex:2`","note":"the reviewer words"}' \
+    "$(g48_merge '["c2","c4"]' "$G48_REPLY" | jq -c '.[0]' 2>/dev/null || echo ABORT)"
+  assert_eq "48ab: one verdict per task consideration, in task order" "c1,c2,c3,c4" \
+    "$(g48_merge '["c2","c4"]' "$G48_REPLY" | jq -r 'map(.consideration) | join(",")' 2>/dev/null || echo ABORT)"
+  assert_eq "48ac: a reply short of the scope is refused, MERGED untouched" "REFUSED-UNCHANGED" \
+    "$(g48_merge '["c2","c4"]' "$(printf '%s' "$G48_REPLY" | jq -c '.[:1]')")"
+  assert_eq "48ad: a reworded consideration string is refused" "REFUSED-UNCHANGED" \
+    "$(g48_merge '["c2","c4"]' "$(printf '%s' "$G48_REPLY" | jq -c '.[0].consideration = "c2 "')")"
+  assert_eq "48ae: a partial verdict is never carried" "REFUSED-UNCHANGED" \
+    "$(g48_merge '["c4"]' "$(printf '%s' "$G48_REPLY" | jq -c '.[1:]')")"
+  assert_eq "48af: a prior missing a carried verdict is refused" "REFUSED-UNCHANGED" \
+    "$(g48_merge '["c2","c4"]' "$G48_REPLY" "$(printf '%s' "$G48_PRIOR" | jq -c '.security_considerations.considerations |= map(select(.consideration != "c3"))')")"
+  assert_eq "48ag: round one carries nothing and restores task order" "c1,c2,c3,c4" \
+    "$(g48_merge "$G48_TC" '[{"consideration":"c4","status":"mitigated","evidence":"x:1"},{"consideration":"c3","status":"mitigated","evidence":"x:1"},{"consideration":"c2","status":"mitigated","evidence":"x:1"},{"consideration":"c1","status":"mitigated","evidence":"x:1"}]' '{}' | jq -r 'map(.consideration) | join(",")' 2>/dev/null || echo ABORT)"
+  G48_ALLMIT=$(printf '%s' "$G48_PRIOR" | jq -c '.security_considerations.considerations |= map(.status = "mitigated")')
+  assert_eq "48ah: an empty scope carries the prior array exactly" \
+    "$(printf '%s' "$G48_ALLMIT" | jq -c '.security_considerations.considerations')" \
+    "$(g48_merge '[]' '[]' "$G48_ALLMIT")"
+  g48_prior() { # $1=c1 evidence $2=c1 status -> G48_PRIOR with c1 replaced
+    printf '%s' "$G48_PRIOR" | jq -c --arg e "$1" --arg st "${2:-mitigated}" \
+      '.security_considerations.considerations[0] |= (.evidence = $e | .status = $st)'
+  }
+  assert_eq "48ai: a cited path with +, [ ] or @ still re-checks when touched" '["c1","c2","c4"]' \
+    "$(g48_scope "printf x >> 'src/routes/api/+server.ts'" "$(g48_prior 'src/routes/api/+server.ts:3')")"
+  assert_eq "48ai2: a bracketed directory too" '["c1","c2","c4"]' \
+    "$(g48_scope "printf x >> 'app/[id]/page.tsx'" "$(g48_prior 'app/[id]/page.tsx:4')")"
+  assert_eq "48ai3: and an @-scoped directory" '["c1","c2","c4"]' \
+    "$(g48_scope "printf x >> 'src/@types/x.ts'" "$(g48_prior 'see `src/@types/x.ts:1`')")"
+  assert_eq "48aj: a file cited without a line is still a cited file" '["c1","c2","c4"]' \
+    "$(g48_scope 'printf x >> lib/a.ex' "$(g48_prior 'guard in lib/a.ex#L2')")"
+  assert_eq "48ak: a gitignored cited file is unmeasured, never untouched" '["c1","c2","c4"]' \
+    "$(g48_scope 'printf x >> lib/b.ex' "$(g48_prior 'config/secret.exs:1')")"
+  assert_eq "48al: a non-path token is unmeasured, never a carried path" '["c1","c2","c4"]' \
+    "$(g48_scope 'printf x >> lib/b.ex' "$(g48_prior 'OWASP A03:2021 handled')")"
+  # 48am-48an: three rounds. The round-two fix is reverted before round three, so
+  # the net diff from round one's base is empty; the round-two snapshot is what
+  # still shows the cited file was touched since the verdict was judged.
+  g48_three() { # [$1=pre-round-three script] -> round three's $SCOPE
+    ( repo="$G48_DIR/repo3-$RANDOM$RANDOM"
+      mkdir -p "$repo/lib" "$repo/docs" "$repo/.stride" && cd "$repo" || exit 1
+      git init -q . && git config user.email t@example.com && git config user.name t
+      printf 'a\n' > lib/a.ex; printf 'b\n' > lib/b.ex; printf 'c\n' > docs/c.md; printf '.stride/\n' > .gitignore
+      git add -A >/dev/null && git commit -qm init
+      STRIDE_DIR="$repo/.stride" IDENT=W4848 FIX_REPOS="$repo" FIX_STAGE=base
+      eval "$G48_FIX" >/dev/null 2>&1
+      TASK_CONSIDERATIONS="$G48_TC"
+      printf '%s' "$(g48_prior 'lib/a.ex:2' partial)" > .stride/.reviewer-result-W4848-r1.json
+      printf 'a2\n' > lib/a.ex
+      MERGED="$STRIDE_DIR/.reviewer-result-W4848-r2.json"; eval "$G48_SCOPE" >/dev/null 2>&1
+      printf '%s' "$(printf '%s' "$G48_PRIOR" | jq -c '.security_considerations.considerations |= map(.status = "mitigated" | .evidence = "lib/a.ex:2")')" > "$MERGED"
+      printf 'a\n' > lib/a.ex
+      eval "${1:-:}"
+      MERGED="$STRIDE_DIR/.reviewer-result-W4848-r3.json"; eval "$G48_SCOPE" >/dev/null 2>&1
+      printf '%s' "$SCOPE" | jq -c . 2>/dev/null || echo ABORT )
+  }
+  assert_eq "48am: a fix reverting a cited file to round one's content is re-checked" "$G48_TC" \
+    "$(g48_three)"
+  G48_TOB='printf "%s" "$(jq -c ".security_considerations.considerations |= map(.evidence = \"lib/b.ex:1\")" "$STRIDE_DIR/.reviewer-result-W4848-r2.json")" > "$STRIDE_DIR/.reviewer-result-W4848-r2.json"'
+  assert_eq "48an: verdicts judged on untouched files carry across rounds" '[]' \
+    "$(g48_three "$G48_TOB")"
+  assert_eq "48an2: but a missing prior-round snapshot fails open" "$G48_TC" \
+    "$(g48_three "$G48_TOB"'; rm -f "$STRIDE_DIR/.review-tree-W4848-r2.txt"')"
+  assert_eq "48ar: a parenthesised directory never resolves to a shorter tracked path" '["c1","c2","c4"]' \
+    "$(g48_scope 'printf x >> "(auth)/lib/a.ex"' "$(g48_prior '(auth)/lib/a.ex:1')")"
+  assert_eq "48as: a ../ citation is unmeasured" '["c1","c2","c4"]' \
+    "$(g48_scope 'printf x >> lib/b.ex' "$(g48_prior '../README.md:1')")"
+  assert_contains "48at: a snapshot repo that fails is recorded unknown, never dropped" \
+    't=$(fix_tree "$repo") || t=unknown' "$(cat "$G48_OSR")"
+  assert_contains "48au: snapshots are cleared with the other review artifacts" \
+    '"$STRIDE_DIR/.review-tree-$IDENT-r"*.txt' "$(cat "$G48_RBE")"
+  assert_eq "48av: a cited symlink whose target changed is re-checked" '["c1","c2","c4"]' \
+    "$(g48_scope 'printf x >> lib/a.ex' "$(g48_prior 'lib/link.ex:2')")"
+  assert_eq "48aw: an assume-unchanged cited file is unmeasured" '["c1","c2","c4"]' \
+    "$(g48_scope 'git update-index --assume-unchanged lib/a.ex; printf x >> lib/a.ex' "$(g48_prior 'lib/a.ex:2')")"
+  assert_eq "48ax: a skip-worktree cited file is unmeasured" '["c1","c2","c4"]' \
+    "$(g48_scope 'git update-index --skip-worktree lib/a.ex; printf x >> lib/a.ex' "$(g48_prior 'lib/a.ex:2')")"
+  assert_eq "48ay: a tail after a space never resolves to a shorter tracked path" '["c1","c2","c4"]' \
+    "$(g48_scope "printf x >> 'web app/lib/b.ex'" "$(g48_prior '"web app/lib/b.ex:2"')")"
+  assert_eq "48ao: a gitignored .env never resolves to a tracked docker/.env" '["c1","c2","c4"]' \
+    "$(g48_scope 'printf x >> .env; printf x >> lib/b.ex' "$(g48_prior '.env:1')")"
+  assert_eq "48ap: an unmeasured X/lib/a.ex never resolves to a tracked lib/a.ex" '["c1","c2","c4"]' \
+    "$(g48_scope 'printf x >> lib/b.ex' "$(g48_prior 'X/lib/a.ex:2')")"
+  assert_eq "48aq: a project-root-relative citation resolves exactly" '["c2","c4"]' \
+    "$(g48_scope 'printf x >> lib/b.ex' "$(g48_prior '@REPO@/lib/a.ex:2')")"
+  rm -rf "$G48_DIR"
+else
+  echo "  SKIP: Group 48 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

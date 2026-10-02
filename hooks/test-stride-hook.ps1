@@ -12655,6 +12655,48 @@ if ((Test-Path -LiteralPath $g41Osr) -and (Test-Path -LiteralPath $g41Wf) -and (
 }
 
 # ============================================================
+# Test Group 42: W2281 - scoped security re-dispatch and verdict carry-over, PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 48 text pins; the behavioural pins run in bash only.
+Write-Host ""
+Write-Host "=== Test Group 42: W2281 scoped security re-dispatch (PowerShell) ==="
+$g42Osr    = Join-Path $ScriptDir '../skills/stride-workflow/optional-security-review.md'
+$g42Sub    = Join-Path $ScriptDir '../skills/stride-subagent-workflow/SKILL.md'
+$g42Ref    = Join-Path $ScriptDir '../skills/stride-workflow/reference.md'
+$g42Readme = Join-Path $ScriptDir '../README.md'
+if ((Test-Path -LiteralPath $g42Osr) -and (Test-Path -LiteralPath $g42Sub) -and (Test-Path -LiteralPath $g42Ref) -and (Test-Path -LiteralPath $g42Readme)) {
+    $g42Text = @{
+        OSR    = Get-Content -LiteralPath $g42Osr -Raw
+        SUB    = Get-Content -LiteralPath $g42Sub -Raw
+        REF    = Get-Content -LiteralPath $g42Ref -Raw
+        README = Get-Content -LiteralPath $g42Readme -Raw
+    }
+    Assert-Contains "42a: the re-dispatch section exists" '## Re-dispatch rounds: gate, scope, carry-over' $g42Text.OSR
+    Assert-Contains "42b: only what can have changed is re-checked" '**Re-check only what can have changed.**' $g42Text.OSR
+    Assert-Contains "42c: evidence with no path:line is in scope" 'its `evidence` cites no `path:line`' $g42Text.OSR
+    Assert-Contains "42d: a touched evidence file is in scope" 'touched by the fixes since round one' $g42Text.OSR
+    Assert-Contains "42e: an added file re-checks everything" '**a fix that added a file**' $g42Text.OSR
+    Assert-Contains "42f: changed paths are unfiltered" '**unfiltered**: unlike `FIX_CODE_PATHS`, a docs or test path counts' $g42Text.OSR
+    Assert-Contains "42g: an empty scope dispatches nothing" '**do not dispatch the specialist this round**' $g42Text.OSR
+    Assert-Contains "42h: the re-dispatch passes only the scope" 'with **only the considerations in `$SCOPE`**' $g42Text.OSR
+    Assert-Contains "42i: carried verdicts are never re-typed" '**Carry over, never re-type.**' $g42Text.OSR
+    Assert-Contains "42j: a changed-evidence verdict is never carried" 'a verdict whose evidence file changed is in scope by construction, so it is never carried' $g42Text.OSR
+    Assert-Contains "42k: the merge keeps one verdict per consideration" '**The merge assembles one verdict per task consideration**' $g42Text.OSR
+    Assert-Contains "42l: the subagent-workflow mirror carries over" 'carrying every other verdict verbatim from the prior round' $g42Text.SUB
+    Assert-Contains "42m: the reference flow mirrors the scope" 'round 2+: re-dispatch the specialist only for $SCOPE' $g42Text.REF
+    Assert-Contains "42n: the README mirrors the gate" 're-dispatched only for the considerations whose prior verdict was not `mitigated`' $g42Text.README
+    Assert-Contains "42o2: an unresolvable cited path is unmeasured, never untouched" '**unmeasured, never untouched**' $g42Text.OSR
+    Assert-Contains "42o3: a revert to round one''s content still counts as touched" 'a fix that puts a file back exactly as round one had it still counts' $g42Text.OSR
+    Assert-Contains "42o4: the scope fence runs on every round" '**Compute `$SCOPE` before the dispatch, on every round**' $g42Text.OSR
+    Assert-Contains "42o6: symlinks and index-flagged entries never resolve" 'a symlink (its target can change unseen), an assume-unchanged or skip-worktree entry' $g42Text.OSR
+    Assert-Contains "42o5: a cited path resolves only exactly" 'never by a shared tail' $g42Text.OSR
+    $g42Old = @(Get-Content -LiteralPath $g42Osr | Where-Object { $_.Contains('because the merge replaces the array with whatever came back') }).Count
+    Assert-Eq "42o: the replace-whatever-came-back wording is gone" '0' ([string]$g42Old)
+} else {
+    Write-Host "  SKIP: Group 42 contract files not found"
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

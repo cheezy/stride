@@ -25,6 +25,16 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — the security specialist re-checks only what the fixes could have moved and carries every other verdict over (W2281)
+
+91 of 257 specialist dispatches were re-dispatches, and tasks ran up to 11 rounds, each re-checking every consideration — yet a narrow "confirm the quoting" re-dispatch took 24 s against about 100 s for a full one.
+
+- **Gate** (`skills/stride-workflow/optional-security-review.md`, new "Re-dispatch rounds: gate, scope, carry-over"): on a round after the first a consideration is re-checked only when the prior round has no verdict for it, its verdict is not `mitigated`, its evidence cites no `path:line`, a path its evidence cites (as `path:line`, or bare with a `/`; any characters but whitespace, quotes and separators) does not resolve to a file the measured repos track — gitignored, outside the measured repos, a symlink, an assume-unchanged or skip-worktree entry, the tail of a tracked path with a space before it, or not a path at all reads as unmeasured, never untouched — or a file it cites was touched since round one's fix base **or** since the snapshot of the tree the carried verdict was judged on (`.review-tree-<IDENTIFIER>-r<N>.txt`, written by each round's scope run), so a fix reverted to round one's content still counts. A cited path resolves only exactly — repo-relative, project-root-relative or absolute, never by a shared tail — and a resolved file is then matched suffix-tolerantly against the unfiltered `git diff-tree` list (`core.quotePath=false`), so docs and test paths count. Every consideration is re-checked when the base or the prior round's snapshot is missing or unreadable, `$STRIDE_DIR` is unresolved, the prior round is unparsable or recorded the specialist anomaly or a finding outside the considerations, or a fix added a file.
+- **Scoped dispatch**: only the in-scope considerations go to the specialist, still in the same message as the task-reviewer; with none in scope it is not dispatched and the mapping update runs with `SPECIALIST_FINDINGS='[]'`. Step 1 now also asks for a `file:line` in every mitigated verdict.
+- **Carry-over**: the merge assembles one verdict per task consideration in the task's order — the reply's for each scoped one, the prior round's object copied verbatim for the rest, never hand-edited and never one whose evidence file changed — and exits non-zero, writing nothing, unless the reply covers exactly the scope and the result exactly the task's list; that refusal is the existing fail-closed anomaly.
+- **Mirrors**: `stride-subagent-workflow`, `reference.md`'s Step 5 flow and the README; `stride-workflow/SKILL.md` is unchanged — its pointer already defers the whole body to the sibling.
+- **Pinned**: bash hook-suite Group 48 (text pins, plus both fences extracted from the contract and run against throwaway git repos and fixtures) and PowerShell Group 42 (text twins).
+
 ### Changed — the security specialist is dispatched beside the task-reviewer and merged after both return (W2280)
 
 The specialist already ran alongside a task-reviewer in 186 of 254 runs, exposing only 33% of its wall clock, but the docs never said to and placed the deep sub-step after extraction, which reads as serial.

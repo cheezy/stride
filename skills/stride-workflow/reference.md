@@ -124,6 +124,9 @@ STEP 5: Code Review (Decision Matrix)
                   and dispatch task-reviewer plus, when it fires, the specialist
                   in ONE message; merge only after both return, then fix
                   Critical/Important issues
+                  (the specialist gets SECURITY_RESULT_PATH; read its result
+                  from that path only -- inline fence as the fallback,
+                  neither --> fail closed; Step 7 deletes the file)
                   (round 2+: re-dispatch the specialist only for $SCOPE --
                   not mitigated, no path:line, or an evidence file the fixes
                   touched; [] --> no dispatch; carry every other verdict

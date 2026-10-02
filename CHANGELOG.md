@@ -25,6 +25,17 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — the security specialist's full result goes to a file under `.stride/` and the main loop gets a few lines (W2284)
+
+Specialist results returned to the main loop totalled 1.94 MB (median 8.1 KB, max 23.3 KB), re-sent on every later main-loop request.
+
+- **Supply** (`optional-security-review.md` step 1): `SECURITY_RESULT_PATH=<absolute path>` — `.stride/.security-<IDENTIFIER>-r<N>.json` under the project root, identifier anchored on `^[A-Za-z0-9_-]+$` (else the numeric task id), `<N>` its own per-dispatch series including a crashed re-dispatch, resolved as for `REVIEW_BLOCK_PATH`.
+- **Read** (step 2): a new fence reads only the path the orchestrator supplied — never one the summary names — and takes `consideration_verdicts` and `findings` from it with `jq`. A symlink (or a symlinked `.stride/`), an unparseable file, more than one JSON value, or a `result: NOT WRITTEN` reply falls back to the reply's inline ```json fence (an older plugin, or a failed write), which the orchestrator writes with its file-write tool — never through the shell — to `.security-<IDENTIFIER>-r<N>.inline.json` and reads with the same `jq` check; with neither, both variables stay unset and the existing fail-closed anomaly applies — never `[]`.
+- **Cleanup** (`review-block-extraction.md`): `"$STRIDE_DIR/.security-$IDENT-r"*` (the result, its `.inline.json` fallback, and a temp copy a killed write leaves) joins the per-attempt artifacts cleared at claim and deleted at Step 7 once the PATCH has succeeded.
+- **Mirrors**: `stride-subagent-workflow`, `reference.md`'s Step 5 flow and the README; `stride-workflow/SKILL.md` is unchanged — its pointer defers the body to the sibling.
+- **Pinned**: bash hook-suite Group 49 (text pins, plus the read fence extracted and run against fixtures: file, inline fallback, NOT WRITTEN, a decoy path, symlink, two values, absent) and PowerShell Group 43 (text twins).
+- **Pairs with** `stride-security-review`'s [Unreleased] result-file contract; an older plugin ignores the variable and the inline path is unchanged.
+
 ### Changed — the security specialist re-checks only what the fixes could have moved and carries every other verdict over (W2281)
 
 91 of 257 specialist dispatches were re-dispatches, and tasks ran up to 11 rounds, each re-checking every consideration — yet a narrow "confirm the quoting" re-dispatch took 24 s against about 100 s for a full one.

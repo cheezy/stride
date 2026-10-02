@@ -12697,6 +12697,44 @@ if ((Test-Path -LiteralPath $g42Osr) -and (Test-Path -LiteralPath $g42Sub) -and 
 }
 
 # ============================================================
+# Test Group 43: W2284 - the specialist's result file, PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 49 text pins; the behavioural pins run in bash only.
+Write-Host ""
+Write-Host "=== Test Group 43: W2284 security result file (PowerShell) ==="
+$g43Osr    = Join-Path $ScriptDir '../skills/stride-workflow/optional-security-review.md'
+$g43Rbe    = Join-Path $ScriptDir '../skills/stride-workflow/review-block-extraction.md'
+$g43Sub    = Join-Path $ScriptDir '../skills/stride-subagent-workflow/SKILL.md'
+$g43Ref    = Join-Path $ScriptDir '../skills/stride-workflow/reference.md'
+$g43Readme = Join-Path $ScriptDir '../README.md'
+if ((Test-Path -LiteralPath $g43Osr) -and (Test-Path -LiteralPath $g43Rbe) -and (Test-Path -LiteralPath $g43Sub) -and (Test-Path -LiteralPath $g43Ref) -and (Test-Path -LiteralPath $g43Readme)) {
+    $g43Text = @{
+        OSR    = Get-Content -LiteralPath $g43Osr -Raw
+        RBE    = Get-Content -LiteralPath $g43Rbe -Raw
+        SUB    = Get-Content -LiteralPath $g43Sub -Raw
+        REF    = Get-Content -LiteralPath $g43Ref -Raw
+        README = Get-Content -LiteralPath $g43Readme -Raw
+    }
+    Assert-Contains "43a: step 1 supplies the result path" '**Supply `SECURITY_RESULT_PATH=<absolute path>`**' $g43Text.OSR
+    Assert-Contains "43b: under .stride/, identifier-anchored, per dispatch" '.stride/.security-<IDENTIFIER>-r<N>.json' $g43Text.OSR
+    Assert-Contains "43c: the identifier rule is anchored" 'only when it matches `^[A-Za-z0-9_-]+$` (anchored)' $g43Text.OSR
+    Assert-Contains "43d: every dispatch gets a new N" 'a re-dispatch after a crashed or empty one included' $g43Text.OSR
+    Assert-Contains "43e: step 2 reads only the supplied path" 'Read the result from the path you supplied' $g43Text.OSR
+    Assert-Contains "43f: NOT WRITTEN skips the file" 'Set `SECURITY_NOT_WRITTEN=1` when the reply opens with `result: NOT WRITTEN`' $g43Text.OSR
+    Assert-Contains "43g: no result is never an empty array" 'leaves both unset, never `[]`' $g43Text.OSR
+    Assert-Contains "43g2: no result is the fail-closed anomaly" '**So is a step-2 read that prints `security result: none`**' $g43Text.OSR
+    Assert-Contains "43h: the result file is cleaned with the review artifacts" '"$STRIDE_DIR/.security-$IDENT-r"* ' $g43Text.RBE
+    Assert-Contains "43z: the fallback is written with the file-write tool" 'with your file-write tool, never through the shell' $g43Text.OSR
+    Assert-Contains "43j: the subagent-workflow mirror reads only the path" 'and read its result only from that path' $g43Text.SUB
+    Assert-Contains "43k: the reference flow mirrors it" 'the specialist gets SECURITY_RESULT_PATH; read its result' $g43Text.REF
+    Assert-Contains "43l: the README mirrors it" 'writes its full result to the `SECURITY_RESULT_PATH` the workflow supplies' $g43Text.README
+    $g43Claim = @(Get-Content -LiteralPath $g43Rbe | Where-Object { $_ -notmatch 'Step 7 only' -and $_.Contains('.security-$IDENT-r') }).Count
+    Assert-Eq "43i: the result-file glob is in the claim-time clear too" '1' ([string]$g43Claim)
+} else {
+    Write-Host "  SKIP: Group 43 contract files not found"
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

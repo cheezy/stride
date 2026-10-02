@@ -15139,6 +15139,99 @@ else
 fi
 
 # ============================================================
+# Test Group 49: W2284 -- the specialist's result file under .stride/
+# ============================================================
+# Step 1 supplies SECURITY_RESULT_PATH; step 2 reads only that path, falls back
+# to the inline fence, and leaves both arrays unset (fail closed) with neither.
+# The read fence is extracted from the contract and run against fixtures.
+echo ""
+echo "=== Test Group 49: W2284 security result file (bash) ==="
+G49_OSR="$SCRIPT_DIR/../skills/stride-workflow/optional-security-review.md"
+G49_RBE="$SCRIPT_DIR/../skills/stride-workflow/review-block-extraction.md"
+G49_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G49_REF="$SCRIPT_DIR/../skills/stride-workflow/reference.md"
+G49_README="$SCRIPT_DIR/../README.md"
+if [ -f "$G49_OSR" ] && [ -f "$G49_RBE" ] && [ -f "$G49_SUB" ] && [ -f "$G49_REF" ] && [ -f "$G49_README" ]; then
+  assert_contains "49a: step 1 supplies the result path" \
+    '**Supply `SECURITY_RESULT_PATH=<absolute path>`**' "$(cat "$G49_OSR")"
+  assert_contains "49b: under .stride/, identifier-anchored, per dispatch" \
+    '.stride/.security-<IDENTIFIER>-r<N>.json' "$(cat "$G49_OSR")"
+  assert_contains "49c: the identifier rule is anchored" \
+    'only when it matches `^[A-Za-z0-9_-]+$` (anchored)' "$(cat "$G49_OSR")"
+  assert_contains "49d: every dispatch gets a new N" \
+    'a re-dispatch after a crashed or empty one included' "$(cat "$G49_OSR")"
+  assert_contains "49e: step 2 reads only the supplied path" \
+    'Read the result from the path you supplied' "$(cat "$G49_OSR")"
+  assert_contains "49f: NOT WRITTEN skips the file" \
+    'Set `SECURITY_NOT_WRITTEN=1` when the reply opens with `result: NOT WRITTEN`' "$(cat "$G49_OSR")"
+  assert_contains "49g: no result is never an empty array" \
+    'leaves both unset, never `[]`' "$(cat "$G49_OSR")"
+  assert_contains "49g2: no result is the fail-closed anomaly" \
+    '**So is a step-2 read that prints `security result: none`**' "$(cat "$G49_OSR")"
+  assert_contains "49h: the result file is cleaned with the review artifacts" \
+    '"$STRIDE_DIR/.security-$IDENT-r"* ' "$(cat "$G49_RBE")"
+  assert_contains "49j: the subagent-workflow mirror reads only the path" \
+    'and read its result only from that path' "$(cat "$G49_SUB")"
+  assert_contains "49k: the reference flow mirrors it" \
+    'the specialist gets SECURITY_RESULT_PATH; read its result' "$(cat "$G49_REF")"
+  assert_contains "49l: the README mirrors it" \
+    'writes its full result to the `SECURITY_RESULT_PATH` the workflow supplies' "$(cat "$G49_README")"
+  assert_eq "49i: the result-file glob is in the claim-time clear too" "1" \
+    "$(grep -v 'Step 7 only' "$G49_RBE" | grep -c 'security-\$IDENT-r' | tr -d ' ')"
+  G49_READ=$(awk '/\*\*Read the result from the path you supplied/{f=1} f&&/^   ```bash/{g=1;next} g&&/^   ```/{exit} g' "$G49_OSR" | sed 's/^   //')
+  assert_eq "49m: the read fence is extractable" "yes" \
+    "$(printf '%s' "$G49_READ" | grep -q 'SECURITY_RESULT' && echo yes || echo no)"
+  G49_DIR=$(mktemp -d "${TMPDIR:-/tmp}/stride-g49.XXXXXX")
+  G49_DOC='{"findings":[{"severity":"high","file":"lib/a.ex","line":3,"vulnerability_class":"injection","description":"d","remediation":"r"}],"summary":{"files_reviewed":1},"consideration_verdicts":[{"consideration":"c1","status":"mitigated","evidence":"lib/a.ex:3","note":"n"}]}'
+  G49_ALT='{"findings":[],"summary":{"files_reviewed":0},"consideration_verdicts":[{"consideration":"c1","status":"unmitigated","evidence":"none","note":"decoy"}]}'
+  G49_V='[{"consideration":"c1","status":"mitigated","evidence":"lib/a.ex:3","note":"n"}]'
+  G49_F='[{"severity":"high","file":"lib/a.ex","line":3,"vulnerability_class":"injection","description":"d","remediation":"r"}]'
+  g49_read() { # $1=setup shell -> "<src>|<verdicts or UNSET>|<findings or UNSET>"
+    ( rm -rf "$G49_DIR/.stride"; mkdir -p "$G49_DIR/.stride"; cd "$G49_DIR" || exit 1
+      unset SECURITY_INLINE_FILE SECURITY_NOT_WRITTEN CONSIDERATION_VERDICTS SPECIALIST_FINDINGS
+      SECURITY_RESULT="$G49_DIR/.stride/.security-W4949-r1.json"
+      eval "$1"
+      eval "$G49_READ" > "$G49_DIR/out" 2>/dev/null
+      printf '%s|%s|%s' "$(sed -n 's/^security result: //p' "$G49_DIR/out")" \
+        "${CONSIDERATION_VERDICTS-UNSET}" "${SPECIALIST_FINDINGS-UNSET}" )
+  }
+  G49_OK="file|$G49_V|$G49_F"
+  assert_eq "49n: the supplied file sets both arrays" "$G49_OK" \
+    "$(g49_read 'printf "%s" "$G49_DOC" > "$SECURITY_RESULT"')"
+  assert_eq "49o: the file beats an inline fence" "$G49_OK" \
+    "$(g49_read 'printf "%s" "$G49_DOC" > "$SECURITY_RESULT"; printf "%s" "$G49_ALT" > .stride/in.json; SECURITY_INLINE_FILE="$PWD/.stride/in.json"')"
+  assert_eq "49p: a path the summary names is never read" "none|UNSET|UNSET" \
+    "$(g49_read 'printf "%s" "$G49_ALT" > .stride/.security-W4949-r9.json; SECURITY_SUMMARY="result: $PWD/.stride/.security-W4949-r9.json"')"
+  assert_eq "49p2: the supplied file still wins beside a decoy" "$G49_OK" \
+    "$(g49_read 'printf "%s" "$G49_ALT" > .stride/.security-W4949-r9.json; printf "%s" "$G49_DOC" > "$SECURITY_RESULT"')"
+  assert_eq "49q: an absent file falls back to the inline fence" "inline|$G49_V|$G49_F" \
+    "$(g49_read 'printf "%s" "$G49_DOC" > .stride/in.json; SECURITY_INLINE_FILE="$PWD/.stride/in.json"')"
+  assert_eq "49r: NOT WRITTEN skips a file that is present" "inline|$G49_V|$G49_F" \
+    "$(g49_read 'printf "%s" "$G49_ALT" > "$SECURITY_RESULT"; SECURITY_NOT_WRITTEN=1; printf "%s" "$G49_DOC" > .stride/in.json; SECURITY_INLINE_FILE="$PWD/.stride/in.json"')"
+  assert_eq "49s: no file and no fence leaves both unset" "none|UNSET|UNSET" \
+    "$(g49_read ':')"
+  assert_eq "49t: an unparseable file is no result" "none|UNSET|UNSET" \
+    "$(g49_read 'printf "not json" > "$SECURITY_RESULT"')"
+  assert_eq "49u: a symlink at the supplied path is never followed" "none|UNSET|UNSET" \
+    "$(g49_read 'printf "%s" "$G49_DOC" > .stride/real.json; ln -s real.json "$SECURITY_RESULT"')"
+  assert_eq "49v: two JSON values in the file are no result" "none|UNSET|UNSET" \
+    "$(g49_read 'printf "%s%s" "$G49_DOC" "$G49_DOC" > "$SECURITY_RESULT"')"
+  assert_eq "49w: a missing findings key is null, never []" "file|[]|null" \
+    "$(g49_read 'printf "%s" "{\"consideration_verdicts\":[]}" > "$SECURITY_RESULT"')"
+  assert_eq "49x: a symlinked .stride/ is never read" "none|UNSET|UNSET" \
+    "$(g49_read 'mkdir -p real; printf "%s" "$G49_DOC" > real/.security-W4949-r1.json; rm -rf .stride; ln -s real .stride')"
+  G49_Q="{\"findings\":[],\"consideration_verdicts\":[{\"consideration\":\"c1\",\"status\":\"mitigated\",\"evidence\":\"it's 'quoted' fine\",\"note\":\"n\"}]}"
+  assert_eq "49y: a fallback with quotes is read from its file, never a shell word" \
+    "inline|$(printf '%s' "$G49_Q" | jq -c .consideration_verdicts)|[]" \
+    "$(g49_read 'printf "%s" "$G49_Q" > .stride/in.json; SECURITY_INLINE_FILE="$PWD/.stride/in.json"')"
+  assert_contains "49z: the fallback is written with the file-write tool" \
+    'with your file-write tool, never through the shell' "$(cat "$G49_OSR")"
+  rm -rf "$G49_DIR"
+else
+  echo "  SKIP: Group 49 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

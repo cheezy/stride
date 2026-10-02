@@ -168,7 +168,7 @@ else
   rm -f "$STRIDE_DIR/.review-rounds-$IDENT.json" "$STRIDE_DIR/.review-fixbase-$IDENT.txt" \
        "$STRIDE_DIR/.review-$IDENT-r"*.json "$STRIDE_DIR/.review-$IDENT-r"*.md \
        "$STRIDE_DIR/.reviewer-result-$IDENT-r"*.json "$STRIDE_DIR/.review-tree-$IDENT-r"*.txt \
-       "$STRIDE_DIR/.follow-ups-$IDENT.json"
+       "$STRIDE_DIR/.security-$IDENT-r"* "$STRIDE_DIR/.follow-ups-$IDENT.json"
   # Step 7 only: also "$EXPLORER_REPORT_PATH" "$PLAN_REPORT_PATH" "$STRIDE_DIR/.exploratory-$IDENT-r"*.json "$STRIDE_DIR/.task-$IDENT.json"
   # (never at claim time: the claim hook has just written that task file)
 fi

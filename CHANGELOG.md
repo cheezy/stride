@@ -23,6 +23,18 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Changed — Step 5.5 hands the explorer a report path; Step 7 deletes it (W2266)
+
+The `stride-exploratory-testing` explorer returned its whole findings JSON inline — a median of 37 KB and up to 56 KB per dispatch, 733 KB across 19 Step 5.5 dispatches — all of it ingested by the main loop. Its next release accepts `EXPLORATORY_REPORT_PATH`, writes the full JSON there, and returns a plain-text summary of at most 2,048 bytes.
+
+- **Step 5.5 supplies the path** (`skills/stride-workflow/optional-exploratory-testing.md`): one line `EXPLORATORY_REPORT_PATH=<absolute path>` inside the environment-context block, so the dispatch keeps exactly two arguments. The path is `.stride/.exploratory-<IDENTIFIER>-r<N>.json`, resolved like Step 3's `EXPLORER_REPORT_PATH` — project root found by walking up to `.stride.md`, anchored identifier, `<N>` incremented on every explorer dispatch — in its own series, so it never collides with `.explorer-` reports.
+- **Step 5.5 reads only the path it supplied, never a path the summary names**, and treats the file as application-influenced data. No file, or one that does not parse (an older explorer, or `report: NOT WRITTEN`), falls back to the single ```json fence in the response; with neither, the session is recorded as not performed. The summary is never the findings source.
+- **Step 7 deletes every round's report** after the `2xx`: `review-block-extraction.md`'s "Step 7 only" cleanup line gains `"$STRIDE_DIR/.exploratory-$IDENT-r"*.json`, and `stride-workflow` Step 7 names Step 5.5's exploratory reports among the deleted artifacts. The claim-time clear is unchanged.
+- **The mirrors agree**: `stride-subagent-workflow` Phase 3.5 carries the same supply and read rule, and both `.exploratory/` gitignore notes now say the explorer's one file is its `.stride/` report. `stride-completing-tasks/manual-testing-findings.md` no longer says the explorer holds no `Write`, and forbids citing the report's path in `completion_notes`, because Step 7 deletes it and it holds unredacted application output.
+- **Pinned**: bash hook-suite Group 45 and PowerShell Group 39 assert the supply line, the path shape, the read-only-your-path rule in both mirrors, the Step 7 glob, and that the claim-time `rm` never deletes the report.
+
 ## [1.81.0] - 2026-10-02
 
 ### Added — porting guide for the G446–G448 fixes

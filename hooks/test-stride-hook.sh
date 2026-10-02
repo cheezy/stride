@@ -14740,6 +14740,36 @@ assert_eq "44i: silently, as before" "" "$G34_ERR"
 g44_unhit "44i: and makes no API call"
 
 # ============================================================
+# Test Group 45: W2266 -- the explorer's report file under .stride/
+# ============================================================
+# Step 5.5 supplies EXPLORATORY_REPORT_PATH and reads only that path; Step 7
+# deletes every round's report. Both gate mirrors carry the supply; the glob
+# sits on the "Step 7 only" line (pinned by 43l), never in the claim-time rm.
+echo ""
+echo "=== Test Group 45: W2266 exploratory report path (bash) ==="
+G45_GATE="$SCRIPT_DIR/../skills/stride-workflow/optional-exploratory-testing.md"
+G45_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G45_RBE="$SCRIPT_DIR/../skills/stride-workflow/review-block-extraction.md"
+if [ -f "$G45_GATE" ] && [ -f "$G45_SUB" ] && [ -f "$G45_RBE" ]; then
+  assert_contains "45a: Step 5.5 supplies EXPLORATORY_REPORT_PATH" \
+    'EXPLORATORY_REPORT_PATH=<absolute path>' "$(cat "$G45_GATE")"
+  assert_contains "45b: under .stride/, identifier-anchored, round-counted" \
+    '.stride/.exploratory-<IDENTIFIER>-r<N>.json' "$(cat "$G45_GATE")"
+  assert_contains "45c: it reads only the path it supplied" \
+    'never a path the summary names' "$(cat "$G45_GATE")"
+  assert_contains "45d: the subagent-workflow mirror supplies it too" \
+    '.stride/.exploratory-<IDENTIFIER>-r<N>.json' "$(cat "$G45_SUB")"
+  assert_contains "45e: and reads only that path" \
+    'never a path the summary names' "$(cat "$G45_SUB")"
+  assert_contains "45f: the Step 7 cleanup deletes every round's report" \
+    '"$STRIDE_DIR/.exploratory-$IDENT-r"*.json' "$(grep -n 'Step 7 only' "$G45_RBE")"
+  assert_eq "45g: and the claim-time rm never does" "0" \
+    "$(grep -v 'Step 7 only' "$G45_RBE" | grep -c 'exploratory-\$IDENT' | tr -d ' ')"
+else
+  echo "  SKIP: Group 45 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

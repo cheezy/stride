@@ -661,11 +661,11 @@ When a blocking hook fails, dispatch `stride:hook-diagnostician` agent with the 
 
   `--rawfile` needs jq ≥ 1.6; use `--arg report "$(cat "$REPORT")"` otherwise — command substitution also never prints to your context. No file at `$REPORT` (older reviewer / write-failure)? Splice the reviewer's returned text instead, per Step 5 — the `$MERGED` leg is unaffected; both sources write it.
 
-  **Delete this task's `.stride/` working artifacts once the PATCH has succeeded**, so the durable window is one task rather than the life of the checkout — the reviewer's block, report and merged copy, plus the explorer and plan reports from Step 3 and the claimed task file:
+  **Delete this task's `.stride/` working artifacts once the PATCH has succeeded**, so the durable window is one task rather than the life of the checkout — the reviewer's block, report and merged copy, plus Step 3's explorer and plan reports, Step 5.5's exploratory reports and the claimed task file:
 
   The commands, and the `$STRIDE_DIR` guard they need so an unresolved root cannot turn the delete into a silent no-op, are in [review-block-extraction.md](review-block-extraction.md).
 
-  They can quote diff content, and the explorer's report quotes source verbatim; `<N>` increments every round, so without this a project accrues an unbounded on-disk corpus of code excerpts. That matters most where the `.gitignore` mention in Step 0 went unheeded: a project whose `## after_doing` runs `git add -A` would otherwise sweep review blocks and exploration reports into a commit. **Do this only after a `2xx`** — on a failed or retried completion the files are still the payload's source. This is housekeeping, not a correctness dependency: nothing may read these files after Step 7, so their absence later is never an error.
+  They quote diff content, source or app responses verbatim; `<N>` increments every round, so without this a project accrues an unbounded on-disk corpus of excerpts. That matters most where the `.gitignore` mention in Step 0 went unheeded: a project whose `## after_doing` runs `git add -A` would otherwise sweep review blocks and exploration reports into a commit. **Do this only after a `2xx`** — on a failed or retried completion the files are still the payload's source. This is housekeeping, not a correctness dependency: nothing may read these files after Step 7, so their absence later is never an error.
 
 ---
 

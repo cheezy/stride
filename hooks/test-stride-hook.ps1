@@ -12563,6 +12563,31 @@ Assert-Exit "38i: with no held claim the gate permits as before" 0 $r.ExitCode
 Assert-Eq "38i: silently, as before" '' $r.Stderr
 
 # ============================================================
+# Test Group 39: W2266 — the explorer's report file under .stride/, PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 45.
+Write-Host ""
+Write-Host "=== Test Group 39: W2266 exploratory report path (PowerShell) ==="
+$g39Gate = Join-Path $ScriptDir '../skills/stride-workflow/optional-exploratory-testing.md'
+$g39Sub  = Join-Path $ScriptDir '../skills/stride-subagent-workflow/SKILL.md'
+$g39Rbe  = Join-Path $ScriptDir '../skills/stride-workflow/review-block-extraction.md'
+if ((Test-Path -LiteralPath $g39Gate) -and (Test-Path -LiteralPath $g39Sub) -and (Test-Path -LiteralPath $g39Rbe)) {
+    $g39GateText = Get-Content -LiteralPath $g39Gate -Raw
+    $g39SubText  = Get-Content -LiteralPath $g39Sub -Raw
+    $g39Step7 = (Get-Content -LiteralPath $g39Rbe | Where-Object { $_ -match 'Step 7 only' }) -join "`n"
+    Assert-Contains "39a: Step 5.5 supplies EXPLORATORY_REPORT_PATH" 'EXPLORATORY_REPORT_PATH=<absolute path>' $g39GateText
+    Assert-Contains "39b: under .stride/, identifier-anchored, round-counted" '.stride/.exploratory-<IDENTIFIER>-r<N>.json' $g39GateText
+    Assert-Contains "39c: it reads only the path it supplied" 'never a path the summary names' $g39GateText
+    Assert-Contains "39d: the subagent-workflow mirror supplies it too" '.stride/.exploratory-<IDENTIFIER>-r<N>.json' $g39SubText
+    Assert-Contains "39e: and reads only that path" 'never a path the summary names' $g39SubText
+    Assert-Contains "39f: the Step 7 cleanup deletes every round's report" '"$STRIDE_DIR/.exploratory-$IDENT-r"*.json' $g39Step7
+    $g39Claim = @(Get-Content -LiteralPath $g39Rbe | Where-Object { $_ -notmatch 'Step 7 only' -and $_.Contains('.exploratory-$IDENT') }).Count
+    Assert-Eq "39g: and the claim-time rm never does" '0' ([string]$g39Claim)
+} else {
+    Write-Host "  SKIP: Group 39 contract files not found"
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

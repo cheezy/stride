@@ -117,12 +117,17 @@ gate — that is a finding to report in your record, not a shortcut to take.**
    preservation rule for a re-review are all `stride-workflow` Step 5, and the
    reviewer's own schema is owned by `stride/agents/task-reviewer.md`. Follow
    both by reference. What is yours is the loop and its end: fix every `critical`
-   and `important` issue, then **re-dispatch** the reviewer — a re-review is a
-   dispatch, never a self-assessment of your own fix, because an inline review
-   forfeits both independence and the structured block the completion payload
-   requires. **Two review rounds is the ceiling: the initial review plus one round
-   scoped to verifying your fixes.** `stride-workflow` Step 5 owns the cap, its
-   counter and its scoping; follow them by reference. A round is a dispatch that
+   and `important` issue, then **re-dispatch** the reviewer when Step 5's
+   round-two triggers hold — a re-review is a dispatch, never a self-assessment
+   of your own fix, because an inline review forfeits both independence and the
+   structured block the completion payload requires.
+   **Two review rounds is the ceiling: the initial review plus one round scoped
+   to verifying your fixes, run only when a fix edited a code path or round one
+   reported a `critical` or a `category: "security"` issue — otherwise every
+   fixed finding is recorded, not re-reviewed, and you complete on round one's
+   result.** `stride-workflow` Step 5
+   owns the cap, its triggers, its counter and its scoping; follow them by
+   reference. A round is a dispatch that
    produced a `$MERGED` file, so a crashed or unparsable dispatch is re-dispatched
    and consumes no round. **A `critical` is exempt** — it blocks however many
    rounds it takes, and a further round dispatched to clear one is not a cap

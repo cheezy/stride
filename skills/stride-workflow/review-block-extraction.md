@@ -10,7 +10,7 @@ Read this at Step 5, after the task-reviewer has returned (or when an older revi
 
 **The carve-out is scope-pinned by a check you must not skip.** The assertion is self-certified wherever the evidence above is absent — a nested-repo commit, or an orchestrator that predates it — because you are the party whose review round it unblocks, and without that evidence the reviewer has nothing independent of you about lifecycle order. Where the evidence is present it verifies that **no matching commit has been made since the claim** — narrower than "a commit really is still ahead": an overdue commit is equally absent from the range and still rests on leg (c), and a `performed_by` step that never commits (an empty `## after_doing`, say) goes undetected. This pin verifies *containment*, a different property, so it runs either way: the *result* is verified — the `commit_pending_scope_ok` boolean in the MANDATORY Source A self-check below asserts that every `"not_met"` criterion is either paired with an `acceptance_criteria` issue or carries the sentinel, never neither and never both. It runs on **both** extraction paths — as `commit_pending_scope_ok` in the Source A jq, and as the matching assertion in the Source B self-check, which is reachable whenever the reviewer's block write fails and it emits the fence inline — costs a dispatch without `commit_pending` nothing, and **a failure on either path means do not submit.** The check and its exact jq are in the Source A self-check below; do not restate them elsewhere.
 
-## Review rounds — the counter, the cap, and its three variables
+## Review rounds — the counter, the cap, and its five variables
 
 **A round is a reviewer dispatch that produced a `$MERGED` file** — not a dispatch. `<N>` stays a dispatch counter that increments for crashed re-dispatches so two dispatches never share a path, so a crashed or unparsable reviewer burns a filename, not a round. `$MERGED` is the authority rather than `$BLOCK` because it is written on **both** Source A and Source B, so an inline-fence round counts identically to a file round.
 
@@ -30,7 +30,7 @@ The counter lives in `$ROUNDS_FILE` — `.stride/.review-rounds-<IDENTIFIER>.jso
 STRIDE_DIR="${STRIDE_DIR:-}"
 if [ -z "$STRIDE_DIR" ] || [ ! -d "$STRIDE_DIR" ]; then
   # Fail CLOSED: no directory means no evidence, not "no rounds yet".
-  REVIEW_ROUND=-1; PRIOR_CRITICAL=0
+  REVIEW_ROUND=-1; PRIOR_CRITICAL=0; PRIOR_SECURITY=0
   echo "round-cap: STRIDE_DIR unset or not a directory -- resolve it and re-check" >&2
 else
 ROUNDS_FILE="$STRIDE_DIR/.review-rounds-$IDENT.json"
@@ -53,12 +53,16 @@ jq -n --arg id "$IDENT" --argjson n "$REVIEW_ROUND" '{identifier: $id, rounds: $
 # entry by NUMERIC round index. Ordering matters and is not cosmetic: lexical
 # order sorts r10 before r9, so a string-ordered "second highest" reads r8 at
 # ten dispatches and silently turns a live exemption into a refusal.
-PRIOR_CRITICAL=0
+# PRIOR_SECURITY: that same round's count of category "security" issues, at any
+# severity -- one of round two's three triggers. Type-guarded like the rest.
+PRIOR_CRITICAL=0; PRIOR_SECURITY=0
 if [ "$RECOUNT" -ge 2 ]; then
   PREV=$(printf '%s\n' "$ROUND_LIST" | tail -2 | head -1 | cut -f2)
   [ -n "$PREV" ] && PRIOR_CRITICAL=$(jq -r '(.issue_counts.critical | numbers) // 0 | floor' "$PREV" 2>/dev/null || echo 0)
+  [ -n "$PREV" ] && PRIOR_SECURITY=$(jq -r '[((.issues | arrays) // [])[] | objects | select(.category == "security")] | length' "$PREV" 2>/dev/null || echo 0)
 fi
 case "$PRIOR_CRITICAL" in ( '' | *[!0-9]* ) PRIOR_CRITICAL=0 ;; esac
+case "$PRIOR_SECURITY" in ( '' | *[!0-9]* ) PRIOR_SECURITY=0 ;; esac
 fi
 ```
 
@@ -66,9 +70,85 @@ fi
 
 **Do not confuse the shell `REVIEW_ROUND` with the `review_round` dispatch field.** They are different things that share a name: the dispatch field is what the *reviewer* receives, and absent means round 1 with nothing about its review changing. The shell variable is what this *self-check* consumes, and absent means the recount above never ran — a defect, hence `-1` and a refusal rather than a permissive default.
 
-**`CRITICAL_CLEARED` — the third variable, and the only self-certified one.** Set it to `1` when this round exists **solely** to verify a fix for a `critical` that no prior round recorded — one found by you while fixing, by a Step 5.5 exploratory escalation, or by a human — and `0` (the default) otherwise. Without it the exemption is keyed on *who discovered* the Critical rather than on whether one existed: a Critical you find yourself, fix, and dispatch a round to verify comes back clean, so `PRIOR_CRITICAL` is `0`, the cap refuses the submission, and the task has no compliant exit at all — recording is forbidden for a `critical` and `review_blocked` requires one still *open*, while this one is fixed and verified. It is asserted on the same terms as `commit_pending`: **record what it was for in `completion_notes` and one line of `completion_summary`** — bounded the way `fixes[]` is bounded: name the `critical` by severity, category and `file:line` plus one line of what the round verified, **never its description or diff text**, redacted as for any session text, and **never set it to make a cap-reached round pass** when the open findings are `important`/`minor` — that is the exact abuse the cap exists to prevent, and it is a worse defect than the round it would avoid.
+**`CRITICAL_CLEARED` — the only self-certified variable.** Set it to `1` when this round exists **solely** to verify a fix for a `critical` that no prior round recorded — one found by you while fixing, by a Step 5.5 exploratory escalation, or by a human — and `0` (the default) otherwise. Without it the exemption is keyed on *who discovered* the Critical rather than on whether one existed: a Critical you find yourself, fix, and dispatch a round to verify comes back clean, so `PRIOR_CRITICAL` is `0`, the cap refuses the submission, and the task has no compliant exit at all — recording is forbidden for a `critical` and `review_blocked` requires one still *open*, while this one is fixed and verified. It is asserted on the same terms as `commit_pending`: **record what it was for in `completion_notes` and one line of `completion_summary`** — bounded the way `fixes[]` is bounded: name the `critical` by severity, category and `file:line` plus one line of what the round verified, **never its description or diff text**, redacted as for any session text, and **never set it to make a cap-reached round pass** when the open findings are `important`/`minor` — that is the exact abuse the cap exists to prevent, and it is a worse defect than the round it would avoid.
 
 **What `review_round.fixes[]` may carry.** Name each round-one finding you fixed by **severity, category and `file:line` only** — the fields the bounded summary already rendered into your context — plus one line naming the change you made. **Never paste the previous block, its prose, or diff text.** The dispatch prompt is ephemeral, but it is still an artifact, and the reviewer is barred from reading round one's files precisely so that round one's content does not travel; pasting it here would defeat that by another route.
+
+**Round two has three triggers — decide before you dispatch it.** Round two runs only when round one earned it: round one reported a `critical` (`PRIOR_CRITICAL`), or a `category: "security"` issue at any severity (`PRIOR_SECURITY`, read from round one's `$MERGED`, so it includes a security finding the deep-security escalation wrote there), or round one's fixes edited a code path (`FIX_CODE_PATHS` not `0`). `CRITICAL_CLEARED` above is the one other way a round past the first is legal, on its own terms. **Without a trigger, every fixed finding is recorded, not re-reviewed:** name each on the `fixes[]` bound above — severity, category, `file:line` and one line of what changed, redacted — in `completion_notes` and one line of `completion_summary`, and submit round one's `$MERGED`. Read the two prior-round triggers straight off round one's file before dispatching — `jq -e '((.issue_counts.critical | numbers) // 0) > 0 or ([((.issues | arrays) // [])[] | objects | select(.category == "security")] | length) > 0' "$MERGED"` — and the third from the fence below. That `jq -e` exits `1` for *no prior-round trigger*; any other non-zero exit means `$MERGED` was unset, missing or unreadable — treat it as a trigger, never as none. **Step 5.5's "fixed in this task and re-reviewed" is governed by these triggers too.** A Step 5.5 finding below `critical` is never written to `issues[]`, so `PRIOR_SECURITY` cannot see it: its fix earns round two by editing a code path, and is recorded otherwise. That leaves one gap, disclosed as limit (e) below.
+
+**A code path is decided by path and changed-line shape, never by judgement.** A changed path is **not** code when it is documentation (`*.md`, `*.mdx`, `*.markdown`, `*.rst`, `*.adoc`, anything under `docs/`, `README*`, `CHANGELOG*`, `LICENSE*`), a test (`test/`, `tests/`, `spec/`, `__tests__/`, `*_test.*`, `*.test.*`, `*_spec.*`, `*.spec.*`, `test-*.sh`, `test-*.ps1`), or a text change whose every changed line is blank or a **whole-line** comment: `// …`, `/* … */` closed on the same line, `<!-- … -->`, `<%# … %>`, or `# …` and a bare `#` outside C-family sources, where `#` opens a preprocessor directive. A lone `/*` or `*/`, or a comment followed by code, is code. Everything else is code — `*.txt` included, because `requirements.txt` and `CMakeLists.txt` are build inputs. So a fix confined to docs, comments, the changelog or test wording never buys round two, and a one-character change to a code path always does.
+
+**The fix-path classifier.** Run it with `FIX_STAGE=base` **once**, after round one returns and before your first fix: it snapshots each repository's whole working tree — untracked files included, `.gitignore` honoured — as a git tree, recorded in `.stride/.review-fixbase-<IDENTIFIER>.txt` and never overwritten. Run it with `FIX_STAGE=count` after fixing, to decide whether round two runs, and again beside the recount whenever a round-two self-check runs. `FIX_REPOS` names the repositories the fixes may touch, one per line; on a nested-repo task that is the nested repo, never the project root that ignores it.
+
+```bash
+fix_tree() { # $1=repo -> a tree object of the whole working tree, untracked included
+  t=$(mktemp -d "${TMPDIR:-/tmp}/stride-fix.XXXXXX") || return 1
+  cp "$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)/index" "$t/index" 2>/dev/null
+  GIT_INDEX_FILE="$t/index" git -C "$1" add -A >/dev/null 2>&1 &&
+    GIT_INDEX_FILE="$t/index" git -C "$1" write-tree 2>/dev/null
+  rc=$?; rm -rf "$t"; return $rc
+}
+fix_code_count() { # $1=repo $2=base tree $3=current tree -> number of code paths changed
+  git -C "$1" diff-tree -r --name-only "$2" "$3" | while IFS= read -r p; do
+    case "$p" in
+      ( .stride/* | *.md | *.mdx | *.markdown | *.rst | *.adoc | docs/* | */docs/* \
+      | README* | */README* | CHANGELOG* | */CHANGELOG* | LICENSE* | */LICENSE* ) continue ;;
+      ( test/* | */test/* | tests/* | */tests/* | spec/* | */spec/* | __tests__/* | */__tests__/* \
+      | *_test.* | *.test.* | *_spec.* | *.spec.* | test-*.sh | */test-*.sh | test-*.ps1 | */test-*.ps1 ) continue ;;
+    esac
+    # A text change whose every changed line is blank or a WHOLE-LINE comment is
+    # not code. No hunk at all (binary, mode-only) counts as code. In C-family
+    # sources '#' opens a preprocessor directive, never a comment.
+    case "$p" in ( *.c | *.h | *.cc | *.cpp | *.cxx | *.hh | *.hpp | *.m | *.mm ) cfam=1 ;; ( * ) cfam=0 ;; esac
+    git -C "$1" diff -U0 --no-color "$2" "$3" -- "$p" | awk -v cfam="$cfam" '
+      /^@@/ { h = 1; next }
+      h && /^[+-]/ { t = substr($0, 2); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t); n = length(t)
+        if (n == 0 || substr(t, 1, 2) == "//") next
+        if (substr(t, 1, 2) == "/*" && n >= 4 && index(t, "*/") == n - 1) next
+        if (substr(t, 1, 4) == "<!--" && n >= 7 && index(t, "-->") == n - 2) next
+        if (substr(t, 1, 3) == "<%#" && n >= 5 && index(t, "%>") == n - 1) next
+        if (!cfam && (t == "#" || substr(t, 1, 2) == "# ")) next
+        c = 1 }
+      END { exit (h && !c) ? 0 : 1 }' && continue
+    echo "$p"
+  done | grep -c .
+}
+STRIDE_DIR="${STRIDE_DIR:-}"
+FIX_REPOS="${FIX_REPOS:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+FIX_CODE_PATHS=-1   # -1 = unmeasured: round two stays available, a third never does
+if [ -z "$STRIDE_DIR" ] || [ ! -d "$STRIDE_DIR" ]; then
+  echo "fix-paths: STRIDE_DIR unresolved -- FIX_CODE_PATHS stays -1 (unmeasured)" >&2
+else
+FIX_BASE_FILE="$STRIDE_DIR/.review-fixbase-$IDENT.txt"
+case "${FIX_STAGE:-}" in
+( base )
+  printf '%s\n' "$FIX_REPOS" | while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    # Never overwrite: the base is the tree as it stood BEFORE the first fix.
+    awk -v r="$repo" '{ sub(/^[^ ]* /, "") } $0 == r { f = 1 } END { exit !f }' \
+      "$FIX_BASE_FILE" 2>/dev/null && continue
+    tree=$(fix_tree "$repo") || tree=unknown
+    case "$tree" in ( '' | *[!0-9a-f]* ) tree=unknown ;; esac
+    printf '%s %s\n' "$tree" "$repo" >> "$FIX_BASE_FILE"
+  done ;;
+( count )
+  if [ -s "$FIX_BASE_FILE" ]; then
+    FIX_CODE_PATHS=$(total=0
+      while IFS=' ' read -r base repo; do
+        case "$base" in ( '' | *[!0-9a-f]* ) total=-1; break ;; esac
+        git -C "$repo" cat-file -e "$base^{tree}" 2>/dev/null || { total=-1; break; }
+        now=$(fix_tree "$repo") || { total=-1; break; }
+        n=$(fix_code_count "$repo" "$base" "$now")
+        case "$n" in ( '' | *[!0-9]* ) total=-1; break ;; esac
+        total=$((total + n))
+      done < "$FIX_BASE_FILE"
+      printf '%s' "$total")
+  fi ;;
+esac
+fi
+```
+
+**Five limits of the classification, stated rather than papered over.** (a) It reads paths and line prefixes only: an `@doc` or docstring edit counts as code, `#[derive]` stays code because a comment `#` must be followed by a space or end the line, and in C-family sources no `#` line is a comment. Odd filenames can only over-count, which keeps round two available. In a repository whose product is markdown — this plugin, whose skills and agents are `.md` — a skill edit classifies as documentation. That is deliberate: those were exactly the second rounds that found wording rather than defects. (b) `-1` means *unmeasured* — no base recorded, `$STRIDE_DIR` unresolved, or a tree git could not produce — and keeps round two available, which is the behaviour before this rule existed; it never buys a third round. (c) Only the repositories named in `FIX_REPOS` when the base was recorded are measured. (d) The pin bounds rounds from above only: a round two that should have run and was skipped is caught by nothing mechanical, exactly as before this rule. (e) A security-relevant Step 5.5 finding below `critical` whose fix lands only in documentation paths earns no round two, because Step 5.5 never writes such a finding to `issues[]`; in this plugin that includes shell embedded in a skill's markdown. Name it in `completion_notes` so a human sees the unverified fix.
 
 **Clearing the counter at claim time.** The counter and its artifacts are scoped to **one attempt**, not to the checkout. Step 7 deletes them only after a successful completion, so every other exit — a failed `after_doing` gate, an interrupted session, an expired claim — leaves them behind, and the next attempt's *first* review round would be counted as round three and refused with `PRIOR_CRITICAL` of `0`, which is the most reachable way to strand a task that this cap has. Clear them on a successful claim, using the same anchored `$IDENT`; this mirrors how the hook executor clears `.stride/.hook-result-*.json` at claim time (D234).
 
@@ -85,7 +165,7 @@ done
 if [ -z "$STRIDE_DIR" ] || [ ! -d "$STRIDE_DIR" ]; then
   echo "review artifacts: STRIDE_DIR unresolved -- skipping clear, not globbing /" >&2
 else
-  rm -f "$STRIDE_DIR/.review-rounds-$IDENT.json" \
+  rm -f "$STRIDE_DIR/.review-rounds-$IDENT.json" "$STRIDE_DIR/.review-fixbase-$IDENT.txt" \
        "$STRIDE_DIR/.review-$IDENT-r"*.json "$STRIDE_DIR/.review-$IDENT-r"*.md \
        "$STRIDE_DIR/.reviewer-result-$IDENT-r"*.json \
        "$STRIDE_DIR/.follow-ups-$IDENT.json"
@@ -95,7 +175,7 @@ fi
 
 Re-claiming is therefore also the **only sanctioned repair** for a counter that over-reports — the take-the-larger rule has no downward path within an attempt, by design, so a stale or inflated `rounds` value would otherwise be permanent. Never hand-delete these files mid-attempt to buy another round: that is the one move this whole control exists to prevent.
 
-**Five limits, stated rather than papered over.** (1) A Source C round writes no `$MERGED` and therefore does not count, so this cap does not bound a reviewer that repeatedly lands on Source C — the convergence rule in `stride/agents/task-runner.md` is what bounds that, and for the same reason a Source C round can never supply a non-zero `PRIOR_CRITICAL`, so a Critical found on that path needs `CRITICAL_CLEARED`. (2) **`CRITICAL_CLEARED` is self-certified but NOT result-verified, and that is a real asymmetry with `commit_pending`, which it otherwise resembles.** `commit_pending` is pinned mechanically by `commit_pending_scope_ok` on both paths; `critical_cleared` has no counterpart — `($cc == 1)` unlocks any round number, and nothing checks that a `critical` ever existed, that this round verified one, or that `completion_notes` recorded what it was for. The prohibition on using it to pass a cap reached with only `important`/`minor` findings is therefore **prose only**, which is the shape this feature's own pitfalls rule out for the cap itself. It is disclosed here rather than left implied; a mechanical pin needs a signal the block does not currently carry. (3) **`cosmetic` is self-certified and NOT result-verified, exactly as `CRITICAL_CLEARED` is.** `cosmetic_shape_ok` checks the flag's *type* and its *co-ordinates* — severity and category — and **cannot reach its truth**. A reviewer that marks a substantive `minor` cosmetic passes every boolean and ends the review loop, and no signal in the block is independent of the reviewer's judgement, which is the same reason a pin was impossible for `CRITICAL_CLEARED`. So the cheapest abuse is not relabelling a `critical` or a `security` finding — the pin refuses those — but relabelling an ordinary substantive `minor`, which it cannot see. Disclosed here rather than left implied; the remedy is a human reading `issues[]`, and note the Review queue currently groups by severity alone, so the flag is invisible there. (4) **The all-cosmetic re-review disposition is likewise Source-A/B only.** `cosmetic_shape_ok` can only run where a structured block parsed; on Source C `issues[]` is absent by construction, so "every entry is cosmetic" is vacuously true and the rule is inapplicable rather than satisfied — an absent or empty `issues[]` is never an all-cosmetic round. (5) The `critical` exemption is deliberately unbounded, so a reviewer that keeps reporting a `critical` is bounded only by that same convergence rule; the cap governs rounds, never correctness, and this is the price of that.
+**Five limits, stated rather than papered over.** (1) A Source C round writes no `$MERGED` and therefore does not count, so this cap does not bound a reviewer that repeatedly lands on Source C — the convergence rule in `stride/agents/task-runner.md` is what bounds that, and for the same reason a Source C round can never supply a non-zero `PRIOR_CRITICAL` or `PRIOR_SECURITY`, so a Critical found on that path needs `CRITICAL_CLEARED`. (2) **`CRITICAL_CLEARED` is self-certified but NOT result-verified, and that is a real asymmetry with `commit_pending`, which it otherwise resembles.** `commit_pending` is pinned mechanically by `commit_pending_scope_ok` on both paths; `critical_cleared` has no counterpart — `($cc == 1)` unlocks any round number, and nothing checks that a `critical` ever existed, that this round verified one, or that `completion_notes` recorded what it was for. The prohibition on using it to pass a cap reached with only `important`/`minor` findings is therefore **prose only**, which is the shape this feature's own pitfalls rule out for the cap itself. It is disclosed here rather than left implied; a mechanical pin needs a signal the block does not currently carry. (3) **`cosmetic` is self-certified and NOT result-verified, exactly as `CRITICAL_CLEARED` is.** `cosmetic_shape_ok` checks the flag's *type* and its *co-ordinates* — severity and category — and **cannot reach its truth**. A reviewer that marks a substantive `minor` cosmetic passes every boolean and ends the review loop, and no signal in the block is independent of the reviewer's judgement, which is the same reason a pin was impossible for `CRITICAL_CLEARED`. So the cheapest abuse is not relabelling a `critical` or a `security` finding — the pin refuses those — but relabelling an ordinary substantive `minor`, which it cannot see. Disclosed here rather than left implied; the remedy is a human reading `issues[]`, and note the Review queue currently groups by severity alone, so the flag is invisible there. (4) **The all-cosmetic re-review disposition is likewise Source-A/B only.** `cosmetic_shape_ok` can only run where a structured block parsed; on Source C `issues[]` is absent by construction, so "every entry is cosmetic" is vacuously true and the rule is inapplicable rather than satisfied — an absent or empty `issues[]` is never an all-cosmetic round. (5) The `critical` exemption is deliberately unbounded, so a reviewer that keeps reporting a `critical` is bounded only by that same convergence rule; the cap governs rounds, never correctness, and this is the price of that.
 
 ## Guards on Source A
 
@@ -128,7 +208,8 @@ fi
 ```bash
 jq -n --slurpfile s "$BLOCK" --slurpfile r "$MERGED" --argjson n "$TASK_CRITERION_LINES" \
   --argjson round "${REVIEW_ROUND:--1}" --argjson prior_critical "${PRIOR_CRITICAL:-0}" \
-  --argjson critical_cleared "${CRITICAL_CLEARED:-0}" '
+  --argjson critical_cleared "${CRITICAL_CLEARED:-0}" --argjson prior_security "${PRIOR_SECURITY:-0}" \
+  --argjson fix_code_paths "${FIX_CODE_PATHS:--1}" '
   ($s[0].acceptance_criteria // []) as $ac
   | [$ac[] | select(.status=="not_met" and ((.evidence // "") | startswith("PENDING COMMIT — ")))] as $pending
   | ([$ac[] | select(.status=="not_met")] | length) as $not_met
@@ -144,10 +225,15 @@ jq -n --slurpfile s "$BLOCK" --slurpfile r "$MERGED" --argjson n "$TASK_CRITERIO
                | select(.severity != "minor" or .category == "security")] | length) == 0)),
       round_cap_ok: ((($round | numbers) // -1) as $r
         | (($prior_critical | numbers) // 0) as $pc
+        | (($prior_security | numbers) // 0) as $ps
+        | (($fix_code_paths | numbers) // -1) as $fc
         | (($critical_cleared | numbers) // 0) as $cc
-        | ($r >= 0) and (($r <= 2) or ($pc > 0) or ($cc == 1))),
+        | ($r >= 0) and (($r <= 1)
+            or (($r == 2) and (($pc > 0) or ($ps > 0) or ($fc != 0) or ($cc == 1)))
+            or (($r >= 3) and (($pc > 0) or ($cc == 1))))),
       pin_terms: { not_met: $not_met, sentinel: ($pending|length), ac_issues: $ac_issues,
                    round: $round, prior_critical: $prior_critical,
+                   prior_security: $prior_security, fix_code_paths: $fix_code_paths,
                    critical_cleared: $critical_cleared } }'
 ```
 
@@ -159,11 +245,11 @@ jq -n --slurpfile s "$BLOCK" --slurpfile r "$MERGED" --argjson n "$TASK_CRITERIO
 
 `commit_pending_shape_ok` is the one piece of mis-qualification that *is* mechanically checkable, and it covers the explicit never-list: a sentinel-bearing criterion whose text mentions pushing, tagging, releasing, deploying, or opening a pull request is refused outright. It is a keyword heuristic, not a proof — it cannot read leg (b) or leg (c) — but it converts the never-list from prose into a check.
 
-**Every term is type-guarded, and that is not defensive padding.** jq's total ordering ranks strings, arrays and objects *above* all numbers, so a bare `$prior_critical > 0` returns **true** for `"0"`, `"abc"`, `[]` or `{}` — a reviewer emitting string-typed `issue_counts` would silently disable the cap entirely — and a bare `$round <= 2` returns **true** for `null`, because null sorts below every number. Both failures are *fail-open*: the cap stops binding and reads green. `(… | numbers) // <default>` coerces every non-number to the default, and the `$r >= 0` term turns a malformed round into a refusal rather than a pass, so malformed input now fails **closed** on both terms. The shell `:-` defaults matter for a different reason, and note `REVIEW_ROUND` defaults to **`-1`, not `0`**: an unset round means the recount above did not run, which is a defect rather than a first round, so it fails closed and shows `round: -1` in `pin_terms` — the one value that says *run the recount, then re-check* rather than *you are past the cap*. The other reason is mechanical: `--argjson` parses its value before the program runs, so an *unset* variable aborts jq with exit 2 and emits nothing at all — taking `dropped_sections` and the four `commit_pending` booleans down with it, which is the same whole-invocation abort the `// []` and `// ""` guards elsewhere in this file exist to prevent.
+**Every term is type-guarded, and that is not defensive padding.** jq's total ordering ranks strings, arrays and objects *above* all numbers, so a bare `$prior_critical > 0` returns **true** for `"0"`, `"abc"`, `[]` or `{}` — a reviewer emitting string-typed `issue_counts` would silently disable the cap entirely — and a bare `$round <= 2` returns **true** for `null`, because null sorts below every number. Both failures are *fail-open*: the cap stops binding and reads green. `(… | numbers) // <default>` coerces every non-number to the default, and the `$r >= 0` term turns a malformed round into a refusal rather than a pass, so malformed input now fails **closed** on both terms. The shell `:-` defaults matter for a different reason, and note `REVIEW_ROUND` defaults to **`-1`, not `0`**: an unset round means the recount above did not run, which is a defect rather than a first round, so it fails closed and shows `round: -1` in `pin_terms` — the one value that says *run the recount, then re-check* rather than *you are past the cap*. `PRIOR_SECURITY` fails closed to `0` like `PRIOR_CRITICAL`. `FIX_CODE_PATHS` is the one deliberately permissive default — `-1`, *unmeasured*, which keeps round two available as it was before the triggers existed and never buys a third round; it is computed from git by you, never read from the reviewer's block, so the string-typed-input threat above does not reach it. The other reason is mechanical: `--argjson` parses its value before the program runs, so an *unset* variable aborts jq with exit 2 and emits nothing at all — taking `dropped_sections` and the four `commit_pending` booleans down with it, which is the same whole-invocation abort the `// []` and `// ""` guards elsewhere in this file exist to prevent.
 
 **The Source B half applies the identical coercion**, including excluding booleans from the numeric types — Python's `bool` is a subclass of `int`, so an unguarded `prior_critical > 0` would pass on `true` where the jq half refuses. The two halves must return the same verdict for the same inputs; which path an orchestrator lands on is decided by whether the reviewer's file write succeeded, which is an accident of I/O and must never change a verdict.
 
-`round_cap_ok` is the two-round cap's enforcement half, and it is here for the same reason the scope pin is: this self-check already runs once per round, so the pin is free rather than a new harness. It reads `$REVIEW_ROUND` and `$PRIOR_CRITICAL` computed above, and deliberately reads the **previous** round's Critical count rather than the current block's. That is the trap it avoids: a legitimate third round dispatched to clear a round-two Critical will usually come back with zero criticals, and a check reading the *current* block would refuse exactly the submission the exemption exists to permit. **The remedy for a failure here is never another round.** Be precise about which moment you are in, because "do not submit" and "record and submit" govern different ones and reading them as one rule leaves no green path. **At the cap** — round two, `round_cap_ok` still `true` — you record the remaining `important` and `minor` findings in `completion_notes` and one line of `completion_summary` — **severity, category and `file:line` only: never paste the block, its prose, or diff text, and redact as for any session text** — and you submit round two's result. **A `category: "security"` issue is never recordable at any severity**: `important` is the reviewer's documented default for a security finding, so recording one would ship an unfixed weakness. Fix it, or escalate `review_blocked`. That is the ordinary exit and the one the cap is designed to produce. **Past the cap** — a third round was dispatched with no exemption, so this check is `false` — you may not submit that round's result, and the check will stay `false` on every later evaluation, so there is no waiting it out: record the residual findings and **escalate `review_blocked`** — unless `pin_terms.round` is `-1`, which is not a cap breach at all but the recount not having run: run it and re-check so a human sees that the loop over-ran, or, if the round genuinely existed to verify a Critical no prior round recorded, set `CRITICAL_CLEARED` and say so in `completion_notes`. A `critical` is fixed or escalated, never recorded.
+`round_cap_ok` is the two-round cap's enforcement half, and it is here for the same reason the scope pin is: this self-check already runs once per round, so the pin is free rather than a new harness. It reads `$REVIEW_ROUND`, `$PRIOR_CRITICAL` and `$PRIOR_SECURITY` computed above and `$FIX_CODE_PATHS` from the classifier, and deliberately reads the **previous** round's Critical count rather than the current block's. That is the trap it avoids: a legitimate third round dispatched to clear a round-two Critical will usually come back with zero criticals, and a check reading the *current* block would refuse exactly the submission the exemption exists to permit. **The remedy for a failure here is never another round.** Be precise about which moment you are in, because "do not submit" and "record and submit" govern different ones and reading them as one rule leaves no green path. **At the cap** — round two, `round_cap_ok` still `true` — you record the remaining `important` and `minor` findings in `completion_notes` and one line of `completion_summary` — **severity, category and `file:line` only: never paste the block, its prose, or diff text, and redact as for any session text** — and you submit round two's result. **A `category: "security"` issue is never recordable at any severity**: `important` is the reviewer's documented default for a security finding, so recording one would ship an unfixed weakness. Fix it, or escalate `review_blocked`. That is the ordinary exit and the one the cap is designed to produce. **An untriggered round two** — `false` with `pin_terms.round` at `2` and no trigger term set — is not a cap breach and is not escalated: that round should not have run, so do not submit it, submit round one's `$MERGED` without re-running its check (the recount now reads `2`, so it would stay `false`), and record per the triggers paragraph — **including every finding that round raised**, by severity, category and `file:line`, since its result is not submitted; anything it raised at `critical` or `category: "security"` is still fixed or escalated, never dropped with its result. **Past the cap** — a third round was dispatched with no exemption, so this check is `false` — you may not submit that round's result, and the check will stay `false` on every later evaluation, so there is no waiting it out: record the residual findings and **escalate `review_blocked`** — unless `pin_terms.round` is `-1`, which is not a cap breach at all but the recount not having run: run it and re-check so a human sees that the loop over-ran, or, if the round genuinely existed to verify a Critical no prior round recorded, set `CRITICAL_CLEARED` and say so in `completion_notes`. A `critical` is fixed or escalated, never recorded.
 
 **On failure, do not submit — and read `pin_terms` before choosing the remedy, because the three failing conditions need different ones.** If `sentinel` exceeds the carve-outs you actually intended, a criterion was wrongly granted: re-dispatch the reviewer with `<N>` incremented and the failure named. If `ac_issues` is short, a pairing was dropped: same remedy. If `commit_pending_shape_ok` is `false`, the carve-out reached the never-list: drop the `commit_pending` assertion and review normally. **And one case is neither**: if you asserted no `commit_pending` at all and `sentinel` is nonzero, the sentinel arrived as *data* — most often a reviewer correctly quoting a criterion whose own text embeds it. Neither remedy above applies; treat it as the evidence-collision case the sentinel rule below governs, and have the reviewer re-emit that `evidence` without leading with the literal.
 
@@ -275,8 +361,9 @@ with open(merged_path, "w") as f:
 # this round's; on this path the merge happens after the other asserts, so an
 # assert placed with them reads N-1 where Source A reads N, making the effective
 # cap three here and two there. Run the round-counter block at the top of this
-# file now -- after the dump, before this assert -- so review_round, prior_critical
-# and critical_cleared are the values Source A would have computed.
+# file now -- after the dump, before this assert -- and the fix-path classifier
+# with FIX_STAGE=count, so review_round, prior_critical, prior_security,
+# fix_code_paths and critical_cleared are the values Source A would have computed.
 #
 # The coercion mirrors the jq `(… | numbers) // default` exactly, bool included:
 # Python's bool is a subclass of int, so an unguarded `prior_critical > 0` would
@@ -287,10 +374,15 @@ def _num(v, default):
 _r = _num(review_round, -1)
 _pc = _num(prior_critical, 0)
 _cc = _num(critical_cleared, 0)
-assert _r >= 0 and (_r <= 2 or _pc > 0 or _cc == 1), (
+_ps = _num(prior_security, 0)
+_fc = _num(fix_code_paths, -1)
+assert _r >= 0 and (_r <= 1 or (_r == 2 and (_pc > 0 or _ps > 0 or _fc != 0 or _cc == 1)) or (_r >= 3 and (_pc > 0 or _cc == 1))), (
     "review round cap exceeded — do not submit. Terms: "
     f"round={review_round!r} prior_critical={prior_critical!r} "
+    f"prior_security={prior_security!r} fix_code_paths={fix_code_paths!r} "
     f"critical_cleared={critical_cleared!r}. "
+    "An UNTRIGGERED round two (round=2, no trigger term) is not a breach: "
+    "submit round one's merged result and record the fixed findings. "
     "At the cap the remedy is to RECORD the remaining important/minor findings "
     "in completion_notes and completion_summary (severity/category/file:line "
     "only, redacted) and submit round two's result; a category=security issue "

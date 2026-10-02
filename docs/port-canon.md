@@ -787,13 +787,20 @@ anchors stale — `stride`, `stride-codex`, `stride-copilot`, `stride-copilot-li
 `stride-gemini` and `stride-lite` — and owed seven edits counting this file's own,
 for no change in what any port must carry.
 
-### 7. Two review rounds is the ceiling, and the second verifies rather than re-reviews — `review-round-cap`
+### 7. Two review rounds is the ceiling, and round two must be earned — `review-round-cap`
 
-<!-- canon:review-round-cap v1 -->
+<!-- canon:review-round-cap v2 -->
 
 **Substance.** A port's review phase must terminate by construction rather than
-by the reviewer running out of things to say. Two rounds is the ceiling. A
-**round** is a dispatch that produced a parsed review block; a crashed or
+by the reviewer running out of things to say. Two rounds is the ceiling, and
+round two is **earned, not automatic**: it runs only when round one's fixes
+edited a code path — a path that is neither documentation nor a test and whose
+change is not comment-only, decided by path and changed-line shape rather than
+by judgement — or round one reported a `critical`, or a `category: "security"`
+finding at any severity. Without a trigger every fixed finding is **recorded,
+not re-reviewed**, by severity, category and `file:line` in both
+`completion_notes` and `completion_summary`, and round one's result is
+submitted. A **round** is a dispatch that produced a parsed review block; a crashed or
 unparsable dispatch is re-dispatched and consumes no round, which is why the
 round counter and the per-dispatch filename counter are deliberately different
 numbers. Round two receives the **full** diff — the cap scopes the second
@@ -812,12 +819,15 @@ disposition the prohibition exists to compel and binds exactly as tightly.
 `stride/skills/stride-workflow/SKILL.md`, in the paragraph beginning "Two review
 rounds is the ceiling" in Step 5 and in the `REVIEW_BLOCK_PATH` bullet above it;
 that file remains the source, and the round counter's own shape, write and
-recount live in `stride/skills/stride-workflow/review-block-extraction.md`. The
-governed text, verbatim:
+recount — and, from v2, the fix-path classifier behind `FIX_CODE_PATHS` — live in
+`stride/skills/stride-workflow/review-block-extraction.md`. The governed text,
+verbatim:
 
-> **Two review rounds is the ceiling, and the second verifies rather than re-reviews.** A round is a dispatch that produced a `$MERGED` file; a crashed or unparsable dispatch is re-dispatched and consumes no round.
+> **Two review rounds is the ceiling, and round two must be earned.** A round is a dispatch that produced a `$MERGED` file; a crashed or unparsable dispatch is re-dispatched and consumes no round.
 
-> **After round two, remaining `important` and `minor` findings are RECORDED, not fixed — never a `category: "security"` issue, fixed or escalated at any severity, `important` being the reviewer's default for one:**
+> **Round two has three triggers:** round one's fixes edited a code path (`FIX_CODE_PATHS` not `0` — a path that is not documentation, a test, or a comment-only change; the classifier is in [review-block-extraction.md](review-block-extraction.md)), or round one reported a `critical`, or a `category: "security"` issue at any severity. **Without one, every fixed finding is recorded, not re-reviewed**, and you submit round one's result — so a fix confined to docs, comments, the changelog or test wording never buys round two.
+
+> **After round two, remaining `important` and `minor` findings are RECORDED, not fixed — never a `category: "security"` issue, fixed or escalated at any severity, `important` being the reviewer's default for one.**
 
 > **`critical` is exempt from the cap and always blocks:** fix it and dispatch a further round scoped to that finding; where you cannot, stop without completing (`review_blocked`, `failure.kind: "review_escalation"`) rather than recording it.
 
@@ -831,7 +841,11 @@ disposition. **No `D` identifier exists for this rule**, and none is invented
 here: it shipped as a work task whose defects were found and fixed in-task rather
 than filed separately. That is a note about which id namespace carries the trace,
 not a departure from this file's admission rule — the rule was forced by observed
-behaviour that shipped, which is what that rule asks for.
+behaviour that shipped, which is what that rule asks for. **v2 was forced by
+W2252**: a nine-task session spent 19 reviewer dispatches, and its second rounds
+verified fixes confined to documentation, comments and test wording — wording,
+not defects — so round two now has to be earned by a code-path fix, a
+`critical` or a security finding.
 
 **Port-side anchor.** Beside the port's own statement of the review-round
 ceiling, wherever its workflow or lifecycle markdown bounds the re-review loop.
@@ -847,11 +861,11 @@ is not a per-port structural fact the way the section-key count is.
 ```json
 {
   "id": "review-round-cap",
-  "version": 1,
+  "version": 2,
   "status": "active",
   "superseded_by": null,
   "provenance": "quoted",
-  "defects": ["W2128"],
+  "defects": ["W2128", "W2252"],
   "check": "anchor",
   "check_hint": "Anchor sits beside the port's statement of the review-round ceiling, wherever its workflow markdown bounds the re-review loop. Not beside the per-dispatch filename counter, which is a different number.",
   "applies_to": [
@@ -868,7 +882,13 @@ is not a per-port structural fact the way the section-key count is.
 }
 ```
 
-**History.** v1 — seeded from W2128.
+**History.**
+
+- v1 — seeded from W2128.
+- v2 — W2252: round two needs a trigger (a code-path fix, a prior `critical`, or a
+  prior security finding); without one, fixed findings are recorded, not
+  re-reviewed. A port still on v1 runs a round two that v2 withholds, and reports
+  STALE until it adopts the triggers.
 
 ### 8. A cosmetic finding changes disposition, never the finding — `cosmetic-finding-class`
 

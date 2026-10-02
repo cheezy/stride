@@ -13232,6 +13232,23 @@ if [ -f "$G36_WF" ] && [ -f "$G36_RBE" ] && [ -f "$G36_CT" ]; then
     "all six" "$(cat "$G36_RBE")"
   assert_contains "36v: the Source B half carries the cap too" \
     "review round cap exceeded" "$(cat "$G36_RBE")"
+  # W2252: round two must be earned. Pinned at every site that states it.
+  assert_contains "36ai: the orchestrator names round two's three triggers" \
+    "Round two has three triggers" "$(cat "$G36_WF")"
+  assert_contains "36ai: and that untriggered fixes are recorded, not re-reviewed" \
+    "recorded, not re-reviewed" "$(cat "$G36_WF")"
+  assert_contains "36ai: the completion self-check states it too" \
+    "recorded, not re-reviewed" "$(cat "$G36_CT")"
+  assert_contains "36ai: and so does the runner" \
+    "recorded, not" "$(cat "$G36_RUN")"
+  assert_contains "36ai: the sibling carries the classifier" \
+    "FIX_CODE_PATHS" "$(cat "$G36_RBE")"
+  assert_contains "36ai: and says a docs-only fix never buys round two" \
+    "never buys round two" "$(cat "$G36_RBE")"
+  assert_contains "36ai: the orchestrator anchor is at v2" \
+    "<!-- canon:review-round-cap v2 -->" "$(cat "$G36_WF")"
+  assert_contains "36ai: and the canon entry was bumped with it" '"version": 2' \
+    "$(awk '/"id": "review-round-cap"/{f=1} f&&/"version"/{print;exit}' "$SCRIPT_DIR/../docs/port-canon.md")"
 else
   echo "  SKIP: 36a-36v: contract files not found from the hooks directory"
 fi
@@ -13264,14 +13281,27 @@ G36BLOCK
   assert_eq "36x: the recount block was extractable from the contract" "yes" \
     "$(printf '%s' "$G36_RECOUNT" | grep -q 'REVIEW_ROUND' && echo yes || echo no)"
 
-  g36_cap() { # $1=round $2=prior $3=cleared -> round_cap_ok ("ABORT" if jq died)
+  g36_cap() { # $1=round $2=prior $3=cleared [$4=prior_security $5=fix_code_paths]
     BLOCK="$G36_DIR/block.json" MERGED="$G36_DIR/merged.json" \
     TASK_CRITERION_LINES=2 REVIEW_ROUND="$1" PRIOR_CRITICAL="$2" CRITICAL_CLEARED="$3" \
+    PRIOR_SECURITY="${4:-0}" FIX_CODE_PATHS="${5:--1}" \
       eval "$G36_JQ" 2>/dev/null | jq -r '.round_cap_ok' 2>/dev/null || echo ABORT
   }
 
   assert_eq "36m: round 1 is within the cap"                  "true"  "$(g36_cap 1 0 0)"
-  assert_eq "36n: round 2 is within the cap"                  "true"  "$(g36_cap 2 0 0)"
+  assert_eq "36n: an unmeasured round 2 stays available"      "true"  "$(g36_cap 2 0 0)"
+  # 36n/36af (W2252): round two must be earned -- by a code-path fix, a prior
+  # critical, a prior security finding, or CRITICAL_CLEARED.
+  assert_eq "36n: round 2 after a docs-only fix is REFUSED"   "false" "$(g36_cap 2 0 0 0 0)"
+  assert_eq "36af: round 2 after a code fix is allowed"       "true"  "$(g36_cap 2 0 0 0 1)"
+  assert_eq "36af: round 2 after a round-one critical"        "true"  "$(g36_cap 2 1 0 0 0)"
+  assert_eq "36af: round 2 after a security finding marked minor" "true" "$(g36_cap 2 0 0 1 0)"
+  assert_eq "36af: round 2 with CRITICAL_CLEARED"             "true"  "$(g36_cap 2 0 1 0 0)"
+  assert_eq "36af: round 1 needs no trigger"                  "true"  "$(g36_cap 1 0 0 0 0)"
+  assert_eq "36af: neither new trigger buys a third round"    "false" "$(g36_cap 3 0 0 1 1)"
+  assert_eq "36af: a string prior_security buys nothing"      "false" "$(g36_cap 2 0 0 '"1"' 0)"
+  assert_eq "36af: nor a boolean one"                         "false" "$(g36_cap 2 0 0 true 0)"
+  assert_eq "36af: a malformed fix_code_paths reads as unmeasured" "true" "$(g36_cap 2 0 0 0 '"0"')"
   assert_eq "36o: a third round is REFUSED by the self-check" "false" "$(g36_cap 3 0 0)"
   assert_eq "36p: unless the prior round carried a critical"  "true"  "$(g36_cap 3 1 0)"
   assert_eq "36p: which keeps blocking however many rounds"   "true"  "$(g36_cap 4 1 0)"
@@ -13293,6 +13323,10 @@ G36BLOCK
     "$(printf '%s' "$G36_UNSET" | jq -r '.round_cap_ok' 2>/dev/null || echo ABORT)"
   assert_eq "36z: and pin_terms names it as an unrun recount"        "-1" \
     "$(printf '%s' "$G36_UNSET" | jq -r '.pin_terms.round' 2>/dev/null || echo ABORT)"
+  assert_eq "36z: an unset prior_security defaults to 0"             "0" \
+    "$(printf '%s' "$G36_UNSET" | jq -r '.pin_terms.prior_security' 2>/dev/null || echo ABORT)"
+  assert_eq "36z: and an unset fix_code_paths to -1 (unmeasured)"    "-1" \
+    "$(printf '%s' "$G36_UNSET" | jq -r '.pin_terms.fix_code_paths' 2>/dev/null || echo ABORT)"
   assert_eq "36z: the other four booleans survive an unset recount"  "true" \
     "$(printf '%s' "$G36_UNSET" | jq -r '[.project_checks_equal,.acceptance_criteria_equal,.commit_pending_scope_ok,.commit_pending_shape_ok] | all' 2>/dev/null || echo ABORT)"
 
@@ -13363,20 +13397,102 @@ G36BLOCK
   g36_art 9 1 W7777; g36_art 10 0 W7777
   assert_eq "36aa: the previous round is found by numeric index, not lexical" "10 10 1" "$(g36_recount W7777)"
 
+  # 36ah (W2252): PRIOR_SECURITY comes from the previous round's merged file,
+  # at any severity, type-guarded like PRIOR_CRITICAL.
+  g36_sec() { # $1=identifier -> PRIOR_SECURITY
+    ( STRIDE_DIR="$G36_DIR/.stride"; IDENT="$1"
+      eval "$G36_RECOUNT" >/dev/null 2>&1; printf '%s' "$PRIOR_SECURITY" )
+  }
+  rm -f "$G36_DIR/.stride/".* 2>/dev/null
+  echo '{"issue_counts":{"critical":0},"issues":[{"category":"security","severity":"minor"}]}' \
+    > "$G36_DIR/.stride/.reviewer-result-W6666-r1.json"
+  g36_art 2 0 W6666
+  assert_eq "36ah: a minor security finding in round one sets PRIOR_SECURITY" "1" "$(g36_sec W6666)"
+  assert_eq "36ah: and the recount triple is unchanged by it" "2 2 0" "$(g36_recount W6666)"
+  echo '{"issue_counts":{"critical":0},"issues":"x"}' > "$G36_DIR/.stride/.reviewer-result-W5555-r1.json"
+  g36_art 2 0 W5555
+  assert_eq "36ah: a non-array issues[] yields 0, not an abort" "0" "$(g36_sec W5555)"
+  echo '{"issue_counts":{"critical":0},"issues":[1,"a"]}' > "$G36_DIR/.stride/.reviewer-result-W4444-r1.json"
+  g36_art 2 0 W4444
+  assert_eq "36ah: non-object entries are ignored"              "0" "$(g36_sec W4444)"
+  assert_eq "36ah: an unset STRIDE_DIR fails closed to 0"       "0" \
+    "$( ( unset STRIDE_DIR; IDENT=W6666; eval "$G36_RECOUNT" >/dev/null 2>&1; printf '%s' "$PRIOR_SECURITY" ) )"
+
+  # 36ag (W2252): the fix-path classifier, executed from the contract's bytes in
+  # throwaway repos. Nothing is committed, so every file is untracked -- which
+  # also proves untouched untracked code is not counted.
+  G36_FIX=$(awk '/^\*\*The fix-path classifier\./{f=1} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' "$G36_RBE")
+  assert_eq "36ag: the classifier was extractable from the contract" "yes" \
+    "$(printf '%s' "$G36_FIX" | grep -q 'FIX_CODE_PATHS' && echo yes || echo no)"
+  if command -v git > /dev/null 2>&1; then
+    g36_fix() { # $1=change script run in the repo -> FIX_CODE_PATHS after it
+      r="$G36_DIR/fixrepo"; rm -rf "$r"; mkdir -p "$r/docs" "$r/lib" "$r/test" "$r/.stride"
+      ( cd "$r" && git init -q . && git config user.email t@t && git config user.name t
+        printf '# T\n' > README.md; printf '# C\n' > CHANGELOG.md; printf 'g\n' > docs/g.md
+        printf 'defmodule A do\n  # old note\n  def a, do: 1\nend\n' > lib/a.ex
+        printf 'test "old name" do\nend\n' > test/a_test.exs
+        printf '#include <a.h>\nint x;\n' > lib/b.c
+        STRIDE_DIR="$r/.stride"; IDENT=W3333; FIX_REPOS="$r"; FIX_STAGE=base
+        eval "$G36_FIX" >/dev/null 2>&1
+        eval "$1"
+        STRIDE_DIR="$r/.stride"; IDENT=W3333; FIX_REPOS="$r"; FIX_STAGE=count
+        eval "$G36_FIX" >/dev/null 2>&1
+        printf '%s' "$FIX_CODE_PATHS" )
+    }
+    assert_eq "36ag: a docs-only fix counts 0 code paths" "0" \
+      "$(g36_fix 'printf "more\n" >> README.md; printf "x\n" >> CHANGELOG.md; printf "y\n" >> docs/g.md')"
+    assert_eq "36ag: a comment-only edit counts 0" "0" \
+      "$(g36_fix 'sed -i.bak "s/old note/new note/" lib/a.ex && rm lib/a.ex.bak')"
+    assert_eq "36ag: renaming a test counts 0" "0" \
+      "$(g36_fix 'sed -i.bak "s/old name/new name/" test/a_test.exs && rm test/a_test.exs.bak')"
+    assert_eq "36ag: renaming the test file counts 0" "0" \
+      "$(g36_fix 'mv test/a_test.exs test/b_test.exs')"
+    assert_eq "36ag: a behaviour change in code counts 1" "1" \
+      "$(g36_fix 'sed -i.bak "s/do: 1/do: 2/" lib/a.ex && rm lib/a.ex.bak')"
+    assert_eq "36ag: a new code file counts 1" "1" \
+      "$(g36_fix 'printf "defmodule N do\nend\n" > lib/new.ex')"
+    assert_eq "36ag: an #include edit is code, not a comment" "1" \
+      "$(g36_fix 'sed -i.bak "s/a.h/b.h/" lib/b.c && rm lib/b.c.bak')"
+    assert_eq "36ag: a mixed docs-plus-code fix counts the code path" "1" \
+      "$(g36_fix 'printf "more\n" >> README.md; sed -i.bak "s/do: 1/do: 2/" lib/a.ex && rm lib/a.ex.bak')"
+    assert_eq "36ag: a whole-line /* */ comment added to C counts 0" "0" \
+      "$(g36_fix 'printf "/* note */\n" >> lib/b.c')"
+    assert_eq "36ag: a '# if 0' directive in C is code" "1" \
+      "$(g36_fix 'printf "# if 0\n" >> lib/b.c')"
+    assert_eq "36ag: a comment followed by code is code" "1" \
+      "$(g36_fix 'printf "/* x */ int y;\n" >> lib/b.c')"
+    assert_eq "36ag: a lone block-comment opener is code" "1" \
+      "$(g36_fix 'printf "/*\n" >> lib/b.c')"
+    assert_eq "36ag: a missing base file reads as unmeasured" "-1" \
+      "$(g36_fix 'rm -f .stride/.review-fixbase-W3333.txt')"
+    assert_eq "36ag: a second base run never overwrites the first" "1" \
+      "$(g36_fix 'sed -i.bak "s/do: 1/do: 2/" lib/a.ex && rm lib/a.ex.bak; STRIDE_DIR="$PWD/.stride" IDENT=W3333 FIX_REPOS="$PWD" FIX_STAGE=base; eval "$G36_FIX" >/dev/null 2>&1')"
+    assert_eq "36ag: an unresolved STRIDE_DIR reads as unmeasured" "-1" \
+      "$( ( unset STRIDE_DIR; IDENT=W3333; FIX_STAGE=count; eval "$G36_FIX" >/dev/null 2>&1; printf '%s' "$FIX_CODE_PATHS" ) )"
+  else
+    echo "  SKIP: 36ag: git not installed"
+  fi
+
   # 36w: Source B parity, from the CONTRACT'S bytes rather than a retyped copy.
   if command -v python3 > /dev/null 2>&1; then
     G36_PY=$(awk '/^# Round-cap pin/{f=1} f&&/^assert _r >= 0/{p=1} f{print} p&&/\)$/{exit}' "$G36_RBE")
-    g36_py() { # $1=round $2=prior $3=cleared -> pass|refused
+    g36_py() { # $1=round $2=prior $3=cleared [$4=prior_security $5=fix_code_paths] -> pass|refused
       python3 -c "
 import sys
-review_round, prior_critical, critical_cleared = $1, $2, $3
+review_round, prior_critical, critical_cleared, prior_security, fix_code_paths = $1, $2, $3, ${4:-0}, ${5:--1}
 try:
 $(printf '%s' "$G36_PY" | sed 's/^/    /')
 except AssertionError:
     print('refused'); sys.exit(0)
 print('pass')" 2>/dev/null || echo error
     }
-    assert_eq "36w: Source B permits round 2"                   "pass"    "$(g36_py 2 0 0)"
+    assert_eq "36w: Source B permits an unmeasured round 2"     "pass"    "$(g36_py 2 0 0)"
+    assert_eq "36w: Source B refuses round 2 after a docs-only fix" "refused" "$(g36_py 2 0 0 0 0)"
+    assert_eq "36w: Source B permits round 2 after a code fix"  "pass"    "$(g36_py 2 0 0 0 1)"
+    assert_eq "36w: Source B permits round 2 after a security finding" "pass" "$(g36_py 2 0 0 1 0)"
+    assert_eq "36w: Source B agrees on a boolean prior_security" "refused" "$(g36_py 2 0 0 True 0)"
+    assert_eq "36w: Source B reads a string fix_code_paths as unmeasured" "pass" "$(g36_py 2 0 0 0 "'0'")"
+    assert_eq "36w: Source B: neither trigger buys a third round" "refused" "$(g36_py 3 0 0 1 1)"
     assert_eq "36w: Source B refuses a third round"             "refused" "$(g36_py 3 0 0)"
     assert_eq "36w: Source B honours the critical exemption"    "pass"    "$(g36_py 3 1 0)"
     assert_eq "36w: Source B agrees on a string prior_critical" "refused" "$(g36_py 3 "'0'" 0)"

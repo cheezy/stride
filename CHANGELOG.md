@@ -23,6 +23,18 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Changed — round two of review must be earned (W2252)
+
+A second reviewer round used to follow any round-one finding that was not cosmetic. In a nine-task session that cost 19 reviewer dispatches, and the second rounds mostly verified fixes to wording — documentation, comments, test names — rather than finding defects. Round two now has **three triggers**: round one's fixes edited a code path, or round one reported a `critical`, or round one reported a `category: "security"` issue at any severity. Without a trigger, every fixed finding is **recorded, not re-reviewed** — by severity, category, `file:line` and a one-line change, in `completion_notes` and one line of `completion_summary` — and round one's result is submitted. A fix confined to docs, comments, the changelog or test wording never buys round two. The `critical` exemption, the security never-record rule and the record-don't-fix disposition after round two are unchanged.
+
+"Code path" is decided mechanically, by path and changed-line shape rather than by judgement. A new fix-path classifier in `skills/stride-workflow/review-block-extraction.md` snapshots each repository's whole working tree (untracked files included) as a git tree before the first fix, in `.stride/.review-fixbase-<IDENTIFIER>.txt`, and after fixing counts the changed paths that are neither documentation, nor tests, nor comment-only text changes. `*.txt` counts as code, because `requirements.txt` and `CMakeLists.txt` are build inputs. In this plugin, whose skills and agents are markdown, a skill edit classifies as documentation; that is deliberate and disclosed as a limit. A comment counts only when it is a whole-line comment, and `#` is never a comment in C-family sources, where it opens a preprocessor directive. Step 5.5's "fixed in this task and re-reviewed" now defers to the same triggers. A security-relevant Step 5.5 finding below `critical` whose fix touches only documentation paths gets no round two; that gap is disclosed as a limit.
+
+`round_cap_ok` gains two terms on both extraction paths, the Source A jq and the Source B Python assert: `prior_security`, read from the previous round's merged result beside `PRIOR_CRITICAL`, and `fix_code_paths`, from the classifier. Round two passes only with a trigger. `fix_code_paths` defaults to `-1`, meaning unmeasured, which keeps round two available as before. Neither trigger ever buys a third round. An untriggered round two is not a cap breach and is not escalated: submit round one's result and record. Both new values appear in `pin_terms`, and the fix-base file is removed by the same claim-time and Step 7 clear as the other review artifacts.
+
+Canon entry `review-round-cap` moves to **v2**, together with stride's anchor in `skills/stride-workflow/SKILL.md`. Every sibling port reports STALE until it adopts the triggers; that is the expected state after a deliberate bump. The mirrors in `stride-completing-tasks`, `stride-subagent-workflow`, `agents/task-runner.md` and the README state the triggers. Step 5's cosmetic bullet and the re-review paragraph were tightened, which brings `skills/stride-workflow/SKILL.md` back under its 101,000-byte budget; 1.80.0 shipped 478 bytes over it. The `changes_requested` rule for an all-cosmetic round now defers to the triggers rather than re-dispatching regardless. The hook suite's Group 36 runs the new predicate and the classifier from the contract's own bytes.
+
 ## [1.80.0] - 2026-10-01
 
 ### Fixed — the reviewer verifies a commit_pending assertion instead of trusting it (D303)

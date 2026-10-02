@@ -157,7 +157,7 @@ Provide the agent with:
 
 The explorer writes its full findings to that file and returns a **bounded summary** — capped at 60 lines / 6,000 characters — naming the path and carrying: one line per key file (current state and what must change), every pattern with its `file:line`, every conflict or concern, and the reuse list. Omitting `EXPLORER_REPORT_PATH` is not a failure but forfeits the whole saving: an explorer given no path returns its full findings inline, exactly as before.
 
-**Use the explorer's summary** to inform your implementation — don't discard it. It tells you what exists, what patterns to follow, and what utilities to reuse. Open the report file only for a specific question the summary leaves open; reading it back in full spends the context the split exists to save.
+**While the explorer runs, read the task's `key_files` and draft your approach, but edit no file until you have read its summary.** **Use the explorer's summary** to inform your implementation — don't discard it, and revise your draft where it disagrees. It tells you what exists, what patterns to follow, and what utilities to reuse. Open the report file only for a specific question the summary leaves open; reading it back in full spends the context the split exists to save.
 
 ## Phase 2: Planning (Conditional, Before Coding)
 

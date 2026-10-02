@@ -25,6 +25,10 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — read and plan while the explorer runs, edit only after its summary (W2254)
+
+Step 3 Branch C used to say to dispatch the task-explorer and wait. In the G439 session the explorer took 4.3 minutes per task, 38.6 in total, while the main agent sat idle and then read the same key files itself. The main agent now reads the task's `key_files` and drafts its approach while the explorer runs. It edits no file until it has read the explorer's summary, and then revises the draft where the summary disagrees. The decision matrix still decides whether the explorer runs, and the planner is still dispatched after the explorer's summary. The same rule is in the `stride-subagent-workflow` Phase 1 mirror. Two commentary clauses in Step 3 and Step 4 were cut to pay for the new text, so `skills/stride-workflow/SKILL.md` shrank.
+
 ### Changed — subagent dispatches pass TASK_FILE instead of retyped task fields (W2249)
 
 Step 3's explorer and planner dispatches, and Step 5's reviewer dispatch, now pass `TASK_FILE`. That is the absolute path of `.stride/.task-<IDENTIFIER>.json`, which the claim hook writes (W2248). The orchestrator uses it once `jq -r .identifier` on the file names the claimed task. The dispatch prompts no longer carry pasted task fields, which one 9-task session showed to be about 186 KB of hand-typed text and a known source of paraphrased acceptance criteria. `agents/task-reviewer.md` and `agents/task-explorer.md` read every field from that file when the dispatch names it. The reviewer builds `acceptance_criteria[]` from the file's newline-split lines, one per line, verbatim and in order. Both agents say so when the file is missing, unparsable or names another task. The inline fields remain the fallback when no file exists, as with an older hook or a port. The mirrors in `stride-subagent-workflow` and `agents/task-runner.md` say the same. `skills/stride-workflow/SKILL.md` did not grow: it went from 100,790 to 100,789 bytes.

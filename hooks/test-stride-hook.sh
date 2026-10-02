@@ -13940,6 +13940,14 @@ if [ -f "$G40_EX" ] && [ -f "$G40_WF" ] && [ -f "$G40_CENSUS" ]; then
     'read all of its claims as unverified' "$(cat "$G40_WF")"
   assert_contains "40i2: and that needs no detection" \
     'needs no detection' "$(cat "$G40_WF")"
+  # 40o (W2254): the main agent reads and plans while the explorer runs, but
+  # edits nothing until its summary is read -- in Branch C and its mirror.
+  assert_contains "40o: Branch C forbids edits until the explorer summary is read" \
+    'edit no file until you have read its summary' "$(cat "$G40_WF")"
+  assert_contains "40o: and lets the agent read key_files while the explorer runs" \
+    'While it runs, read the `key_files`' "$(cat "$G40_WF")"
+  assert_contains "40o: the subagent-workflow mirror carries the same edit gate" \
+    'edit no file until you have read its summary' "$(cat "$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md")"
   # 40j: the two contracts disclaim overlap in BOTH directions, which is what
   # keeps the census rule from being read as governing reports.
   assert_contains "40j: the report contract points at the census rule" \

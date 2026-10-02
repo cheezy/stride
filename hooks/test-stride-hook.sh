@@ -14883,6 +14883,48 @@ else
 fi
 
 # ============================================================
+# Test Group 47: W2280 -- the specialist runs beside the task-reviewer
+# ============================================================
+# The deep security dispatch goes out in the same message as the task-reviewer,
+# the merge into $MERGED waits for both, and a crashed specialist is the
+# fail-closed anomaly -- never a pass. Every mirror says so.
+echo ""
+echo "=== Test Group 47: W2280 parallel security dispatch (bash) ==="
+G47_OSR="$SCRIPT_DIR/../skills/stride-workflow/optional-security-review.md"
+G47_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G47_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+if [ -f "$G47_OSR" ] && [ -f "$G47_WF" ] && [ -f "$G47_SUB" ]; then
+  assert_contains "47a: the sub-step dispatches the specialist with the task-reviewer" \
+    '**Dispatch the specialist in the same message as the task-reviewer**' "$(cat "$G47_OSR")"
+  assert_contains "47b: the merge waits for both" \
+    '**Merge only after both dispatches have returned.**' "$(cat "$G47_OSR")"
+  assert_contains "47c: an early merge can never drop a verdict" \
+    'an early merge can never drop a verdict' "$(cat "$G47_OSR")"
+  assert_contains "47d: a crashed specialist is the fail-closed anomaly" \
+    '**A specialist that crashes or returns nothing is this same anomaly**' "$(cat "$G47_OSR")"
+  assert_contains "47e: the orchestrator pointer names both rules" \
+    'in the same message as the task-reviewer; merge into `$MERGED` only after both return' "$(cat "$G47_WF")"
+  assert_contains "47f: the subagent-workflow mirror dispatches in the same message" \
+    'in the same message as the task-reviewer (Phase 3)' "$(cat "$G47_SUB")"
+  assert_contains "47g: and merges only after both return" \
+    'only after both dispatches have returned' "$(cat "$G47_SUB")"
+  assert_eq "47h: the serial wording is gone from the mirror" "0" \
+    "$(grep -cF 'immediately after the task-reviewer' "$G47_SUB" | tr -d ' ')"
+  assert_contains "47i: a crash with no block to fail stops without completing" \
+    '**stop without completing** (`review_blocked`) rather than recording the crash and completing' "$(cat "$G47_OSR")"
+  assert_contains "47j: a crash with a block fails the section via the update" \
+    'run the update above with `SPECIALIST_FINDINGS=null`' "$(cat "$G47_OSR")"
+  assert_contains "47k: the reviewer dispatch itself sends the specialist alongside" \
+    'the specialist in this same message' "$(cat "$G47_WF")"
+  assert_contains "47l: a reply short of one verdict per consideration is the same anomaly" \
+    'does not carry exactly one entry per task consideration, matched verbatim' "$(cat "$G47_OSR")"
+  assert_contains "47m: the Decision Summary names the crashed/short-reply disposition" \
+    'Fail-closed, never a note alone: re-dispatch once' "$(cat "$G47_WF")"
+else
+  echo "  SKIP: Group 47 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

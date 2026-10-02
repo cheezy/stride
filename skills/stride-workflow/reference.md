@@ -119,13 +119,15 @@ STEP 5: Code Review (Decision Matrix)
                             5.5 likewise gates on manual_tests + plugin only,
                             never on review
   Otherwise:
-    [Claude Code] Dispatch task-reviewer, fix Critical/Important issues, then
-                  evaluate the SAME deep security-considerations gate — it fires
-                  on both branches; it is not a small-task-only step
-                  (verdicts malformed/absent? fail closed: keep the prose verdict,
-                  note the anomaly, never downgrade to passed — and treat the
-                  unconfirmed consideration like an un-addressed one: fix before
-                  completing)
+    [Claude Code] Evaluate the SAME deep security-considerations gate first —
+                  it fires on both branches; it is not a small-task-only step —
+                  and dispatch task-reviewer plus, when it fires, the specialist
+                  in ONE message; merge only after both return, then fix
+                  Critical/Important issues
+                  (specialist crashed, or verdicts malformed/absent/short of one
+                  per consideration? fail closed, never a note alone: re-dispatch
+                  once, then the SPECIALIST_FINDINGS=null update with a block,
+                  or review_blocked on Shape 2 / Source C)
     [Other]       Self-review against acceptance criteria
   |
   v

@@ -25,6 +25,15 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — the security specialist is dispatched beside the task-reviewer and merged after both return (W2280)
+
+The specialist already ran alongside a task-reviewer in 186 of 254 runs, exposing only 33% of its wall clock, but the docs never said to and placed the deep sub-step after extraction, which reads as serial.
+
+- **Same-message dispatch** (`skills/stride-workflow/optional-security-review.md`): whenever a task-reviewer is dispatched, the specialist goes out in the same message — its inputs are the diff and the considerations, never the task-reviewer's output; with review skipped it is dispatched alone.
+- **Merge after both return**: no write touches `$MERGED` until the task-reviewer's block and the specialist's verdicts are both in hand, so an early merge can never drop a verdict. A specialist that crashes or returns nothing — beside the task-reviewer or alone — is the existing fail-closed anomaly, never a pass: re-dispatch once, then with a structured block run the update with `SPECIALIST_FINDINGS=null` (a `critical` security issue), and on a Shape 2 skip or Source C stop without completing (`review_blocked`). A reply short of one verdict per task consideration (matched verbatim) is the same anomaly, checked before the merge; the Decision Summary row now names this disposition instead of "note the anomaly".
+- **Mirrors**: the `stride-workflow` Step 5 reviewer dispatch itself and its deep sub-step pointer (compressed to stay within its 101,000 B budget), `stride-subagent-workflow` and the README say the same.
+- **Pinned**: bash hook-suite Group 47 and PowerShell Group 41 assert the same-message dispatch, the merge ordering, the crashed-specialist anomaly, each mirror, and removal of the serial "immediately after the task-reviewer" wording.
+
 ### Changed — the deep security review's findings reach `issues[]`; escalation takes the backing finding's severity (W2277)
 
 The considerations-mode sub-step captured only `consideration_verdicts`, so the specialist's `findings[]` (509 in the sampled window, 21 high and 88 medium) never reached `reviewer_result`. Separately, every `partial`/`unmitigated` verdict escalated as `critical`, and the round cap exempts criticals, so a minor partial bought unlimited rounds (144 partials; tasks of up to 11 rounds).

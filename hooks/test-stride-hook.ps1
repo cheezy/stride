@@ -12624,6 +12624,37 @@ if ((Test-Path -LiteralPath $g40Osr) -and (Test-Path -LiteralPath $g40Ct) -and (
 }
 
 # ============================================================
+# Test Group 41: W2280 - the specialist runs beside the task-reviewer, PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 47.
+Write-Host ""
+Write-Host "=== Test Group 41: W2280 parallel security dispatch (PowerShell) ==="
+$g41Osr = Join-Path $ScriptDir '../skills/stride-workflow/optional-security-review.md'
+$g41Wf  = Join-Path $ScriptDir '../skills/stride-workflow/SKILL.md'
+$g41Sub = Join-Path $ScriptDir '../skills/stride-subagent-workflow/SKILL.md'
+if ((Test-Path -LiteralPath $g41Osr) -and (Test-Path -LiteralPath $g41Wf) -and (Test-Path -LiteralPath $g41Sub)) {
+    $g41OsrText = Get-Content -LiteralPath $g41Osr -Raw
+    $g41WfText  = Get-Content -LiteralPath $g41Wf -Raw
+    $g41SubText = Get-Content -LiteralPath $g41Sub -Raw
+    Assert-Contains "41a: the sub-step dispatches the specialist with the task-reviewer" '**Dispatch the specialist in the same message as the task-reviewer**' $g41OsrText
+    Assert-Contains "41b: the merge waits for both" '**Merge only after both dispatches have returned.**' $g41OsrText
+    Assert-Contains "41c: an early merge can never drop a verdict" 'an early merge can never drop a verdict' $g41OsrText
+    Assert-Contains "41d: a crashed specialist is the fail-closed anomaly" '**A specialist that crashes or returns nothing is this same anomaly**' $g41OsrText
+    Assert-Contains "41e: the orchestrator pointer names both rules" 'in the same message as the task-reviewer; merge into `$MERGED` only after both return' $g41WfText
+    Assert-Contains "41f: the subagent-workflow mirror dispatches in the same message" 'in the same message as the task-reviewer (Phase 3)' $g41SubText
+    Assert-Contains "41g: and merges only after both return" 'only after both dispatches have returned' $g41SubText
+    $g41Serial = @(Get-Content -LiteralPath $g41Sub | Where-Object { $_.Contains('immediately after the task-reviewer') }).Count
+    Assert-Eq "41h: the serial wording is gone from the mirror" '0' ([string]$g41Serial)
+    Assert-Contains "41i: a crash with no block to fail stops without completing" '**stop without completing** (`review_blocked`) rather than recording the crash and completing' $g41OsrText
+    Assert-Contains "41j: a crash with a block fails the section via the update" 'run the update above with `SPECIALIST_FINDINGS=null`' $g41OsrText
+    Assert-Contains "41k: the reviewer dispatch itself sends the specialist alongside" 'the specialist in this same message' $g41WfText
+    Assert-Contains "41l: a reply short of one verdict per consideration is the same anomaly" 'does not carry exactly one entry per task consideration, matched verbatim' $g41OsrText
+    Assert-Contains "41m: the Decision Summary names the crashed/short-reply disposition" 'Fail-closed, never a note alone: re-dispatch once' $g41WfText
+} else {
+    Write-Host "  SKIP: Group 41 contract files not found"
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

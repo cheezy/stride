@@ -21,15 +21,15 @@ planned section.
 
 | Task | Goal | Fix | Status in `stride` |
 |---|---|---|---|
-| W2248 | G446 | The post-claim hook writes the claimed task to `.stride/.task-<IDENTIFIER>.json` | planned |
-| W2249 | G446 | Explorer, planner and reviewer dispatches pass `TASK_FILE` instead of retyped task fields | planned (needs W2248) |
+| W2248 | G446 | The post-claim hook writes the claimed task to `.stride/.task-<IDENTIFIER>.json` | **landed in 1.81.0** |
+| W2249 | G446 | Explorer, planner and reviewer dispatches pass `TASK_FILE` instead of retyped task fields | **landed in 1.81.0** |
 | W2250 | G446 | Dispatcher mode becomes the default for multi-task requests, with an opt-out | planned |
 | W2251 | G446 | Step 0 warns when the installed plugin is older than the published pin | planned |
-| W2252 | G447 | Round two of review must be earned | **landed**, commit `61e3733`, not yet released |
+| W2252 | G447 | Round two of review must be earned | **landed in 1.81.0** |
 | W2253 | G447 | Carry the `review-round-cap` v2 canon change to every port | planned. **This document is its input.** |
-| W2254 | G447 | The main agent reads key files while the explorer runs, with no edits until it reports | planned |
-| W2255 | G447 | The Stop gate does not block while a dispatched stride subagent is still running | planned |
-| W2256 | G448 | Discovery uses a slim `GET /api/tasks/next`; the task body comes from the claim | planned |
+| W2254 | G447 | The main agent reads key files while the explorer runs, with no edits until it reports | **landed in 1.81.0** |
+| W2255 | G447 | The Stop gate does not block while a dispatched stride subagent is still running | **landed in 1.81.0** |
+| W2256 | G448 | Discovery uses a slim `GET /api/tasks/next`; the task body comes from the claim | **landed in 1.81.0** |
 | W2257 | G448 | Move rationale out of `stride-workflow` SKILL.md and `review-block-extraction.md` | planned |
 | W2258 | G448 | Move rationale out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` | planned |
 | W2259 | G448 | Measure the token and wall-clock effect of all three goals | planned (runs last) |
@@ -96,14 +96,14 @@ Two facts from this table decide most of the porting work:
 
 ## G446 — accuracy
 
-### W2248 — the hook writes the claimed task to a file (planned)
+### W2248 — the hook writes the claimed task to a file (**landed in 1.81.0**)
 
 **Problem.** Task fields reach subagents only by being retyped into each dispatch
 prompt. One session retyped about 186 KB this way. Paraphrase in that copy is a
 known cause of `/complete` 422s; the acceptance-criteria 1:1 mapping is the usual
 casualty.
 
-**Planned change.** After a 2xx `POST /api/tasks/claim`, the post-claim hook
+**What shipped.** After a 2xx `POST /api/tasks/claim`, the post-claim hook
 writes the response's `data` object unchanged to `.stride/.task-<IDENTIFIER>.json`
 under the project root:
 
@@ -129,9 +129,11 @@ covers it.
 object. Then claim with a hostile identifier fixture and confirm the numeric-id
 fallback is used.
 
-### W2249 — dispatches pass `TASK_FILE` (planned; needs W2248)
+As shipped, the file is written only when the claim's own response proved the task identity (the D226 check), so a truncated claim stdout writes nothing. The name must match `\A[A-Za-z0-9_-]{1,64}\z`; otherwise the numeric id is used. The PowerShell half writes the raw `data` text without a byte-order mark rather than re-serialising it. Tests: bash Group 43 and PowerShell Group 37.
 
-**Planned change.** In Steps 3 and 5, each dispatch prompt names the absolute path
+### W2249 — dispatches pass `TASK_FILE` (**landed in 1.81.0**)
+
+**What shipped.** In Steps 3 and 5, each dispatch prompt names the absolute path
 of the task file instead of the pasted fields. Agents read their fields from that
 file. The reviewer builds its `acceptance_criteria` array from the file's lines,
 verbatim and in order. When no file exists, the old inline path stays as the
@@ -148,6 +150,8 @@ that never write the file.
 
 **Verify.** Complete one small and one medium dev-board task with the new
 dispatch. Both `/complete` calls must succeed on the first try.
+
+As shipped, each dispatch also carries one line telling the agent to read every task field from the file, as data. That line is what an older installed agent follows. The reviewer builds one criterion per non-blank line, and the planner, which has no agent file, gets the same read-as-data rule in its dispatch.
 
 ### W2250 — dispatcher mode by default (planned; `stride` only for now)
 
@@ -187,7 +191,7 @@ version, skip the warning; never guess the version.
 
 ## G447 — speed
 
-### W2252 — round two of review must be earned (**landed**)
+### W2252 — round two of review must be earned (**landed in 1.81.0**)
 
 **What shipped in `stride`** (commit `61e3733`, unreleased as of this writing):
 
@@ -282,12 +286,12 @@ This is the W2252 port procedure above, run across all eight ports and the
 catalogs. Expect STALE until each port lands; the canon describes that as the
 normal state after a deliberate bump.
 
-### W2254 — read while the explorer runs (planned)
+### W2254 — read while the explorer runs (**landed in 1.81.0**)
 
 **Problem.** Explorer dispatches took 38.6 minutes over 9 tasks. The main agent
 sat idle for each one before writing anything.
 
-**Planned change.** While the explorer runs, the main agent may read the task's
+**What shipped.** While the explorer runs, the main agent may read the task's
 `key_files` and plan, but it may not edit until the explorer's report arrives.
 The explorer's output still governs.
 
@@ -295,33 +299,63 @@ The explorer's output still governs.
 subagent). Without one, the port has nothing to overlap. Write that into the
 port's text rather than porting an instruction it cannot follow.
 
-### W2255 — no Stop-gate block while a subagent runs (planned)
+As shipped, Step 3 Branch C and the subagent-workflow Phase 1 mirror carry the rule, and Group 40 pins the wording.
+
+### W2255 — no Stop-gate block while a subagent runs (**landed in 1.81.0**)
 
 **Problem.** The Stop gate blocks a session that still holds a claim. With
 background subagents, the main agent ends its turn to wait. Each wait costs a
 blocked stop and an extra round trip: 18 in one session, and 106 across the last
 18 sessions.
 
-**Planned change.** The gate permits a stop while a stride subagent dispatched
-for the claimed task is still running. Recognising that case must come from
-state the hook can check, never from the agent's claim alone.
+**Evidence the fix rests on (measured, Claude Code 2.1.287).** Throwaway
+`claude -p` sessions with project-local hooks logged every agent-related event:
+- `PreToolUse` and `PostToolUse` fire for the `Agent` tool at launch.
+- `SubagentStart` and `SubagentStop` carry `agent_id` and `agent_type`.
+- The **`Stop` input carries `background_tasks`**. While a background agent
+  runs, it lists `{id, type: "subagent", status: "running", agent_type}`, and
+  the list is empty once the agent finishes.
+- A plugin agent appears as, for example, `"stride:hook-diagnostician"`.
 
-**Port needs.** A Stop gate (`stride-codex`, `stride-copilot` and `stride-gemini`
-have one) and a way for the gate to learn that a subagent is in flight.
-`stride-opencode` and `stride-pi` use advisory continuation rather than a
-blocking Stop gate. Read how those ports end a turn before deciding whether this
-fix applies to them at all.
+The documentation does not cover any of this, so **re-measure it on each runtime
+before porting.**
+
+**What shipped.** Two changes, both in the held-claim branch, after the local
+pre-filter and before the one API call, in both gate halves:
+- **The permit.** The gate permits the stop while the live list holds a running
+  agent of an exact type stride dispatches. That covers its task agents, the
+  security reviewer, the exploratory-testing agents and the generic `Plan`
+  agent, matched as whole strings and never by prefix. The permit names the
+  agent's type and id, never its description.
+- **The time bound.** A wait is one held claim plus one set of pending agent ids.
+  Its first permit records `{identifier, agents, since_epoch}` in
+  `.stride/.stop-pending-since.json`, and permits stop after 30 minutes. A
+  different set of pending agents starts a new wait. A stop with nothing pending
+  clears the record. A wait that cannot be recorded does not permit.
+
+Parsing is strict and identical in both halves: a JSON object, an array of
+tasks, string fields, exact matches and a whole-number epoch. No hook
+registration changed. Tests: bash Group 44 and PowerShell Group 38.
+
+**Port needs.**
+- A **blocking Stop gate**: `stride-codex`, `stride-copilot` and `stride-gemini`
+  have one.
+- A runtime whose Stop input lists **running background agents**. This is the
+  part to verify per runtime. Without such a list the fix cannot be ported, so
+  record "not applicable" rather than inventing a marker.
+- `stride-opencode` and `stride-pi` use advisory continuation rather than a
+  blocking Stop gate. Read how those ports end a turn first.
 
 ---
 
 ## G448 — token usage
 
-### W2256 — slim discovery (planned)
+### W2256 — slim discovery (**landed in 1.81.0**)
 
 **Problem.** Each task body arrived twice: once from `next` (7–9 KB) and again
 from `claim` (8–11 KB).
 
-**Planned change.** Discovery calls `GET /api/tasks/next?response_view=slim`.
+**What shipped.** Discovery calls `GET /api/tasks/next?response_view=slim`.
 That returns the 11-key task summary (id, identifier, title, type, status,
 priority, complexity, dependencies, created_by_agent, parent_id,
 claim_expires_at), not the body. An older server ignores the parameter and

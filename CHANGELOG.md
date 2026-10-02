@@ -23,7 +23,11 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.81.0] - 2026-10-02
+
+### Added — porting guide for the G446–G448 fixes
+
+`docs/porting-g446-g448.md` records, for each accuracy, speed and token fix in goals G446–G448, what changed, why, which mechanisms a port needs, and how each of the eight ports and their vendored catalogs differ (hook executable, Stop gate, task-runner, round-cap predicate). Each fix carries a status, and a port should port from landed sections only.
 
 ### Changed — slim task discovery; the task body comes from the claim (W2256)
 
@@ -47,7 +51,7 @@ Step 3 Branch C used to say to dispatch the task-explorer and wait. In the G439 
 
 ### Changed — subagent dispatches pass TASK_FILE instead of retyped task fields (W2249)
 
-Step 3's explorer and planner dispatches, and Step 5's reviewer dispatch, now pass `TASK_FILE`. That is the absolute path of `.stride/.task-<IDENTIFIER>.json`, which the claim hook writes (W2248). The orchestrator uses it once `jq -r .identifier` on the file names the claimed task. The dispatch prompts no longer carry pasted task fields, which one 9-task session showed to be about 186 KB of hand-typed text and a known source of paraphrased acceptance criteria. `agents/task-reviewer.md` and `agents/task-explorer.md` read every field from that file when the dispatch names it. The reviewer builds `acceptance_criteria[]` from the file's newline-split lines, one per line, verbatim and in order. Both agents say so when the file is missing, unparsable or names another task. The inline fields remain the fallback when no file exists, as with an older hook or a port. The mirrors in `stride-subagent-workflow` and `agents/task-runner.md` say the same. `skills/stride-workflow/SKILL.md` did not grow: it went from 100,790 to 100,789 bytes.
+Step 3's explorer and planner dispatches, and Step 5's reviewer dispatch, now pass `TASK_FILE`. That is the absolute path of `.stride/.task-<IDENTIFIER>.json`, which the claim hook writes (W2248). The orchestrator uses it once `jq -r .identifier` on the file names the claimed task. The dispatch prompts no longer carry pasted task fields, which one 9-task session showed to be about 186 KB of hand-typed text and a known source of paraphrased acceptance criteria. `agents/task-reviewer.md` and `agents/task-explorer.md` read every field from that file when the dispatch names it. The reviewer builds `acceptance_criteria[]` from the file's newline-split lines, one per line, verbatim and in order. Both agents say so when the file is missing, unparsable or names another task. The inline fields remain the fallback when no file exists, as with an older hook or a port. The mirrors in `stride-subagent-workflow` and `agents/task-runner.md` say the same. `skills/stride-workflow/SKILL.md` did not grow; it was 100,790 bytes after this change, the same as before. The reviewer builds `acceptance_criteria[]` one entry per non-blank line, because the server counts only non-blank lines, and reports a missing or mismatched file on a `task_file:` summary line.
 
 ### Added — the claim hook writes the claimed task to .stride/.task-<IDENTIFIER>.json (W2248)
 
@@ -61,7 +65,7 @@ A second reviewer round used to follow any round-one finding that was not cosmet
 
 `round_cap_ok` gains two terms on both extraction paths, the Source A jq and the Source B Python assert: `prior_security`, read from the previous round's merged result beside `PRIOR_CRITICAL`, and `fix_code_paths`, from the classifier. Round two passes only with a trigger. `fix_code_paths` defaults to `-1`, meaning unmeasured, which keeps round two available as before. Neither trigger ever buys a third round. An untriggered round two is not a cap breach and is not escalated: submit round one's result and record. Both new values appear in `pin_terms`, and the fix-base file is removed by the same claim-time and Step 7 clear as the other review artifacts.
 
-Canon entry `review-round-cap` moves to **v2**, together with stride's anchor in `skills/stride-workflow/SKILL.md`. Every sibling port reports STALE until it adopts the triggers; that is the expected state after a deliberate bump. The mirrors in `stride-completing-tasks`, `stride-subagent-workflow`, `agents/task-runner.md` and the README state the triggers. Step 5's cosmetic bullet and the re-review paragraph were tightened, which brings `skills/stride-workflow/SKILL.md` back under its 101,000-byte budget; 1.80.0 shipped 478 bytes over it. The `changes_requested` rule for an all-cosmetic round now defers to the triggers rather than re-dispatching regardless. The hook suite's Group 36 runs the new predicate and the classifier from the contract's own bytes.
+Canon entry `review-round-cap` moves to **v2**, together with stride's anchor in `skills/stride-workflow/SKILL.md`. Every sibling port reports STALE until it adopts the triggers; that is the expected state after a deliberate bump. The mirrors in `stride-completing-tasks`, `stride-subagent-workflow`, `agents/task-runner.md` and the README state the triggers. Step 5's cosmetic bullet and the re-review paragraph were tightened, which brings `skills/stride-workflow/SKILL.md` back under its 101,000-byte budget; 1.80.0 shipped 478 bytes over it. The `changes_requested` rule for an all-cosmetic round now defers to the triggers rather than re-dispatching regardless. The hook suite's Group 36 runs the new predicate and the classifier from the contract's own bytes. The hook suite's `assert_contains` now reads a here-string. Under `pipefail`, piping `echo` into `grep -q` hit EPIPE on a haystack larger than the pipe buffer (`agents/task-reviewer.md` is about 76 KB), so a real match was reported as a failure.
 
 ## [1.80.0] - 2026-10-01
 

@@ -25,6 +25,10 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Added — the measured "after" for G446–G448 on a multi-task run (W2259)
+
+`docs/token-measurement-g446-g448.md` measures three `medium` tasks run through dispatcher mode on the released 1.83.0 (session `ba8fa028`, claim positions 2–4) against G439's D337–D339 at the same claim positions on 1.78.0, per task and per request only. Main-loop growth per task was 4–6K tokens against 109–205K inline; entered share 3.5–6.6% against 75–85%; 1.0 reviewer dispatch per task against 3.0; 3 Stop-gate blocks across the three tasks against 6 (2 per task) for D337–D339, all 3 false positives that attribute a runner's claim to the main session. Wall clock (means 29.8 vs 30.2 min) and subagent tokens are reported but no effect is claimed for either — the task mixes differ. `docs/scripts/w2259-multitask.py` produces every measured figure (the harness and runner token counts, W2268's interim-notification time, W2267's review issue counts and the Stop-gate reason split are quoted from the session's records), deduplicates usage by message id (it reproduces G439's 518 requests from 1,103 content-block records), detects compaction from record structure rather than text, and has a `--self-test`.
+
 ### Changed — Step 5.5 groups manual tests into at most about three charters and dispatches independent observe-only charters together (W2267)
 
 Step 5.5 (`skills/stride-workflow/optional-exploratory-testing.md`) and its twin, `stride-subagent-workflow` Phase 3.5, mapped every `manual_tests` entry to its own charter and dispatched them one after another with no cap, so each session repeated the same setup and the main loop sat through every window in turn — one observed session made a single request in each of five 9–10 minute explorer windows, another spent 41 turns polling.

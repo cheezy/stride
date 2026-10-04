@@ -32,7 +32,7 @@ planned section.
 | W2256 | G448 | Discovery uses a slim `GET /api/tasks/next`; the task body comes from the claim | **landed in 1.81.0** |
 | W2257 | G448 | Move rationale out of `stride-workflow` SKILL.md and `review-block-extraction.md` | **landed in 1.83.0** |
 | W2258 | G448 | Move rationale out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` | **landed in 1.83.0** |
-| W2259 | G448 | Measure the token and wall-clock effect of all three goals | planned (runs last) |
+| W2259 | G448 | Measure the token and wall-clock effect of all three goals | measured (unreleased) — [`token-measurement-g446-g448.md`](token-measurement-g446-g448.md) |
 
 ## The evidence behind the goals
 
@@ -55,6 +55,11 @@ Counting content-block records instead roughly doubles the request count.
 Use these as the "before" numbers when you judge whether a port gained anything.
 They come from one session of plugin work. W2259 owns the measured "after", so do
 not quote a percentage saving for a port until that exists.
+
+**The "after" now exists:** [`token-measurement-g446-g448.md`](token-measurement-g446-g448.md)
+(measured 2026-10-04, `stride` 1.83.0, three dispatched tasks at claim positions
+2–4 against G439's D337–D339). It compares per task and per request only; read its
+comparator section before quoting any figure from it.
 
 ## The port fleet, as checked on 2026-10-02
 
@@ -463,7 +468,7 @@ rule inline, because a dispatched reviewer never opens the rationale doc.
 (if any) passes, its hook suite stays green, and one dispatched review on the
 slimmed reviewer completes on the first `/complete`.
 
-### W2259 — measure the effect (planned; last)
+### W2259 — measure the effect (measured; last)
 
 Run a multi-task session with all landed fixes, using the method in
 `docs/token-baseline.md`. Name the comparator and the session position for every

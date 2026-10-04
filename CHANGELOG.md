@@ -23,6 +23,20 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Changed — Step 5.5 groups manual tests into at most about three charters and dispatches independent observe-only charters together (W2267)
+
+Step 5.5 (`skills/stride-workflow/optional-exploratory-testing.md`) and its twin, `stride-subagent-workflow` Phase 3.5, mapped every `manual_tests` entry to its own charter and dispatched them one after another with no cap, so each session repeated the same setup and the main loop sat through every window in turn — one observed session made a single request in each of five 9–10 minute explorer windows, another spent 41 turns polling.
+
+- **Grouping and cap.** Manual tests that share a target merge into one charter, and a task runs at most about three charters, highest-risk first. Every manual test maps to a charter or is recorded as a human responsibility in `completion_notes` — none is silently dropped. A single manual test is one charter.
+- **Parallel dispatch for observe-only charters.** Each dispatch still carries one charter, but independent observe-only charters go out together in one message, each with its own pre-allocated `EXPLORATORY_REPORT_PATH`. A charter that mutates shared data runs alone, never in parallel with another; when unsure, it is treated as mutating.
+- **While the charters run.** The main loop may do non-conflicting work — drafting completion notes, reading files the charters do not exercise — makes no edits to any file the charters exercise, and waits for the completion notification instead of polling.
+- **Budget.** The per-dispatch band is unchanged; a budget that funds some charters but not all runs the highest-risk ones and hands the rest back as a human responsibility.
+- **Knock-on fixes.** A crashed dispatch in a parallel message retries on the next unallocated `<N>`, so it never shares a running sibling's report path; a not-performed merged charter hands back every manual test it carried; and a parallel message folds its elapsed wall-clock into the `reviewer` telemetry once, not the sum of its overlapping sessions.
+
+The Step 5.5 Decision Summary row in `skills/stride-workflow/SKILL.md` states the same rule (+300 bytes, within budget). Hook-suite Test Group 52 pins each rule in both twins and in the Decision Summary row.
+
 ## [1.83.0] - 2026-10-04
 
 ### Changed — rationale and provenance move out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` into `docs/` (W2258)

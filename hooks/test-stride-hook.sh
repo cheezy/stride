@@ -15427,6 +15427,61 @@ else
 fi
 
 # ============================================================
+# Test Group 52: W2267 -- Step 5.5 groups manual tests into at most ~3 charters
+# ============================================================
+# Both gate mirrors carry the same needles (keep-in-sync rule): grouping by
+# shared target, the cap, nothing dropped, observe-only charters together,
+# mutating charters never parallel, and the while-the-charters-run rule. The
+# Decision Summary row names the cap. Every needle except 52m is ABSENT at
+# the parent commit; 52m is a regression pin. 52p-52s pin the superseded
+# wording gone.
+echo ""
+echo "=== Test Group 52: W2267 charter grouping, cap and parallel dispatch (bash) ==="
+G52_GATE="$SCRIPT_DIR/../skills/stride-workflow/optional-exploratory-testing.md"
+G52_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G52_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+if [ -f "$G52_GATE" ] && [ -f "$G52_SUB" ] && [ -f "$G52_WF" ]; then
+  G52_GATE_TXT="$(cat "$G52_GATE")"; G52_SUB_TXT="$(cat "$G52_SUB")"; G52_WF_TXT="$(cat "$G52_WF")"
+  # g52_both <id> <label> <needle> -> pins the needle in both twins
+  g52_both() {
+    assert_contains "$1: Step 5.5 $2" "$3" "$G52_GATE_TXT"
+    assert_contains "${1}2: Phase 3.5 $2 too" "$3" "$G52_SUB_TXT"
+  }
+  g52_both 52a "caps the run at about three charters" 'at most about three charters per task'
+  g52_both 52b "merges manual tests that share a target" 'Manual tests that share a target merge into one charter'
+  g52_both 52c "never silently drops a manual test" 'Every manual test maps to a charter or is recorded as a human responsibility'
+  g52_both 52d "keeps a single manual test as one charter" 'single manual test is one charter'
+  g52_both 52e "dispatches observe-only charters together" 'independent observe-only charters together in ONE message'
+  g52_both 52f "never parallelises a mutating charter" 'that mutates shared data runs alone, never in parallel with another'
+  g52_both 52g "treats an unsure charter as mutating" 'unsure whether a charter mutates, treat it as mutating'
+  g52_both 52h "gives each parallel charter its own report path" 'so no two dispatches in the message share a report path'
+  g52_both 52i "says what the main loop does while charters run" 'While the charters run'
+  g52_both 52j "allows non-conflicting work such as drafting notes" 'drafting the completion notes'
+  g52_both 52k "forbids edits to exercised files" 'no edits to any file the charters exercise'
+  g52_both 52l "forbids polling turns" 'wait for the completion notification'
+  g52_both 52m "still carries one charter per dispatch" 'one charter per dispatch'
+  g52_both 52t "hands back every manual test a merged charter carried" 'a merged charter hands back every manual test it carried'
+  g52_both 52u "counts a parallel message's wall-clock once" 'a parallel message contributes its elapsed wall-clock once'
+  assert_contains "52v: a crashed parallel dispatch retries on an unallocated report path" \
+    're-dispatch with the next unallocated `<N>` instead' "$G52_GATE_TXT"
+  assert_eq "52v2: the bare N+1 crash retry is gone" "0" \
+    "$(grep -cF 're-dispatch with `N+1` instead' "$G52_GATE" | tr -d ' ')"
+  assert_contains "52n: the Decision Summary names the cap" 'at most ~3 per task' "$G52_WF_TXT"
+  assert_contains "52n2: and observe-only charters in one message" 'observe-only charters in one message' "$G52_WF_TXT"
+  assert_contains "52n3: and no edits to exercised files" 'no edits to exercised files' "$G52_WF_TXT"
+  assert_eq "52p: the one-charter-per-test step is gone from Step 5.5" "0" \
+    "$(grep -cF 'Map each `manual_tests` entry to a charter' "$G52_GATE" | tr -d ' ')"
+  assert_eq "52q: Step 5.5's budget no longer scales with raw manual_tests" "0" \
+    "$(grep -cF 'a task with many `manual_tests` needs proportionally' "$G52_GATE" | tr -d ' ')"
+  assert_eq "52r: nor does Phase 3.5's" "0" \
+    "$(grep -cF 'many `manual_tests` need proportionally' "$G52_SUB" | tr -d ' ')"
+  assert_eq "52s: the uncapped Decision Summary row is gone" "0" \
+    "$(grep -cF 'Dispatch explorer per charter, capture findings' "$G52_WF" | tr -d ' ')"
+else
+  echo "  SKIP: Group 52 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

@@ -15264,6 +15264,169 @@ else
 fi
 
 # ============================================================
+# Test Group 51: W2251 -- Step 0 plugin-currency check (check-plugin-current.sh)
+# ============================================================
+# The helper compares the installed version (named by the skill base
+# directory, or plugin.json for a local-path install) with the stride entry's
+# version in the published marketplace catalog. A stub curl on PATH serves the
+# catalog, so no test touches the network; the URL stays a constant in the
+# helper rather than becoming an input.
+echo ""
+echo "=== Test Group 51: W2251 plugin-currency check (bash) ==="
+G51_HELPER="$SCRIPT_DIR/check-plugin-current.sh"
+G51_DIR="$TMPDIR_TEST/g51"
+mkdir -p "$G51_DIR/stub"
+cat > "$G51_DIR/stub/curl" <<'G51STUB'
+#!/usr/bin/env bash
+printf 'ARGS: %s\n' "$*" >> "$G51_CURL_LOG"
+[ -f "$G51_BODY_FILE" ] && cat "$G51_BODY_FILE"
+exit "${G51_CURL_EXIT:-0}"
+G51STUB
+chmod +x "$G51_DIR/stub/curl"
+
+# g51_base <version-dir-name> -> echoes a skill base dir under a cache layout
+g51_base() {
+  mkdir -p "$G51_DIR/cache/stride/$1/skills/stride-workflow"
+  printf '%s' "$G51_DIR/cache/stride/$1/skills/stride-workflow"
+}
+# g51_catalog <stride-version> -> writes a catalog body with decoy versions
+g51_catalog() {
+  printf '{"name":"stride-marketplace","metadata":{"version":"9.9.9"},"plugins":[{"name":"stride-ideation","version":"9.9.9"},{"name":"stride","source":{"source":"url","url":"https://github.com/cheezy/stride.git"},"version":"%s"}]}' "$1" > "$G51_DIR/body"
+}
+# g51_run <base> [curl-exit] -> sets G51_OUT and G51_RC
+g51_run() {
+  : > "$G51_DIR/curl.log"
+  G51_OUT=$(G51_CURL_LOG="$G51_DIR/curl.log" G51_BODY_FILE="$G51_DIR/body" G51_CURL_EXIT="${2:-0}" \
+    PATH="$G51_DIR/stub:$PATH" bash "$G51_HELPER" "$1" 2>&1)
+  G51_RC=$?
+}
+
+if [ -f "$G51_HELPER" ] && command -v jq > /dev/null 2>&1; then
+  g51_catalog "1.80.0"
+  g51_run "$(g51_base 1.78.0)"
+  assert_exit "51a: older install exits 0" 0 "$G51_RC"
+  assert_eq "51a: older install prints the one-line warning" \
+    "stride plugin 1.78.0 is installed but the marketplace publishes 1.80.0 - update with: /plugin marketplace update stride-marketplace, then /plugin update stride@stride-marketplace" \
+    "$G51_OUT"
+
+  g51_run "$(g51_base 1.80.0)"
+  assert_eq "51b: equal versions print nothing" "" "$G51_OUT"
+  assert_exit "51b: equal versions exit 0" 0 "$G51_RC"
+
+  g51_run "$(g51_base 1.81.0)"
+  assert_eq "51c: newer install prints nothing" "" "$G51_OUT"
+
+  g51_run "$(g51_base 1.9.0)"
+  assert_contains "51d: 1.9.0 installed vs 1.80.0 pin warns (numeric, not string)" \
+    'stride plugin 1.9.0 is installed but the marketplace publishes 1.80.0' "$G51_OUT"
+
+  g51_catalog "1.9.0"
+  g51_run "$(g51_base 1.80.0)"
+  assert_eq "51e: 1.80.0 installed vs 1.9.0 pin is silent" "" "$G51_OUT"
+
+  g51_catalog "1.80.0"
+  rm -f "$G51_DIR/body"
+  g51_run "$(g51_base 1.78.0)" 28
+  assert_eq "51f: unreachable pin (curl timeout) prints nothing" "" "$G51_OUT"
+  assert_exit "51f: unreachable pin exits 0" 0 "$G51_RC"
+
+  printf '<html>rate limited</html>' > "$G51_DIR/body"
+  g51_run "$(g51_base 1.78.0)"
+  assert_eq "51g: malformed pin prints nothing" "" "$G51_OUT"
+  assert_exit "51g: malformed pin exits 0" 0 "$G51_RC"
+
+  printf '{"plugins":[{"name":"stride-ideation","version":"9.9.9"}],"metadata":{"version":"9.9.9"}}' > "$G51_DIR/body"
+  g51_run "$(g51_base 1.78.0)"
+  assert_eq "51h: catalog with no stride entry prints nothing (decoys ignored)" "" "$G51_OUT"
+
+  printf '{"plugins":[{"name":"stride","version":"1.80.0 and more"}]}' > "$G51_DIR/body"
+  g51_run "$(g51_base 1.78.0)"
+  assert_eq "51i: non-version-shaped pin is never printed" "" "$G51_OUT"
+
+  g51_catalog "1.80.0"
+  mkdir -p "$G51_DIR/local/stride/skills/stride-workflow" "$G51_DIR/local/stride/.claude-plugin"
+  printf '{"name":"stride","version":"1.79.0"}' > "$G51_DIR/local/stride/.claude-plugin/plugin.json"
+  g51_run "$G51_DIR/local/stride/skills/stride-workflow"
+  assert_contains "51j: local-path install reads plugin.json" \
+    'stride plugin 1.79.0 is installed but the marketplace publishes 1.80.0' "$G51_OUT"
+
+  mkdir -p "$G51_DIR/bare/stride/skills/stride-workflow"
+  g51_run "$G51_DIR/bare/stride/skills/stride-workflow"
+  assert_eq "51k: no version dir and no plugin.json prints nothing" "" "$G51_OUT"
+  assert_exit "51k: no version dir and no plugin.json exits 0" 0 "$G51_RC"
+
+  g51_catalog "1.83.0"
+  g51_run "$(g51_base 1.83.0-rc.1)"
+  assert_contains "51l: pre-release install is older than its release" \
+    'stride plugin 1.83.0-rc.1 is installed but the marketplace publishes 1.83.0' "$G51_OUT"
+  g51_catalog "1.83.0-rc.1"
+  g51_run "$(g51_base 1.83.0)"
+  assert_eq "51m: release install vs its pre-release pin is silent" "" "$G51_OUT"
+  g51_catalog "1.83.0-rc.2"
+  g51_run "$(g51_base 1.83.0-rc.1)"
+  assert_eq "51n: two pre-releases of one core are not guessed at" "" "$G51_OUT"
+
+  g51_catalog "1.80.0"
+  g51_run "$(g51_base 1.78.0)"
+  G51_ARGS="$(cat "$G51_DIR/curl.log")"
+  assert_contains "51o: reads the canonical catalog over HTTPS" \
+    'https://raw.githubusercontent.com/cheezy/stride-marketplace/main/.claude-plugin/marketplace.json' "$G51_ARGS"
+  assert_contains "51o: bounded by a short max-time" 'max-time 3' "$G51_ARGS"
+  assert_contains "51o: sends a curl User-Agent" 'curl/stride-plugin-check' "$G51_ARGS"
+  assert_eq "51o: sends no Authorization header" "0" "$(grep -ciF 'authorization' "$G51_DIR/curl.log" | tr -d ' ')"
+
+  g51_run ""
+  assert_eq "51p: no argument prints nothing" "" "$G51_OUT"
+  assert_exit "51p: no argument exits 0" 0 "$G51_RC"
+
+  # 51r-51u: the remaining silent branches. A minimal PATH holds only the
+  # externals the helper uses, so curl or jq can be left out deliberately.
+  rm -f "$G51_DIR/body"
+  g51_run "$(g51_base 1.78.0)" 0
+  assert_eq "51r: curl exits 0 with an empty body -> nothing" "" "$G51_OUT"
+  assert_exit "51r: empty body exits 0" 0 "$G51_RC"
+
+  g51_catalog "1.80.0"
+  G51_BASH="$(command -v bash)"
+  mkdir -p "$G51_DIR/nocurl" "$G51_DIR/nojq"
+  for g51_tool in basename dirname; do
+    ln -sf "$(command -v "$g51_tool")" "$G51_DIR/nocurl/$g51_tool"
+    ln -sf "$(command -v "$g51_tool")" "$G51_DIR/nojq/$g51_tool"
+  done
+  ln -sf "$(command -v jq)" "$G51_DIR/nocurl/jq"
+  ln -sf "$G51_DIR/stub/curl" "$G51_DIR/nojq/curl"
+  : > "$G51_DIR/curl.log"
+  G51_OUT=$(PATH="$G51_DIR/nocurl" "$G51_BASH" "$G51_HELPER" "$(g51_base 1.78.0)" 2>&1); G51_RC=$?
+  assert_eq "51s: curl absent -> nothing" "" "$G51_OUT"
+  assert_exit "51s: curl absent exits 0" 0 "$G51_RC"
+
+  G51_OUT=$(G51_CURL_LOG="$G51_DIR/curl.log" G51_BODY_FILE="$G51_DIR/body" \
+    PATH="$G51_DIR/nojq" "$G51_BASH" "$G51_HELPER" "$(g51_base 1.78.0)" 2>&1); G51_RC=$?
+  assert_eq "51t: jq absent -> nothing" "" "$G51_OUT"
+  assert_exit "51t: jq absent exits 0" 0 "$G51_RC"
+  assert_eq "51t: jq absent -> no fetch is attempted" "" "$(cat "$G51_DIR/curl.log")"
+  G51_OUT=$(G51_CURL_LOG="$G51_DIR/curl.log" G51_BODY_FILE="$G51_DIR/body" \
+    PATH="$G51_DIR/nojq" "$G51_BASH" "$G51_HELPER" "$G51_DIR/local/stride/skills/stride-workflow" 2>&1); G51_RC=$?
+  assert_eq "51t: jq absent on a local-path install -> nothing" "" "$G51_OUT"
+
+  mkdir -p "$G51_DIR/numver/stride/skills/stride-workflow" "$G51_DIR/numver/stride/.claude-plugin"
+  printf '{"name":"stride","version":1.79}' > "$G51_DIR/numver/stride/.claude-plugin/plugin.json"
+  g51_run "$G51_DIR/numver/stride/skills/stride-workflow"
+  assert_eq "51u: non-string plugin.json version -> nothing" "" "$G51_OUT"
+  assert_exit "51u: non-string plugin.json version exits 0" 0 "$G51_RC"
+else
+  echo "  SKIP: Group 51 needs hooks/check-plugin-current.sh and jq"
+fi
+
+G51_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+if [ -f "$G51_WF" ]; then
+  assert_contains "51q: Step 0 runs the helper" 'hooks/check-plugin-current.sh' "$(cat "$G51_WF")"
+  assert_contains "51q: Step 0 says it never blocks" '**Plugin currency — warn, never block.**' "$(cat "$G51_WF")"
+else
+  echo "  SKIP: Group 51 SKILL.md not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

@@ -518,7 +518,11 @@ The gaps below were each confirmed by execution, not assumed:
   The `hooks.json` timeout is an independent backstop on both halves, and the
   failure direction is identical either way — a slow or dead host permits the
   stop. Recorded rather than papered over: this is a real, if minor, divergence
-  in a pair the rest of the fleet keeps in lockstep.
+  in a pair the rest of the fleet keeps in lockstep. The Step 0 plugin-currency
+  helper (W2251) has the same divergence: `check-plugin-current.ps1` has one
+  `-TimeoutSec 3` bound where `check-plugin-current.sh` has
+  `--connect-timeout 2` plus `--max-time 3`. A slow or dead host gives silence
+  on both halves.
 - **`Set-StrictMode -Version Latest`** (`hooks/stride-hook.ps1:14`,
   `hooks/stride-skill-gate.ps1:17`) is valid on both hosts, but `Latest`
   resolves to a different strictness on each. Not flagged, by design.

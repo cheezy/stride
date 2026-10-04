@@ -25,6 +25,17 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Added — Step 0 warns when the installed stride plugin is older than the published marketplace pin (W2251)
+
+On 2026-10-02 Claude Code ran stride 1.78.0 while the marketplace pinned 1.80.0. Dispatched agents load from the installed cache, so the 1.79 and 1.80 fixes never ran and nothing said so. The local marketplace clone was stale too, and `skills_version` is `1.0` for every release, so the server cannot detect this either.
+
+- **New helper:** `hooks/check-plugin-current.sh` and its PowerShell twin `hooks/check-plugin-current.ps1`. Each takes the skill base directory, reads the installed version from the directory name (or from `.claude-plugin/plugin.json` for a local-path install), and reads the `stride` entry's `version` from the published catalog on GitHub over HTTPS (a constant URL, no credentials, a 3-second bound).
+- **One line or nothing:** when the install is older, it prints one line naming both versions and the `/plugin marketplace update` then `/plugin update` commands. It prints nothing when the versions match or the install is newer, and nothing when the pin is unreachable, malformed or not version-shaped. It always exits 0.
+- **Numeric comparison:** versions are compared per component, so 1.80.0 is newer than 1.9.0. A pre-release sorts below its release. Two pre-releases of the same core are reported as silence rather than ordered.
+- **`SKILL.md` Step 0 item 5** runs the helper as a statement that never blocks. Item 4 was tightened to pay for it, and `SKILL.md` stays within budget at 100,992 of 101,000 bytes.
+- **Pinned:** bash hook-suite Group 51 and PowerShell Group 45. They use a stub curl and an in-process fixture, so neither touches the network.
+- **Ports:** not carried. The port canon does not register Step 0.
+
 ### Changed — asking to work a goal, the queue or several tasks now runs each task in its own runner, with an opt-out (W2250)
 
 Step 1.5 dispatcher mode was opt-in, so multi-task sessions kept every task's output in one context: in the 9-task G439 session (measured 2026-10-02, plugin 1.78.0) main-loop context grew from 70K to 965K tokens per request over 518 requests (223M total, ~72% of the session's tokens).

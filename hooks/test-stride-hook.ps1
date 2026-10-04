@@ -12766,6 +12766,127 @@ if ((Test-Path -LiteralPath $g44Wf) -and (Test-Path -LiteralPath $g44Odm) -and (
 }
 
 # ============================================================
+# Test Group 45: W2251 - Step 0 plugin-currency check, PowerShell half
+# (mirrors bash Group 51)
+# ============================================================
+# The helper is dot-sourced, which defines its functions without running the
+# check; Get-StridePinBody is then replaced in-process with a fixture so no case
+# touches the network and the URL stays a constant rather than an input.
+Write-Host ""
+Write-Host "=== Test Group 45: W2251 plugin-currency check (PowerShell) ==="
+$g45Helper = Join-Path $ScriptDir 'check-plugin-current.ps1'
+$g45Dir = Join-Path $TmpDir 'g45'
+$g45Update = '/plugin marketplace update stride-marketplace, then /plugin update stride@stride-marketplace'
+
+function New-G45Base {
+    param([string]$Version)
+    $p = Join-Path (Join-Path (Join-Path (Join-Path $g45Dir 'cache') 'stride') $Version) (Join-Path 'skills' 'stride-workflow')
+    New-Item -ItemType Directory -Path $p -Force | Out-Null
+    return $p
+}
+function New-G45Catalog {
+    param([string]$Version)
+    return ('{"name":"stride-marketplace","metadata":{"version":"9.9.9"},"plugins":[{"name":"stride-ideation","version":"9.9.9"},{"name":"stride","source":{"source":"url","url":"https://github.com/cheezy/stride.git"},"version":"' + $Version + '"}]}')
+}
+# Run the check in a child scope with a fixture catalog body.
+function Invoke-G45Check {
+    param([string]$Base, [string]$Body)
+    $out = & {
+        . $g45Helper
+        $script:G45Body = $Body
+        function Get-StridePinBody { return $script:G45Body }
+        Invoke-StridePluginCheck $Base
+    }
+    return (@($out) -join "`n")
+}
+
+if (Test-Path -LiteralPath $g45Helper) {
+    $out = Invoke-G45Check (New-G45Base '1.78.0') (New-G45Catalog '1.80.0')
+    Assert-Eq "45a: older install prints the one-line warning" "stride plugin 1.78.0 is installed but the marketplace publishes 1.80.0 - update with: $g45Update" $out
+    Assert-Eq "45b: equal versions print nothing" '' (Invoke-G45Check (New-G45Base '1.80.0') (New-G45Catalog '1.80.0'))
+    Assert-Eq "45c: newer install prints nothing" '' (Invoke-G45Check (New-G45Base '1.81.0') (New-G45Catalog '1.80.0'))
+    Assert-Contains "45d: 1.9.0 installed vs 1.80.0 pin warns (numeric, not string)" 'stride plugin 1.9.0 is installed but the marketplace publishes 1.80.0' (Invoke-G45Check (New-G45Base '1.9.0') (New-G45Catalog '1.80.0'))
+    Assert-Eq "45e: 1.80.0 installed vs 1.9.0 pin is silent" '' (Invoke-G45Check (New-G45Base '1.80.0') (New-G45Catalog '1.9.0'))
+    Assert-Eq "45f: unreachable pin (empty body) prints nothing" '' (Invoke-G45Check (New-G45Base '1.78.0') '')
+    Assert-Eq "45g: malformed pin prints nothing" '' (Invoke-G45Check (New-G45Base '1.78.0') '<html>rate limited</html>')
+    Assert-Eq "45h: catalog with no stride entry prints nothing (decoys ignored)" '' (Invoke-G45Check (New-G45Base '1.78.0') '{"plugins":[{"name":"stride-ideation","version":"9.9.9"}],"metadata":{"version":"9.9.9"}}')
+    Assert-Eq "45i: non-version-shaped pin is never printed" '' (Invoke-G45Check (New-G45Base '1.78.0') '{"plugins":[{"name":"stride","version":"1.80.0 and more"}]}')
+
+    $g45Local = Join-Path $g45Dir (Join-Path 'local' 'stride')
+    New-Item -ItemType Directory -Path (Join-Path $g45Local (Join-Path 'skills' 'stride-workflow')) -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $g45Local '.claude-plugin') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path (Join-Path $g45Local '.claude-plugin') 'plugin.json') -Value '{"name":"stride","version":"1.79.0"}'
+    Assert-Contains "45j: local-path install reads plugin.json" 'stride plugin 1.79.0 is installed but the marketplace publishes 1.80.0' (Invoke-G45Check (Join-Path $g45Local (Join-Path 'skills' 'stride-workflow')) (New-G45Catalog '1.80.0'))
+
+    $g45Bare = Join-Path $g45Dir (Join-Path 'bare' (Join-Path 'stride' (Join-Path 'skills' 'stride-workflow')))
+    New-Item -ItemType Directory -Path $g45Bare -Force | Out-Null
+    Assert-Eq "45k: no version dir and no plugin.json prints nothing" '' (Invoke-G45Check $g45Bare (New-G45Catalog '1.80.0'))
+
+    Assert-Contains "45l: pre-release install is older than its release" 'stride plugin 1.83.0-rc.1 is installed but the marketplace publishes 1.83.0' (Invoke-G45Check (New-G45Base '1.83.0-rc.1') (New-G45Catalog '1.83.0'))
+    Assert-Eq "45m: release install vs its pre-release pin is silent" '' (Invoke-G45Check (New-G45Base '1.83.0') (New-G45Catalog '1.83.0-rc.1'))
+    Assert-Eq "45n: two pre-releases of one core are not guessed at" '' (Invoke-G45Check (New-G45Base '1.83.0-rc.1') (New-G45Catalog '1.83.0-rc.2'))
+
+    $g45Src = Get-Content -LiteralPath $g45Helper -Raw
+    Assert-Contains "45o: reads the canonical catalog over HTTPS" "'https://raw.githubusercontent.com/cheezy/stride-marketplace/main/.claude-plugin/marketplace.json'" $g45Src
+    Assert-Contains "45o: bounded by a short timeout" '-TimeoutSec 3' $g45Src
+    Assert-Contains "45o: never follows a redirect off the host" '-MaximumRedirection 0' $g45Src
+    Assert-Contains "45o: sends a curl User-Agent" "-UserAgent 'curl/stride-plugin-check'" $g45Src
+    Assert-Eq "45o: sends no Authorization header" 'False' ([string]$g45Src.Contains('Authorization'))
+
+    # A real child process: no argument -> silence and exit 0, without any fetch.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = (Get-Process -Id $PID).Path
+    $psi.Arguments = "-NoProfile -File `"$g45Helper`""
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $g45Stdout = $proc.StandardOutput.ReadToEnd()
+    $null = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    Assert-Eq "45p: no argument prints nothing" '' $g45Stdout.Trim()
+    Assert-Exit "45p: no argument exits 0" 0 $proc.ExitCode
+
+    # 45r-45u: the real Get-StridePinBody, with Invoke-WebRequest shadowed by a
+    # function in the child scope, so its Byte[], string and catch branches run
+    # without the network. The stub has no param block, so every argument the
+    # helper passes binds to $args and none can fail to bind.
+    function Invoke-G45Fetch {
+        param([string]$Base, [scriptblock]$Iwr)
+        $out = & {
+            . $g45Helper
+            ${function:Invoke-WebRequest} = $Iwr
+            Invoke-StridePluginCheck $Base
+        }
+        return (@($out) -join "`n")
+    }
+    $script:G45Catalog = New-G45Catalog '1.80.0'
+    $g45Bytes = { [pscustomobject]@{ Content = [System.Text.Encoding]::UTF8.GetBytes($script:G45Catalog) } }
+    $g45String = { [pscustomobject]@{ Content = [string]$script:G45Catalog } }
+    $g45Throw = { throw 'simulated network failure' }
+    Assert-Contains "45r: Byte[] response content is decoded, not cast" 'stride plugin 1.78.0 is installed but the marketplace publishes 1.80.0' (Invoke-G45Fetch (New-G45Base '1.78.0') $g45Bytes)
+    Assert-Contains "45s: string response content is read" 'stride plugin 1.78.0 is installed but the marketplace publishes 1.80.0' (Invoke-G45Fetch (New-G45Base '1.78.0') $g45String)
+    Assert-Eq "45t: a throwing request is caught into silence" '' (Invoke-G45Fetch (New-G45Base '1.78.0') $g45Throw)
+
+    $g45Num = Join-Path $g45Dir (Join-Path 'numver' 'stride')
+    New-Item -ItemType Directory -Path (Join-Path $g45Num (Join-Path 'skills' 'stride-workflow')) -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $g45Num '.claude-plugin') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path (Join-Path $g45Num '.claude-plugin') 'plugin.json') -Value '{"name":"stride","version":1.79}'
+    Assert-Eq "45u: non-string plugin.json version prints nothing" '' (Invoke-G45Check (Join-Path $g45Num (Join-Path 'skills' 'stride-workflow')) (New-G45Catalog '1.80.0'))
+} else {
+    Write-Host "  SKIP: Group 45 needs hooks/check-plugin-current.ps1"
+}
+
+$g45Wf = Join-Path $ScriptDir (Join-Path '..' (Join-Path 'skills' (Join-Path 'stride-workflow' 'SKILL.md')))
+if (Test-Path -LiteralPath $g45Wf) {
+    $g45WfText = Get-Content -LiteralPath $g45Wf -Raw -Encoding UTF8
+    Assert-Contains "45q: Step 0 runs the helper" 'hooks/check-plugin-current.sh' $g45WfText
+    Assert-Contains "45q: Step 0 names the PowerShell twin" 'check-plugin-current.ps1' $g45WfText
+} else {
+    Write-Host "  SKIP: Group 45 SKILL.md not found"
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

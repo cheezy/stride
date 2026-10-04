@@ -30,7 +30,7 @@ planned section.
 | W2254 | G447 | The main agent reads key files while the explorer runs, with no edits until it reports | **landed in 1.81.0** |
 | W2255 | G447 | The Stop gate does not block while a dispatched stride subagent is still running | **landed in 1.81.0** |
 | W2256 | G448 | Discovery uses a slim `GET /api/tasks/next`; the task body comes from the claim | **landed in 1.81.0** |
-| W2257 | G448 | Move rationale out of `stride-workflow` SKILL.md and `review-block-extraction.md` | planned |
+| W2257 | G448 | Move rationale out of `stride-workflow` SKILL.md and `review-block-extraction.md` | **landed (unreleased)** |
 | W2258 | G448 | Move rationale out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` | planned |
 | W2259 | G448 | Measure the token and wall-clock effect of all three goals | planned (runs last) |
 
@@ -381,27 +381,51 @@ before claiming must move it to after the claim.
 **Verify.** Run one task from discovery to completion and confirm the discovery
 response is the slim shape.
 
-### W2257 and W2258 — lighter hot-path skills (planned)
+### W2257 — lighter `stride-workflow` hot path (**landed (unreleased)**; `stride` only for now)
 
-**Planned change.** Move rationale, provenance and history out of the files every
-task loads:
+**Change.**
 
-- W2257: `stride-workflow` SKILL.md and `review-block-extraction.md`.
-- W2258: `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md`.
-
-The moved text goes into `docs/`, and every gate, rule and self-check stays
-inline. The byte budgets in `scripts/check-skill-budgets.sh` drop to match.
+- Rationale, provenance and history moved out of `skills/stride-workflow/SKILL.md`
+  (100,992 → 98,446 B, −2.5%) and `skills/stride-workflow/review-block-extraction.md`
+  (56,272 → 50,906 B, −9.5%) into a new `docs/orchestrator-rationale.md`, one
+  `##` section per moved block.
+- Each moved block left a one-sentence pointer at its original site naming the
+  doc and the section. Text that duplicated another file (`reference.md` §
+  Edge Cases, `hook-execution.md`, a Source B code comment) was deleted with a
+  pointer to that file instead of being copied.
+- The six canon back-reference paragraphs were shortened, not moved. Each keeps
+  the `port-canon.md` path, the entry id and the version-bump obligation, which
+  is what the `edit-site-back-reference` check reads.
+- Every gate, decision matrix, Decision Summary, schema, self-check, executed
+  code block, prompt-injection framing and redaction rule stayed inline, as did
+  the text `docs/port-canon.md` quotes. No canon version changed.
+- `scripts/check-skill-budgets.sh` and `.ps1`: `stride-workflow/SKILL.md`
+  lowered from 101,000 to 100,000, and `review-block-extraction.md` budgeted
+  for the first time at 57,000.
 
 **Port needs.** Each port's skills are its own voicing, so port the *method*, not
 the bytes:
 
 1. Identify the rationale paragraphs in the port's hot path.
-2. Move them to the port's docs.
-3. Keep every canon anchor beside its governed text.
+2. Move them to the port's docs, never under a directory where every `.md`
+   registers as an agent.
+3. Keep every canon anchor beside its governed text, with a back-reference
+   paragraph below it that names `port-canon.md` and the entry id.
+4. Leave a pointer at every original site.
 
 Canon provenance quotes must still match the governed text verbatim after the
-move. An earlier trim of this kind measured about 5%, so this has the lowest
-priority of any fix here.
+move.
+
+**Verify.** The port's canon check reports no new failing cell, its budget check
+(if any) passes, and its hook suite stays green.
+
+### W2258 — lighter `stride-completing-tasks` and reviewer (planned)
+
+**Planned change.** Apply the W2257 method to `stride-completing-tasks` SKILL.md
+and `agents/task-reviewer.md`. The moved text goes into `docs/`, and every gate,
+rule and self-check stays inline. The byte budgets drop to match. An earlier
+trim of this kind measured about 5%, so this has the lowest priority of any fix
+here.
 
 ### W2259 — measure the effect (planned; last)
 

@@ -25,6 +25,17 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — rationale and provenance move out of the stride-workflow hot path into `docs/orchestrator-rationale.md` (W2257)
+
+`skills/stride-workflow/SKILL.md` and `skills/stride-workflow/review-block-extraction.md` are resident for most of a session, and much of their text explained *why* a rule exists rather than stating it. That explanation now lives in a new `docs/orchestrator-rationale.md`. `SKILL.md` goes from 100,992 to 98,446 bytes (−2,546, −2.5%) and `review-block-extraction.md` from 56,272 to 50,906 bytes (−5,366, −9.5%): 7,912 bytes fewer for every request that has both files loaded.
+
+- **Moved, each with a pointer at its original site:** 15 sections. From `SKILL.md`: why the orchestrator exists, the former inline Plan and Review triggers, the Step 5.6 mirroring note, why Step 7 deletes its working artifacts, and where the `reason_code` vocabulary came from. From `review-block-extraction.md`: the `commit_pending` nested-repo evidence and its residuals, why the scope pin runs either way, why the round-counter loop is written as it is, why `CRITICAL_CLEARED` exists, why the counter is cleared at claim time, why the Source A merge is a whole-object overlay, what `commit_pending_scope_ok` detects, why every `round_cap_ok` term is type-guarded, why it reads the previous round, and why the scope-pin lookups are total.
+- **Deleted as duplicates, with a pointer instead:** the stale-marker explanation (already in `reference.md` § Edge Cases), the D242 settled-decision sentence (already in `hook-execution.md`), and the round-recount ordering explanation (already in the Source B code comment).
+- **Shortened, not moved:** the six canon back-reference paragraphs beside the `SKILL.md` anchors, the row-precedence note above them, and the `cosmetic-finding-class` mirror sentence. Each still names `stride/docs/port-canon.md`, its entry id and the version-bump obligation; the `edit-site-back-reference` check passes unchanged.
+- **Kept inline:** every gate, decision matrix, Decision Summary, schema, self-check, executed code block, prompt-injection framing and redaction rule, plus every passage `docs/port-canon.md` quotes and every string a hook-suite group greps for. No canon version changed.
+- **Budgets:** `stride-workflow/SKILL.md` drops from 101,000 to 100,000 bytes. The usual 10–15% headroom would have *raised* it, so it is held tighter instead. `review-block-extraction.md` gets its first budget, 57,000 bytes, about 12% above its new size, in both `scripts/check-skill-budgets.sh` and `.ps1`.
+- **Ports:** not carried. `docs/porting-g446-g448.md` records the method for each port to apply in its own voicing.
+
 ### Added — Step 0 warns when the installed stride plugin is older than the published marketplace pin (W2251)
 
 On 2026-10-02 Claude Code ran stride 1.78.0 while the marketplace pinned 1.80.0. Dispatched agents load from the installed cache, so the 1.79 and 1.80 fixes never ran and nothing said so. The local marketplace clone was stale too, and `skills_version` is `1.0` for every release, so the server cannot detect this either.

@@ -10,7 +10,7 @@ skills_version: 1.0
 
 This skill replaces the fragmented pattern of remembering to invoke `stride-claiming-tasks`, `stride-subagent-workflow`, and `stride-completing-tasks` at specific moments. Instead, invoke this one skill and follow it through. Every step is here, in order, and this skill tells you at each point what it needs — the few deliberate hand-offs are gated procedures in sibling files, lookup material in `reference.md`, and the completion contract Step 7 loads from `stride-completing-tasks`. You never have to remember when; you only have to follow.
 
-**Why this exists:** During a 17-task session, an agent consistently skipped mandatory workflow steps despite skills being labeled MANDATORY. The root cause: too many disconnected skills that the agent had to remember to invoke at specific moments. Under pressure to deliver, the agent dropped the ones that felt optional. This orchestrator eliminates that failure mode.
+**Why this exists:** [orchestrator-rationale.md](../../docs/orchestrator-rationale.md) § Why the Orchestrator Exists.
 
 ## The Core Principle
 
@@ -292,12 +292,7 @@ The `hooks.json` PostToolUse handler automatically executes `.stride.md` `## bef
 | Defect type | Skip | YES | Skip (unless large) | YES | YES |
 | Complexity absent or unrecognised | Skip | YES | YES | YES | YES |
 
-**Canon-governed — the rows above belong to entry `row-precedence`, not to
-`decision-matrix-authority`.** Both entries live in `stride/docs/port-canon.md`
-and both are anchored below, but they govern different things: editing a row's
-content is a substance change to `row-precedence`, whose Provenance quotes the
-`Complexity absent or unrecognised` row verbatim. Read that entry's
-back-reference below before changing any row here.
+**Canon-governed — these rows are entry `row-precedence` in `stride/docs/port-canon.md`, not `decision-matrix-authority`.** Editing a row owes that entry a version bump; read its back-reference below first.
 
 <!-- canon:decision-matrix-authority v1 -->
 **This matrix is the SOLE decision point for every column it carries** —
@@ -310,11 +305,7 @@ defect D221, and this rule is its fix. `stride-subagent-workflow` carries a
 mirror of this table for the subagent columns: it must agree row for row, and
 **where it diverges, this matrix is authoritative.**
 
-**Canon-governed — entry `decision-matrix-authority` in
-`stride/docs/port-canon.md`.** That entry registers this rule as one every port
-must carry. A change to its substance owes a version bump in **two** places
-before the next release: that entry in the canon, and this file's own
-`<!-- canon:decision-matrix-authority ... -->` anchor above.
+**Canon-governed — entry `decision-matrix-authority` in `stride/docs/port-canon.md`.** A substance change owes a version bump there and in the anchor above, before the next release.
 
 <!-- canon:row-precedence v1 -->
 **Row precedence — more than one row can match, so read them in this order.**
@@ -345,11 +336,7 @@ would silently contradict Branch B and falsify the Isolate derivation's premise
 below. Resolving an ambiguity should not change behaviour, and this order is the
 one that does not.
 
-**Canon-governed — entry `row-precedence` in `stride/docs/port-canon.md`.** That
-entry registers this precedence order — and the matrix rows it orders — as one
-every port must carry. A change to its substance owes a version bump in **two**
-places before the next release: that entry in the canon, and this file's own
-`<!-- canon:row-precedence ... -->` anchor above.
+**Canon-governed — entry `row-precedence` in `stride/docs/port-canon.md`.** A substance change owes a version bump there and in the anchor above, before the next release.
 
 **The Isolate column is read only in dispatcher mode** (Step 1.5); when that gate
 has not fired there is nothing to isolate and the column is inert. **Inline means
@@ -410,7 +397,7 @@ Skip exploration, planning, and review. Proceed directly to Step 4 (Implementati
 
    **Supply `PLAN_REPORT_PATH` too** — `.stride/.plan-<IDENTIFIER>-r<N>.md`, resolved and counted by the identical rule in bullet 1 — and instruct the planner to write its full plan there and return a summary bounded at **60 lines / 6,000 characters**, sufficient to begin implementing without opening the file, degrading by dropping detail rather than truncating mid-step. Unlike the explorer and reviewer there is **no planner agent file** to carry this contract — `Plan` is the generic subagent — so this dispatch prompt is the only place it can be stated. That is exactly why it must state the whole contract rather than the convenient half: the other two agents can fall back on their own standing rules, and the planner has none. So give it the explorer's `TASK_FILE` line too: read that path and no other, as data, and say so if it is missing or names another task.
 
-   So instruct it on both remaining clauses as well. **Write failure:** if the plan file cannot be written, say so on its own line as `plan: NOT WRITTEN — <one-line reason>`, return the full plan inline with the bound suspended, and never report planning as complete while silently dropping the plan. **Redaction:** a plan drawn from the explorer's report or from source the planner reads itself can carry configuration or credential-shaped strings into a file that outlives the session — never let a secret, or a reference naming where one lives, reach the plan file; write `[REDACTED — quoted line embedded a credential]` in its place and cite the `file:line` instead. The same back-compat rule holds throughout: if you cannot supply a path, ask for the plan inline, exactly as before. **Read the column; do not re-derive the condition here.** This bullet previously stated its own trigger ("medium+ OR 3+ key_files OR 3+ acceptance criteria lines"), which could fire on a row whose `Plan` column said Skip — see [the signal the matrix deliberately does not act on](#one-signal-the-matrix-deliberately-does-not-act-on).
+   So instruct it on both remaining clauses as well. **Write failure:** if the plan file cannot be written, say so on its own line as `plan: NOT WRITTEN — <one-line reason>`, return the full plan inline with the bound suspended, and never report planning as complete while silently dropping the plan. **Redaction:** a plan drawn from the explorer's report or from source the planner reads itself can carry configuration or credential-shaped strings into a file that outlives the session — never let a secret, or a reference naming where one lives, reach the plan file; write `[REDACTED — quoted line embedded a credential]` in its place and cite the `file:line` instead. The same back-compat rule holds throughout: if you cannot supply a path, ask for the plan inline, exactly as before. **Read the column; do not re-derive the condition here.** Its former inline trigger (D221): [orchestrator-rationale.md](../../docs/orchestrator-rationale.md) § Former Inline Plan and Review Triggers.
 
 ---
 
@@ -433,7 +420,7 @@ Follow:
 
 ## Step 5: Code Review (Decision Matrix)
 
-**Check the decision matrix from Step 3.** Review is required when that matrix's **Review** column says YES for this task's row. **Read the column; do not re-derive the condition here.** This line previously restated its own trigger ("medium+ OR 2+ key_files"), which disagreed with the matrix for a `small` defect with 1 `key_file` — the same defect as D221, in the Review column instead of the Plan column.
+**Check the decision matrix from Step 3.** Review is required when that matrix's **Review** column says YES for this task's row. **Read the column; do not re-derive the condition here.** Its former inline trigger (D221): [orchestrator-rationale.md](../../docs/orchestrator-rationale.md) § Former Inline Plan and Review Triggers.
 
 ### Claude Code: Dispatch Task Reviewer
 
@@ -455,14 +442,14 @@ Dispatch `stride:task-reviewer` agent — and, when the deep security gate below
 <!-- canon:review-round-cap v2 -->
 **Two review rounds is the ceiling, and round two must be earned.** A round is a dispatch that produced a `$MERGED` file; a crashed or unparsable dispatch is re-dispatched and consumes no round. **Round two has three triggers:** round one's fixes edited a code path (`FIX_CODE_PATHS` not `0` — a path that is not documentation, a test, or a comment-only change; the classifier is in [review-block-extraction.md](review-block-extraction.md)), or round one reported a `critical`, or a `category: "security"` issue at any severity. **Without one, every fixed finding is recorded, not re-reviewed**, and you submit round one's result — so a fix confined to docs, comments, the changelog or test wording never buys round two. Round two still receives the **full** task diff and emits the full block. **After round two, remaining `important` and `minor` findings are RECORDED, not fixed — never a `category: "security"` issue, fixed or escalated at any severity, `important` being the reviewer's default for one.** Record by severity, category and `file:line` only, redacted, in `completion_notes` and one line of `completion_summary`, before Step 7 deletes the block files. **`critical` is exempt from the cap and always blocks:** fix it and dispatch a further round scoped to that finding; where you cannot, stop without completing (`review_blocked`, `failure.kind: "review_escalation"`) rather than recording it.
 
-**Canon-governed — entry `review-round-cap` in `stride/docs/port-canon.md`.** That entry registers the two-round ceiling and its round-two triggers, the `critical` exemption and the record-don't-fix disposition as rules every port must carry. A change to their substance owes a version bump in **two** places before the next release: that entry in the canon, and this file's own `<!-- canon:review-round-cap ... -->` anchor above.
+**Canon-governed — entry `review-round-cap` in `stride/docs/port-canon.md`.** A substance change owes a version bump there and in the anchor above, before the next release.
 
 The reviewer returns a **bounded plain-text summary — at most 24 lines and 2,000 characters** — naming the block file and the report file it wrote. The full structured block lives in the block file; the full prose report lives in the report file. The schema of the block is owned by `stride/agents/task-reviewer.md` — do not duplicate field definitions here. **The summary is not a source for `reviewer_result`: never build the payload from the numbers you read in it.**
 
 - **Fix all Critical issues** before proceeding — read the issue detail from the **block file**, not from the summary, which deliberately carries no descriptions: `jq -r '.issues[] | select(.severity=="critical")' "$BLOCK"`
 - **Fix all Important issues** before proceeding — same source — **through round two; after it record them per the cap above, never a `category: "security"` one**
 - Minor issues are optional but recommended
-- **A round whose findings are ALL cosmetic buys no further review round.** A `cosmetic: true` issue is presentational only — the claim is correct, the subject is wrapping, width, counts or phrasing — so it is reported and recorded like any other finding but never spends a round. If every entry in `issues[]` is cosmetic, fix them or not as you choose and **proceed to completion without re-dispatching**; a single substantive finding alongside them means the round is not all-cosmetic and the normal path applies. **Scoped to a block that parsed** (Source A or B): on the Source C prose fallback `issues[]` is absent by construction, so "every entry is cosmetic" would be **vacuously true** — the rule is *inapplicable* there, and **an absent or empty `issues[]` is never an all-cosmetic round.** And note the predicate reads `issues[]` **only**, while `status` has three inputs — issues, `not_met` criteria, and `not_met` project checks — so an all-cosmetic round is not by itself a round that found nothing that matters: **if `status` is `changes_requested`, honour it: the all-cosmetic exemption does not apply, and the cap's round-two triggers decide.** **Cosmetic is orthogonal to severity**: only ever on a non-security `minor` — `cosmetic_shape_ok` refuses anything else — and otherwise self-certified; see limit (3) in [review-block-extraction.md](review-block-extraction.md). Its definition is owned by `stride/agents/task-reviewer.md`. **Canon-governed — entry `cosmetic-finding-class` in `stride/docs/port-canon.md`;** that entry registers this rule as one every port must carry, and its anchor sits beside the definition in `stride/agents/task-reviewer.md`, not here — this bullet is the mirror.
+- **A round whose findings are ALL cosmetic buys no further review round.** A `cosmetic: true` issue is presentational only — the claim is correct, the subject is wrapping, width, counts or phrasing — so it is reported and recorded like any other finding but never spends a round. If every entry in `issues[]` is cosmetic, fix them or not as you choose and **proceed to completion without re-dispatching**; a single substantive finding alongside them means the round is not all-cosmetic and the normal path applies. **Scoped to a block that parsed** (Source A or B): on the Source C prose fallback `issues[]` is absent by construction, so "every entry is cosmetic" would be **vacuously true** — the rule is *inapplicable* there, and **an absent or empty `issues[]` is never an all-cosmetic round.** And note the predicate reads `issues[]` **only**, while `status` has three inputs — issues, `not_met` criteria, and `not_met` project checks — so an all-cosmetic round is not by itself a round that found nothing that matters: **if `status` is `changes_requested`, honour it: the all-cosmetic exemption does not apply, and the cap's round-two triggers decide.** **Cosmetic is orthogonal to severity**: only ever on a non-security `minor` — `cosmetic_shape_ok` refuses anything else — and otherwise self-certified; see limit (3) in [review-block-extraction.md](review-block-extraction.md). Its definition is owned by `stride/agents/task-reviewer.md`. **Canon-governed — entry `cosmetic-finding-class` in `stride/docs/port-canon.md`** (anchor in `stride/agents/task-reviewer.md`; this bullet mirrors it): a substance change owes a version bump there.
 - **`review_report` comes from the report file** — splice it into the Step 7 payload with `jq --rawfile` rather than reading it into your context. When no report file exists (an older reviewer, or the reviewer's write-failure path), fall back to its returned text exactly as before.
 
 #### Extracting the structured review block
@@ -581,7 +568,7 @@ If any is false, **skip this step entirely and proceed to Step 6 with no failure
 
 **Skipping changes nothing.** With no session, no convertible findings, no `/harden`, or a non-Claude-Code environment, the workflow behaves exactly as it did before this step existed — no completion field changes, no telemetry name is added, and nothing blocks.
 
-This step is stated a second time, intentionally identical in substance, in `stride-subagent-workflow` **Phase 3.6** — **keep the two in sync; an edit here needs the matching edit there.** The step's procedure lives in `skills/stride-workflow/optional-hardening.md`, so that is the file an edit on this side actually lands in.
+Mirrored in `stride-subagent-workflow` **Phase 3.6** — **an edit here needs the matching edit there**, landing in `optional-hardening.md` on this side ([orchestrator-rationale.md](../../docs/orchestrator-rationale.md) § Step 5.6 Is Mirrored in stride-subagent-workflow).
 
 
 ---
@@ -613,9 +600,9 @@ The executor writes each hook's structured result — with a real measured durat
 - **`before_doing_result` / `after_doing_result` / `before_review_result` `duration_ms` — `0`.** All three request bodies are written *before* their own hook runs, so a real figure does not exist at write time even in principle.
 - **`after_goal` — READ IT. This is the one that works.** Its result PATCH is a **separate, later** request: read `.stride/.hook-result-after_goal.json` when you build the `PATCH /api/tasks/$GOAL_ID/after_goal` body (see Step 8), and the server stores the real `duration_ms` on the goal. Keep `0` only if the file is absent, which means the section was empty and did no work.
 
-**Do not invent any of these numbers.** An absent `.stride/.hook-result-<hook>.json` means the section body was empty, the executor did no work, and `0` is truthful — absence is never an error, a retry, or a licence to invent a figure. As of D242 the `0` on the three task-lifecycle results is a **settled decision, not an open gap** — the panel renders it as an em dash, and no follow-up PATCH exists or is planned.
+**Do not invent any of these numbers.** An absent `.stride/.hook-result-<hook>.json` means the section body was empty, the executor did no work, and `0` is truthful — absence is never an error, a retry, or a licence to invent a figure.
 
-The full derivation (exit-0/stdout chain, D234 durable-file design, D227 forbidden list, the three alternatives D242 declined) is in [hook-execution.md](hook-execution.md) § Why Every Task-Lifecycle Duration Is Zero — read it only if tempted to re-open the question.
+The full derivation (exit-0/stdout chain, D234 durable-file design, D227 forbidden list, why D242 settled the `0` rather than leaving a gap, and the three alternatives it declined) is in [hook-execution.md](hook-execution.md) § Why Every Task-Lifecycle Duration Is Zero — read it only if tempted to re-open the question.
 
 If `after_doing` fails (PreToolUse returns exit 2), fix the issue and retry the curl. The hooks fire again automatically.
 
@@ -629,7 +616,7 @@ curl -sS -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete?response_view=sli
   | tee "$CLAUDE_PROJECT_DIR/.stride/.last-api-response.json"
 ```
 
-**Canon-governed — entry `stdout-preservation-guard` in `stride/docs/port-canon.md`.** That entry registers this rule as one every port whose runtime parses a Stride reply must carry. A change to its substance owes a version bump in **two** places before the next release: that entry in the canon, and this file's own `<!-- canon:stdout-preservation-guard ... -->` anchor above.
+**Canon-governed — entry `stdout-preservation-guard` in `stride/docs/port-canon.md`.** A substance change owes a version bump there and in the anchor above, before the next release.
 
 ### Hook Environment Variables
 
@@ -667,7 +654,7 @@ When a blocking hook fails, dispatch `stride:hook-diagnostician` agent with the 
 
   The commands, and the `$STRIDE_DIR` guard they need so an unresolved root cannot turn the delete into a silent no-op, are in [review-block-extraction.md](review-block-extraction.md).
 
-  They quote diff content, source or app responses verbatim; `<N>` increments every round, so without this a project accrues an unbounded on-disk corpus of excerpts. That matters most where the `.gitignore` mention in Step 0 went unheeded: a project whose `## after_doing` runs `git add -A` would otherwise sweep review blocks and exploration reports into a commit. **Do this only after a `2xx`** — on a failed or retried completion the files are still the payload's source. This is housekeeping, not a correctness dependency: nothing may read these files after Step 7, so their absence later is never an error.
+  Why: [orchestrator-rationale.md](../../docs/orchestrator-rationale.md) § Why Step 7 Deletes the Working Artifacts. **Do this only after a `2xx`** — on a failed or retried completion the files are still the payload's source. This is housekeeping, not a correctness dependency: nothing may read these files after Step 7, so their absence later is never an error.
 
 ---
 
@@ -735,7 +722,7 @@ When the workflow finally stops -- in one of the four states above -- clear the 
 rm -f "$CLAUDE_PROJECT_DIR/.stride/.orchestrator_active"
 ```
 
-Leaving a stale marker behind allows direct sub-skill invocations to slip past the PreToolUse gate in the next session for up to 4 hours. The hook treats markers older than 4 hours as stale and may delete them on read, but the orchestrator should not rely on that — clear explicitly.
+Clear it explicitly — never rely on the 4-hour expiry ([reference.md](reference.md) § Edge Cases, "Stale orchestrator marker").
 
 ---
 
@@ -770,9 +757,9 @@ Each element of `workflow_steps` is an object with these keys:
 | `folded_into_prior_step` | An earlier step already produced this step's output — most often an explorer that returned a complete plan |
 | `matrix_deviation` | The matrix called for this step and it was deliberately not run |
 
-The vocabulary was derived by classifying the skip reasons actually persisted on the production board, so every code names a skip that really happens. `matrix_deviation` is the one that records **non-compliance**, and that is exactly why it exists: when the matrix called for a step you did not run, say so with that code rather than reaching for `decision_matrix_skip`, which would dress a deviation up as a sanctioned skip. The prose in `reason` then explains what drove it.
+Provenance: [orchestrator-rationale.md](../../docs/orchestrator-rationale.md) § Where the reason_code Vocabulary Came From. `matrix_deviation` is the one that records **non-compliance**, and that is exactly why it exists: when the matrix called for a step you did not run, say so with that code rather than reaching for `decision_matrix_skip`, which would dress a deviation up as a sanctioned skip. The prose in `reason` then explains what drove it.
 
-**Canon-governed — entry `reason-code-vocabulary` in `stride/docs/port-canon.md`.** That entry registers this vocabulary as one every port must carry. A change to its substance owes a version bump in **two** places before the next release: that entry in the canon, and this file's own `<!-- canon:reason-code-vocabulary ... -->` anchor above.
+**Canon-governed — entry `reason-code-vocabulary` in `stride/docs/port-canon.md`.** A substance change owes a version bump there and in the anchor above, before the next release.
 
 `name` is deliberately **not** constrained to the six values — persisted data carries a second step vocabulary from another runtime, and rejecting it would `422` that runtime's completions. Use the canonical six anyway; an invented name aggregates as its own row.
 
@@ -819,7 +806,7 @@ A small task with 0-1 key_files that legitimately skipped exploration, planning,
 - A missing `workflow_steps` array, or one with fewer than six entries, indicates an incomplete telemetry record.
 
 <!-- canon:dispatch-count-telemetry v1 -->
-**Canon-governed — entry `dispatch-count-telemetry` in `stride/docs/port-canon.md`.** That entry registers the `dispatch_count` key, its counts-dispatches-not-rounds rule, and the six limits in [telemetry-cost.md](telemetry-cost.md) as rules every port must carry. A change to their substance owes a version bump in **two** places before the next release: that entry in the canon, and this file's own `<!-- canon:dispatch-count-telemetry ... -->` anchor above.
+**Canon-governed — entry `dispatch-count-telemetry` in `stride/docs/port-canon.md`**, covering `dispatch_count` above and the limits in [telemetry-cost.md](telemetry-cost.md). A substance change owes a version bump there and in this anchor, before the next release.
 
 ---
 

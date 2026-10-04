@@ -32,7 +32,7 @@ planned section.
 | W2256 | G448 | Discovery uses a slim `GET /api/tasks/next`; the task body comes from the claim | **landed in 1.81.0** |
 | W2257 | G448 | Move rationale out of `stride-workflow` SKILL.md and `review-block-extraction.md` | **landed in 1.83.0** |
 | W2258 | G448 | Move rationale out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` | **landed in 1.83.0** |
-| W2259 | G448 | Measure the token and wall-clock effect of all three goals | measured (unreleased) — [`token-measurement-g446-g448.md`](token-measurement-g446-g448.md) |
+| W2259 | G448 | Measure the token and wall-clock effect of all three goals | measured; released in 1.84.0 — [`token-measurement-g446-g448.md`](token-measurement-g446-g448.md) |
 
 ## The evidence behind the goals
 

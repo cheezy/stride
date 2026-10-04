@@ -23,7 +23,9 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.84.0] - 2026-10-04
+
+Step 5.5 catches up with `stride-exploratory-testing` 0.4.0's explorer contract, and gets faster and lighter. It groups manual tests into at most about three charters, re-checks a fixed Critical in verify mode, fills a fixed dispatch template carrying the explorer's two required safety lines, and treats `no_observation_surface` as not performed. An unreplicated or provisional Critical is advisory. Step 5.6 runs `/harden` unattended. The two Step 5.5 hot-path files are trimmed to rules. Also: the measured G446–G448 dispatcher-mode run.
 
 ### Changed — Step 5.5's two hot-path files trimmed to rules, with history and rationale moved to `docs/exploratory-testing-rationale.md` (W2271)
 

@@ -173,7 +173,9 @@ STEP 5.6: Harden findings into checks (Optional, Gated)
   No session / no convertible findings / non-Claude-Code? --> Skip (no failure)
   /harden unavailable? --> Skip AND record that hardening was unavailable, so "could
     not" is distinguishable from "never considered"
-  Otherwise: dispatch /harden (no --output) --> drafts land staged in .exploratory/checks/
+  Otherwise: dispatch /harden (no --output) via a subagent, once per report, with the
+    report path you supplied and an explicit --framework <name|none>
+    --> drafts land staged in .exploratory/checks/
     Staged is the default and always safe. A check enters the suite ONLY if the file
       loads clean AND the case is green or inert -- established by RUNNING the suite once,
       never by expecting. Otherwise revert the move and file a follow-up defect.
@@ -299,7 +301,9 @@ CLAUDE CODE WORKFLOW:
 ├─ 5.6 Harden findings into regression checks (optional, gated):
 │     ├─ No session / no convertible findings / non-Claude-Code → Skip, no failure
 │     ├─ No /harden → Skip AND record that hardening was unavailable
-│     ├─ Dispatch /harden without --output; drafts stay staged in .exploratory/checks/ (safe default)
+│     ├─ Dispatch /harden without --output, via a subagent, from the report path you
+│     │  supplied with an explicit --framework <name|none>; drafts stay staged in
+│     │  .exploratory/checks/ (safe default)
 │     └─ Into the suite only if the file loads clean AND the case is inert or run-green;
 │        verify by running once, else revert and file a follow-up carrying the check's
 │        substance. NEVER overwrite an existing test file (that check is yours, not

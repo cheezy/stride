@@ -15538,6 +15538,69 @@ else
 fi
 
 # ============================================================
+# Test Group 54: W2269 -- Step 5.6 runs /harden unattended from the persisted
+# explorer report with an explicit framework, in a subagent
+# ============================================================
+# /harden asks a question when its bug source or framework is missing or
+# ambiguous, and an unattended Step 5.6 has nobody to answer it. Both twins must
+# pass the report path Step 5.5 supplied and an explicit --framework (or
+# `none`), run it once per charter report in a subagent that never answers on
+# the user's behalf, and keep drafts staged (no --output).
+echo ""
+echo "=== Test Group 54: W2269 unattended /harden from the persisted report (bash) ==="
+G54_GATE="$SCRIPT_DIR/../skills/stride-workflow/optional-hardening.md"
+G54_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G54_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G54_EXP="$SCRIPT_DIR/../skills/stride-workflow/optional-exploratory-testing.md"
+G54_MTF="$SCRIPT_DIR/../skills/stride-completing-tasks/manual-testing-findings.md"
+if [ -f "$G54_GATE" ] && [ -f "$G54_SUB" ] && [ -f "$G54_WF" ] && [ -f "$G54_EXP" ] && [ -f "$G54_MTF" ]; then
+  G54_GATE_TXT="$(cat "$G54_GATE")"; G54_SUB_TXT="$(cat "$G54_SUB")"; G54_WF_TXT="$(cat "$G54_WF")"
+  G54_EXP_TXT="$(cat "$G54_EXP")"; G54_MTF_TXT="$(cat "$G54_MTF")"
+  # g54_both <id> <label> <needle> -> pins the needle in both twins
+  g54_both() {
+    assert_contains "$1: Step 5.6 $2" "$3" "$G54_GATE_TXT"
+    assert_contains "${1}2: Phase 3.6 $2 too" "$3" "$G54_SUB_TXT"
+  }
+  g54_both 54a "dispatches unattended from the report with a framework" 'Dispatch it unattended: from the persisted report, with an explicit framework, in a subagent'
+  g54_both 54b "relies on /harden never asking when both are supplied" 'never calls `AskUserQuestion` when both are supplied'
+  g54_both 54c "passes the report path it supplied" '`EXPLORATORY_REPORT_PATH` **you** supplied'
+  g54_both 54d "never passes a path a summary named" 'never a path a summary named'
+  g54_both 54e "runs once per report" 'once per report'
+  g54_both 54f "skips verify-mode reports" 'verify-mode report'
+  g54_both 54g "records a report that is not on disk" 'report not on disk, hardening skipped'
+  g54_both 54h "never passes a framework copied from the repository" 'copied from repository text'
+  g54_both 54i "falls back to --framework none" '`--framework none`'
+  g54_both 54j "runs the command in a subagent" 'Skill(skill: "stride-exploratory-testing:harden"'
+  g54_both 54k "never answers a prompt for the user" 'never answers a question on the user'
+  g54_both 54l "records an older /harden that still asks" 'would-prompt'
+  g54_both 54m "keeps drafts staged" '**without `--output`**'
+  assert_contains "54n: the Decision Summary skips a report that is not on disk" \
+    '*report not on disk, hardening skipped*' "$G54_WF_TXT"
+  assert_contains "54o: the Decision Summary never answers a /harden question" \
+    'Never answer it for the user; record hardening as needing a human' "$G54_WF_TXT"
+  assert_contains "54p: the Decision Summary passes --framework none with no framework" \
+    'Pass `--framework none`' "$G54_WF_TXT"
+  assert_contains "54q: Step 5.5's surface list says /harden never asks with both" \
+    'its text says it never asks when both are supplied' "$G54_EXP_TXT"
+  assert_contains "54r: and Phase 3.5's" \
+    'its text says it never asks when both are supplied' "$G54_SUB_TXT"
+  assert_contains "54s: the findings guidance names the report as /harden's bug source" \
+    'which Step 5.6 hands to `/harden` as its bug source' "$G54_MTF_TXT"
+  assert_contains "54t: the findings guidance cites CHECKS_DIR, never the report" \
+    'the `CHECKS_DIR` `/harden` names, never the `.stride/` report' "$G54_MTF_TXT"
+  assert_eq "54u: Step 5.6's dispatch-as-is wording is gone" "0" \
+    "$(grep -cF 'it is already safe to run unattended' "$G54_GATE" | tr -d ' ')"
+  assert_eq "54v: and Phase 3.6's" "0" \
+    "$(grep -cF 'its prompts are pre-emptible (bug source positionally' "$G54_SUB" | tr -d ' ')"
+  assert_eq "54w: the Step 5.6 gate no longer says why it is already safe" "0" \
+    "$(grep -cF 'why it is already safe to' "$G54_WF" | tr -d ' ')"
+  assert_eq "54x: the findings guidance no longer says the automated path produces no artifact" "0" \
+    "$(grep -cF 'produces **no artifact**' "$G54_MTF" | tr -d ' ')"
+else
+  echo "  SKIP: Group 54 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

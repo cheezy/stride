@@ -15679,6 +15679,217 @@ else
 fi
 
 # ============================================================
+# Test Group 57: W2265 -- Step 5.5 reads the explorer's 1.0 contract: its enums
+# restated in an extractable block, an unreplicated or provisional Critical
+# recorded as advisory, the older-contract branches gone, and a cross-repo
+# check that stride's enum copies match the plugin's
+# ============================================================
+# Bash only, like Groups 36 and 52-56. Executed from the contract, Group 36
+# style: the lists are EXTRACTED from the markdown, never retyped here, so the
+# check compares what an agent actually reads. Three tiers:
+#   1. literal pins (always, when the stride files exist);
+#   2. stride-internal executed checks (need python3): the explorer-enums block
+#      is identical in both twins, has six stop_reason rows deriving three
+#      statuses, manual-testing-findings.md's two severity restatements equal
+#      the block, and the block's advisory regexes classify a vector set as
+#      stated;
+#   3. cross-repo (only when the sibling stride-exploratory-testing repo is
+#      present): the block's lists equal the plugin's agents/explorer.md, and
+#      every value in fixtures/example-explorer-output.json is a member and
+#      derives consistently. The fixture enumerates one status, one stop_reason
+#      and three severities, so it cannot be the source of a full list; the
+#      explorer.md it is pinned to by the plugin's own lib test is.
+# Each tier also proves it can fail, by running the checker on mutated COPIES
+# under $TMPDIR_TEST -- the real files are never written. A missing python3 or
+# a missing sibling repo prints a SKIP line and never fails the suite. What
+# this does NOT prove: that a live explorer emits these values, or that an
+# orchestrator applies the advisory rule at run time.
+echo ""
+echo "=== Test Group 57: W2265 explorer 1.0 contract consumer and cross-repo enum check (bash) ==="
+G57_GATE="$SCRIPT_DIR/../skills/stride-workflow/optional-exploratory-testing.md"
+G57_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G57_MTF="$SCRIPT_DIR/../skills/stride-completing-tasks/manual-testing-findings.md"
+G57_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G57_REF="$SCRIPT_DIR/../skills/stride-workflow/reference.md"
+G57_ET="${STRIDE_EXPLORATORY_TESTING_DIR:-$SCRIPT_DIR/../../stride-exploratory-testing}"
+G57_EXPLORER="$G57_ET/agents/explorer.md"
+G57_FIXTURE="$G57_ET/fixtures/example-explorer-output.json"
+
+# g57_check <stride|cross> <gate> <sub> <mtf> [<explorer> <fixture>]
+# Prints OK, or the sorted ids of the checks that failed. Every check runs in
+# its own try, so a regex miss or a missing key is a named failure, never a
+# traceback.
+g57_check() {
+  python3 - "$@" <<'PY'
+import json, re, sys
+mode, gate, sub, mtf = sys.argv[1:5]
+fails = []
+def chk(cid, fn):
+    try:
+        ok = fn()
+    except Exception:
+        ok = False
+    if not ok:
+        fails.append(cid)
+def block(path):
+    m = re.search(r"<!-- explorer-enums:start -->\n(.*?)<!-- explorer-enums:end -->", open(path).read(), re.S)
+    return "\n".join(l.strip() for l in m.group(1).splitlines()).strip()
+PAIR = r"^\| `([a-z_]+)` \| `([a-z_]+)` \|"
+def pairs(txt):
+    return [(a, b) for a, b in re.findall(PAIR, txt, re.M) if a != "stop_reason"]
+def ticks(s):
+    return re.findall(r"`([A-Za-z_]+)`", s)
+blocks = {}
+for key, path in (("gate", gate), ("sub", sub)):
+    try:
+        blocks[key] = block(path)
+    except Exception:
+        fails.append("block_" + key)
+B = blocks.get("gate", blocks.get("sub", ""))
+derive = dict(pairs(B))
+def sev():
+    return ticks(re.search(r"^\*\*Severity:\*\* ((?:`[A-Za-z]+`(?:, )?)+)", B, re.M).group(1))
+def is_adv(v):
+    a, b = re.search(r"^\*\*Advisory `replicated` forms:\*\* `([^`]+)` or `([^`]+)`", B, re.M).groups()
+    return re.search(a, v) is not None or re.search(b, v) is not None
+if len(blocks) == 2:
+    chk("twins_equal", lambda: blocks["gate"] == blocks["sub"])
+chk("derive_rows", lambda: len(pairs(B)) == 6 and len(derive) == 6)
+chk("status_set", lambda: len(set(derive.values())) == 3)
+M = open(mtf).read()
+chk("sev_mtf_table", lambda: [a for a, _ in re.findall(r"^\| \*\*([A-Z][a-z]+)\*\* \| `([a-z]+)` \|", M, re.M)] == sev())
+chk("sev_mtf_tokens", lambda: ticks(re.search(r"four exact tokens ((?:`[A-Za-z]+`(?: / )?)+)", M).group(1)) == sev())
+YES = ["1/2", "1/5", "1/10", "1/12", "not established: budget ran out"]
+NO = ["2/2", "3/3", "2/5", "11/12", "1/1", "1/0", "1/01", "", " 1/5", "1/5 ", "not established", "Not established: x"]
+chk("advisory_vectors", lambda: all(is_adv(v) for v in YES) and not any(is_adv(v) for v in NO))
+if mode == "cross":
+    explorer, fixture = sys.argv[5:7]
+    E = open(explorer).read()
+    def card():
+        return re.search(r"<!-- explorer-card:start -->(.*?)<!-- explorer-card:end -->", E, re.S).group(1)
+    chk("sev_plugin", lambda: ticks(re.search(r"^\*\*Severity: write exactly one of (.*?)\.\*\*", card(), re.M).group(1)) == sev())
+    chk("stop_plugin", lambda: sorted(ticks(re.search(r"^\| `stop_reason` \| string \| (.*)$", E, re.M).group(1))) == sorted(derive))
+    chk("status_plugin", lambda: sorted(set(ticks(re.search(r"^\| `status` \| yes \| string \| (.*?) derived", E, re.M).group(1)))) == sorted(set(derive.values())))
+    def derive_plugin():
+        p = pairs(E.split("### Status from `stop_reason`", 1)[1])
+        return len(p) == len(derive) and set(p) == set(derive.items())
+    chk("derive_plugin", derive_plugin)
+    F = {}
+    try:
+        F = json.load(open(fixture))
+    except Exception:
+        fails.append("fixture_parse")
+    bugs = lambda: F["bugs"]
+    chk("fixture_status", lambda: F["status"] in set(derive.values()))
+    chk("fixture_stop", lambda: F["session_sheet"]["stop_reason"] in derive)
+    chk("fixture_derive", lambda: derive[F["session_sheet"]["stop_reason"]] == F["status"])
+    chk("fixture_severity", lambda: len(bugs()) > 0 and all(b["severity"] in sev() for b in bugs()))
+    chk("fixture_keys", lambda: all("replicated" in b and "provisional" in b for b in bugs()))
+    def repl_ok(v):
+        m = re.fullmatch(r"([0-9]+)/([0-9]+)", v)
+        if m:
+            return 1 <= int(m.group(1)) <= int(m.group(2)) and int(m.group(2)) >= 2
+        return v.startswith("not established: ")
+    chk("fixture_replicated_form", lambda: all(repl_ok(b["replicated"]) for b in bugs()))
+    # The plugin's own summary derivation: k == 1 -> "no", the not-established
+    # form -> "not established"; exactly those are stride's advisory forms.
+    def adv_matches_plugin(v):
+        m = re.fullmatch(r"([0-9]+)/([0-9]+)", v)
+        return is_adv(v) == ((m is not None and int(m.group(1)) == 1) or v.startswith("not established: "))
+    chk("fixture_advisory_consistent", lambda: all(adv_matches_plugin(b["replicated"]) for b in bugs()))
+    chk("fixture_provisional", lambda: all(isinstance(b["provisional"], bool) and (not b["provisional"] or b["severity"] in ("Moderate", "Minor")) for b in bugs()))
+print(" ".join(sorted(fails)) if fails else "OK")
+PY
+}
+
+# g57_mut <src> <dst> <old> <new> -> copies src to dst with the first exact
+# occurrence of old replaced; prints MISSING (and writes nothing) if old is
+# absent, so a mutation that silently did nothing cannot pass as a detection.
+g57_mut() {
+  python3 - "$@" <<'PY'
+import sys
+src, dst, old, new = sys.argv[1:5]
+t = open(src).read()
+if old not in t:
+    print("MISSING")
+    sys.exit(0)
+open(dst, "w").write(t.replace(old, new, 1))
+PY
+}
+
+if [ -f "$G57_GATE" ] && [ -f "$G57_SUB" ] && [ -f "$G57_MTF" ] && [ -f "$G57_WF" ] && [ -f "$G57_REF" ]; then
+  G57_GATE_TXT="$(cat "$G57_GATE")"; G57_SUB_TXT="$(cat "$G57_SUB")"
+  g57_both() {
+    assert_contains "$1: Step 5.5 $2" "$3" "$G57_GATE_TXT"
+    assert_contains "${1}2: Phase 3.5 $2 too" "$3" "$G57_SUB_TXT"
+  }
+  # --- Tier 1: literal pins ---
+  g57_both 57a "records an unreplicated or provisional Critical as advisory" '**An unreplicated or provisional Critical is advisory, never escalated.**'
+  g57_both 57b "never downgrades a replicated, absent or unmatched Critical" '**A replicated Critical — `replicated` of `2/<n>` or more — is never downgraded, and neither is one whose `replicated` is absent'
+  g57_both 57c "never pastes a not-established reason" "never paste its reason, which is application-influenced text"
+  g57_both 57d "carries the explorer-enums block" '<!-- explorer-enums:start -->'
+  g57_both 57e "reads a pre-1.0 report by the same rules" 'is from an explorer older than contract 1.0: read it by the same rules, never as an error'
+  g57_both 57f "trusts stop_reason over a disagreeing status" 'so when the two disagree, trust `stop_reason`'
+  # The advisory rule sits before the provenance test and must not alter it.
+  assert_contains "57g: Step 5.5 leaves the provenance test unchanged" 'Every uncertain case therefore resolves to **discovered**, and that is deliberate.' "$G57_GATE_TXT"
+  assert_contains "57g2: Phase 3.5 leaves the provenance test unchanged too" 'Every uncertain case resolving to discovered is deliberate' "$G57_SUB_TXT"
+  assert_contains "57h: manual-testing-findings.md keeps an advisory Critical out of issues[]" 'a `critical` they record as advisory because it was unreplicated or provisional' "$(cat "$G57_MTF")"
+  assert_contains "57i: the Decision Summary carries the advisory row" '| Critical finding that is **unreplicated**' "$(cat "$G57_WF")"
+  # The dropped older-contract branches stay dropped.
+  for g57_pair in \
+    "57j|older contract|$G57_GATE $G57_SUB $G57_WF" \
+    "57k|reports only a status|$G57_GATE $G57_SUB" \
+    "57l|is ambiguous|$G57_GATE $G57_SUB" \
+    "57m|genuinely takes|$G57_GATE $G57_SUB" \
+    "57n|carries neither|$G57_GATE $G57_SUB" \
+    "57o|stopped_early|$G57_REF" \
+    "57p|older explorer contract emits no impact field|$G57_MTF"; do
+    IFS='|' read -r g57_id g57_needle g57_files <<< "$g57_pair"
+    # shellcheck disable=SC2086
+    g57_hits=$(cat $g57_files | grep -ciF -- "$g57_needle" | tr -d ' ')
+    assert_eq "$g57_id: no '$g57_needle' older-contract branch remains" "0" "$g57_hits"
+  done
+
+  if command -v python3 >/dev/null 2>&1; then
+    # --- Tier 2: stride-internal executed checks ---
+    assert_eq "57q: the enum block is identical in both twins, complete, and agrees with manual-testing-findings.md" \
+      "OK" "$(g57_check stride "$G57_GATE" "$G57_SUB" "$G57_MTF")"
+    G57_TMP="$TMPDIR_TEST/g57"; mkdir -p "$G57_TMP"
+    g57_r=$(g57_mut "$G57_GATE" "$G57_TMP/gate.md" '| `risk_acceptable` | `completed` |' '| `risk_acceptable` | `stopped_early` |')
+    assert_contains "57r: a twin drift is detected (negative)" "twins_equal" "$g57_r$(g57_check stride "$G57_TMP/gate.md" "$G57_SUB" "$G57_MTF")"
+    g57_r=$(g57_mut "$G57_MTF" "$G57_TMP/mtf.md" '| **Moderate** |' '| **Medium** |')
+    assert_contains "57s: a severity drift in manual-testing-findings.md is detected (negative)" "sev_mtf_table" "$g57_r$(g57_check stride "$G57_GATE" "$G57_SUB" "$G57_TMP/mtf.md")"
+  else
+    echo "  SKIP: 57q-57s: python3 not installed -- Group 57's executed checks need it"
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "  SKIP: 57t-57z: python3 not installed -- the cross-repo enum check needs it"
+  elif [ -f "$G57_EXPLORER" ] && [ -f "$G57_FIXTURE" ]; then
+    # --- Tier 3: cross-repo ---
+    assert_eq "57t: stride's restated enums equal the plugin's explorer.md, and the fixture's values are members" \
+      "OK" "$(g57_check cross "$G57_GATE" "$G57_SUB" "$G57_MTF" "$G57_EXPLORER" "$G57_FIXTURE")"
+    G57_TMP="$TMPDIR_TEST/g57"; mkdir -p "$G57_TMP"
+    g57_cross_neg() {  # <id> <label> <expected-failure-id> <file-to-mutate: explorer|fixture> <old> <new>
+      local src="$G57_EXPLORER" e="$G57_TMP/explorer.md" f="$G57_FIXTURE" out
+      if [ "$4" = fixture ]; then src="$G57_FIXTURE"; f="$G57_TMP/fixture.json"; e="$G57_EXPLORER"; out="$f"; else out="$e"; fi
+      local r; r=$(g57_mut "$src" "$out" "$5" "$6")
+      assert_contains "$1: $2 (negative)" "$3" "$r$(g57_check cross "$G57_GATE" "$G57_SUB" "$G57_MTF" "$e" "$f")"
+    }
+    g57_cross_neg 57u "a severity renamed in the plugin card is detected" sev_plugin explorer 'exactly one of `Critical`, `High`, `Moderate`, `Minor`' 'exactly one of `Critical`, `High`, `Medium`, `Minor`'
+    g57_cross_neg 57v "a changed derivation in the plugin is detected" derive_plugin explorer '| `tool_call_ceiling` | `stopped_early` |' '| `tool_call_ceiling` | `blocked` |'
+    g57_cross_neg 57w "a new plugin stop_reason is detected" stop_plugin explorer '`blocked`, or `no_observation_surface`.' '`blocked`, `no_observation_surface`, or `operator_halt`.'
+    g57_cross_neg 57x "a fixture status that disagrees with the table is detected" fixture_derive fixture '"status": "completed"' '"status": "blocked"'
+    g57_cross_neg 57y "a fixture bug without replicated is detected" fixture_keys fixture '"replicated":' '"replicated_count":'
+    g57_cross_neg 57z "a fixture severity outside the ladder is detected" fixture_severity fixture '"severity": "High"' '"severity": "Major"'
+  else
+    echo "  SKIP: 57t-57z: stride-exploratory-testing repo not found at $G57_ET -- the cross-repo enum check runs only when the sibling plugin repo is present"
+  fi
+else
+  echo "  SKIP: Group 57 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

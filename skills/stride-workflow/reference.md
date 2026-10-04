@@ -153,9 +153,8 @@ STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
       probe budget exhausted --> partial coverage, file leftover risk as a follow-up;
       blocked or tool-call ceiling at ~zero probes --> NOT performed, hand the manual
       test back as a human responsibility (the obstacle is recorded as an obstacle,
-      never as a severity-bearing finding); older-contract stopped_early --> resolve
-      from the sheet, conservatively; budget too small to fund one charter --> do
-      not dispatch at all; blocked or ceiling AFTER meaningful probes --> partial
+      never as a severity-bearing finding); budget too small to fund one charter
+      --> do not dispatch at all; blocked or ceiling AFTER meaningful probes --> partial
       coverage, record the findings and say the coverage claim is incomplete;
       no_observation_surface --> NOT performed whatever it probed, hand the test back
       (tools = the explorer's own front-matter tools: line, never this session's)
@@ -165,6 +164,9 @@ STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
       (moved/reformatted-only lines shown to predate the change are NOT related -->
       out-of-scope below; a follow-up task is the exception for a real out-of-scope
       bug, never the default)
+    Unreplicated (replicated 1/<n> with n >= 2, or "not established: ...") or provisional Critical
+                  --> advisory: record, never escalate (gate still decides fix vs file);
+                  replicated 2/<n>+, absent or unmatched --> the rows below, unchanged
     Critical whose responsible lines you wrote --> escalate fail-closed (testing_strategy failed
                   + category:testing Critical issue), fix, re-check (verify mode), re-review
     Out-of-scope or provenance-undetermined Critical --> report + file a
@@ -292,12 +294,13 @@ CLAUDE CODE WORKFLOW:
 │     │                     no authorized/non-prod affirmative from the user → do not dispatch
 │     ├─ Session ending bounds the coverage claim: quiet → performed | probe budget → partial +
 │     │   file leftover risk | blocked/ceiling at ~zero probes → NOT performed, hand back
-│     │   (obstacle ≠ finding) | stopped_early → resolve from sheet | budget too small → no dispatch
+│     │   (obstacle ≠ finding) | budget too small → no dispatch
 │     │   | blocked/ceiling AFTER meaningful probes → partial coverage, record + say so
 │     │   | no_observation_surface → NOT performed whatever it probed, hand back
 │     ├─ Relatedness gate FIRST, any severity: lines you changed OR same defect class →
 │     │   fix in-task + re-review, never file (moved-only lines predating the change ≠
 │     │   related; a follow-up task = the exception for a real out-of-scope bug)
+│     ├─ Unreplicated or provisional Critical → advisory, never escalated (gate still applies)
 │     └─ Critical: lines you wrote → escalate fail-closed | out-of-scope or provenance
 │        undetermined → report + file
 │        (no structured review block in the payload → no escalation; never synthesize one)

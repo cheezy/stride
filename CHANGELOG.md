@@ -25,6 +25,14 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — Step 5.5's two hot-path files trimmed to rules, with history and rationale moved to `docs/exploratory-testing-rationale.md` (W2271)
+
+When Step 5.5 runs, the main loop loads `skills/stride-workflow/optional-exploratory-testing.md` and, at completion, `skills/stride-completing-tasks/manual-testing-findings.md`. Both had accumulated history and argument alongside their rules. They now carry the rules only: the first goes from 62,789 to 46,080 bytes, the second from 21,875 to 16,967 (`wc -c`).
+
+- **What moved.** The why-this-step-exists text, the reasons behind each never-dispatch surface (the `/explore` question-round argument, the `/harden` "earlier draft" history), the "as of writing" budget figures, the coverage-ending arguments, the gitignore walk-through, the D257 treadmill measurement, the change-set gotcha explanations, the D188 persistence arguments, the four-into-three severity reasoning, the session-artifact caveat and the length-is-not-a-control examples. All of it now lives in the new `docs/exploratory-testing-rationale.md`, which carries no rule. Each source site links to its section with a one-line `Why:` pointer.
+- **What stayed inline.** Every gate, enum and redaction rule, unchanged in substance: the unattended-surface principle and never-dispatch list, the `AUTHORIZED_NON_PRODUCTION` and `ALLOWED_HOSTS` lines, the dispatch template and explorer-enums blocks (byte-identical), every coverage ending's disposition, the relatedness gate, the provenance test with its change-set steps, the introduced/discovered/no-block escalation shapes, the severity table, and every redaction rule.
+- **No behaviour change.** Every needle `hooks/test-stride-hook.sh` Groups 41, 45 and 52–58 pin in these files is still present verbatim, and `stride-subagent-workflow` Phase 3.5 is untouched — it stays identical in substance.
+
 ### Changed — Step 5.5 fills a fixed explorer dispatch template instead of a hand-written prompt (W2270)
 
 Step 5.5 (`skills/stride-workflow/optional-exploratory-testing.md`) and its twin, `stride-subagent-workflow` Phase 3.5, used to describe the explorer's environment-context block in prose bullets and leave the prompt to be composed per task. The task's session measurements put those hand-written prompts at 3.1–8.5 KB each. Both twins now carry one fixed template between `<!-- explorer-dispatch-template:start -->` and `<!-- explorer-dispatch-template:end -->` markers; the block between them is 869 bytes. The bullets above it still say what each line means.

@@ -156,7 +156,9 @@ STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
       never as a severity-bearing finding); older-contract stopped_early --> resolve
       from the sheet, conservatively; budget too small to fund one charter --> do
       not dispatch at all; blocked or ceiling AFTER meaningful probes --> partial
-      coverage, record the findings and say the coverage claim is incomplete
+      coverage, record the findings and say the coverage claim is incomplete;
+      no_observation_surface --> NOT performed whatever it probed, hand the test back
+      (tools = the explorer's own front-matter tools: line, never this session's)
     Relatedness gate FIRST, at ANY severity: responsible lines are lines this task
       changed, OR same defect class as the change --> fix in-task + re-review, never
       file; the severity/provenance policy below governs only out-of-scope findings
@@ -292,6 +294,7 @@ CLAUDE CODE WORKFLOW:
 │     │   file leftover risk | blocked/ceiling at ~zero probes → NOT performed, hand back
 │     │   (obstacle ≠ finding) | stopped_early → resolve from sheet | budget too small → no dispatch
 │     │   | blocked/ceiling AFTER meaningful probes → partial coverage, record + say so
+│     │   | no_observation_surface → NOT performed whatever it probed, hand back
 │     ├─ Relatedness gate FIRST, any severity: lines you changed OR same defect class →
 │     │   fix in-task + re-review, never file (moved-only lines predating the change ≠
 │     │   related; a follow-up task = the exception for a real out-of-scope bug)

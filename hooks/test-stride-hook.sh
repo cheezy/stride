@@ -15601,6 +15601,49 @@ else
 fi
 
 # ============================================================
+# Test Group 55: W2263 -- Step 5.5 lists only the explorer's own tools and
+# treats no_observation_surface as a test that was not performed
+# ============================================================
+# The explorer holds Read, Grep, Glob, Bash and Write -- no browser -- so a
+# charter needing a rendered view comes back blocked with stop_reason
+# no_observation_surface. Both twins must read the explorer's tools from its own
+# front matter (never this session's), and hand the manual test back whatever
+# the session probed. 55h-55j pin the superseded wording gone.
+echo ""
+echo "=== Test Group 55: W2263 explorer tools and no_observation_surface (bash) ==="
+G55_GATE="$SCRIPT_DIR/../skills/stride-workflow/optional-exploratory-testing.md"
+G55_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G55_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+if [ -f "$G55_GATE" ] && [ -f "$G55_SUB" ] && [ -f "$G55_WF" ]; then
+  G55_GATE_TXT="$(cat "$G55_GATE")"; G55_SUB_TXT="$(cat "$G55_SUB")"; G55_WF_TXT="$(cat "$G55_WF")"
+  # g55_both <id> <label> <needle> -> pins the needle in both twins
+  g55_both() {
+    assert_contains "$1: Step 5.5 $2" "$3" "$G55_GATE_TXT"
+    assert_contains "${1}2: Phase 3.5 $2 too" "$3" "$G55_SUB_TXT"
+  }
+  g55_both 55a "names the explorer's tools, not the session's" '**Which tools the explorer holds**'
+  g55_both 55b "reads them from the agent's front matter" "front matter \`tools:\` line, never from this session's own tool list"
+  g55_both 55c "says a main-loop browser tool does not reach the explorer" 'a browser or MCP tool the main loop holds does not reach it'
+  g55_both 55d "lists today's explorer tools" '`Read, Grep, Glob, Bash, Write`'
+  g55_both 55e "names the no_observation_surface ending" '`no_observation_surface`'
+  g55_both 55f "treats it as not performed whatever it probed" 'not a performed test, whatever it probed'
+  g55_both 55g "hands back every manual test the charter carried" 'hand back every manual test the charter carried as a human responsibility'
+  g55_both 55k "skips the probe-count judgement for it" 'its coverage is not a partial session'
+  g55_both 55l "records the missing surface as an obstacle" 'the missing surface'
+  g55_both 55m "records a purely visual test without a dispatch" 'whole point is a rendered view'
+  assert_contains "55n: the Decision Summary treats no_observation_surface as not performed" \
+    '| Session returns **`no_observation_surface`** (no tool to observe what the charter needs) | **Not** a performed test, whatever it probed' "$G55_WF_TXT"
+  assert_eq "55h: Step 5.5 no longer enumerates the main loop's own tools" "0" \
+    "$(grep -ciF 'enumerate this one yourself' "$G55_GATE" | tr -d ' ')"
+  assert_eq "55i: nor does Phase 3.5" "0" \
+    "$(grep -ciF 'enumerate this one yourself' "$G55_SUB" | tr -d ' ')"
+  assert_eq "55j: Step 5.5's cross-browser charter example is gone" "0" \
+    "$(grep -cF 'theme toggle across browsers' "$G55_GATE" | tr -d ' ')"
+else
+  echo "  SKIP: Group 55 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

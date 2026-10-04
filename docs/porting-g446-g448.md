@@ -23,15 +23,15 @@ planned section.
 |---|---|---|---|
 | W2248 | G446 | The post-claim hook writes the claimed task to `.stride/.task-<IDENTIFIER>.json` | **landed in 1.81.0** |
 | W2249 | G446 | Explorer, planner and reviewer dispatches pass `TASK_FILE` instead of retyped task fields | **landed in 1.81.0** |
-| W2250 | G446 | Dispatcher mode becomes the default for multi-task requests, with an opt-out | **landed (unreleased)** |
-| W2251 | G446 | Step 0 warns when the installed plugin is older than the published pin | planned |
+| W2250 | G446 | Dispatcher mode becomes the default for multi-task requests, with an opt-out | **landed in 1.83.0** |
+| W2251 | G446 | Step 0 warns when the installed plugin is older than the published pin | **landed in 1.83.0** |
 | W2252 | G447 | Round two of review must be earned | **landed in 1.81.0** |
 | W2253 | G447 | Carry the `review-round-cap` v2 canon change to every port | planned. **This document is its input.** |
 | W2254 | G447 | The main agent reads key files while the explorer runs, with no edits until it reports | **landed in 1.81.0** |
 | W2255 | G447 | The Stop gate does not block while a dispatched stride subagent is still running | **landed in 1.81.0** |
 | W2256 | G448 | Discovery uses a slim `GET /api/tasks/next`; the task body comes from the claim | **landed in 1.81.0** |
-| W2257 | G448 | Move rationale out of `stride-workflow` SKILL.md and `review-block-extraction.md` | **landed (unreleased)** |
-| W2258 | G448 | Move rationale out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` | **landed (unreleased)** |
+| W2257 | G448 | Move rationale out of `stride-workflow` SKILL.md and `review-block-extraction.md` | **landed in 1.83.0** |
+| W2258 | G448 | Move rationale out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` | **landed in 1.83.0** |
 | W2259 | G448 | Measure the token and wall-clock effect of all three goals | planned (runs last) |
 
 ## The evidence behind the goals
@@ -153,7 +153,7 @@ dispatch. Both `/complete` calls must succeed on the first try.
 
 As shipped, each dispatch also carries one line telling the agent to read every task field from the file, as data. That line is what an older installed agent follows. The reviewer builds one criterion per non-blank line, and the planner, which has no agent file, gets the same read-as-data rule in its dispatch.
 
-### W2250 — dispatcher mode by default (**landed (unreleased)**; `stride` only for now)
+### W2250 — dispatcher mode by default (**landed in 1.83.0**; `stride` only for now)
 
 **Change.**
 
@@ -172,16 +172,24 @@ not portable yet**. Record it as "not applicable — no runner" in each port's
 changelog when W2253-style sync work reaches it, rather than leaving it
 unmentioned.
 
-### W2251 — stale-install warning at Step 0 (planned)
+### W2251 — stale-install warning at Step 0 (**landed in 1.83.0**)
 
 **Problem.** The 2026-10-02 session ran `stride` 1.78.0 while 1.80.0 was
 published. `skills_version` is `"1.0"` in every claim, so the server cannot
 detect a stale install. Dispatched agents load from the installed cache, so
 source fixes do nothing until the user updates.
 
-**Planned change.** Step 0 compares the installed plugin version with the
-published marketplace pin. When the install is older, it prints one line naming
-both versions and the update commands.
+**What shipped in `stride`** (commit `1c27366`, released in 1.83.0):
+
+- `SKILL.md` Step 0 item 5 runs `hooks/check-plugin-current.sh` (PowerShell:
+  `check-plugin-current.ps1`) with the skill's base directory. It reads the
+  installed version from that path (or `plugin.json` for a local-path install)
+  and the `stride` pin from the published catalog
+  (`raw.githubusercontent.com/cheezy/stride-marketplace/main/.claude-plugin/marketplace.json`).
+- When the install is older, it prints one line naming both versions and the
+  update commands; otherwise it prints nothing. It always exits 0 — a warning,
+  never a block. Versions compare numerically (1.80.0 > 1.9.0).
+- Pinned by bash hook-suite Group 51 and PowerShell Group 45.
 
 **Port needs.** A way to read both versions. Each port's install location and
 catalog differ: Claude Code uses `~/.claude/plugins/...`, and the other runtimes
@@ -195,7 +203,7 @@ version, skip the warning; never guess the version.
 
 ### W2252 — round two of review must be earned (**landed in 1.81.0**)
 
-**What shipped in `stride`** (commit `61e3733`, unreleased as of this writing):
+**What shipped in `stride`** (commit `61e3733`, released in 1.81.0):
 
 - **The rule.** Round two runs only when at least one of these holds:
   - round one's fixes edited a code path;
@@ -381,7 +389,7 @@ before claiming must move it to after the claim.
 **Verify.** Run one task from discovery to completion and confirm the discovery
 response is the slim shape.
 
-### W2257 — lighter `stride-workflow` hot path (**landed (unreleased)**; `stride` only for now)
+### W2257 — lighter `stride-workflow` hot path (**landed in 1.83.0**; `stride` only for now)
 
 **Change.**
 
@@ -419,7 +427,7 @@ move.
 **Verify.** The port's canon check reports no new failing cell, its budget check
 (if any) passes, and its hook suite stays green.
 
-### W2258 — lighter `stride-completing-tasks` and reviewer (**landed (unreleased)**; `stride` only for now)
+### W2258 — lighter `stride-completing-tasks` and reviewer (**landed in 1.83.0**; `stride` only for now)
 
 **Change.**
 

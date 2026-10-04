@@ -23,7 +23,7 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.83.0] - 2026-10-04
 
 ### Changed — rationale and provenance move out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` into `docs/` (W2258)
 

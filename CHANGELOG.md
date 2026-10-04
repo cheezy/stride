@@ -37,6 +37,17 @@ Step 5.5 (`skills/stride-workflow/optional-exploratory-testing.md`) and its twin
 
 The Step 5.5 Decision Summary row in `skills/stride-workflow/SKILL.md` states the same rule (+300 bytes, within budget). Hook-suite Test Group 52 pins each rule in both twins and in the Decision Summary row.
 
+### Changed — Step 5.5 re-checks a fixed introduced Critical in verify mode, falling back to the full charter (W2268)
+
+When Step 5.5 found a Critical this task introduced, the fix was confirmed by re-running the whole affected charter: another full explorer session of at least eight probes (the explorer's 8–20 band), only to re-execute one known repro. `stride-exploratory-testing`'s explorer now has a verify mode, and Step 5.5 (`skills/stride-workflow/optional-exploratory-testing.md`) and its twin, `stride-subagent-workflow` Phase 3.5, use it for that re-check.
+
+- **The re-check.** One explorer dispatch whose charter is built from the finding's `minimal_repro`, with `EXPLORATORY_MODE=verify`, the finding's `summary`, `observed`, `minimal_repro` and `generalization`, and the contract's verify budget (2 probes / 10 tool calls) in the environment context. It is used only when the installed `explorer` contract documents verify mode, read the way step 2a reads the budget unit, because the two plugins release independently.
+- **Reading the result.** `verify.result` decides it, not the step 2a coverage endings: `pass` clears that one defect only, never the rest of the charter, and the original session's coverage record stands; `fail` means the fix is not done; `not_verified` is never a pass: one caused by setup consuming the tool-call ceiling is re-dispatched once with a raised ceiling, and any other takes the fallback directly. Any other bug a verify returns goes through the relatedness gate.
+- **Fallback.** The full charter re-run, with its existing must-re-reach-the-repro rule, is kept for a finding with no usable `minimal_repro`, an installed explorer without verify mode (or a response with no `verify` result), and a second `not_verified`. The no-structured-review-block path follows the same rule.
+- **The reviewer re-run is unchanged.** Verify mode replaces only the charter re-run; the fresh review that clears the escalation still runs, under the review-round cap.
+
+The Step 5.5 Decision Summary row in `skills/stride-workflow/SKILL.md` says "re-check in verify mode" (+5 bytes, 98,751 of 100,000), and the `reference.md` flowchart matches. Hook-suite Test Group 53 pins the rule in both twins and the Decision Summary row, and pins the superseded charter-re-run wording gone. Until a `stride-exploratory-testing` release with verify mode is installed, every re-check correctly takes the full-charter fallback.
+
 ## [1.83.0] - 2026-10-04
 
 ### Changed — rationale and provenance move out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` into `docs/` (W2258)

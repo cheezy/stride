@@ -15482,6 +15482,62 @@ else
 fi
 
 # ============================================================
+# Test Group 53: W2268 -- a fixed introduced Critical is re-checked in verify mode
+# ============================================================
+# Both gate mirrors carry the same needles (keep-in-sync rule): the re-check
+# uses the explorer's verify mode (EXPLORATORY_MODE=verify, built from the
+# finding's minimal_repro), only when the installed contract documents it;
+# pass covers that one defect only; fail and not_verified are never a pass;
+# and it falls back to the full charter when no repro exists. Verify mode
+# replaces the charter re-run, never the reviewer re-run (canon
+# review-round-cap). 53p-53t pin the superseded wording gone.
+echo ""
+echo "=== Test Group 53: W2268 verify-mode re-check of a fixed Critical (bash) ==="
+G53_GATE="$SCRIPT_DIR/../skills/stride-workflow/optional-exploratory-testing.md"
+G53_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G53_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+if [ -f "$G53_GATE" ] && [ -f "$G53_SUB" ] && [ -f "$G53_WF" ]; then
+  G53_GATE_TXT="$(cat "$G53_GATE")"; G53_SUB_TXT="$(cat "$G53_SUB")"; G53_WF_TXT="$(cat "$G53_WF")"
+  # g53_both <id> <label> <needle> -> pins the needle in both twins
+  g53_both() {
+    assert_contains "$1: Step 5.5 $2" "$3" "$G53_GATE_TXT"
+    assert_contains "${1}2: Phase 3.5 $2 too" "$3" "$G53_SUB_TXT"
+  }
+  g53_both 53a "re-checks a fixed Critical in verify mode" 'fix the defect, re-check it in verify mode, and re-run the reviewer before completing'
+  g53_both 53b "never lets verify mode replace the re-review" 'Verify mode replaces only the charter re-run, never the reviewer re-run'
+  g53_both 53c "uses verify mode only when the installed contract has it" 'only when the installed `explorer` contract documents verify mode'
+  g53_both 53d "signals the mode in the environment context" 'EXPLORATORY_MODE=verify'
+  g53_both 53e "builds the re-check from the finding's repro" '`minimal_repro`'
+  g53_both 53f "reads the verify result" 'verify.result'
+  g53_both 53g "scopes a pass to the one defect" 'a verify pass clears that one defect only, never the rest of the charter'
+  g53_both 53h "treats fail as an unfinished fix" '`fail` means the fix is not done'
+  g53_both 53i "never reads not_verified as a pass" '`not_verified` is never a pass'
+  g53_both 53j "falls back to the full charter" 'Fall back to re-running the affected charter'
+  g53_both 53k "keeps the fallback's re-reach rule" 'actually re-reach the defect'
+  g53_both 53o "sends the original target's authorization with the re-check" 'the original target and its authorization'
+  g53_both 53u "falls back directly on a non-ceiling not_verified" 'a `not_verified` for any other cause takes the fallback directly'
+  g53_both 53l "covers the no-structured-block path" 're-checked in verify mode before completing (or its charter re-run, per the fallback above)'
+  assert_contains "53m: Step 5.5 falls back when the finding has no usable repro" \
+    'when the finding has no usable `minimal_repro`' "$G53_GATE_TXT"
+  assert_contains "53m2: Phase 3.5 falls back when the finding has no usable repro" \
+    'when the finding has no usable `minimal_repro`' "$G53_SUB_TXT"
+  assert_contains "53n: the Decision Summary names the verify-mode re-check" \
+    'fix, re-check in verify mode, and re-review before completing' "$G53_WF_TXT"
+  assert_eq "53p: Step 5.5's full-charter re-run default is gone" "0" \
+    "$(grep -cF 'fix the defect, re-run the affected charter' "$G53_GATE" | tr -d ' ')"
+  assert_eq "53q: and Phase 3.5's" "0" \
+    "$(grep -cF 'fix the defect, re-run the affected charter' "$G53_SUB" | tr -d ' ')"
+  assert_eq "53r: Step 5.5's no-block path no longer re-runs the charter by default" "0" \
+    "$(grep -cF 'fix it and re-run the charter before completing' "$G53_GATE" | tr -d ' ')"
+  assert_eq "53s: nor does Phase 3.5's" "0" \
+    "$(grep -cF 'fixed and its charter re-run before completing' "$G53_SUB" | tr -d ' ')"
+  assert_eq "53t: the Decision Summary's charter re-run row is gone" "0" \
+    "$(grep -cF 'fix, re-run the charter, and re-review' "$G53_WF" | tr -d ' ')"
+else
+  echo "  SKIP: Group 53 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

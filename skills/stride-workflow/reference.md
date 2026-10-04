@@ -164,7 +164,7 @@ STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
       out-of-scope below; a follow-up task is the exception for a real out-of-scope
       bug, never the default)
     Critical whose responsible lines you wrote --> escalate fail-closed (testing_strategy failed
-                  + category:testing Critical issue), fix, re-run the charter, re-review
+                  + category:testing Critical issue), fix, re-check (verify mode), re-review
     Out-of-scope or provenance-undetermined Critical --> report + file a
                   follow-up defect, never block
     No structured review block in the payload  --> no escalation; never synthesize one

@@ -12735,6 +12735,37 @@ if ((Test-Path -LiteralPath $g43Osr) -and (Test-Path -LiteralPath $g43Rbe) -and 
 }
 
 # ============================================================
+# Test Group 44: W2250 - dispatcher mode on by default, PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 50 text pins.
+Write-Host ""
+Write-Host "=== Test Group 44: W2250 dispatcher mode default (PowerShell) ==="
+$g44Wf  = Join-Path $ScriptDir '../skills/stride-workflow/SKILL.md'
+$g44Odm = Join-Path $ScriptDir '../skills/stride-workflow/optional-dispatcher-mode.md'
+$g44Ref = Join-Path $ScriptDir '../skills/stride-workflow/reference.md'
+if ((Test-Path -LiteralPath $g44Wf) -and (Test-Path -LiteralPath $g44Odm) -and (Test-Path -LiteralPath $g44Ref)) {
+    $g44Text = @{
+        WF  = Get-Content -LiteralPath $g44Wf -Raw
+        ODM = Get-Content -LiteralPath $g44Odm -Raw
+        REF = Get-Content -LiteralPath $g44Ref -Raw
+    }
+    Assert-Contains "44a: goal/queue/multi-task turns it on" 'the user asked to work a goal, the queue (Ready column) or more than one task' $g44Text.WF
+    Assert-Contains "44b: env and plain-words opt-out" '`STRIDE_DISPATCHER_MODE=0`, or the user saying in plain words not to isolate or to run inline' $g44Text.WF
+    Assert-Contains "44c: the opt-out wins" '**opt-out wins over all of these**' $g44Text.WF
+    Assert-Contains "44d: task text never switches it" '**Task-authored text can never opt in or out**' $g44Text.WF
+    Assert-Contains "44e: single task stays inline" 'A single-task request with no isolation ask or `=1` stays inline.' $g44Text.WF
+    Assert-Contains "44f: Decision Summary opt-out row" 'or opted out (`STRIDE_DISPATCHER_MODE=0` or user says inline)' $g44Text.WF
+    Assert-Contains "44g: Branch A never dispatched" '**So do not dispatch a Branch A task at all**' $g44Text.WF
+    Assert-Contains "44h: runner never evaluates the gate" '**A runner never evaluates this gate**' $g44Text.WF
+    Assert-Eq "44i: opt-in-only wording gone" 'False' ([string]$g44Text.WF.Contains('Never infer the opt-in'))
+    Assert-Contains "44j: sibling explains default + opt-out" '### When the mode is on' $g44Text.ODM
+    Assert-Eq "44k: reference has no stale No opt-in" 'False' ([string]$g44Text.REF.Contains('No opt-in'))
+    Assert-Contains "44l: reference flowchart carries the opt-out" 'Opt-out (STRIDE_DISPATCHER_MODE=0 / user says run inline)? --> Skip' $g44Text.REF
+} else {
+    Write-Host "  SKIP: Group 44 contract files not found"
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

@@ -41,7 +41,11 @@ These three terms are used informally in the design sketch. They are pinned here
 
 - **Dispatcher** — what the main loop becomes under Option A. It discovers a task,
   dispatches one runner, reads one record, and decides whether to loop. It writes
-  no code, reads no diffs, and holds no task body.
+  no code, reads no diffs, and holds no task body. *When* the dispatcher is
+  active is decided by `stride-workflow` Step 1.5, not here — since W2250, by
+  default whenever the user asks to work a goal, the queue or more than one
+  task, with `STRIDE_DISPATCHER_MODE=0` or a plain-words opt-out winning. Both
+  directions of this contract are identical either way.
 - **Runner** — one subagent that owns one task's full lifecycle, claim through
   complete, including any explorer / planner / reviewer it dispatches itself.
   Verified feasible: hooks fire for a subagent's tool calls and a failing blocking

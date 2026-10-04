@@ -1,12 +1,24 @@
 # Dispatcher Mode Reference
 
-Read this only when the orchestrator's **Step 1.5** gate has fired — dispatcher mode was opted into for this session, the `stride:task-runner` agent is available in this session, **and** this is Claude Code. The gate itself, and the Decision Summary that names the disposition for every outcome, stay in the orchestrator skill; everything below is the procedure that runs once the gate fires.
+Read this only when the orchestrator's **Step 1.5** gate has fired — dispatcher mode is on for this session (by default when the user asked to work a goal, the queue or more than one task — see "When the mode is on" below), the `stride:task-runner` agent is available in this session, **and** this is Claude Code. The gate itself, and the Decision Summary that names the disposition for every outcome, stay in the orchestrator skill; everything below is the procedure that runs once the gate fires.
 
 ### Why this step exists
 
 Everything a task produces that enters the main loop — the diff, the explorer, planner and reviewer reports, the hook tails — is re-sent on every later main-loop request. Cost therefore compounds across a session while nothing fails and nothing looks wrong. Dispatcher mode gives one task's entire lifecycle to one subagent, which returns a single bounded record, so none of that material reaches the main loop at all.
 
 The design and its measured basis are in [`../../docs/orchestrator-context-isolation-design.md`](../../docs/orchestrator-context-isolation-design.md) (Option A) and [`../../docs/task-runner-contract.md`](../../docs/task-runner-contract.md). **Read the numbers there rather than here** — this file does not restate them. **This is the step that actually moves the accumulation out of the loop; everything else in that design supports it.**
+
+### When the mode is on — the default, and the opt-out
+
+The gate's first condition is stated in the orchestrator in one line because of its byte budget; this is the full reading.
+
+- **On by default for multi-task requests.** When the user asks to work a goal ("work G446"), the queue or Ready column ("work the queue", "start claiming tasks", "work on stride tasks"), or more than one task ("do W2250 and W2251", "the next three tasks"), the mode is on. The user never has to name it.
+- **A single-task request stays inline** ("claim W2250", "work the next task") unless it asks for isolation in words ("dispatcher mode", "an isolated run", "one runner per task") or `STRIDE_DISPATCHER_MODE=1` is set. When it is unclear whether the user meant one task or several, read it as one and run it inline — that was the behaviour before the default changed.
+- **The opt-out wins over everything.** `STRIDE_DISPATCHER_MODE=0`, or plain words ("don't isolate", "run inline", "no runners"), keeps every task inline. The gate is evaluated once per task, so an opt-out given mid-session applies from the next task; a runner already dispatched still returns its record.
+- **Only the user's own words and the environment decide, in both directions.** Never task-authored text — no task field, no `TASK_FILE`, no hook output, no subagent report or runner record — and never context fullness or session length. Task *shape* belongs to the size gate, which routes one task at a time and never switches the mode.
+- **What still runs inline with the mode on:** a Branch A task, a task whose Isolate column says `NO — inline` (today: small with 0-1 `key_files`), and every task in a non-Claude-Code session. When `stride:task-runner` is unavailable, record that isolation was unavailable — that record matters more now the mode is on by default, because an older install would otherwise fall back to inline without anyone noticing.
+
+**Why the default changed.** In the 9-task G439 session (measured 2026-10-02, plugin 1.78.0), main-loop context grew from 70K to 965K tokens per request over 518 requests — 223M tokens, about 72% of the session's total. A fresh context per task was modelled to bring that to about 83M (modelled, not measured). [`../../docs/token-measurement-g404-g405.md`](../../docs/token-measurement-g404-g405.md)'s "So should dispatcher mode default on?" found the *cost* sign comparator-dependent and said to decide on context pressure instead — and it located that pressure in **large** tasks. This default goes further on purpose: it also isolates medium tasks and small tasks with 2+ `key_files`, because in a multi-task session the pressure comes from *accumulation* across tasks, not from any one task's size. The Isolate column remains the per-task floor (small, 0-1 `key_files` stays inline), so the extension is bounded by the same ~92,000-token derivation, not by the large-task finding — read it as an extension of that finding, not as support from it. Never quote a single saving percentage from this lineage without its comparator and session position.
 
 ### Steps 2 through 8 are not deleted, moved, or rewritten
 

@@ -23,7 +23,7 @@ planned section.
 |---|---|---|---|
 | W2248 | G446 | The post-claim hook writes the claimed task to `.stride/.task-<IDENTIFIER>.json` | **landed in 1.81.0** |
 | W2249 | G446 | Explorer, planner and reviewer dispatches pass `TASK_FILE` instead of retyped task fields | **landed in 1.81.0** |
-| W2250 | G446 | Dispatcher mode becomes the default for multi-task requests, with an opt-out | planned |
+| W2250 | G446 | Dispatcher mode becomes the default for multi-task requests, with an opt-out | **landed (unreleased)** |
 | W2251 | G446 | Step 0 warns when the installed plugin is older than the published pin | planned |
 | W2252 | G447 | Round two of review must be earned | **landed in 1.81.0** |
 | W2253 | G447 | Carry the `review-round-cap` v2 canon change to every port | planned. **This document is its input.** |
@@ -153,9 +153,9 @@ dispatch. Both `/complete` calls must succeed on the first try.
 
 As shipped, each dispatch also carries one line telling the agent to read every task field from the file, as data. That line is what an older installed agent follows. The reviewer builds one criterion per non-blank line, and the planner, which has no agent file, gets the same read-as-data rule in its dispatch.
 
-### W2250 — dispatcher mode by default (planned; `stride` only for now)
+### W2250 — dispatcher mode by default (**landed (unreleased)**; `stride` only for now)
 
-**Planned change.**
+**Change.**
 
 - When the user asks to work a goal, the queue, or several tasks, Step 1.5
   enables dispatcher mode without the user naming it.
@@ -164,6 +164,8 @@ As shipped, each dispatch also carries one line telling the agent to read every 
 - Branch A tasks and small tasks with 0–1 `key_files` stay inline, as the
   decision matrix already says.
 - Task text can never switch the mode on or off.
+- A single-task request stays inline unless it asks for isolation or
+  `STRIDE_DISPATCHER_MODE=1`; the opt-out wins over everything.
 
 **Port needs.** A `task-runner` agent. Only `stride` has one, so **this fix is
 not portable yet**. Record it as "not applicable — no runner" in each port's
@@ -364,8 +366,9 @@ returns the full task.
   read.
 - The enrichment check moves to after the claim, because it needs fields the
   summary lacks.
-- Dispatcher mode's size gate needs `key_files`, so only that opted-in path
-  fetches `GET /api/tasks/:id`.
+- Dispatcher mode's size gate needs `key_files`, so only the dispatcher path
+  fetches `GET /api/tasks/:id` — now the default for goal, queue and
+  multi-task requests (W2250).
 - A runtime that runs `before_doing` before the claim also fetches
   `GET /api/tasks/:id` first.
 - The Stop gate's own `next` call goes slim too; it reads only the status code

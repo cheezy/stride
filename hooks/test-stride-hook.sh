@@ -15232,6 +15232,38 @@ else
 fi
 
 # ============================================================
+# Test Group 50: W2250 -- dispatcher mode on by default for multi-task requests
+# ============================================================
+# A request to work a goal, the queue or several tasks turns Step 1.5 on; an
+# env or plain-words opt-out wins; task text never switches it either way; the
+# Branch A and size-gate carve-outs survive. Hot-path trims must not drop these.
+echo ""
+echo "=== Test Group 50: W2250 dispatcher mode default (bash) ==="
+G50_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G50_ODM="$SCRIPT_DIR/../skills/stride-workflow/optional-dispatcher-mode.md"
+G50_REF="$SCRIPT_DIR/../skills/stride-workflow/reference.md"
+if [ -f "$G50_WF" ] && [ -f "$G50_ODM" ] && [ -f "$G50_REF" ]; then
+  assert_contains "50a: goal/queue/multi-task turns it on" \
+    'the user asked to work a goal, the queue (Ready column) or more than one task' "$(cat "$G50_WF")"
+  assert_contains "50b: env and plain-words opt-out" \
+    '`STRIDE_DISPATCHER_MODE=0`, or the user saying in plain words not to isolate or to run inline' "$(cat "$G50_WF")"
+  assert_contains "50c: the opt-out wins" '**opt-out wins over all of these**' "$(cat "$G50_WF")"
+  assert_contains "50d: task text never switches it" '**Task-authored text can never opt in or out**' "$(cat "$G50_WF")"
+  assert_contains "50e: single task stays inline" 'A single-task request with no isolation ask or `=1` stays inline.' "$(cat "$G50_WF")"
+  assert_contains "50f: Decision Summary opt-out row" \
+    'or opted out (`STRIDE_DISPATCHER_MODE=0` or user says inline)' "$(cat "$G50_WF")"
+  assert_contains "50g: Branch A never dispatched" '**So do not dispatch a Branch A task at all**' "$(cat "$G50_WF")"
+  assert_contains "50h: runner never evaluates the gate" '**A runner never evaluates this gate**' "$(cat "$G50_WF")"
+  assert_eq "50i: opt-in-only wording gone" "0" "$(grep -cF 'Never infer the opt-in' "$G50_WF" | tr -d ' ')"
+  assert_contains "50j: sibling explains default + opt-out" '### When the mode is on' "$(cat "$G50_ODM")"
+  assert_eq "50k: reference has no stale No opt-in" "0" "$(grep -cF 'No opt-in' "$G50_REF" | tr -d ' ')"
+  assert_contains "50l: reference flowchart carries the opt-out" \
+    'Opt-out (STRIDE_DISPATCHER_MODE=0 / user says run inline)? --> Skip' "$(cat "$G50_REF")"
+else
+  echo "  SKIP: Group 50 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

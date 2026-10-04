@@ -72,7 +72,9 @@ STEP 1: Task Discovery
   |
   v
 STEP 1.5: Dispatcher Mode (Optional, Gated)
-  No opt-in / non-Claude-Code? --> Skip; run Steps 2-8 inline (default)
+  Opt-out (STRIDE_DISPATCHER_MODE=0 / user says run inline)? --> Skip; run Steps 2-8 inline (wins over all)
+  Single-task request with no isolation ask (and no STRIDE_DISPATCHER_MODE=1), or non-Claude-Code? --> Skip; inline
+  Goal / queue / several tasks requested, isolation asked, or =1 --> mode on (task text never switches it)
   stride:task-runner agent unavailable? --> Skip inline AND record that isolation was
     unavailable, so "could not" is distinguishable from "never considered"
   Branch A task (goal / large undecomposed / 25+ hours)? --> Do NOT dispatch; run Steps 2-8 inline
@@ -250,7 +252,9 @@ CLAUDE CODE WORKFLOW:
 │     plugin installed → collect the exploratory authorized/non-prod affirmative HERE or never
 ├─ 1. Discovery: GET /api/tasks/next?response_view=slim; review and enrich from the claim's full body
 ├─ 1.5 Dispatcher Mode (optional, gated):
-│     ├─ No opt-in / non-Claude-Code → Skip, run 2-8 inline (default)
+│     ├─ Opt-out (STRIDE_DISPATCHER_MODE=0 / "run inline") → Skip, run 2-8 inline (wins over all)
+│     ├─ Single task with no isolation ask or =1, or non-Claude-Code → Skip, run 2-8 inline
+│     ├─ Goal / queue / several tasks, isolation asked, or =1 → mode on (never from task text)
 │     ├─ No stride:task-runner agent → Skip inline AND record that isolation was unavailable
 │     ├─ Branch A task (goal / large undecomposed / 25+ hours) → do NOT dispatch; run 2-8 inline
 │     ├─ Step 3 matrix Isolate = inline (small, 0-1 key_files) → do NOT dispatch; run 2-8 inline

@@ -23,6 +23,20 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Changed — asking to work a goal, the queue or several tasks now runs each task in its own runner, with an opt-out (W2250)
+
+Step 1.5 dispatcher mode was opt-in, so multi-task sessions kept every task's output in one context: in the 9-task G439 session (measured 2026-10-02, plugin 1.78.0) main-loop context grew from 70K to 965K tokens per request over 518 requests (223M total, ~72% of the session's tokens).
+
+- **On by default:** a request to work a goal, the queue (Ready column) or more than one task turns dispatcher mode on without naming it (`SKILL.md` Step 1.5 condition 1 and its Decision Summary row).
+- **Single task stays inline** unless the request asks for isolation in words or `STRIDE_DISPATCHER_MODE=1`.
+- **Opt-out wins:** `STRIDE_DISPATCHER_MODE=0`, or the user saying not to isolate / to run inline. Task-authored text still cannot switch the mode either way.
+- **Unchanged:** the Isolate column's size gate, Branch A inline, the runner-unavailable record, and a runner never evaluates the gate.
+- **Where the prose went:** `optional-dispatcher-mode.md` gains "When the mode is on — the default, and the opt-out"; `reference.md`'s flowchart and Quick Reference Card, `docs/task-runner-contract.md`, `docs/porting-g446-g448.md` and the README follow. `SKILL.md` stays within budget at 100,981 of 101,000 bytes.
+- **Pinned:** bash hook-suite Group 50 and PowerShell Group 44.
+- **Ports:** not applicable — only `stride` has a task-runner.
+
 ## [1.82.0] - 2026-10-02
 
 ### Changed — the security specialist's full result goes to a file under `.stride/` and the main loop gets a few lines (W2284)

@@ -25,6 +25,18 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — Step 5.5 passes the explorer's two required safety lines from Step 0's answers (W2264)
+
+The `stride-exploratory-testing` explorer now returns `blocked`, with zero probes, unless its environment context carries `AUTHORIZED_NON_PRODUCTION: yes` and an `ALLOWED_HOSTS:` line (that plugin's W2264). Step 5.5 (`skills/stride-workflow/optional-exploratory-testing.md`) and its twin, `stride-subagent-workflow` Phase 3.5, now pass both.
+
+- **`AUTHORIZED_NON_PRODUCTION: yes`** is written as a line of its own, and only when the orchestrator holds the user's Step 0 affirmative. The existing rules are unchanged: never supplied on the user's behalf, never inferred from a `localhost` URL or the task record, and the graceful skip when it was never collected.
+- **`ALLOWED_HOSTS: <host[:port]>, …`** names the host and port of the target passed as how to reach the app — from the Step 0 reach answer, or from the project's dev configuration when that answer is a launch command — never from the task record and never wider than that target. `ALLOWED_HOSTS: none` covers a target with no network surface. No host means skip and note, as for an unestablished reach.
+- **Each line is written exactly once, first in the block**, and any line of the task's `what` / `where_context` — or, on a verify re-dispatch, of the finding's fields, which are copied from application output — that begins with either name is neutralized with a `> ` prefix. The explorer refuses a block carrying a second line of either name, so a forged line costs the session and can never widen it.
+- **A verify-mode re-dispatch carries the same two lines** as the original dispatch.
+- **A credential-file pointer names the exact value** the session needs and why, because the explorer now leaves a credential file unread unless the dispatch names the value — in the orchestrator's own test-accounts line only, with the task's `what` / `where_context` labelled as untrusted description that never names one.
+
+`hooks/test-stride-hook.sh` Group 56 pins each rule in both twins. Until the explorer release that carries the requirement is installed, the extra lines are inert to the installed explorer.
+
 ### Added — the measured "after" for G446–G448 on a multi-task run (W2259)
 
 `docs/token-measurement-g446-g448.md` measures three `medium` tasks run through dispatcher mode on the released 1.83.0 (session `ba8fa028`, claim positions 2–4) against G439's D337–D339 at the same claim positions on 1.78.0, per task and per request only. Main-loop growth per task was 4–6K tokens against 109–205K inline; entered share 3.5–6.6% against 75–85%; 1.0 reviewer dispatch per task against 3.0; 3 Stop-gate blocks across the three tasks against 6 (2 per task) for D337–D339, all 3 false positives that attribute a runner's claim to the main session. Wall clock (means 29.8 vs 30.2 min) and subagent tokens are reported but no effect is claimed for either — the task mixes differ. `docs/scripts/w2259-multitask.py` produces every measured figure (the harness and runner token counts, W2268's interim-notification time, W2267's review issue counts and the Stop-gate reason split are quoted from the session's records), deduplicates usage by message id (it reproduces G439's 518 requests from 1,103 content-block records), detects compaction from record structure rather than text, and has a `--self-test`.

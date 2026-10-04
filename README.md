@@ -362,13 +362,15 @@ distinguishable from a failing one without re-running it.
 **(v1.66.0+)** The bash suite's final group (Group 28) runs
 `scripts/check-skill-budgets.sh`, the hot-path byte-budget drift detector: the
 gate fails when `stride-workflow/SKILL.md`, `stride-workflow/review-block-extraction.md`
-(budgeted since W2257), `stride-completing-tasks/SKILL.md`, or
-`stride-claiming-tasks/SKILL.md` exceeds its stated budget, and the failure
+(budgeted since W2257), `stride-completing-tasks/SKILL.md`,
+`stride-claiming-tasks/SKILL.md`, or `agents/task-reviewer.md` (budgeted since
+W2258) exceeds its stated budget, and the failure
 output names the file, its size, its budget, the extraction pattern to apply,
 and where the budget table lives. Budgets sit 10-15% above post-extraction
 sizes, so ordinary edits pass and only sustained regrowth trips (D229
-philosophy) — except `stride-workflow/SKILL.md`, held tighter since W2257 so
-its extraction saving cannot regrow unnoticed; raising one is a deliberate,
+philosophy) — except `stride-workflow/SKILL.md`, held tighter since W2257, and
+`stride-completing-tasks/SKILL.md` and `agents/task-reviewer.md`, held tighter
+since W2258, so each extraction saving cannot regrow unnoticed; raising one is a deliberate,
 reviewed decision.
 
 **(v1.68.0+)** Group 29 runs `scripts/check-ps1-compat.sh`, a static Windows

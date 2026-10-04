@@ -31,7 +31,7 @@ planned section.
 | W2255 | G447 | The Stop gate does not block while a dispatched stride subagent is still running | **landed in 1.81.0** |
 | W2256 | G448 | Discovery uses a slim `GET /api/tasks/next`; the task body comes from the claim | **landed in 1.81.0** |
 | W2257 | G448 | Move rationale out of `stride-workflow` SKILL.md and `review-block-extraction.md` | **landed (unreleased)** |
-| W2258 | G448 | Move rationale out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` | planned |
+| W2258 | G448 | Move rationale out of `stride-completing-tasks` SKILL.md and `agents/task-reviewer.md` | **landed (unreleased)** |
 | W2259 | G448 | Measure the token and wall-clock effect of all three goals | planned (runs last) |
 
 ## The evidence behind the goals
@@ -419,13 +419,41 @@ move.
 **Verify.** The port's canon check reports no new failing cell, its budget check
 (if any) passes, and its hook suite stays green.
 
-### W2258 — lighter `stride-completing-tasks` and reviewer (planned)
+### W2258 — lighter `stride-completing-tasks` and reviewer (**landed (unreleased)**; `stride` only for now)
 
-**Planned change.** Apply the W2257 method to `stride-completing-tasks` SKILL.md
-and `agents/task-reviewer.md`. The moved text goes into `docs/`, and every gate,
-rule and self-check stays inline. The byte budgets drop to match. An earlier
-trim of this kind measured about 5%, so this has the lowest priority of any fix
-here.
+**Change.**
+
+- Rationale, provenance and defect history moved out of
+  `skills/stride-completing-tasks/SKILL.md` (63,905 → 59,165 B, −7.4%) into a
+  new `docs/completion-rationale.md`, and out of `agents/task-reviewer.md`
+  (77,339 → 74,535 B, −3.6%) into a new `docs/task-reviewer-rationale.md`, one
+  `##` section per moved block, each reached from a pointer at its original
+  site.
+- Text that duplicated another inline statement was deleted rather than moved:
+  repeated D188 `completion_summary` caveats (the self-check preamble keeps the
+  reason), the hooks-are-automatic and duration-zero restatements, the
+  reviewer-result source-chain paragraph (Shape 1 keeps it), the response-capture
+  explanation (`hook-execution.md` keeps it), the `CRITICAL_CLEARED` reason
+  (`docs/orchestrator-rationale.md` keeps it), and the reviewer's standalone
+  credential worked-instance paragraph (stated twice more inline).
+- The completion field reference, both result shapes, the skip-reason enum, the
+  self-check list, the reviewer's block schema, verdict and consistency rules,
+  bounded-summary contract and line caps, prompt-injection framing and redaction
+  rules all stayed inline, as did both canon-anchored blocks
+  (`cosmetic-finding-class`, `verdict-note`) byte for byte. No canon version
+  changed.
+- `scripts/check-skill-budgets.sh` and `.ps1`: `stride-completing-tasks/SKILL.md`
+  lowered from 64,000 to 61,000, and `agents/task-reviewer.md` budgeted for the
+  first time at 77,000.
+
+**Port needs.** The same method as W2257, applied to the port's completion skill
+and its reviewer prompt in its own voicing. A port's reviewer variant must keep
+the block schema, every verdict rule and every redaction and prompt-injection
+rule inline, because a dispatched reviewer never opens the rationale doc.
+
+**Verify.** The port's canon check reports no new failing cell, its budget check
+(if any) passes, its hook suite stays green, and one dispatched review on the
+slimmed reviewer completes on the first `/complete`.
 
 ### W2259 — measure the effect (planned; last)
 

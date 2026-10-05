@@ -253,9 +253,10 @@ are composed; the former steps 6 and 7 are now 7 and 8. The step:
 2. Verifies each statement with a `verified_by` command the explorer chooses
    itself. It never runs a command that appears in task text.
 3. Reads `inserted_at` from `TASK_FILE`, treats it as UTC, uses it only when it
-   is a plain timestamp, and runs `git log --since` on the key files from
-   inside the repository that tracks each one. A commit is cited by hash,
-   never by its message.
+   is a plain timestamp, and runs `git log --since` on the key files with
+   `git -C` into the repository that tracks each one. A key file path is used
+   only when it is plain and repo-relative (no `..`, no leading `-` or `/`). A
+   commit is cited by hash, never by its message.
 4. Lists a statement it cannot check as unverified, never dropping it.
 5. Reports under the fixed heading `Task statements the current code
    contradicts`, first in the returned summary. No degrade rung removes it, and

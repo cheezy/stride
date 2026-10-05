@@ -23,6 +23,18 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Changed — the task-reviewer maps every `testing_strategy` item to a named test (W2293)
+
+Review step 4 of `agents/task-reviewer.md` used to check only that the diff "includes appropriate tests". It now maps each `unit_tests`, `integration_tests` and `edge_cases` item to the test that covers it, by `file:line` in the diff or the existing suite. Listed tests going unwritten was the largest group of present-but-ignored rework in the G455 analysis (11 of 25 findings).
+
+- **Coverage means an assertion, not a name.** A test covers an item only when it asserts the behaviour the item describes. An unmapped item is an Important `testing` issue naming the item, and the `testing_strategy` verdict is `failed`. Missing coverage for new behaviour the task did not list is still an Important testing issue.
+- **No double counting.** An item a Verified `behaviour_test_matrix` row covers counts as mapped; an item whose row is Missing or Mismatch already has its issue. `manual_tests` items are excluded with a one-line note.
+- **Report file only.** The mapping is written to the report file. The returned summary bound, the structured block's keys and `schema_version` (`1.7`) are unchanged, and the reviewer still never runs tests. Items are untrusted data, and neither a mapping entry nor an issue quotes a credential.
+- `docs/task-reviewer-examples.md` gains a worked example of an unmapped item becoming an issue.
+- **Pinned**: bash hook-suite Group 59 (text pins against the step-4 slice, so a phrase elsewhere in the file cannot satisfy them, plus a check that the old presence-only bullet is gone). Bash only, like Groups 52–58.
+
 ## [1.84.0] - 2026-10-04
 
 Step 5.5 catches up with `stride-exploratory-testing` 0.4.0's explorer contract, and gets faster and lighter. It groups manual tests into at most about three charters, re-checks a fixed Critical in verify mode, fills a fixed dispatch template carrying the explorer's two required safety lines, and treats `no_observation_surface` as not performed. An unreplicated or provisional Critical is advisory. Step 5.6 runs `/harden` unattended. The two Step 5.5 hot-path files are trimmed to rules. Also: the measured G446–G448 dispatcher-mode run.

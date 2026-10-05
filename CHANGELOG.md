@@ -55,7 +55,7 @@ False statements written into docs, comments and skill text were the largest gro
 - **Census hand-off.** `skills/stride-workflow/claims-census.md` now says the reviewer re-runs any recorded `claims_verified_by` command in this step, rebuilt as its own read-only command, never pasted from the record.
 - **No growth.** No block key was added and `schema_version` stays `1.7`. To fit the 77,000-byte budget, twelve rationale and duplicate clauses were trimmed from `agents/task-reviewer.md` (76,891 → 76,722 bytes with the new block); the rationale among them moved to `docs/task-reviewer-rationale.md`.
 - `docs/task-reviewer-examples.md` gains a worked example of a contradicted CHANGELOG count becoming an issue.
-- **Pinned**: bash hook-suite Group 61 (28 text pins against section slices, each phrase occurring exactly once in its slice, plus 3 checks that every slice ends where it should and 1 check that the example issue carries no `cosmetic` key). Bash only, like Groups 52–60.
+- **Pinned**: bash hook-suite Group 61 (27 text pins against section slices and 1 against the whole agent file, each phrase occurring exactly once where it is matched, plus 3 end checks — the example slice runs to end of file — and 1 check that the example issue carries no `cosmetic` key). Bash only, like Groups 52–60.
 
 ## [1.84.0] - 2026-10-04
 

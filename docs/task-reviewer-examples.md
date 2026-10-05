@@ -300,7 +300,7 @@ The unmapped item becomes this `issues[]` entry, which backs `"testing_strategy"
 ```text
 Statement checks (3 listed, 0 unchecked)
 - CHANGELOG.md:31 "touches three files" — `git diff --name-only a1b2c3d` → 4 paths — CONTRADICTED: 4 files
-- CHANGELOG.md:33 "pinned by Group 61" — `grep -n 'Test Group 61' hooks/test-stride-hook.sh` → 1 hit — verified
+- CHANGELOG.md:33 "pinned by Group 61" — `grep -n '=== Test Group 61' hooks/test-stride-hook.sh` → 1 hit — verified
 - README.md:12 "GitHub caps a release body at 125,000 characters" — no repository command can check it — unverifiable, no issue
 ```
 

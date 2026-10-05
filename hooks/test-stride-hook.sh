@@ -16288,8 +16288,11 @@ fi
 # the diff, the Important-never-cosmetic disposition, the unverifiable
 # disposition, the 25-statement cap and the redaction rule), the step-8
 # report-file sentence, the claims-census.md hand-off, and the worked example.
-# Every phrase is matched against a SLICE and occurs once there, so a phrase
-# elsewhere in a file cannot satisfy a pin; every slice has an end check.
+# Every phrase except 61t is matched against a SLICE and occurs once there, so
+# a phrase elsewhere in a file cannot satisfy a pin; 61t pins the standing
+# no-execute constraint against the whole agent file, where it occurs once. The
+# step-6, step-8 and census slices have end checks (61ad-61af); the example
+# slice runs to end of file by design, so it has none.
 # What it does NOT prove: that a live reviewer verifies statements. That is
 # model behaviour, covered by the task's manual verification step.
 echo ""

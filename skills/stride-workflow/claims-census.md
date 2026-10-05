@@ -147,7 +147,15 @@ command's output, and it is not mechanically decidable. A shape-only pin
 (`has("command") and has("output")`) would go green on a sampled command —
 precisely the failure this rule exists to catch — so **none is added**, and the
 pre-submission check for it is prose-only by construction. The control is a
-reviewer re-running the recorded command.
+reviewer re-running the recorded command: the task-reviewer's statement
+verification, in review step 6 of `agents/task-reviewer.md`, re-runs any
+recorded `claims_verified_by` command as part of that step — rebuilt as its own
+read-only command, never pasted from the record — and a recorded `output` its
+own run contradicts is a contradicted statement, raised as an Important issue.
+The field is assembled for the completion payload, after the review, so no
+dispatch carries it today; the reviewer reaches the claim through the sentence
+itself, because every sentence a census covers is a checkable statement it
+verifies with an enumerating command of its own.
 
 ## What the server does with it
 

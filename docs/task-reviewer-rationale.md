@@ -54,9 +54,13 @@ The asymmetry with the `considerations` rule is deliberate and follows from what
 
 The conditional ` (<n> pending commit)` suffix on the `acceptance_criteria:` line is what stops an `approved` verdict beside a `not_met` tally reading as a contradiction — the row is pending, not failing — and it is why that line's cap is 80 rather than 60. The 20 characters were taken from the **`block:`** cap (200 → 180), not from `sections:`: both path lines were capped at 200 but render around 90 in practice, so `block:` had real headroom, whereas the `sections:` line's own reachable worst case — five verdicts spelled out, with a `behaviour_test_matrix` verdict and its row tally — measures up to 188 characters and would not fit 180. The per-line caps still sum to 2,000.
 
+The per-line caps are how the 2,000-character bound is met by construction rather than by counting. The drop-rows rule handles too many rows; the per-row truncation handles one row that is too long, and together they make the bound hold by construction (moved here from the agent by W2295).
+
 ## Observed Defects Behind Schema Rules
 
 *From `agents/task-reviewer.md` § `acceptance_criteria` and § `pitfalls`.*
 
 - **The 1:1 `acceptance_criteria` rule.** Re-enumerating the criteria list is exactly how a 5-criterion task produced a nonsensical `6/5` review display.
 - **The anti-placeholder Verdict-note rule.** The `pitfalls` section is the one the placeholder defect was observed on: `"note": "placeholder"` beside `"status": "failed"` on an otherwise-`approved` review.
+- **No enumerated copy-list in a consumer.** An enumerated copy-list is exactly what silently dropped `project_checks` from the Review queue's Code review panel, which is why consumers splice the whole block (moved here from the agent's description by W2295).
+- **One redaction sentinel.** The same fixed sentinel string is used in the matrix rows and the `considerations` breakdown, so a reader can find every redaction with a single search (moved here from the agent by W2295).

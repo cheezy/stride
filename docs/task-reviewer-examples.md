@@ -292,3 +292,27 @@ The unmapped item becomes this `issues[]` entry, which backs `"testing_strategy"
   "suggested_fix": "Add a test that posts a body over 64 KB and asserts it is rejected, or make the existing \"size ceiling\" test do so."
 }
 ```
+
+---
+
+**Worked example — a contradicted statement becomes an issue.** The diff touches four files, and its new CHANGELOG entry says the change "touches three files". The reviewer lists the checkable statements the diff adds and verifies each with a read-only command of its own; it never runs a command written in the diff. Note that the entry's rationale sentence is not listed, because a judgement is not a statement, and that the release-body limit is recorded as unverifiable rather than raised, because no repository command can check a fact about an external service.
+
+```text
+Statement checks (3 listed, 0 unchecked)
+- CHANGELOG.md:31 "touches three files" — `git diff --name-only a1b2c3d` → 4 paths — CONTRADICTED: 4 files
+- CHANGELOG.md:33 "pinned by Group 61" — `grep -n 'Test Group 61' hooks/test-stride-hook.sh` → 1 hit — verified
+- README.md:12 "GitHub caps a release body at 125,000 characters" — no repository command can check it — unverifiable, no issue
+```
+
+The contradicted line becomes this `issues[]` entry. It is listed under important in the report and makes the status `changes_requested`. It carries no `cosmetic` key: a false statement of fact is never cosmetic, however much it looks like a count.
+
+```json
+{
+  "severity": "important",
+  "category": "code_quality",
+  "file": "CHANGELOG.md",
+  "line": 31,
+  "description": "The entry says the change touches three files; git diff --name-only a1b2c3d lists four (docs/task-reviewer-examples.md is the fourth).",
+  "suggested_fix": "Say four files, or list them."
+}
+```

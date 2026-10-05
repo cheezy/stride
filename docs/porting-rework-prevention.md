@@ -22,7 +22,7 @@ from a planned section.**
 | Task | Change | Status in `stride` |
 |---|---|---|
 | W2292 | The creation skills and the decomposer author a `behaviour_test_matrix` by default for testable tasks | planned |
-| W2293 | The reviewer maps every `testing_strategy` item to a named test | planned |
+| W2293 | The reviewer maps every `testing_strategy` item to a named test | landed (`c4c029a`) |
 | W2294 | The implementer records break-it evidence that new and changed tests can fail, and the reviewer enforces it | planned (after W2293) |
 | W2295 | The reviewer verifies the factual statements a diff adds | planned (after W2294) |
 | W2296 | The reviewer flags untouched twins and mirrors | planned (after W2295) |
@@ -245,7 +245,7 @@ contradiction.
 All four edit the reviewer agent. Port them in this order if your port lands
 them one at a time: the later ones assume the earlier wording.
 
-### W2293 — map every testing item to a named test (planned)
+### W2293 — map every testing item to a named test (landed)
 
 **Problem.** The reviewer's testing check asks whether the diff "includes
 appropriate tests". It never maps each listed test to a real one. 11 of the 25
@@ -255,13 +255,18 @@ present-but-ignored findings were tests the task listed word for word:
 - W2248 skipped the 422/404 fixture case.
 - W2181's size-ceiling edge case went untested for three rounds.
 
-**Planned change in `stride`.** For each `unit_tests`, `integration_tests` and
-`edge_cases` item, the reviewer names the covering test by `file:line`. A test
-counts only if it asserts the item's behaviour; a matching name is not enough.
-An unmapped item raises an Important `testing` issue and fails the verdict.
-`manual_tests` items are excluded, with a one-line note. An item already covered
-by a verified matrix row counts as mapped. The mapping goes in the report file,
-and no new key is added to the review block.
+**Shipped in `stride`** (commit `c4c029a`; the version is set when W2299
+releases). Review step 4 of `agents/task-reviewer.md` now maps every
+`unit_tests`, `integration_tests` and `edge_cases` item to the test that covers
+it, by `file:line` in the diff or the existing suite. A test counts only if it
+asserts the item's behaviour; a matching name is not enough. An unmapped item
+raises an Important `testing` issue and fails the verdict. `manual_tests` items
+are excluded, with a one-line note. An item covered by a Verified matrix row
+counts as mapped, and an item that a Missing or Mismatch row already reported
+gets no second issue. The mapping goes in the report file only. The summary
+bound, the block keys and `schema_version` are unchanged, and the reviewer
+still never runs tests. `docs/task-reviewer-examples.md` shows an unmapped item
+becoming an issue, and bash hook-suite Group 59 pins the rules.
 
 **Port needs.**
 - **Full ports:** add the mapping to the reviewer's testing step. The per-row

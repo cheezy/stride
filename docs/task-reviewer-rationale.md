@@ -16,6 +16,8 @@ Nothing gates on the value — the server validates `schema_version` as a semver
 
 The review runs before the commit by design, so a criterion that asks for nothing but that commit would otherwise be raised as a Critical every time — a false positive the carve-out exists to remove. Reporting it as pending with no paired `issues[]` entry at any severity is exactly what the `acceptance_criteria` array hard rule specifies, and it is what the downstream scope-pin invariant (`commit_pending_scope_ok`) counts on: it reads the `PENDING COMMIT — ` sentinel as the only machine-readable trace of the carve-out.
 
+**Why the evidence checks fail closed, and how the carve-out sits beside the pairing rules** (moved here from the agent by W2296). The claim hook records the local `HEAD` in `.stride-env-cache` at claim time, so the base it supplies is a hook artifact rather than dispatch input, though not proof against an agent that edits the file. A missing env file fails the check rather than skipping it: an orchestrator sending `base_ref` must have read it, and skipping would let a `base_ref` equal to `head` verify an empty range that proves nothing. The carve-out does not actually conflict with the step-5 rule that a real finding is always emitted: its premise is that a scheduled step is not a finding, so there is nothing produced to suppress, but both rules apply to one criterion, so neither may silently override the other. In the `status` rule, a commit-pending criterion contributes nothing because it names no defect: the carve-out suppresses its paired `issues[]` entry, so it reaches neither `issues` nor `issue_counts`, and the other two clauses of that rule are untouched by it.
+
 ## Section Verdict Rules — Provenance and Reach
 
 *From `agents/task-reviewer.md` review step 5, the verdict rule for all four section tiles and "A real finding always outranks `not_assessed`".*
@@ -56,11 +58,13 @@ The conditional ` (<n> pending commit)` suffix on the `acceptance_criteria:` lin
 
 The per-line caps are how the 2,000-character bound is met by construction rather than by counting. The drop-rows rule handles too many rows; the per-row truncation handles one row that is too long, and together they make the bound hold by construction (moved here from the agent by W2295).
 
+Naming an unread location in a security finding's `suggested_fix` is not exploring it, so the rule that raises such a finding leaves the review-only-the-changes-in-the-diff constraint intact (moved here from the agent by W2296).
+
 ## Observed Defects Behind Schema Rules
 
 *From `agents/task-reviewer.md` § `acceptance_criteria` and § `pitfalls`.*
 
-- **The 1:1 `acceptance_criteria` rule.** Re-enumerating the criteria list is exactly how a 5-criterion task produced a nonsensical `6/5` review display.
+- **The 1:1 `acceptance_criteria` rule.** Re-enumerating the criteria list is exactly how a 5-criterion task produced a nonsensical `6/5` review display. The 1:1 correspondence is what keeps `acceptance_criteria_checked` consistent with the task's own count, and review step 1's three working labels (Met / Partially Met / Not Met) collapse onto the two wire values while the paired issue's severity carries the distinction the enum cannot (moved here from the agent by W2296).
 - **The anti-placeholder Verdict-note rule.** The `pitfalls` section is the one the placeholder defect was observed on: `"note": "placeholder"` beside `"status": "failed"` on an otherwise-`approved` review.
 - **No enumerated copy-list in a consumer.** An enumerated copy-list is exactly what silently dropped `project_checks` from the Review queue's Code review panel, which is why consumers splice the whole block (moved here from the agent's description by W2295).
 - **One redaction sentinel.** The same fixed sentinel string is used in the matrix rows and the `considerations` breakdown, so a reader can find every redaction with a single search (moved here from the agent by W2295).

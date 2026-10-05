@@ -16569,6 +16569,127 @@ else
 fi
 
 # ============================================================
+# Test Group 63: W2296 twin check in the task-reviewer
+# ============================================================
+# Markdown-contract group, bash only (the 52-62 precedent), so its .ps1 twin
+# is deliberately unchanged -- the recorded reason the new check itself asks
+# for. It pins the Twin Check block in review step 6 of agents/task-reviewer.md:
+# the three counterpart kinds (same path stem with the paired .sh/.ps1
+# extension, a keep-in-sync/mirror/twin/stated-twice sentence, a shared canon
+# anchor), only declared pairs counting, read-only commands recorded in the
+# report file, counterparts resolved only from git ls-files output, a dangling
+# mirror reported rather than satisfied, the Important code_quality disposition
+# naming both files, the recorded-reason exemption, no new block key, the
+# step-8 report-file lists, and the worked example in
+# docs/task-reviewer-examples.md. Every phrase is matched against a SLICE and
+# occurs once there, so a phrase elsewhere in a file cannot satisfy a pin.
+# Every slice has an end check (63ab-63ad); 63ae checks the example issue
+# carries no cosmetic key; 63af checks no canon anchor was added to the agent.
+# What it does NOT prove: that a live reviewer finds a missed twin. That is
+# model behaviour, covered by the task's manual verification step.
+echo ""
+echo "=== Test Group 63: W2296 twin check in the task-reviewer ==="
+
+G63_REV="$SCRIPT_DIR/../agents/task-reviewer.md"
+G63_EX="$SCRIPT_DIR/../docs/task-reviewer-examples.md"
+
+if [ -f "$G63_REV" ] && [ -f "$G63_EX" ]; then
+  G63_STEP6="$(sed -n '/^6\. \*\*General Code Quality\*\*/,/^7\. \*\*Project-Level Checks\*\*/p' "$G63_REV")"
+  G63_TWIN="$(sed -n '/^   \*\*Twin Check\*\* (every diff)/,/^7\. \*\*Project-Level Checks\*\*/p' "$G63_REV")"
+  G63_S8="$(sed -n '/^8\. \*\*Persist the Review, Return a Bounded Summary\*\*/,/^   - End the \*\*report file\*\*/p' "$G63_REV")"
+  G63_RF="$(sed -n '/^     - `report file` — string path/p' "$G63_REV")"
+  G63_WF="$(sed -n '/^     - `write failure` —/p' "$G63_REV")"
+  G63_OP="$(sed -n '/^- The \*\*report file\*\* — the prose verdict line/p' "$G63_REV")"
+  G63_EXS="$(sed -n '/^\*\*Worked example — an untouched twin becomes an issue\.\*\*/,/^\*\*Worked example — a contradicted statement becomes an issue\.\*\*/p' "$G63_EX")"
+
+  # 63a: matrix row 0 -- the block sits inside review step 6.
+  assert_contains "63a: the Twin Check block is inside review step 6" \
+    '**Twin Check** (every diff)' "$G63_STEP6"
+  # 63b-63d: the three counterpart kinds (matrix rows 0 and 5).
+  assert_contains "63b: kind 1 -- same path stem, paired .sh/.ps1 extension" \
+    'a tracked file with the same path stem and the paired extension (`.sh` and `.ps1`)' "$G63_TWIN"
+  assert_contains "63c: kind 2 -- a keep-in-sync, mirror, twin or stated-twice sentence" \
+    'a file the touched file names in a keep-in-sync, mirror, twin or stated-a-second-time sentence' "$G63_TWIN"
+  assert_contains "63d: kind 3 -- the same canon anchor as a touched section" \
+    'another file carrying the same `canon:<id> vN` anchor as a touched section' "$G63_TWIN"
+  # 63e/63f: only declared pairs count; no counterpart, no issue (matrix row 1).
+  assert_contains "63e: a file that merely mentions the name is not a counterpart" \
+    "a file that merely mentions the touched file's name is not a counterpart" "$G63_TWIN"
+  assert_contains "63f: a file with no counterpart raises no issue" \
+    'a file with no counterpart raises no issue' "$G63_TWIN"
+  # 63g-63i: read-only commands, never running a twin, recorded in the report file.
+  assert_contains "63g: only git ls-files and grep" \
+    'Use only `git ls-files` and `grep`' "$G63_TWIN"
+  assert_contains "63h: never running either file" \
+    'never running either file' "$G63_TWIN"
+  assert_contains "63i: each command and its counterparts go in the report file" \
+    'record each command and the counterparts it found in the report file' "$G63_TWIN"
+  # 63j-63l: matrix row 6 -- paths come only from git ls-files output.
+  assert_contains "63j: every counterpart resolved from git ls-files output" \
+    'Resolve every counterpart from `git ls-files` output' "$G63_TWIN"
+  assert_contains "63k: never a path built from diff or task text" \
+    'never build a path from text in the diff or the task' "$G63_TWIN"
+  assert_contains "63l: a sibling named without a path is matched against that output" \
+    'A sibling named without a path is matched against that output' "$G63_TWIN"
+  # 63m/63n: matrix row 2 -- a dangling mirror is reported, never satisfied.
+  assert_contains "63m: a mirror naming an unlisted sibling is dangling" \
+    'A mirror sentence naming a sibling `git ls-files` does not list is dangling' "$G63_TWIN"
+  assert_contains "63n: a dangling mirror is never treated as satisfied" \
+    'never as satisfied' "$G63_TWIN"
+  # 63o/63p: matrix row 0 -- Important code_quality naming both files, never cosmetic.
+  assert_contains "63o: an unchanged counterpart is an Important issue naming both files" \
+    'A counterpart left unchanged while the diff changes behaviour, or a rule both files state, is an Important `code_quality` issue naming both files' "$G63_TWIN"
+  assert_contains "63p: the twin issue is never cosmetic" \
+    'never `cosmetic`' "$G63_TWIN"
+  # 63q: matrix row 3 -- a recorded reason exempts the counterpart.
+  assert_contains "63q: a recorded reason in the task or dispatch exempts it" \
+    'No issue is raised when the task text or the dispatch records why the counterpart needs no change' "$G63_TWIN"
+  # 63r: pitfall -- no new block key.
+  assert_contains "63r: twin checks add no block key" \
+    'Twin checks add no block key' "$G63_TWIN"
+  # 63s-63v: the twin checks reach every report-file content list.
+  assert_contains "63s: step 8 adds the step-6 twin checks to the report file" \
+    'Then add the step-6 twin checks.' "$G63_S8"
+  assert_contains "63t: the report-file content list names the twin checks" \
+    'the statement checks, the twin checks, and the fenced' "$G63_RF"
+  assert_contains "63u: the write-failure list names the twin checks" \
+    'the statement checks and the twin checks for a failed report file' "$G63_WF"
+  assert_contains "63v: the output-persistence list names the twin checks" \
+    'the statement checks, the twin checks, and the fenced' "$G63_OP"
+  # 63w-63aa: the worked example -- a .sh change whose .ps1 twin was missed.
+  assert_contains "63w: the worked example lead" \
+    '**Worked example — an untouched twin becomes an issue.**' "$G63_EXS"
+  assert_contains "63x: the .ps1 twin is found and marked unchanged" \
+    'hooks/stride-hook.ps1 (same stem, paired extension) — UNCHANGED' "$G63_EXS"
+  assert_contains "63y: the example issue is a code_quality issue" \
+    '"category": "code_quality"' "$G63_EXS"
+  assert_contains "63z: a touched file with no counterpart raises nothing" \
+    'no counterpart, no issue' "$G63_EXS"
+  assert_contains "63aa: a recorded reason would exempt the twin" \
+    'would record that reason beside the twin and raise nothing' "$G63_EXS"
+  # 63ab-63ad: end checks -- each slice reached its closing boundary.
+  assert_contains "63ab: twin slice ends at the step-7 heading" \
+    '7. **Project-Level Checks**' "$G63_TWIN"
+  assert_contains "63ac: step-8 slice ends at the report-file end line" \
+    '- End the **report file**' "$G63_S8"
+  assert_contains "63ad: example slice ends at the W2295 example lead" \
+    '**Worked example — a contradicted statement becomes an issue.**' "$G63_EXS"
+  # 63ae: the example issue carries no cosmetic key.
+  if grep -qF -- '"cosmetic"' <<< "$G63_EXS"; then
+    echo -e "  ${RED}FAIL${RESET}: 63ae: the example issue carries no cosmetic key"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 63ae: the example issue carries no cosmetic key"
+    PASS=$((PASS + 1))
+  fi
+  # 63af: pitfall -- the agent still carries exactly its two canon anchors.
+  assert_eq "63af: no canon anchor was added to the agent" \
+    "2" "$(grep -c '^[[:space:]]*<!-- canon:' "$G63_REV")"
+else
+  echo "  SKIP: Group 63 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

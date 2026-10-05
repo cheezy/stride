@@ -69,6 +69,17 @@ None of 385 production tasks (W2000–W2291, D250–D349) carried a `behaviour_t
 - `docs/task-decomposer-reference.md` notes that its worked example leaves out each task's matrix for length.
 - **Pinned**: bash hook-suite Group 62 (41 text pins against section slices and 3 against the whole creating-tasks file, each phrase occurring exactly once where it is matched, plus 3 end checks and 4 checks that the old optional-only wording is gone). Bash only, like Groups 52–61.
 
+### Changed — the task-reviewer flags untouched twins and mirrors (W2296)
+
+Incomplete sweeps were the second most common implementation mistake in the G455 rework data: the PowerShell half of a bash change was missed or wrong (D320, D322, D326, D339), a second statement of a rule was left stale (W2120, W2169), and removed concepts left orphaned references (W2037). The repository already declares its pairs, in `.sh`/`.ps1` twins and in keep-in-sync and mirror sentences, but nothing checked that a change reached both halves.
+
+- **A Twin Check block in review step 6.** For each touched file the reviewer finds declared counterparts of three kinds: a tracked file with the same path stem and the paired extension (`.sh` and `.ps1`), a file the touched file names in a keep-in-sync, mirror, twin or stated-a-second-time sentence, and another file carrying the same canon anchor as a touched section. Only declared pairs count; a file with no counterpart raises no issue.
+- **Paths from `git ls-files` only.** Counterparts are found with `git ls-files` and `grep`, never by running either file, and each command goes in the report file. No path is built from diff or task text. A mirror sentence naming a sibling `git ls-files` does not list is reported as dangling, never treated as satisfied.
+- **Dispositions.** A counterpart left unchanged while the diff changes behaviour, or a rule both files state, is an Important `code_quality` issue naming both files, never `cosmetic`. No issue is raised when the task text or the dispatch records why the counterpart needs no change.
+- **No growth beyond the budget.** No block key was added. To fit the 77,000-byte budget, eight rationale and duplicate clauses were removed or shortened in `agents/task-reviewer.md` (76,722 → 76,744 bytes with the new block); their substance moved to `docs/task-reviewer-rationale.md`.
+- `docs/task-reviewer-examples.md` gains a worked example of a `hooks/stride-hook.sh` change whose `.ps1` twin was missed.
+- **Pinned**: bash hook-suite Group 63 (27 text pins against section slices, each phrase occurring exactly once in its slice, plus 3 end checks, 1 check that the example issue carries no `cosmetic` key and 1 that the agent still carries exactly two canon anchors). Bash only, like Groups 52–62, so `hooks/test-stride-hook.ps1` is unchanged.
+
 ## [1.84.0] - 2026-10-04
 
 Step 5.5 catches up with `stride-exploratory-testing` 0.4.0's explorer contract, and gets faster and lighter. It groups manual tests into at most about three charters, re-checks a fixed Critical in verify mode, fills a fixed dispatch template carrying the explorer's two required safety lines, and treats `no_observation_surface` as not performed. An unreplicated or provisional Critical is advisory. Step 5.6 runs `/harden` unattended. The two Step 5.5 hot-path files are trimmed to rules. Also: the measured G446–G448 dispatcher-mode run.

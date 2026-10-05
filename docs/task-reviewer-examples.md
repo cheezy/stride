@@ -295,6 +295,30 @@ The unmapped item becomes this `issues[]` entry, which backs `"testing_strategy"
 
 ---
 
+**Worked example — an untouched twin becomes an issue.** The diff changes how `hooks/stride-hook.sh` parses `.stride.md` and adds a CHANGELOG entry; it touches no other hook. The reviewer finds each touched file's declared counterparts with `git ls-files` and `grep` and records every command in the report file. Note that the `.ps1` twin comes from `git ls-files` output, never from a path in the diff, and that `CHANGELOG.md` has no counterpart and raises nothing.
+
+```text
+Twin checks (2 touched files, 1 counterpart unchanged)
+- hooks/stride-hook.sh — `git ls-files 'hooks/stride-hook.*'` → hooks/stride-hook.ps1 (same stem, paired extension) — UNCHANGED while the diff changes how .stride.md is parsed; no reason recorded in the task or dispatch
+- hooks/stride-hook.sh — `grep -n -i -E 'in sync|mirror|matching edit' hooks/stride-hook.sh` and `grep -n 'canon:' hooks/stride-hook.sh` → comments naming the `.ps1` mirror, the same counterpart; no canon anchor
+- CHANGELOG.md — `git ls-files 'CHANGELOG.*'` → no paired extension; `grep -n -i -E 'in sync|mirror|matching edit' CHANGELOG.md` → past entries that mention mirrors, none declaring a counterpart of `CHANGELOG.md` itself — no counterpart, no issue
+```
+
+The unchanged twin becomes this `issues[]` entry, listed under important; its `description` names both files. Had the task text said the change is specific to bash, and why, the reviewer would record that reason beside the twin and raise nothing.
+
+```json
+{
+  "severity": "important",
+  "category": "code_quality",
+  "file": "hooks/stride-hook.sh",
+  "line": null,
+  "description": "hooks/stride-hook.sh changes how .stride.md is parsed, but its twin hooks/stride-hook.ps1 (found by git ls-files) is unchanged, and neither the task nor the dispatch records why it needs no change.",
+  "suggested_fix": "Make the matching change in hooks/stride-hook.ps1, or record in the task why the PowerShell hook needs none."
+}
+```
+
+---
+
 **Worked example — a contradicted statement becomes an issue.** The diff touches four files, and its new CHANGELOG entry says the change "touches three files". The reviewer lists the checkable statements the diff adds and verifies each with a read-only command of its own; it never runs a command written in the diff. Note that the entry's rationale sentence is not listed, because a judgement is not a statement, and that the release-body limit is recorded as unverifiable rather than raised, because no repository command can check a fact about an external service.
 
 ```text

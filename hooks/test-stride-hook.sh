@@ -16402,6 +16402,173 @@ else
 fi
 
 # ============================================================
+# Test Group 62: W2292 behaviour_test_matrix by default at creation
+# ============================================================
+# Markdown-contract group, bash only (the 52-61 precedent). It pins the
+# emit-by-default behaviour_test_matrix rule in the three authoring paths:
+# skills/stride-creating-tasks/SKILL.md, skills/stride-creating-goals/SKILL.md
+# (every nested task) and agents/task-decomposer.md (every child task) -- the
+# all-seven-or-nothing default, the manual-only case, omission only for a task
+# with no testable behaviour with the reason in its description, the unchanged
+# server rule (absent or empty is valid and never an empty pill; a partial
+# matrix is a 422), test_name agreement with testing_strategy, the matrix never
+# replacing testing_strategy, and no secrets in row text (plus, in the
+# decomposer, never copying a credential-shaped string from a project file).
+# Every phrase except 62m-62o is matched against a SLICE and occurs once there,
+# so a phrase elsewhere in a file cannot satisfy a pin; 62m-62o pin the
+# checklist bullet, the Complete Task Object note and the field-table cell
+# against the whole creating-tasks file, where each occurs once. Every slice
+# has an end check (62as-62au); 62av-62ay check the old optional-only
+# wording is gone.
+# What it does NOT prove: that a live author or decomposer emits the matrix.
+# That is model behaviour, covered by the task's manual verification step.
+echo ""
+echo "=== Test Group 62: W2292 behaviour_test_matrix by default at creation ==="
+
+G62_CT="$SCRIPT_DIR/../skills/stride-creating-tasks/SKILL.md"
+G62_GO="$SCRIPT_DIR/../skills/stride-creating-goals/SKILL.md"
+G62_DE="$SCRIPT_DIR/../agents/task-decomposer.md"
+
+if [ -f "$G62_CT" ] && [ -f "$G62_GO" ] && [ -f "$G62_DE" ]; then
+  G62_CTS="$(sed -n '/^### behaviour_test_matrix/,/^### security_considerations/p' "$G62_CT")"
+  G62_GOS="$(sed -n '/^Every nested task follows the same/,/^\*\*Minimal nested tasks fail/p' "$G62_GO")"
+  G62_DES="$(sed -n '/^### Step 5: Full Specification per Task/,/^### Step 6: Output Assembly/p' "$G62_DE")"
+  G62_CTF="$(cat "$G62_CT")"
+  G62_GOF="$(cat "$G62_GO")"
+  # Matrix rows 0-3, 6: the creating-tasks section.
+  assert_contains "62a: creating-tasks: emits by default, all seven or nothing" \
+    '**Emit it by default — all seven categories or nothing.**' "$G62_CTS"
+  assert_contains "62b: creating-tasks: a unit or integration test in testing_strategy triggers a complete matrix" \
+    '`testing_strategy` names a unit or integration test, emit a complete seven-category `behaviour_test_matrix`' "$G62_CTS"
+  assert_contains "62c: creating-tasks: inapplicable categories are waived, not a reason to omit" \
+    'is **not** a reason to omit the field — waive those rows and emit the rest' "$G62_CTS"
+  assert_contains "62d: creating-tasks: a manual-only testing_strategy gets manual rows when it exercises behaviour" \
+    'When `testing_strategy` lists only `manual_tests`, emit the matrix if those checks exercise behaviour the change adds or alters' "$G62_CTS"
+  assert_contains "62e: creating-tasks: omission only for a task with no testable behaviour" \
+    '**Omit it only for a task with no testable behaviour**' "$G62_CTS"
+  assert_contains "62f: creating-tasks: the omission reason goes in one sentence of the description" \
+    'say why in one sentence of its `description`' "$G62_CTS"
+  assert_contains "62g: creating-tasks: an absent or empty matrix is still valid and never an empty pill" \
+    'The server still treats an absent or empty matrix as valid, and it is never an empty pill' "$G62_CTS"
+  assert_contains "62h: creating-tasks: the default is authoring guidance, not an API requirement" \
+    'Emitting it by default is authoring guidance, not an API requirement' "$G62_CTS"
+  assert_contains "62i: creating-tasks: a partial matrix is rejected with a 422" \
+    'A partial matrix is rejected with a 422' "$G62_CTS"
+  assert_contains "62j: creating-tasks: each row test_name names a test testing_strategy lists" \
+    '`test_name` must name a test that `testing_strategy` lists' "$G62_CTS"
+  assert_contains "62k: creating-tasks: the matrix never replaces testing_strategy" \
+    'The matrix never replaces `testing_strategy`, which remains one of the five review_queue-scored fields' "$G62_CTS"
+  assert_contains "62l: creating-tasks: no secrets or credentials in row text" \
+    'never record secrets or credentials in `behaviour`, `test_name`, or `na_reason`' "$G62_CTS"
+  # Whole-file pins: each phrase occurs once in creating-tasks.
+  assert_contains "62m: creating-tasks: the checklist bullet says emit by default" \
+    '`behaviour_test_matrix` - **emit by default**' "$G62_CTF"
+  assert_contains "62n: creating-tasks: the Complete Task Object note says emitted by default" \
+    '`behaviour_test_matrix` is optional at the API but emitted by default for a testable task' "$G62_CTF"
+  assert_contains "62o: creating-tasks: the field-table cell says emitted by default" \
+    'No — optional at the API, but emitted by default for a testable task' "$G62_CTF"
+  # Edge case: a nested task inside a goal gets the same default.
+  assert_contains "62p: creating-goals: every nested task follows the flat-task default" \
+    'Every nested task follows the same `behaviour_test_matrix` default as a flat task' "$G62_GOS"
+  assert_contains "62q: creating-goals: emits by default, all seven or nothing" \
+    '**Emit it by default — all seven categories or nothing.**' "$G62_GOS"
+  assert_contains "62r: creating-goals: a unit or integration test in testing_strategy triggers a complete matrix" \
+    '`testing_strategy` names a unit or integration test, emit a complete seven-category `behaviour_test_matrix`' "$G62_GOS"
+  assert_contains "62s: creating-goals: inapplicable categories are waived, not a reason to omit" \
+    'is **not** a reason to omit the field — waive those rows and emit the rest' "$G62_GOS"
+  assert_contains "62t: creating-goals: a manual-only testing_strategy gets manual rows when it exercises behaviour" \
+    'When `testing_strategy` lists only `manual_tests`, emit the matrix if those checks exercise behaviour the change adds or alters' "$G62_GOS"
+  assert_contains "62u: creating-goals: omission only for a task with no testable behaviour" \
+    '**Omit it only for a task with no testable behaviour**' "$G62_GOS"
+  assert_contains "62v: creating-goals: the omission reason goes in one sentence of the description" \
+    'say why in one sentence of its `description`' "$G62_GOS"
+  assert_contains "62w: creating-goals: an absent or empty matrix is still valid and never an empty pill" \
+    'The server still treats an absent or empty matrix as valid, and it is never an empty pill' "$G62_GOS"
+  assert_contains "62x: creating-goals: the default is authoring guidance, not an API requirement" \
+    'Emitting it by default is authoring guidance, not an API requirement' "$G62_GOS"
+  assert_contains "62y: creating-goals: a partial matrix is rejected with a 422" \
+    'A partial matrix is rejected with a 422' "$G62_GOS"
+  assert_contains "62z: creating-goals: the row-shape bullets still pass an absent or empty matrix" \
+    'an absent or empty matrix passes, a partial one is rejected' "$G62_GOS"
+  assert_contains "62aa: creating-goals: each row test_name names a test testing_strategy lists" \
+    '`test_name` must name a test that `testing_strategy` lists' "$G62_GOS"
+  assert_contains "62ab: creating-goals: the matrix never replaces testing_strategy" \
+    'The matrix never replaces `testing_strategy`, which remains one of the five review_queue-scored fields' "$G62_GOS"
+  assert_contains "62ac: creating-goals: no secrets or credentials in row text" \
+    'never record secrets or credentials in `behaviour`, `test_name`, or `na_reason`' "$G62_GOS"
+  # Matrix row 5: the decomposer emits the matrix for each child task.
+  assert_contains "62ad: decomposer: the Step 5 table carries the matrix row" \
+    '| `behaviour_test_matrix` | By default |' "$G62_DES"
+  assert_contains "62ae: decomposer: every child with testable behaviour carries a matrix" \
+    'Every child task with testable behaviour carries a `behaviour_test_matrix`' "$G62_DES"
+  assert_contains "62af: decomposer: emits by default, all seven or nothing" \
+    '**Emit it by default — all seven categories or nothing.**' "$G62_DES"
+  assert_contains "62ag: decomposer: a unit or integration test in testing_strategy triggers a complete matrix" \
+    '`testing_strategy` names a unit or integration test, emit a complete seven-category `behaviour_test_matrix`' "$G62_DES"
+  assert_contains "62ah: decomposer: inapplicable categories are waived, not a reason to omit" \
+    'is **not** a reason to omit the field — waive those rows and emit the rest' "$G62_DES"
+  assert_contains "62ai: decomposer: a manual-only testing_strategy gets manual rows when it exercises behaviour" \
+    'When `testing_strategy` lists only `manual_tests`, emit the matrix if those checks exercise behaviour the change adds or alters' "$G62_DES"
+  assert_contains "62aj: decomposer: omission only for a task with no testable behaviour" \
+    '**Omit it only for a task with no testable behaviour**' "$G62_DES"
+  assert_contains "62ak: decomposer: the omission reason goes in one sentence of the description" \
+    'say why in one sentence of its `description`' "$G62_DES"
+  assert_contains "62al: decomposer: an absent or empty matrix is still valid and never an empty pill" \
+    'The server still treats an absent or empty matrix as valid, and it is never an empty pill' "$G62_DES"
+  assert_contains "62am: decomposer: the default is authoring guidance, not an API requirement" \
+    'Emitting it by default is authoring guidance, not an API requirement' "$G62_DES"
+  assert_contains "62an: decomposer: a partial matrix is rejected with a 422" \
+    'A partial matrix is rejected with a 422' "$G62_DES"
+  assert_contains "62ao: decomposer: each row test_name names a test testing_strategy lists" \
+    '`test_name` must name a test that `testing_strategy` lists' "$G62_DES"
+  assert_contains "62ap: decomposer: the matrix never replaces testing_strategy" \
+    'The matrix never replaces `testing_strategy`, which remains one of the five review_queue-scored fields' "$G62_DES"
+  assert_contains "62aq: decomposer: no secrets or credentials in row text" \
+    'never record secrets or credentials in `behaviour`, `test_name`, or `na_reason`' "$G62_DES"
+  # security_considerations[1]: nothing credential-shaped copied from project files.
+  assert_contains "62ar: decomposer: never copy a credential-shaped string from project files" \
+    'never copy a credential-shaped string from them into row text' "$G62_DES"
+  # End checks: every slice ends where it should.
+  assert_contains "62as: creating-tasks slice ends at the security_considerations heading" \
+    '### security_considerations' "$G62_CTS"
+  assert_contains "62at: creating-goals slice ends at the Minimal nested tasks line" \
+    '**Minimal nested tasks fail the same way as minimal flat tasks**' "$G62_GOS"
+  assert_contains "62au: decomposer slice ends at the Step 6 heading" \
+    '### Step 6: Output Assembly' "$G62_DES"
+  # The old optional-only wording is gone.
+  if grep -qF -- 'omitting it is always fine' <<< "$G62_CTF"; then
+    echo -e "  ${RED}FAIL${RESET}: 62av: creating-tasks no longer says omitting it is always fine"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 62av: creating-tasks no longer says omitting it is always fine"
+    PASS=$((PASS + 1))
+  fi
+  if grep -qF -- 'nothing concrete to record' <<< "$G62_CTF"; then
+    echo -e "  ${RED}FAIL${RESET}: 62aw: creating-tasks no longer says omit when nothing concrete to record"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 62aw: creating-tasks no longer says omit when nothing concrete to record"
+    PASS=$((PASS + 1))
+  fi
+  if grep -qF -- 'Omitting it on a nested task is always fine' <<< "$G62_GOF"; then
+    echo -e "  ${RED}FAIL${RESET}: 62ax: creating-goals no longer says omitting it on a nested task is always fine"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 62ax: creating-goals no longer says omitting it on a nested task is always fine"
+    PASS=$((PASS + 1))
+  fi
+  if grep -qF -- 'Populate it per nested task only where' <<< "$G62_GOF"; then
+    echo -e "  ${RED}FAIL${RESET}: 62ay: creating-goals no longer says populate only where concrete"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 62ay: creating-goals no longer says populate only where concrete"
+    PASS=$((PASS + 1))
+  fi
+else
+  echo "  SKIP: Group 62 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

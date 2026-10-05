@@ -57,6 +57,18 @@ False statements written into docs, comments and skill text were the largest gro
 - `docs/task-reviewer-examples.md` gains a worked example of a contradicted CHANGELOG count becoming an issue.
 - **Pinned**: bash hook-suite Group 61 (27 text pins against section slices and 1 against the whole agent file, each phrase occurring exactly once where it is matched, plus 3 end checks — the example slice runs to end of file — and 1 check that the example issue carries no `cosmetic` key). Bash only, like Groups 52–60.
 
+### Changed — the creation skills and the decomposer author a `behaviour_test_matrix` by default for testable tasks (W2292)
+
+None of 385 production tasks (W2000–W2291, D250–D349) carried a `behaviour_test_matrix`, yet it is the one test specification the reviewer checks row by row and the implementer updates as it goes. `stride-creating-tasks` and `stride-creating-goals` called it optional, to include only when there was something concrete to record, and `agents/task-decomposer.md` never mentioned it; only the enricher emitted it by default.
+
+- **Emit by default, all seven categories or nothing.** Whenever a task's `testing_strategy` names a unit or integration test, `stride-creating-tasks`, `stride-creating-goals` (every nested task) and the decomposer (every child task) emit a complete seven-category matrix, waiving categories that do not apply with `na_reason` — the rule `agents/task-enricher.md` already follows. A `testing_strategy` with only `manual_tests` gets `"manual"` rows when those checks exercise behaviour, and no matrix when they only proof-read docs, copy or config.
+- **Omission says why.** The matrix is omitted only for a task with no testable behaviour (a pure docs, copy or config change), with the reason in one sentence of the task's `description`.
+- **Rows agree with `testing_strategy`.** Each row's `test_name` must name a test that `testing_strategy` lists; a row needing an unlisted test adds it to `testing_strategy` first. The matrix never replaces `testing_strategy`, which stays one of the five review_queue-scored fields.
+- **Server rule unchanged.** An absent or empty matrix is still valid and never an empty pill, and a partial one is still rejected with a 422. No server, schema or API change.
+- **Row text stays clean.** All three files say never to record secrets or credentials in `behaviour`, `test_name` or `na_reason`, and the decomposer must not copy a credential-shaped string from a project file into row text.
+- `docs/task-decomposer-reference.md` notes that its worked example leaves out each task's matrix for length.
+- **Pinned**: bash hook-suite Group 62 (41 text pins against section slices and 3 against the whole creating-tasks file, each phrase occurring exactly once where it is matched, plus 3 end checks and 4 checks that the old optional-only wording is gone). Bash only, like Groups 52–61.
+
 ## [1.84.0] - 2026-10-04
 
 Step 5.5 catches up with `stride-exploratory-testing` 0.4.0's explorer contract, and gets faster and lighter. It groups manual tests into at most about three charters, re-checks a fixed Critical in verify mode, fills a fixed dispatch template carrying the explorer's two required safety lines, and treats `no_observation_surface` as not performed. An unreplicated or provisional Critical is advisory. Step 5.6 runs `/harden` unattended. The two Step 5.5 hot-path files are trimmed to rules. Also: the measured G446–G448 dispatcher-mode run.

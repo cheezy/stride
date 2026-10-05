@@ -266,7 +266,7 @@ These five fields must be filled in on every nested task in the batch — the go
 
 A nested task MAY also carry an optional free-form `technical_details` object (any keys — see `stride:stride-creating-tasks`); it is **not** one of the five review_queue-scored fields and is never required.
 
-A nested task MAY also carry an optional `behaviour_test_matrix` array (see `stride:stride-creating-tasks` for the full contract); it is **not** one of the five review_queue-scored fields and is never required. Omitting it on a nested task is always fine and never produces an empty pill. When you do supply it, the shape is identical to a flat task's — same rules, no batch-specific variation:
+Every nested task follows the same `behaviour_test_matrix` default as a flat task (see `stride:stride-creating-tasks` for the full contract). **Emit it by default — all seven categories or nothing.** Whenever the task's `testing_strategy` names a unit or integration test, emit a complete seven-category `behaviour_test_matrix` on that nested task; the goal-level `description` never stands in for it. "Some categories don't apply here" is **not** a reason to omit the field — waive those rows and emit the rest. The shape is identical to a flat task's — same rules, no batch-specific variation:
 
 - Each row is an object: `category`, `behaviour`, `test_name`, `type`, `status`, `na_reason`, `position`. `category`, `behaviour`, and `status` are required; always supply `position` (integer >= 0) too — the API tolerates its absence, but it is how a row records its intended order. Emit the rows in that order as well; nothing re-sorts the array.
 - `category` is one of the **7 fixed categories**, exact strings: `"Happy path"`, `"Boundary"`, `"Error / exception"`, `"Null / empty"`, `"Concurrency"`, `"Lifecycle / wiring"`, `"Contract / serialization"`.
@@ -275,7 +275,15 @@ A nested task MAY also carry an optional `behaviour_test_matrix` array (see `str
 - Each row names a **real test** in `test_name`, **or** is waived (`status: "not_applicable"` or an N/A `test_name`) and supplies a one-line `na_reason`. A row with neither is rejected.
 - A **non-empty** matrix must include at least one row for **every** one of the 7 categories; an absent or empty matrix passes, a partial one is rejected.
 
-Populate it per nested task only where you have concrete behaviours to record — a matrix is never a substitute for that task's `testing_strategy`, which remains one of the five. Row text is stored and later rendered, so never record secrets or credentials in `behaviour`, `test_name`, or `na_reason` — nothing on the server strips them, so this rule is the only thing protecting them. Raw HTML is a separate matter with a real control behind it: every render path interpolates row text through auto-escaped HEEx and never a raw-HTML helper, and the API rejects an out-of-vocabulary `category` or `status` outright, so markup in a row renders as literal text rather than executing. Keep row text free of raw HTML anyway, as hygiene.
+When `testing_strategy` lists only `manual_tests`, emit the matrix if those checks exercise behaviour the change adds or alters — each row's `test_name` then names one of those `manual_tests` entries and its `type` is `"manual"` — and omit it, stating why, if they only proof-read docs, copy or config.
+
+**Omit it only for a task with no testable behaviour** — a pure docs, copy or config change — and say why in one sentence of its `description`, for example `No behaviour_test_matrix: docs-only change with no testable behaviour.` An omission with no stated reason reads as an oversight.
+
+**Optional at the API, unchanged.** The server still treats an absent or empty matrix as valid, and it is never an empty pill, because the matrix is **not** one of the five review_queue-scored fields. Emitting it by default is authoring guidance, not an API requirement. A partial matrix is rejected with a 422, so emit all seven categories or omit the field.
+
+**Every row's `test_name` must name a test that `testing_strategy` lists**, so the two never disagree; a waived row names no test and carries `na_reason` instead. If a row needs a test the strategy does not list, add that test to `testing_strategy` first. The matrix never replaces `testing_strategy`, which remains one of the five review_queue-scored fields.
+
+Row text is stored and later rendered, so never record secrets or credentials in `behaviour`, `test_name`, or `na_reason` — nothing on the server strips them, so this rule is the only thing protecting them. Raw HTML is a separate matter with a real control behind it: every render path interpolates row text through auto-escaped HEEx and never a raw-HTML helper, and the API rejects an out-of-vocabulary `category` or `status` outright, so markup in a row renders as literal text rather than executing. Keep row text free of raw HTML anyway, as hygiene.
 
 **Minimal nested tasks fail the same way as minimal flat tasks** — causing 3+ hour exploration AND empty review_queue pills at completion.
 

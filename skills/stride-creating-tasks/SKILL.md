@@ -112,7 +112,7 @@ Use BEFORE calling `POST /api/tasks` to create any Stride task or defect.
 
 - [ ] `estimated_files` - Helps set expectations: `"1-2"`, `"3-5"`, or `"5+"`
 - [ ] `required_capabilities` - Array of agent skills needed
-- [ ] `behaviour_test_matrix` - **OPTIONAL** array of behaviour/test rows; omitting it is always fine and never an empty pill — see [behaviour_test_matrix](#behaviour_test_matrix)
+- [ ] `behaviour_test_matrix` - **emit by default**: a complete seven-category matrix whenever `testing_strategy` names a unit or integration test; omit it only for a task with no testable behaviour and say why in its `description` — see [behaviour_test_matrix](#behaviour_test_matrix)
 
 ## Field Type Validations (CRITICAL)
 
@@ -402,7 +402,7 @@ The task object below is what goes inside that `task` key.
 }
 ```
 
-`behaviour_test_matrix` and `technical_details` are both optional — see the Embedded Object Formats section below. Neither is one of the five review_queue-scored fields, so omitting either never produces an empty pill. The matrix above shows all **seven** fixed categories because that is the rule once the array is non-empty: an absent or empty matrix is fine, but a partial one is rejected.
+`technical_details` is optional, and `behaviour_test_matrix` is optional at the API but emitted by default for a testable task — see the Embedded Object Formats section below. Neither is one of the five review_queue-scored fields, so omitting either never produces an empty pill. The matrix above shows all **seven** fixed categories because that is the rule once the array is non-empty: an absent or empty matrix is fine, but a partial one is rejected.
 
 `created_by_agent` records **which agent created the task** so the `/agents` activity feed attributes the `created` row to that agent instead of an uninformative `?` avatar. Set it to **the plugin's own agent name — the exact same value you send as `agent_name` on claim and complete** (here, `"Claude Opus 4.6"`). Use the plain agent name, never the `ai_agent:<model>` token form, so one agent stays one roster identity. `created_by_agent` is accepted **only on create** (`POST /api/tasks` and `POST /api/tasks/batch`); it is **forbidden on `PATCH`**, so it cannot be backfilled later — stamp it at creation time.
 
@@ -544,7 +544,7 @@ Use these exact values — any other value will be rejected.
 | `dependencies` | array | Task identifiers `["W45", "W46"]` | No |
 | `pitfalls` | array | Strings `["Don't do X", "Avoid Y"]` | No |
 | `technical_details` | object | Free-form JSON object of any additional technical info | No |
-| `behaviour_test_matrix` | array | Row objects: `category` (one of the 7 fixed categories), `behaviour`, `test_name`, `type` (`"unit"`/`"integration"`/`"manual"` or a `/`-joined combo), `status` (`"planned"`/`"passing"`/`"failing"`/`"not_applicable"`), `na_reason`, `position` | No (but if non-empty, all 7 categories must appear) |
+| `behaviour_test_matrix` | array | Row objects: `category` (one of the 7 fixed categories), `behaviour`, `test_name`, `type` (`"unit"`/`"integration"`/`"manual"` or a `/`-joined combo), `status` (`"planned"`/`"passing"`/`"failing"`/`"not_applicable"`), `na_reason`, `position` | No — optional at the API, but emitted by default for a testable task; if non-empty, all 7 categories must appear |
 
 ## Embedded Object Formats — WRONG vs RIGHT
 
@@ -620,7 +620,15 @@ Use these exact values — any other value will be rejected.
 
 ### behaviour_test_matrix
 
-**Optional field.** Omit it entirely when you have nothing concrete to record — it is **not** one of the five review_queue-scored fields, so an absent matrix is never an empty pill. The rules below apply only once you do supply it.
+**Emit it by default — all seven categories or nothing.** Whenever the task's `testing_strategy` names a unit or integration test, emit a complete seven-category `behaviour_test_matrix`: one row for every fixed category, each naming a real test or waived with `na_reason`. That is the normal outcome, and it is the rule `agents/task-enricher.md` already follows. "Some categories don't apply here" is **not** a reason to omit the field — waive those rows and emit the rest. Never pad with filler rows either.
+
+When `testing_strategy` lists only `manual_tests`, emit the matrix if those checks exercise behaviour the change adds or alters — each row's `test_name` then names one of those `manual_tests` entries and its `type` is `"manual"` — and omit it, stating why, if they only proof-read docs, copy or config.
+
+**Omit it only for a task with no testable behaviour** — a pure docs, copy or config change — and say why in one sentence of its `description`, for example `No behaviour_test_matrix: docs-only change with no testable behaviour.` An omission with no stated reason reads as an oversight.
+
+**Optional at the API, unchanged.** The server still treats an absent or empty matrix as valid, and it is never an empty pill, because the matrix is **not** one of the five review_queue-scored fields. Emitting it by default is authoring guidance, not an API requirement. A partial matrix is rejected with a 422, so emit all seven categories or omit the field.
+
+**Every row's `test_name` must name a test that `testing_strategy` lists**, so the two never disagree; a waived row names no test and carries `na_reason` instead. If a row needs a test the strategy does not list, add that test to `testing_strategy` first. The matrix never replaces `testing_strategy`, which remains one of the five review_queue-scored fields.
 
 ```json
 ❌ WRONG (strings — must be row objects):

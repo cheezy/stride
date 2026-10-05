@@ -21,14 +21,14 @@ from a planned section.**
 
 | Task | Change | Status in `stride` |
 |---|---|---|
-| W2292 | The creation skills and the decomposer author a `behaviour_test_matrix` by default for testable tasks | landed (`955533c`) |
-| W2293 | The reviewer maps every `testing_strategy` item to a named test | landed (`c4c029a`) |
-| W2294 | The implementer records break-it evidence that new and changed tests can fail, and the reviewer enforces it | landed (`cb1fc8f`) |
-| W2295 | The reviewer verifies the factual statements a diff adds | landed (`f2c5957`) |
-| W2296 | The reviewer flags untouched twins and mirrors | landed (`b0d1cad`) |
-| W2297 | The enricher and decomposer run a cross-field consistency pass before creating a task | landed (`620972e`) |
-| W2298 | The explorer reports task statements that the current code contradicts | landed (`d03571e`) |
-| W2299 | Release `stride` once and finish this guide | planned (runs last) |
+| W2292 | The creation skills and the decomposer author a `behaviour_test_matrix` by default for testable tasks | landed in 1.85.0 (`955533c`) |
+| W2293 | The reviewer maps every `testing_strategy` item to a named test | landed in 1.85.0 (`c4c029a`) |
+| W2294 | The implementer records break-it evidence that new and changed tests can fail, and the reviewer enforces it | landed in 1.85.0 (`cb1fc8f`) |
+| W2295 | The reviewer verifies the factual statements a diff adds | landed in 1.85.0 (`f2c5957`) |
+| W2296 | The reviewer flags untouched twins and mirrors | landed in 1.85.0 (`b0d1cad`) |
+| W2297 | The enricher and decomposer run a cross-field consistency pass before creating a task | landed in 1.85.0 (`620972e`) |
+| W2298 | The explorer reports task statements that the current code contradicts | landed in 1.85.0 (`d03571e`) |
+| W2299 | Release `stride` once and finish this guide | released as 1.85.0 |
 
 W2293 to W2296 all edit `agents/task-reviewer.md`, so they run in that order.
 
@@ -135,8 +135,8 @@ test specification the reviewer checks row by row and the implementer updates
 as it goes. The creation skills call it optional, and the decomposer never
 mentions it. The enricher already emits it by default.
 
-**Shipped in `stride`** (commit `955533c`; the version is set when W2299
-releases). `stride-creating-tasks`, `stride-creating-goals` (for every nested
+**Shipped in `stride`** (commit `955533c`, released in 1.85.0).
+`stride-creating-tasks`, `stride-creating-goals` (for every nested
 task) and `agents/task-decomposer.md` (for every child task) emit a complete
 seven-category matrix whenever the task's `testing_strategy` names a unit or
 integration test, waiving categories that do not apply with `na_reason`. A
@@ -182,8 +182,8 @@ stated, such as server validation rules, protocol behaviour and already-tagged
 versions. A wrapped acceptance criterion also becomes two criteria, because
 every reviewer counts lines.
 
-**Shipped in `stride`** (commit `620972e`; the version is set when W2299
-releases). `agents/task-enricher.md` runs the pass after its 18-item checklist
+**Shipped in `stride`** (commit `620972e`, released in 1.85.0).
+`agents/task-enricher.md` runs the pass after its 18-item checklist
 (the checklist itself is unchanged), and `agents/task-decomposer.md` runs it on
 every child task as a new Step 7. Both state six checks:
 1. Every verification step covers at least the scope of the criterion it
@@ -243,8 +243,8 @@ context that sibling W2164 had made untrue a day earlier, and W2202 kept a stale
 production summaries mention stale or missing spec elements. But nothing tells
 them to look.
 
-**Shipped in `stride`** (commit `d03571e`; the version is set when W2299
-releases). `agents/task-explorer.md` has a new step 6, run before the findings
+**Shipped in `stride`** (commit `d03571e`, released in 1.85.0).
+`agents/task-explorer.md` has a new step 6, run before the findings
 are composed; the former steps 6 and 7 are now 7 and 8. The step:
 1. Collects each statement the task makes about the current code from the
    `key_files` notes, `description`, `where_context`, `patterns_to_follow` and
@@ -303,8 +303,8 @@ present-but-ignored findings were tests the task listed word for word:
 - W2248 skipped the 422/404 fixture case.
 - W2181's size-ceiling edge case went untested for three rounds.
 
-**Shipped in `stride`** (commit `c4c029a`; the version is set when W2299
-releases). Review step 4 of `agents/task-reviewer.md` now maps every
+**Shipped in `stride`** (commit `c4c029a`, released in 1.85.0). Review step 4 of
+`agents/task-reviewer.md` now maps every
 `unit_tests`, `integration_tests` and `edge_cases` item to the test that covers
 it, by `file:line` in the diff or the existing suite. A test counts only if it
 asserts the item's behaviour; a matching name is not enough. An unmapped item
@@ -340,8 +340,8 @@ implementation mistake:
 Fix rounds regressed too (W2181, D337). The reviewer cannot run code, so the
 evidence has to come from the implementer.
 
-**Shipped in `stride`** (commit `cb1fc8f`; the version is set when W2299
-releases). The new `skills/stride-workflow/test-non-vacuity.md`, pointed to in
+**Shipped in `stride`** (commit `cb1fc8f`, released in 1.85.0). The new
+`skills/stride-workflow/test-non-vacuity.md`, pointed to in
 one line from Step 4, says: for every test the diff adds or changes, break the
 behaviour it guards, see it fail, restore, and see it pass. A diff with no new
 or changed tests needs no entries, and a formatting-only change needs none
@@ -391,8 +391,8 @@ group of implementation mistakes:
 About 19 of these came after `claims_verified_by` shipped. That rule is optional,
 covers only claims about several things at once, and nothing checks it.
 
-**Shipped in `stride`** (commit `f2c5957`; the version is set when W2299
-releases). Review step 6 of `agents/task-reviewer.md` now carries a Statement
+**Shipped in `stride`** (commit `f2c5957`, released in 1.85.0). Review step 6 of
+`agents/task-reviewer.md` now carries a Statement
 Verification block. The reviewer lists each checkable factual statement the
 diff adds to prose, comments, changelogs, or skill and agent text: a count, a
 path, an identifier, a line reference, a version number, or a claim about what
@@ -431,8 +431,8 @@ changelog line.
 - a second statement of a rule was left stale (W2120, W2169);
 - removed concepts left orphaned references (W2037).
 
-**Shipped in `stride`** (commit `b0d1cad`; the version is set when W2299
-releases). Review step 6 of `agents/task-reviewer.md` now carries a Twin Check
+**Shipped in `stride`** (commit `b0d1cad`, released in 1.85.0). Review step 6 of
+`agents/task-reviewer.md` now carries a Twin Check
 block. For each touched file the reviewer finds three kinds of declared
 counterpart:
 - a tracked file with the same path stem and the paired extension (`.sh` and `.ps1`);
@@ -466,11 +466,17 @@ names the `.ps1` twin and raises an Important issue.
 
 ---
 
-## W2299 — release (planned; last)
+## W2299 — release (landed in 1.85.0)
 
-`stride` is released once for the whole goal, following `RELEASE.md` and the
-`stride-marketplace` catalog contract. When the release lands, mark every
-section above as landed, with its commit and the version.
+`stride` was released once for the whole goal, as **1.85.0**, following
+`RELEASE.md`. Its `CHANGELOG.md` carries one `[1.85.0]` heading with an entry
+for each of the seven changes above, each naming the bash hook-suite group that
+pins it (Groups 59–65). The `stride-marketplace` catalog pins `stride` 1.85.0
+in its release 1.103.0, following that catalog's own release contract.
+
+Every section above is now marked landed, with its commit and the version, so
+**every section is portable**. The release itself carries nothing a port needs
+to copy: each port makes its own single release for the goal (rule 4 below).
 
 ---
 

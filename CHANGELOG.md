@@ -23,7 +23,9 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.85.0] - 2026-10-05
+
+Goal G455 gates the causes of review rework found in the G455 rework analysis. The task-reviewer now maps every `testing_strategy` item to a covering test, enforces break-it evidence that new and changed tests can fail, verifies the factual statements a diff adds, and flags untouched twins and mirrors. The task-explorer reports task statements the current code contradicts. At creation time, the creation skills and the decomposer author a `behaviour_test_matrix` by default for testable tasks, and the enricher and decomposer run a cross-field consistency pass before returning a task. No task field, server or API change, and the reviewer's `schema_version` stays `1.7`. Bash hook-suite Groups 59–65 pin the seven changes. The ports owe them; `docs/porting-rework-prevention.md` records what each port needs.
 
 ### Changed — the task-reviewer maps every `testing_strategy` item to a named test (W2293)
 

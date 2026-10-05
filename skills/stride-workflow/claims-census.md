@@ -26,7 +26,7 @@ every completion record that described it.
 deleted after a successful completion (Step 7 housekeeping), so it fails
 condition 3 — it does not outlive the session — and owes no census. Claims
 *inside* a report are governed instead by `verified_by` in
-`agents/task-explorer.md` step 6. The two rules meet at exactly one point and
+`agents/task-explorer.md` step 7. The two rules meet at exactly one point and
 do not otherwise overlap: a report claim marked unverified may not become a
 shipped sentence, and a shipped sentence is where this rule takes over.
 
@@ -39,7 +39,7 @@ shipped sentence, and a shipped sentence is where this rule takes over.
   sample must be one you can point at yourself — a task field, a diff, a
   command's output. **A count taken from a subagent's report is not a bounded
   claim, it is an unverified one**, and naming it as your sample launders it
-  into fact. See `agents/task-explorer.md` step 6: a report claim with no
+  into fact. See `agents/task-explorer.md` step 7: a report claim with no
   `verified_by` is unverified, and an unverified claim is not a census.
 
 A rule that fires on everything gets routed around. This one is meant to fire on

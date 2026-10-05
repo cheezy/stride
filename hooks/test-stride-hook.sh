@@ -16120,8 +16120,11 @@ fi
 # pointer and Step 5 bullet in SKILL.md, the orchestrator-asserted `break_it`
 # input in review-block-extraction.md, the reviewer's receive paragraph and its
 # step-4 enforcement rule, and the two twin copies. Every phrase is matched
-# against a section SLICE and occurs exactly once in it, so a phrase elsewhere
-# in a file cannot satisfy a pin -- the W2035 shape this task exists to catch.
+# against a SLICE -- a section, or for 60af the one paragraph line that carries
+# it -- and occurs exactly once there, so a phrase elsewhere in a file cannot
+# satisfy a pin: the W2035 shape this task exists to catch. Every slice also has
+# an end check (60ah-60ao, 60at-60aw), so a renamed end heading cannot silently
+# widen a slice and lose the occurs-once property.
 # What it does NOT prove: that an implementer runs the breaks or that a live
 # reviewer raises the issue. That is model behaviour, covered by the task's
 # manual verification step.
@@ -16148,6 +16151,7 @@ if [ -f "$G60_NV" ] && [ -f "$G60_WF" ] && [ -f "$G60_RBE" ] && [ -f "$G60_REV" 
   G60_REVIN="$(sed -n '/^You may also receive \*\*`break_it`\*\*/,/^When reviewing code changes/p' "$G60_REV")"
   G60_REV4="$(sed -n '/^4\. \*\*Testing Strategy Alignment\*\*/,/\*\*Behaviour\/Test Matrix Verification\*\*/p' "$G60_REV")"
   G60_POSR="$(sed -n '/^### Other Environments: Self-Review/,/^## Step 6/p' "$G60_PO")"
+  G60_SUBREV="$(sed -n '/^\*\*What to do:\*\* Dispatch the `stride:task-reviewer` agent/p' "$G60_SUB")"
 
   # 60a: matrix row 0 -- the break-it definition (break, fail, restore, pass).
   assert_contains "60a: break-it definition: break, see it fail, restore, see it pass" \
@@ -16227,7 +16231,7 @@ if [ -f "$G60_NV" ] && [ -f "$G60_WF" ] && [ -f "$G60_RBE" ] && [ -f "$G60_REV" 
     'A test changed only in formatting needs no entry.' "$G60_REV4"
   # 60af/60ag: the twin copies carry the input and the self-review check.
   assert_contains "60af: stride-subagent-workflow passes break_it" \
-    'Pass **`break_it`** on the same terms whenever the diff adds or changes a test' "$(cat "$G60_SUB")"
+    'Pass **`break_it`** on the same terms whenever the diff adds or changes a test' "$G60_SUBREV"
   assert_contains "60ag: the other-environments self-review checks break-it" \
     'did you break it, see it fail, restore it and see it pass ([test-non-vacuity.md](test-non-vacuity.md))' "$G60_POSR"
   # 60ah-60ao: every slice reaches its end heading, so a broken sed range
@@ -16248,6 +16252,29 @@ if [ -f "$G60_NV" ] && [ -f "$G60_WF" ] && [ -f "$G60_RBE" ] && [ -f "$G60_REV" 
     'When reviewing code changes for a Stride task' "$G60_REVIN"
   assert_contains "60ao: self-review slice ends at Step 6" \
     '## Step 6' "$G60_POSR"
+  # 60ap-60as (W2294 review round 1): rules the coverage target missed.
+  assert_contains "60ap: fixes that touch no test resend round one's entries" \
+    "Fixes that touch no test: resend round one's entries unchanged." "$G60_REROUND"
+  assert_contains "60aq: an observed false is never flipped (procedure)" \
+    'never flip an observed `false` to `true`' "$G60_PROC"
+  assert_contains "60ar: an observed false is never flipped (dispatch input)" \
+    'send `false` only when you cannot fix it, and never flip one' "$G60_RB"
+  assert_contains "60as: the procedure runs even when review is skipped" \
+    'When the decision matrix skips review, run the procedure anyway and send nothing.' "$G60_ENTRIES"
+  assert_contains "60ax: never break a gitignored file the snapshot cannot see" \
+    'Never place a break in a gitignored file' "$G60_SAFE"
+  # 60at-60aw: end checks for the four slices 60ah-60ao did not cover; 60ay
+  # proves the 60af paragraph slice is non-empty.
+  assert_contains "60at: what-counts slice ends at the procedure heading" \
+    '## The procedure' "$G60_COUNTS"
+  assert_contains "60au: safety slice ends at the entries heading" \
+    '## The `break_it` entries' "$G60_SAFE"
+  assert_contains "60av: entries slice ends at the re-review heading" \
+    '## Re-review rounds' "$G60_ENTRIES"
+  assert_contains "60aw: reviewer step-4 slice ends at the matrix sub-heading" \
+    '**Behaviour/Test Matrix Verification**' "$G60_REV4"
+  assert_contains "60ay: the subagent-workflow slice is the reviewer-dispatch paragraph" \
+    'Dispatch the `stride:task-reviewer` agent' "$G60_SUBREV"
 else
   echo "  SKIP: Group 60 contract files not found"
 fi

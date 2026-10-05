@@ -37,6 +37,7 @@ Text pins may be broken together in one batched run when every pinned phrase occ
 - Breaks happen only in the working tree of the repository under change. Nothing outside it is edited, created or deleted.
 - **No destructive commands, no network.** No `rm -rf`, no history rewrite, no restoring by checkout, no call to a remote, a registry, an API or the Stride server.
 - No shared state: no shared database (a test's own sandbox is fine), no global configuration, no hook cache files, no other process.
+- Never place a break in a gitignored file: the snapshot hashes only tracked and unignored files, so it could not prove that restore.
 - **Never commit a broken state.** One break at a time unless batched as above, and the snapshot check proves the restore.
 - A test that cannot be broken without side effects outside the repository is recorded with a one-line `not_broken_reason` instead of being skipped silently. Its `break` and both booleans are `null`. A reason that names no outside side effect — "slow", "obvious", "trivial" — is not a reason: break the test.
 
@@ -62,7 +63,7 @@ A fix touches a test when it edits the test or the site that test's entry broke.
 
 ## Worked example — a phrase that appears twice
 
-A test pins `assert_contains "Na: pointer" '[x.md](x.md)' "$(cat SKILL.md)"`. The implementer breaks the link text, `[x.md]` becomes `[y.md]`, and runs the suite: the test stays green, because `x.md` still appears in the link target and the whole file is the slice. The entry would read `failed_when_broken: false`, so the test is vacuous. The fix is to pin a phrase that occurs once in a narrower slice, then break it again and observe the failure.
+A test pins the bare filename against the whole file: `assert_contains "Na: pointer" 'x.md' "$(cat SKILL.md)"`, where the pointer line reads `[x.md](x.md)`. The implementer breaks the link text, `[x.md]` becomes `[y.md]`, and runs the suite: the test stays green, because `x.md` still appears in the link target and the whole file is the slice. The occurrence count would have said so first — `grep -oF -- 'x.md'` finds it twice on that one line, where `grep -c` reports 1. The entry would read `failed_when_broken: false`, so the test is vacuous. The fix is to pin a phrase that occurs once in a narrower slice — the whole link, or the bold sentence around it — then break it again and observe the failure.
 
 ## One limit, stated rather than papered over
 

@@ -23,7 +23,7 @@ from a planned section.**
 |---|---|---|
 | W2292 | The creation skills and the decomposer author a `behaviour_test_matrix` by default for testable tasks | planned |
 | W2293 | The reviewer maps every `testing_strategy` item to a named test | landed (`c4c029a`) |
-| W2294 | The implementer records break-it evidence that new and changed tests can fail, and the reviewer enforces it | planned (after W2293) |
+| W2294 | The implementer records break-it evidence that new and changed tests can fail, and the reviewer enforces it | landed (`cb1fc8f`) |
 | W2295 | The reviewer verifies the factual statements a diff adds | planned (after W2294) |
 | W2296 | The reviewer flags untouched twins and mirrors | planned (after W2295) |
 | W2297 | The enricher and decomposer run a cross-field consistency pass before creating a task | planned (after W2292) |
@@ -280,7 +280,7 @@ becoming an issue, and bash hook-suite Group 59 pins the rules.
 **Verify.** Review a change that omits one listed edge case. The report maps the
 other items and raises an Important `testing` issue for the omitted one.
 
-### W2294 — break-it evidence for new tests (planned)
+### W2294 — break-it evidence for new tests (landed)
 
 **Problem.** Tests that stay green when their code is broken were a recurring
 implementation mistake:
@@ -292,20 +292,27 @@ implementation mistake:
 Fix rounds regressed too (W2181, D337). The reviewer cannot run code, so the
 evidence has to come from the implementer.
 
-**Planned change in `stride`.**
-- **The procedure.** For every test the diff adds or changes, break the
-  behaviour the test guards, see it fail, restore, and see it pass. Check
-  `git status` afterwards to prove the restore. A test that cannot be broken
-  safely is recorded with a reason. The procedure lives in a new
-  `skills/stride-workflow/test-non-vacuity.md`, with a one-line pointer from
-  Step 4.
-- **The reviewer input.** The results reach the reviewer as an
-  orchestrator-asserted input beside `commit_pending`. Each entry carries
-  `test`, `break`, `failed_when_broken` and `passes_when_restored`.
-- **The reviewer rule.** A new or changed test with no entry, or with a break
-  that misses the asserted behaviour, raises an Important `testing` issue.
-- **Re-review rounds.** A re-review round needs fresh entries for every test the
-  fixes touched.
+**Shipped in `stride`** (commit `cb1fc8f`; the version is set when W2299
+releases). The new `skills/stride-workflow/test-non-vacuity.md`, pointed to in
+one line from Step 4, says: for every test the diff adds or changes, break the
+behaviour it guards, see it fail, restore, and see it pass. A diff with no new
+or changed tests needs no entries, and a formatting-only change needs none
+either. The restore check is a content-hashing snapshot (`git status
+--porcelain` plus the diff and untracked-file hashes), because porcelain alone
+misses a break left in an already-modified file; it must match before the
+reviewer is dispatched. Restores reverse the edit and never use a git command
+that would drop uncommitted work. A test that cannot be broken without side
+effects outside the repository is recorded with a one-line
+`not_broken_reason`. For text pins the procedure counts occurrences in the
+slice, not lines. The results reach the reviewer as `break_it`, documented in
+`review-block-extraction.md` beside `commit_pending`, with `test`, `break`,
+`failed_when_broken` and `passes_when_restored`; it is not folded into
+`review_round.fixes[]`. Review step 4 of `agents/task-reviewer.md` raises an
+Important `testing` issue for a missing entry and for a break that misses the
+asserted behaviour, and re-review rounds need fresh entries for touched tests.
+No block key was added and `schema_version` is unchanged. `SKILL.md` did not
+grow net. `stride-subagent-workflow` and the other-environments self-review
+checklist carry matching lines, and bash hook-suite Group 60 pins the rules.
 
 **Port needs.**
 - **Full ports:** add the procedure to the workflow skill or a sibling. **No

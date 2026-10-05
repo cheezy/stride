@@ -16583,8 +16583,10 @@ fi
 # step-8 report-file lists, and the worked example in
 # docs/task-reviewer-examples.md. Every phrase is matched against a SLICE and
 # occurs once there, so a phrase elsewhere in a file cannot satisfy a pin.
-# Every slice has an end check (63ab-63ad); 63ae checks the example issue
-# carries no cosmetic key; 63af checks no canon anchor was added to the agent.
+# The three range slices that can stop short have an end check (63ab-63ad);
+# G63_STEP6 shares G63_TWIN's step-7 boundary, and G63_RF, G63_WF and G63_OP
+# are single-line slices. 63ae checks the example issue carries no cosmetic
+# key; 63af checks no canon anchor was added to the agent.
 # What it does NOT prove: that a live reviewer finds a missed twin. That is
 # model behaviour, covered by the task's manual verification step.
 echo ""

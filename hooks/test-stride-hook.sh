@@ -16692,6 +16692,187 @@ else
 fi
 
 # ============================================================
+# Test Group 64: W2297 cross-field consistency pass at creation
+# ============================================================
+# Markdown-contract group, bash only (the 52-63 precedent), so its .ps1 twin
+# is deliberately unchanged. It pins the six-check cross-field consistency
+# pass stated inline in agents/task-enricher.md (after the 18-item checklist)
+# and agents/task-decomposer.md (Step 7, every child task): verification scope
+# covering its criterion, no what/patterns_to_follow instruction contradicting
+# a pitfall or security consideration, a prescribed regex or command checked
+# against the task's own edge cases by pattern matching only (and skipped when
+# none is prescribed), precedence stated, one line per criterion, and external
+# contracts named without quoting credentials or hostnames -- plus the edge
+# cases (no verification steps still gets the other five checks, an
+# unevaluable check never blocks, human-authored fields never rewritten) and
+# the one-line pointer in stride-creating-tasks, stride-creating-goals and
+# stride-enriching-tasks. Every phrase except 64ar is matched against a SLICE
+# and occurs once there; 64ar is matched against the whole reference doc.
+# The two range slices have end checks (64as, 64at); the skill slices are
+# single lines, each present exactly once (64au-64aw). 64ax checks the
+# enricher checklist still has 18 items; 64ay checks the pass was not copied
+# into the reference doc. 64az-64bd pin the pattern-with-no-edge-case and
+# conflicting-pitfalls cases in each agent and the technical_details exception.
+# What it does NOT prove: that a live enricher or decomposer catches a
+# contradiction. That is model behaviour, covered by the task's manual
+# verification step.
+echo ""
+echo "=== Test Group 64: W2297 cross-field consistency pass at creation ==="
+
+G64_EN="$SCRIPT_DIR/../agents/task-enricher.md"
+G64_DE="$SCRIPT_DIR/../agents/task-decomposer.md"
+G64_CT="$SCRIPT_DIR/../skills/stride-creating-tasks/SKILL.md"
+G64_GO="$SCRIPT_DIR/../skills/stride-creating-goals/SKILL.md"
+G64_ES="$SCRIPT_DIR/../skills/stride-enriching-tasks/SKILL.md"
+G64_RF="$SCRIPT_DIR/../docs/task-decomposer-reference.md"
+
+if [ -f "$G64_EN" ] && [ -f "$G64_DE" ] && [ -f "$G64_CT" ] && [ -f "$G64_GO" ] \
+   && [ -f "$G64_ES" ] && [ -f "$G64_RF" ]; then
+  G64_ENS="$(sed -n '/^### Cross-Field Consistency Pass (before you return the JSON)/,/^## Handling Defect Tasks/p' "$G64_EN")"
+  G64_ENC="$(sed -n '/^\*\*Pre-submission checklist (18 items):\*\*/,/^### Cross-Field Consistency Pass/p' "$G64_EN")"
+  G64_DES="$(sed -n '/^### Step 7: Cross-Field Consistency Pass per Child Task/,/^## Task Sizing Heuristics/p' "$G64_DE")"
+  G64_CTP="$(sed -n '/^\*\*Cross-field consistency pass\.\*\*/p' "$G64_CT")"
+  G64_GOP="$(sed -n '/^\*\*Cross-field consistency pass\.\*\*/p' "$G64_GO")"
+  G64_ESP="$(sed -n '/^\*\*Cross-field consistency pass\.\*\*/p' "$G64_ES")"
+  G64_RFF="$(cat "$G64_RF")"
+  G64_TD="$(sed -n '/^- \*\*Optional and never fabricated\.\*\*/p' "$G64_EN")"
+
+  # 64a-64q: the enricher's pass (matrix rows 0-3 and 6).
+  assert_contains "64a: the enricher runs the pass before returning its JSON" \
+    'Run it after the checklist and before you return the JSON' "$G64_ENS"
+  assert_contains "64b: check 1 -- verification scope covers its criterion" \
+    'Every verification step covers at least the scope of the acceptance criterion it verifies' "$G64_ENS"
+  assert_contains "64c: check 2 -- no instruction contradicts a pitfall or security consideration" \
+    'No `what` or `patterns_to_follow` instruction contradicts a pitfall or a security consideration' "$G64_ENS"
+  assert_contains "64d: check 3 -- a prescribed pattern is tested against the task's edge cases" \
+    "is checked against each of the task's own edge cases before you include it" "$G64_ENS"
+  assert_contains "64e: check 3 is pattern matching only" \
+    'Test it by pattern matching only' "$G64_ENS"
+  assert_contains "64f: check 3 never runs anything with side effects" \
+    'Never run the prescribed command, and never execute anything with side effects' "$G64_ENS"
+  assert_contains "64g: no prescribed regex or command skips check 3" \
+    'A task that prescribes no regex or command skips this check' "$G64_ENS"
+  assert_contains "64h: check 4 -- the task states which instruction wins" \
+    'the task says which one wins' "$G64_ENS"
+  assert_contains "64i: a contradiction is never resolved by dropping a side" \
+    'Never resolve a contradiction by silently dropping one side' "$G64_ENS"
+  assert_contains "64j: check 5 -- the reviewer counts each non-blank line" \
+    'because the reviewer counts each non-blank line of `acceptance_criteria` as one criterion' "$G64_ENS"
+  assert_contains "64k: a wrapped criterion becomes two" \
+    'A criterion wrapped onto a second line becomes two' "$G64_ENS"
+  assert_contains "64l: check 6 -- the three external contract kinds" \
+    "server validation, a protocol's required behaviour, or an already-tagged version" "$G64_ENS"
+  assert_contains "64m: check 6 never quotes a credential or hostname" \
+    'never quote a credential, token or internal hostname' "$G64_ENS"
+  assert_contains "64n: no verification steps still gets the other five checks" \
+    'A task with no verification steps skips check 1 and is still checked for the other five' "$G64_ENS"
+  assert_contains "64o: an unevaluable check never blocks" \
+    'A check you cannot evaluate never blocks the JSON' "$G64_ENS"
+  assert_contains "64p: the pass never rewrites human-authored fields" \
+    'it never rewrites the human-authored `title`, `type` or `description`' "$G64_ENS"
+  assert_contains "64q: the enricher's open questions go to technical_details" \
+    '`technical_details.open_questions`' "$G64_ENS"
+
+  # 64r-64ah: the decomposer's pass on every child task.
+  assert_contains "64r: the decomposer runs the pass on every child before returning" \
+    'Run it on every child task after Step 6 assembles the output and before you return it' "$G64_DES"
+  assert_contains "64s: check 1 -- verification scope covers its criterion" \
+    'Each verification step covers at least the scope of the acceptance criterion it verifies' "$G64_DES"
+  assert_contains "64t: check 2 -- no instruction contradicts a pitfall or security consideration" \
+    'No `what` or `patterns_to_follow` instruction contradicts a pitfall or a security consideration' "$G64_DES"
+  assert_contains "64u: check 3 -- a prescribed pattern is tested against the child's edge cases" \
+    "is checked against each of that child's own edge cases before you include it" "$G64_DES"
+  assert_contains "64v: check 3 is pattern matching only" \
+    'by pattern matching only' "$G64_DES"
+  assert_contains "64w: check 3 never runs anything with side effects" \
+    'Never run the prescribed command, and never execute anything with side effects' "$G64_DES"
+  assert_contains "64x: no prescribed regex or command skips check 3" \
+    'A child that prescribes no regex or command skips this check' "$G64_DES"
+  assert_contains "64y: check 4 -- the child states which instruction wins" \
+    'the child says which one wins' "$G64_DES"
+  assert_contains "64z: a contradiction is never resolved by dropping a side" \
+    'Never resolve a contradiction by silently dropping one side' "$G64_DES"
+  assert_contains "64aa: check 5 -- the reviewer counts each non-blank line" \
+    'because the reviewer counts each non-blank line of `acceptance_criteria` as one criterion' "$G64_DES"
+  assert_contains "64ab: a wrapped criterion becomes two" \
+    'so a wrapped criterion becomes two' "$G64_DES"
+  assert_contains "64ac: check 6 -- the three external contract kinds" \
+    "server validation, a protocol's required behaviour, an already-tagged version" "$G64_DES"
+  assert_contains "64ad: check 6 never quotes a credential or hostname" \
+    'never quoting a credential, token or internal hostname' "$G64_DES"
+  assert_contains "64ae: no verification steps still gets the other five checks" \
+    'A child with no verification steps skips check 1 and is still checked for the other five' "$G64_DES"
+  assert_contains "64af: an unevaluable check never blocks" \
+    'A check you cannot evaluate never blocks the output' "$G64_DES"
+  assert_contains "64ag: the pass never rewrites human-authored fields" \
+    'never rewrites a human-authored `title`, `type` or `description`' "$G64_DES"
+  assert_contains "64ah: the decomposer's open question starts the sentence" \
+    'starting `Open question:`' "$G64_DES"
+
+  # 64az-64bd: review round 1 -- the remaining edge cases, pinned in each agent.
+  assert_contains "64az: enricher -- a pattern with no listed edge case gets an open question" \
+    'one that prescribes a pattern but lists no edge case for it gets an open question instead' "$G64_ENS"
+  assert_contains "64ba: decomposer -- a pattern with no listed edge case gets an open question" \
+    'one that prescribes a pattern but lists no edge case for it gets an open question instead' "$G64_DES"
+  assert_contains "64bb: enricher -- two conflicting pitfalls need a stated winner" \
+    'two pitfalls, a pitfall and a pattern, a criterion and a pattern' "$G64_ENS"
+  assert_contains "64bc: decomposer -- two conflicting pitfalls need a stated winner" \
+    'including two of its own pitfalls' "$G64_DES"
+  assert_contains "64bd: the Phase-2-only technical_details rule yields to open_questions" \
+    'the one exception is the `open_questions` key the cross-field consistency pass writes in Phase 4' "$G64_TD"
+
+  # 64ai-64aq: matrix row 5 -- each creation skill points to the same pass.
+  assert_contains "64ai: stride-creating-tasks points to the pass" \
+    'still gets the cross-field consistency pass' "$G64_CTP"
+  assert_contains "64aj: ...for a task written without the agents" \
+    'written without `stride:task-enricher`' "$G64_CTP"
+  assert_contains "64ak: ...stated in the enricher's Phase 4" \
+    'Phase 4 of `stride/agents/task-enricher.md`' "$G64_CTP"
+  assert_contains "64al: stride-creating-goals points to the pass" \
+    'still gets the cross-field consistency pass' "$G64_GOP"
+  assert_contains "64am: ...for a nested task written without the decomposer" \
+    'written without `stride:task-decomposer`' "$G64_GOP"
+  assert_contains "64an: ...stated in the decomposer's Step 7" \
+    'Step 7 of `stride/agents/task-decomposer.md`' "$G64_GOP"
+  assert_contains "64ao: stride-enriching-tasks points to the pass" \
+    'still gets the cross-field consistency pass' "$G64_ESP"
+  assert_contains "64ap: ...for a task enriched without the agent" \
+    'without the `stride:task-enricher` agent' "$G64_ESP"
+  assert_contains "64aq: ...stated in the enricher's Phase 4" \
+    'Phase 4 of `stride/agents/task-enricher.md`' "$G64_ESP"
+
+  # 64ar: the reference doc notes the pass and leaves the rule in the agent.
+  assert_contains "64ar: the reference doc points to the decomposer's Step 7" \
+    'the cross-field consistency pass in Step 7 of `agents/task-decomposer.md`' "$G64_RFF"
+
+  # 64as-64at: end checks -- each range slice reached its closing boundary.
+  assert_contains "64as: enricher slice ends at the defect-task heading" \
+    '## Handling Defect Tasks' "$G64_ENS"
+  assert_contains "64at: decomposer slice ends at the sizing heading" \
+    '## Task Sizing Heuristics' "$G64_DES"
+  # 64au-64aw: each skill carries the pointer line exactly once.
+  assert_eq "64au: stride-creating-tasks carries one pointer line" \
+    "1" "$(grep -c '^\*\*Cross-field consistency pass\.\*\*' "$G64_CT")"
+  assert_eq "64av: stride-creating-goals carries one pointer line" \
+    "1" "$(grep -c '^\*\*Cross-field consistency pass\.\*\*' "$G64_GO")"
+  assert_eq "64aw: stride-enriching-tasks carries one pointer line" \
+    "1" "$(grep -c '^\*\*Cross-field consistency pass\.\*\*' "$G64_ES")"
+  # 64ax: the pass is its own block -- the checklist still has 18 items.
+  assert_eq "64ax: the enricher checklist still has 18 items" \
+    "18" "$(grep -c '^- \[ \]' <<< "$G64_ENC")"
+  # 64ay: pitfall -- the pass stays inline in the agent, not in the docs.
+  if grep -qF -- '**Verification scope.**' <<< "$G64_RFF"; then
+    echo -e "  ${RED}FAIL${RESET}: 64ay: the pass was not copied into the reference doc"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 64ay: the pass was not copied into the reference doc"
+    PASS=$((PASS + 1))
+  fi
+else
+  echo "  SKIP: Group 64 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

@@ -201,6 +201,8 @@ Combine all discovered fields into the final task specification.
 - [ ] No invented file paths — every entry is a path located via Grep, Glob, or Read
 - [ ] All 18 items above were considered for this task (none silently skipped) — for the one optional item, `behaviour_test_matrix`, a deliberate omission counts as considered
 
+**Cross-field consistency pass.** A task enriched by hand on this Manual Walkthrough, without the `stride:task-enricher` agent, still gets the cross-field consistency pass that agent runs after this checklist: six checks that compare the fields with each other. Run it as stated in Phase 4 of `stride/agents/task-enricher.md` before you submit.
+
 ## API Integration
 
 ### Submitting the Enriched Task

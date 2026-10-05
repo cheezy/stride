@@ -172,6 +172,8 @@ Reference material for the `stride:task-decomposer` agent, split out of `agents/
 
 The example leaves out each task's `behaviour_test_matrix` for length. All four tasks list unit and integration tests, so a real decomposition gives each one a complete seven-category matrix — see Step 5 of `agents/task-decomposer.md`.
 
+A real decomposition also runs the cross-field consistency pass in Step 7 of `agents/task-decomposer.md` on every child before returning; the pass is stated there, not here.
+
 **Decomposition rationale:**
 - Task 0 (schema) has no dependencies — it's the data foundation
 - Task 1 (UI) depends on [0] — needs context functions to display/create comments

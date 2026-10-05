@@ -251,6 +251,8 @@ When depending on EXISTING tasks already in the system:
 - Include patterns_to_follow and pitfalls
 - Provide security_considerations as an array of strings
 
+**Cross-field consistency pass.** A nested task written without `stride:task-decomposer` still gets the cross-field consistency pass that agent runs on every child before it returns: six checks that compare a task's fields with each other. Run it on every nested task as stated in Step 7 of `stride/agents/task-decomposer.md` before you submit the batch.
+
 **The five review_queue-scored fields are the minimum bar for every nested task:**
 
 - `acceptance_criteria` — newline-separated string; the implementing agent's definition of done. **Blank → empty pill on the review_queue.**

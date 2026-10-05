@@ -182,6 +182,19 @@ That skill is authoritative for both shapes: the single-goal `POST /api/tasks` b
 
 **CRITICAL:** the batch endpoint's root key is `"goals"`, NOT `"tasks"` — the single most common rejection, which is why it is repeated here as a warning. It is a warning, not the contract: where this line and `stride-creating-goals` ever disagree, that skill wins. Both create shapes also carry a top-level `agent_name` — display metadata only, never an authorization signal.
 
+### Step 7: Cross-Field Consistency Pass per Child Task
+
+Step 5 fills each child's fields one at a time; this pass compares them with each other. Run it on every child task after Step 6 assembles the output and before you return it, fixing the child in place. A child that contradicts itself sends its implementer after the more concrete instruction, which is often the wrong one. All six checks run on every child. `agents/task-enricher.md` runs the same pass before it returns an enriched task; change both together.
+
+1. **Verification scope.** Each verification step covers at least the scope of the acceptance criterion it verifies. Widen a narrower grep, command or manual step to the criterion's scope, or record the gap as an open question.
+2. **No contradiction.** No `what` or `patterns_to_follow` instruction contradicts a pitfall or a security consideration of the same child. Fix the side you wrote; when the conflict comes from the goal text, keep both sides and state which one wins (check 4).
+3. **Prescribed patterns tested.** Any regex or command a child prescribes is checked against each of that child's own edge cases before you include it, by pattern matching only — read the pattern against each edge-case string. Never run the prescribed command, and never execute anything with side effects to find out. A child that prescribes no regex or command skips this check; one that prescribes a pattern but lists no edge case for it gets an open question instead.
+4. **Precedence stated.** Where two instructions in a child can conflict, including two of its own pitfalls, the child says which one wins. Never resolve a contradiction by silently dropping one side.
+5. **One line per criterion.** Every acceptance criterion fits on one line, because the reviewer counts each non-blank line of `acceptance_criteria` as one criterion, so a wrapped criterion becomes two.
+6. **External contracts named.** Each child names the external contracts it must respect — server validation, a protocol's required behaviour, an already-tagged version — in its `pitfalls` or `patterns_to_follow`, citing `file:line` and never quoting a credential, token or internal hostname seen while exploring.
+
+**Edge cases.** A child with no verification steps skips check 1 and is still checked for the other five. A check you cannot evaluate never blocks the output: record it as one sentence in that child's `description`, starting `Open question:`. The pass never rewrites a human-authored `title`, `type` or `description` — the goal's own, or those of a task you are splitting — so a conflict inside human text becomes an open question, not an edit.
+
 ## Task Sizing Heuristics
 
 | Size | Hours | Key_files | Signals | Action |

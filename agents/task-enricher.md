@@ -24,7 +24,7 @@ The full process runs in four ordered phases. Steps within Phase 2 are also orde
    5. Analyze code area for risks and security → `pitfalls`, `security_considerations`
    6. Convert intent to outcomes → `acceptance_criteria`
 3. **Phase 3 — Estimate Complexity**: Apply the heuristic table to all collected signals.
-4. **Phase 4 — Assemble and Validate**: Combine all fields, run the 18-item checklist, return the enriched JSON for the orchestrator to submit.
+4. **Phase 4 — Assemble and Validate**: Combine all fields, run the 18-item checklist and then the cross-field consistency pass, return the enriched JSON for the orchestrator to submit.
 
 ## Phase 1: Parse Intent
 
@@ -229,7 +229,7 @@ All existing tests still pass
 
 If exploration surfaced concrete technical context that doesn't fit the structured fields — data shapes, gotchas, key decisions, or reference links — record it in an optional free-form `technical_details` object. Unlike the structured fields, it has no fixed keys: use whatever keys best describe what you found. This is an optional add-on beyond the six exploration steps, not a seventh required step.
 
-- **Optional and never fabricated.** Populate it only with context you actually discovered during Phase 2. When there is nothing substantive to capture, leave it as `{}` — a blank `technical_details` is expected and perfectly fine.
+- **Optional and never fabricated.** Populate it only with context you actually discovered during Phase 2 — the one exception is the `open_questions` key the cross-field consistency pass writes in Phase 4, which this rule does not bar. When there is nothing substantive to capture, leave it as `{}` — a blank `technical_details` is expected and perfectly fine.
 - **Not review_queue-scored.** `technical_details` is NOT one of the five review_queue-scored fields (`acceptance_criteria`, `testing_strategy`, `security_considerations`, `pitfalls`, `patterns_to_follow`), so a blank value is never a scoring gap or an empty pill — never bump complexity or pad other fields to compensate for an empty `technical_details`.
 - **No secrets.** Because the object is free-form, never record tokens, passwords, credentials, or other secrets in it.
 
@@ -273,6 +273,19 @@ Combine all discovered fields into the final task specification. **Return the as
 - [ ] `needs_review` is set to `false`
 - [ ] No invented file paths — every entry is a path located via Grep, Glob, or Read
 - [ ] All 18 items above were considered for this task (none silently skipped) — for the one optional item, `behaviour_test_matrix`, a deliberate omission counts as considered
+
+### Cross-Field Consistency Pass (before you return the JSON)
+
+The checklist above checks each field on its own; this pass compares the fields with each other. Run it after the checklist and before you return the JSON. A task that contradicts itself sends the implementer after the more concrete instruction, which is often the wrong one. Fix the fields you authored in place, and run all six checks on every task. Step 7 of `agents/task-decomposer.md` runs the same pass on every child task; change both together.
+
+1. **Verification scope.** Every verification step covers at least the scope of the acceptance criterion it verifies. Widen a grep, command or manual step that is narrower than its criterion (one file where the criterion names every file, one case where it names three) to the criterion's scope, or record the gap as an open question.
+2. **No contradiction.** No `what` or `patterns_to_follow` instruction contradicts a pitfall or a security consideration. Fix the side you authored; when both sides came from the human, keep both and state which one wins (check 4).
+3. **Prescribed patterns tested.** Any regex or command the task prescribes is checked against each of the task's own edge cases before you include it. Test it by pattern matching only: read the pattern against each edge-case string and decide whether it matches. Never run the prescribed command, and never execute anything with side effects to find out. A task that prescribes no regex or command skips this check; one that prescribes a pattern but lists no edge case for it gets an open question instead.
+4. **Precedence stated.** Where two instructions in the task can conflict — two pitfalls, a pitfall and a pattern, a criterion and a pattern — the task says which one wins, in the text of one of them. Never resolve a contradiction by silently dropping one side.
+5. **One line per criterion.** Every acceptance criterion fits on one line, because the reviewer counts each non-blank line of `acceptance_criteria` as one criterion. A criterion wrapped onto a second line becomes two; join it back onto one line, or split it into two complete criteria.
+6. **External contracts named.** The external contracts the change must respect — server validation, a protocol's required behaviour, or an already-tagged version — are named in `pitfalls` or `patterns_to_follow`. Name each contract and cite the `file:line` where you found it; never quote a credential, token or internal hostname seen while exploring.
+
+**Edge cases.** A task with no verification steps skips check 1 and is still checked for the other five. A check you cannot evaluate never blocks the JSON: record it as an open question and return. `title`, `type` and `description` are human input and stay verbatim — that rule wins over recording the question in the description — so record each open question as a one-sentence string in `technical_details.open_questions`. The pass fixes only the fields you authored: it never rewrites the human-authored `title`, `type` or `description`.
 
 ## Handling Defect Tasks
 
@@ -327,7 +340,7 @@ Your response is a single JSON object matching the Stride API task schema.
 
 A fully-populated worked example of this object — every field exercised, including a seven-row `behaviour_test_matrix` and a `technical_details` object — is in `stride/docs/task-enricher-reference.md`, under "Worked example". Resolve that path from this plugin's own directory (the one this agent file was loaded from); if it does not resolve, glob for `**/stride/*/docs/task-enricher-reference.md` under `~/.claude/plugins/cache/`, and if you still cannot find it, **proceed without it** — the field-type contract below is complete on its own, and the example illustrates it rather than defining it. Read the example only when you are unsure of a field's exact shape.
 
-`technical_details` is optional and free-form — emit it only when exploration found substantive context; otherwise leave it as `{}` or omit it.
+`technical_details` is optional and free-form — emit it only when exploration found substantive context or the cross-field consistency pass recorded an open question; otherwise leave it as `{}` or omit it.
 
 `behaviour_test_matrix` is likewise optional, but it is all-or-nothing: the worked example in the reference file carries a row for **all seven** categories because a non-empty matrix missing any category is rejected. A waived row carries `status: "not_applicable"` with a specific `na_reason` and no `type`, which is the honest way to handle a category the change genuinely does not touch. Every other row names a real test and is `"planned"`. Omit the field entirely only when the task has genuinely no testable behaviour (a pure copy, docs, or config change) — never merely because some categories do not apply, and never as partial or filler rows.
 

@@ -267,3 +267,28 @@ sections: testing_strategy=passed patterns=passed pitfalls=passed security_consi
 **Counter-example — two shapes the carve-out does NOT cover.** An example without a counter-example is how a narrow rule gets read broadly, so read these two beside the one above. **(1) A criterion that bundles reviewable behaviour with the commit.** "The migration runs cleanly and is committed" fails leg (b): it asks for behaviour you can assess against this diff *today*, so it is judged on that half now, paired and counted exactly as it would have been — the trailing "and is committed" does not convert a reviewable criterion into a scheduled one. **(2) A criterion demanding a commit that should already exist.** On a nested-repo task whose work required a mid-work commit the task itself specified, a criterion asking for that commit fails leg (c): the commit it names is not the one `performed_by` names, so its absence is a real gap and is reported as a `critical` `acceptance_criteria` issue, precisely as before. Note that these two fail on *different* legs, which is why the test is a three-part AND rather than a single judgement — and note the standing default: **if you are unsure about any leg, the criterion does not qualify**, and you pair the issue as normal. **(3) A criterion pairing the commit with another deferred step.** "The change is committed and pushed" fails leg (b) too — but note *why*, because counter-example (1)'s reasoning does not transfer. There the disqualifier was that the criterion asked for behaviour assessable **today**; here neither half is assessable today, so a reader carrying forward (1)'s rationale rather than its rule can wrongly conclude that nothing is judged now and the criterion therefore qualifies. It does not: leg (b) asks for **nothing but that commit**, and a push is not that commit. The explicit never-list settles it independently — the carve-out never reaches a criterion about pushing, tagging, releasing, opening a pull request, or deploying — and the scope check enforces that list mechanically. The same applies to "committed and tagged", "committed and released", and "committed and the PR opened". Three counter-examples, three different legs and routes: read the rule, not the rationale of whichever example is nearest.
 
 The carve-out never reaches another `issues[]` category, never reaches `project_checks`, and never reaches a criterion about pushing, tagging, releasing, opening a pull request, or deploying.
+
+---
+
+**Worked example — an unmapped `testing_strategy` item becomes an issue.** The task listed two `unit_tests`, one `edge_cases` item and one `manual_tests` item, and its matrix had a Verified row for the first unit test. The report file carries this mapping. Note that the matrix-covered item takes no second entry, the name-matched test does not count because it never asserts the ceiling, and the manual item is one line, not a row.
+
+```text
+Testing-item mapping
+- unit_tests "rejects an override set to zero" — covered by matrix row 2 (Verified)
+- unit_tests "an override above the default is kept" — test/kanban/limits_test.exs:48
+- edge_cases "a body over the 64 KB ceiling is rejected" — UNMAPPED: test/kanban/limits_test.exs:71 "size ceiling" posts a 1 KB body and never reaches the ceiling
+- manual_tests: 1 item excluded (not mapped by a reviewer)
+```
+
+The unmapped item becomes this `issues[]` entry, which backs `"testing_strategy": { "status": "failed", "note": "edge_cases item 'a body over the 64 KB ceiling is rejected' has no covering test" }`. The returned summary changes only as any testing issue changes it — the counts, `testing_strategy=failed`, and an ordinary `- important testing test/kanban/limits_test.exs:71` row; the mapping itself never enters it.
+
+```json
+{
+  "severity": "important",
+  "category": "testing",
+  "file": "test/kanban/limits_test.exs",
+  "line": 71,
+  "description": "The testing_strategy edge_cases item \"a body over the 64 KB ceiling is rejected\" has no covering test: the test named \"size ceiling\" posts a 1 KB body and never asserts the rejection.",
+  "suggested_fix": "Add a test that posts a body over 64 KB and asserts it is rejected, or make the existing \"size ceiling\" test do so."
+}
+```

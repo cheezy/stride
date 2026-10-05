@@ -39,6 +39,7 @@ Walk through your changes against:
 - [ ] Each item in `pitfalls` -- did you avoid it?
 - [ ] `patterns_to_follow` -- does your code match?
 - [ ] `testing_strategy` -- did you write the specified tests?
+- [ ] Every test you added or changed -- did you break it, see it fail, restore it and see it pass ([test-non-vacuity.md](test-non-vacuity.md))?
 - [ ] `behaviour_test_matrix` -- if the task supplied one (it is optional, so many tasks will not): does every row's named test exist, and does each row's `status` reflect reality?
 
 ## Step 6: Execute Hooks

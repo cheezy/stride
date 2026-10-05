@@ -21,7 +21,7 @@ from a planned section.**
 
 | Task | Change | Status in `stride` |
 |---|---|---|
-| W2292 | The creation skills and the decomposer author a `behaviour_test_matrix` by default for testable tasks | planned |
+| W2292 | The creation skills and the decomposer author a `behaviour_test_matrix` by default for testable tasks | landed (`955533c`) |
 | W2293 | The reviewer maps every `testing_strategy` item to a named test | landed (`c4c029a`) |
 | W2294 | The implementer records break-it evidence that new and changed tests can fail, and the reviewer enforces it | landed (`cb1fc8f`) |
 | W2295 | The reviewer verifies the factual statements a diff adds | landed (`f2c5957`) |
@@ -128,19 +128,28 @@ Things that shape every change below:
 
 ## Changes at creation time
 
-### W2292 — a `behaviour_test_matrix` by default (planned)
+### W2292 — a `behaviour_test_matrix` by default (landed)
 
 **Problem.** No production task carried a matrix (0 of 385), yet it is the one
 test specification the reviewer checks row by row and the implementer updates
 as it goes. The creation skills call it optional, and the decomposer never
 mentions it. The enricher already emits it by default.
 
-**Planned change in `stride`.** `stride-creating-tasks`, `stride-creating-goals`
-and the decomposer emit a complete seven-category matrix whenever the task's
-`testing_strategy` names a unit or integration test. They omit it only for a task
-with no testable behaviour, and say why. Each row's `test_name` must be a test
-that `testing_strategy` lists. The server rule is unchanged: an absent matrix is
-valid and never shows as an empty pill.
+**Shipped in `stride`** (commit `955533c`; the version is set when W2299
+releases). `stride-creating-tasks`, `stride-creating-goals` (for every nested
+task) and `agents/task-decomposer.md` (for every child task) emit a complete
+seven-category matrix whenever the task's `testing_strategy` names a unit or
+integration test, waiving categories that do not apply with `na_reason`. A
+manual-only `testing_strategy` gets `"manual"` rows when its checks exercise
+behaviour. The matrix is omitted only for a task with no testable behaviour, and
+the task's `description` says why in one sentence. Each row's `test_name` must
+name a test that `testing_strategy` lists, and the matrix never replaces
+`testing_strategy`. Row text carries no secrets, and the decomposer never copies
+a credential-shaped string from a project file into it. The server rule is
+unchanged: an absent or empty matrix is valid and never shows as an empty pill,
+and a partial one is rejected. `docs/task-decomposer-reference.md` notes that
+its worked example leaves the matrix out for length, and bash hook-suite Group
+62 pins the rules.
 
 **Port needs.**
 - **Full ports** (codex, copilot, gemini, opencode, pi) already validate and

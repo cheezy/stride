@@ -16886,7 +16886,7 @@ fi
 # carrying that section first, no degrade rung removing it, the summary bound
 # unchanged, the stride-subagent-workflow restatement, and claims-census.md's
 # two references following the verified_by rule to its new step number.
-# Phrases 65a-65o and 65t-65u are matched against the step 6 slice and 65p-65r
+# Phrases 65a-65o (with 65f2) and 65t-65u are matched against the step 6 slice and 65p-65r
 # against the step 8 slice; 65x and 65y are their end checks.
 # What it does NOT prove: that a live explorer finds a stale statement or puts
 # the heading first. That is model behaviour, covered by the task's manual
@@ -16917,6 +16917,8 @@ if [ -f "$G65_EX" ] && [ -f "$G65_SUB" ] && [ -f "$G65_CEN" ]; then
     'Read `inserted_at` from `TASK_FILE`' "$G65_S"
   assert_contains "65f: git log runs on the key_files since inserted_at" \
     "git log --since='<inserted_at>Z' --format='%h %cI' -- <key_files>" "$G65_S"
+  assert_contains "65f2: git log runs inside the repo that tracks each file" \
+    'from inside the repository that tracks each file' "$G65_S"
   assert_contains "65g: a missing inserted_at falls back without the commit window" \
     'check the statements without the commit window and say so' "$G65_S"
   assert_contains "65h: ...and says so in a fixed line" \

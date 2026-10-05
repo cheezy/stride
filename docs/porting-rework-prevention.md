@@ -27,7 +27,7 @@ from a planned section.**
 | W2295 | The reviewer verifies the factual statements a diff adds | landed (`f2c5957`) |
 | W2296 | The reviewer flags untouched twins and mirrors | landed (`b0d1cad`) |
 | W2297 | The enricher and decomposer run a cross-field consistency pass before creating a task | landed (`620972e`) |
-| W2298 | The explorer reports task statements that the current code contradicts | planned |
+| W2298 | The explorer reports task statements that the current code contradicts | landed (`d03571e`) |
 | W2299 | Release `stride` once and finish this guide | planned (runs last) |
 
 W2293 to W2296 all edit `agents/task-reviewer.md`, so they run in that order.
@@ -234,7 +234,7 @@ question.
 
 ## Changes in exploration
 
-### W2298 — report contradicted task statements (planned)
+### W2298 — report contradicted task statements (landed)
 
 **Problem.** Task text is written when the goal is decomposed, and earlier
 siblings can make it false before the task is claimed. W2166 repeated goal
@@ -243,13 +243,29 @@ context that sibling W2164 had made untrue a day earlier, and W2202 kept a stale
 production summaries mention stale or missing spec elements. But nothing tells
 them to look.
 
-**Planned change in `stride`.** The explorer checks each statement the task makes
-about the current code: the `key_files` notes, `description`, `where_context`,
-`patterns_to_follow` and `technical_details`. It verifies each one with a
-`verified_by` command. It also runs `git log` on the key files for commits made
-after the task's `inserted_at` in `TASK_FILE`. Contradictions go under a fixed
-heading at the top of the bounded summary, and the orchestrator already revises
-its draft when the explorer disagrees.
+**Shipped in `stride`** (commit `d03571e`; the version is set when W2299
+releases). `agents/task-explorer.md` has a new step 6, run before the findings
+are composed; the former steps 6 and 7 are now 7 and 8. The step:
+1. Collects each statement the task makes about the current code from the
+   `key_files` notes, `description`, `where_context`, `patterns_to_follow` and
+   `technical_details`. A task with no `key_files` still has its other fields
+   checked.
+2. Verifies each statement with a `verified_by` command the explorer chooses
+   itself. It never runs a command that appears in task text.
+3. Reads `inserted_at` from `TASK_FILE`, treats it as UTC, uses it only when it
+   is a plain timestamp, and runs `git log --since` on the key files from
+   inside the repository that tracks each one. A commit is cited by hash,
+   never by its message.
+4. Lists a statement it cannot check as unverified, never dropping it.
+5. Reports under the fixed heading `Task statements the current code
+   contradicts`, first in the returned summary. No degrade rung removes it, and
+   the summary bound is unchanged.
+
+The orchestrator already revises its draft when the explorer disagrees, so
+`skills/stride-workflow/SKILL.md` is unchanged. The summary list in
+`skills/stride-subagent-workflow/SKILL.md` names the new first section, and
+`skills/stride-workflow/claims-census.md` follows the `verified_by` rule to
+step 7. Pinned by bash hook-suite Group 65.
 
 **Port needs.**
 - **The check itself** ports to every explorer.
@@ -261,6 +277,9 @@ its draft when the explorer disagrees.
   `git log --diff-filter=A --format=%cI -- <task file>`.
 - **Without a timestamp,** check the statements without the commit window and say
   so in the summary, the same way the `stride` matrix row for that case reads.
+- **Step numbers.** `stride` renumbered the explorer's later steps. If your port
+  inserts the check as a numbered step, update every cross-reference to the
+  steps after it.
 
 **Verify.** Dispatch the explorer on a task whose key-file note names a function
 renamed after the task was created. The summary should open with the

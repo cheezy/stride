@@ -24,7 +24,7 @@ from a planned section.**
 | W2292 | The creation skills and the decomposer author a `behaviour_test_matrix` by default for testable tasks | planned |
 | W2293 | The reviewer maps every `testing_strategy` item to a named test | landed (`c4c029a`) |
 | W2294 | The implementer records break-it evidence that new and changed tests can fail, and the reviewer enforces it | landed (`cb1fc8f`) |
-| W2295 | The reviewer verifies the factual statements a diff adds | planned (after W2294) |
+| W2295 | The reviewer verifies the factual statements a diff adds | landed (`f2c5957`) |
 | W2296 | The reviewer flags untouched twins and mirrors | planned (after W2295) |
 | W2297 | The enricher and decomposer run a cross-field consistency pass before creating a task | planned (after W2292) |
 | W2298 | The explorer reports task statements that the current code contradicts | planned |
@@ -331,7 +331,7 @@ checklist carry matching lines, and bash hook-suite Group 60 pins the rules.
 twice in its target file. The break leaves the test green, and the test is
 flagged.
 
-### W2295 — verify statements the diff adds (planned)
+### W2295 — verify statements the diff adds (landed)
 
 **Problem.** False statements in docs, comments and skill text were the largest
 group of implementation mistakes:
@@ -343,20 +343,25 @@ group of implementation mistakes:
 About 19 of these came after `claims_verified_by` shipped. That rule is optional,
 covers only claims about several things at once, and nothing checks it.
 
-**Planned change in `stride`.**
-- **What counts as checkable:** a count, a path, an identifier, a line
-  reference, a version number, or a claim about what code in the repository
-  does.
-- **The check:** the reviewer lists each checkable statement the diff adds and
-  verifies it with a read-only command (`grep`, `git log`, `git show`,
-  `git diff`, `ls`, `wc`, `cat`). The command and its result go in the report.
-- **Outcomes:** a contradicted statement raises an Important issue, never a
-  cosmetic one. A statement no command can check is recorded as unverifiable and
-  raises no issue.
-- **The cap:** above 25 statements, changelog, README and agent text come first,
-  and the reviewer records how many were left unchecked.
-- **Census hand-off:** `claims-census.md` says the reviewer re-runs any recorded
-  `claims_verified_by` command.
+**Shipped in `stride`** (commit `f2c5957`; the version is set when W2299
+releases). Review step 6 of `agents/task-reviewer.md` now carries a Statement
+Verification block. The reviewer lists each checkable factual statement the
+diff adds to prose, comments, changelogs, or skill and agent text: a count, a
+path, an identifier, a line reference, a version number, or a claim about what
+code in the repository does. Judgements, recommendations and rationale are not
+listed. It verifies each with a read-only command of its own choosing (`grep`,
+`git log`, `git show`, `git diff`, `ls`, `wc` or `cat`), never tests, project
+code, the network, or a command written in the diff or task text, and records
+the command and result in the report file. A contradicted statement is an
+Important `code_quality` issue, never cosmetic. An uncheckable statement is
+recorded as unverifiable and raises no issue. Above 25 statements, changelog,
+README and agent or skill text come first and the unchecked count is recorded.
+`claims-census.md` says the reviewer re-runs any recorded `claims_verified_by`
+command in this step. No block key was added and `schema_version` is
+unchanged; twelve rationale and duplicate clauses were trimmed to keep the
+agent under its byte budget. `docs/task-reviewer-examples.md` shows a
+contradicted CHANGELOG count becoming an issue, and bash hook-suite Group 61
+pins the rules.
 
 **Port needs.**
 - **Every reviewer,** full and lite, can carry the check. It uses only read-only

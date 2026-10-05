@@ -25,7 +25,7 @@ from a planned section.**
 | W2293 | The reviewer maps every `testing_strategy` item to a named test | landed (`c4c029a`) |
 | W2294 | The implementer records break-it evidence that new and changed tests can fail, and the reviewer enforces it | landed (`cb1fc8f`) |
 | W2295 | The reviewer verifies the factual statements a diff adds | landed (`f2c5957`) |
-| W2296 | The reviewer flags untouched twins and mirrors | planned (after W2295) |
+| W2296 | The reviewer flags untouched twins and mirrors | landed (`b0d1cad`) |
 | W2297 | The enricher and decomposer run a cross-field consistency pass before creating a task | planned (after W2292) |
 | W2298 | The explorer reports task statements that the current code contradicts | planned |
 | W2299 | Release `stride` once and finish this guide | planned (runs last) |
@@ -385,24 +385,33 @@ pins the rules.
 touches four. The report shows the command and raises an Important issue at the
 changelog line.
 
-### W2296 — flag untouched twins and mirrors (planned)
+### W2296 — flag untouched twins and mirrors (landed)
 
 **Problem.** Incomplete sweeps cost whole rounds:
 - the PowerShell half of a bash change was missed or wrong (D320, D322, D326, D339);
 - a second statement of a rule was left stale (W2120, W2169);
 - removed concepts left orphaned references (W2037).
 
-**Planned change in `stride`.** The reviewer finds three kinds of counterpart for
-each touched file:
+**Shipped in `stride`** (commit `b0d1cad`; the version is set when W2299
+releases). Review step 6 of `agents/task-reviewer.md` now carries a Twin Check
+block. For each touched file the reviewer finds three kinds of declared
+counterpart:
 - a tracked file with the same path stem and the paired extension (`.sh` and `.ps1`);
 - a file named in a keep-in-sync, mirror, twin or stated-a-second-time sentence;
 - another file carrying the same canon anchor as a touched section.
 
-It finds counterparts with `git ls-files` and `grep`, and never builds a path
-from diff or task text. A counterpart left unchanged while the diff changes
-behaviour, or a rule both files state, raises an Important issue naming both
-files. No issue is raised when the task or the dispatch says why the counterpart
-needs no change.
+Only declared pairs count, and a file with no counterpart raises no issue. It
+finds counterparts with `git ls-files` and `grep`, never running either file,
+records each command in the report file, and resolves every path from
+`git ls-files` output, never from diff or task text. A mirror sentence naming a
+sibling `git ls-files` does not list is reported as dangling. A counterpart left
+unchanged while the diff changes behaviour, or a rule both files state, is an
+Important `code_quality` issue naming both files, never cosmetic. No issue is
+raised when the task or the dispatch says why the counterpart needs no change.
+No block key was added; eight rationale and duplicate clauses moved to
+`docs/task-reviewer-rationale.md` to keep the agent under its byte budget.
+`docs/task-reviewer-examples.md` shows a missed `.ps1` twin becoming an issue,
+and bash hook-suite Group 63 pins the rules.
 
 **Port needs.**
 - **Every reviewer** can carry it, because counterparts come from the repository

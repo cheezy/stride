@@ -26,7 +26,7 @@ from a planned section.**
 | W2294 | The implementer records break-it evidence that new and changed tests can fail, and the reviewer enforces it | landed (`cb1fc8f`) |
 | W2295 | The reviewer verifies the factual statements a diff adds | landed (`f2c5957`) |
 | W2296 | The reviewer flags untouched twins and mirrors | landed (`b0d1cad`) |
-| W2297 | The enricher and decomposer run a cross-field consistency pass before creating a task | planned (after W2292) |
+| W2297 | The enricher and decomposer run a cross-field consistency pass before creating a task | landed (`620972e`) |
 | W2298 | The explorer reports task statements that the current code contradicts | planned |
 | W2299 | Release `stride` once and finish this guide | planned (runs last) |
 
@@ -167,7 +167,7 @@ its worked example leaves the matrix out for length, and bash hook-suite Group
 testable behaviour has seven categories, and that its row test names match its
 `testing_strategy`.
 
-### W2297 — a cross-field consistency pass (planned)
+### W2297 — a cross-field consistency pass (landed)
 
 **Problem.** Ten findings came from task specs that contradicted themselves. Each
 time, the implementer followed the more concrete instruction, and that was the
@@ -182,17 +182,36 @@ stated, such as server validation rules, protocol behaviour and already-tagged
 versions. A wrapped acceptance criterion also becomes two criteria, because
 every reviewer counts lines.
 
-**Planned change in `stride`.** The enricher and decomposer each run six checks
-before returning a task:
-1. Every verification step covers at least the scope of the criterion it verifies.
-2. No `what` or pattern instruction contradicts a pitfall or security consideration.
-3. Any prescribed regex or command is tested against the task's own edge cases.
-4. Where two instructions can conflict, the task says which wins.
-5. Every criterion fits on one line.
-6. External contracts the change must respect are named in pitfalls or patterns.
+**Shipped in `stride`** (commit `620972e`; the version is set when W2299
+releases). `agents/task-enricher.md` runs the pass after its 18-item checklist
+(the checklist itself is unchanged), and `agents/task-decomposer.md` runs it on
+every child task as a new Step 7. Both state six checks:
+1. Every verification step covers at least the scope of the criterion it
+   verifies; a narrower step is widened or recorded as an open question.
+2. No `what` or `patterns_to_follow` instruction contradicts a pitfall or
+   security consideration.
+3. Any prescribed regex or command is checked against the task's own edge
+   cases by pattern matching only, never run. A task that prescribes none skips
+   the check; a pattern with no listed edge case gets an open question.
+4. Where two instructions can conflict, including two pitfalls, the task says
+   which wins. A contradiction is never resolved by dropping one side.
+5. Every criterion fits on one line, because the reviewer counts each
+   non-blank line as one criterion.
+6. External contracts (server validation, a protocol's required behaviour, an
+   already-tagged version) are named in pitfalls or patterns, cited by
+   `file:line`, never by quoting a credential, token or internal hostname.
 
-The creation skills point to the same pass. It is stated inline in each agent,
-because agents do not read plugin docs at run time.
+A task with no verification steps still gets the other five checks. A check
+that cannot be evaluated never blocks. The enricher records it in
+`technical_details.open_questions`, because it never rewrites the human's
+`title`, `type` or `description`. Its Phase-2-only rule for `technical_details`
+names that key as the exception. The decomposer adds an `Open question:`
+sentence to the child's `description`. The pass is stated inline in each agent,
+because agents do not read plugin docs at run time. `stride-creating-tasks`,
+`stride-creating-goals` and `stride-enriching-tasks` each carry a one-line
+pointer to it for tasks written without the agents.
+`docs/task-decomposer-reference.md` notes that a real decomposition runs it.
+Bash hook-suite Group 64 pins the rules.
 
 **Port needs.**
 - **Full ports:** add the pass to the enricher and decomposer agents, and point

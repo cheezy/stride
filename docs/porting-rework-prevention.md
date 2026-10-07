@@ -515,8 +515,15 @@ ported (version), or not applicable (reason).
 | `stride-codex` | not started | not started | not started | not started | not started | not started | not started |
 | `stride-copilot` | not started | not started | not started | not started | not started | not started | not started |
 | `stride-gemini` | not started | not started | not started | not started | not started | not started | not started |
-| `stride-opencode` | not started | not started | not started | not started | not started | not started | not started |
+| `stride-opencode` | ported (1.42.0) | ported (1.41.0) | ported (1.41.0) | ported (1.41.0; census hand-off not applicable) | ported (1.42.0) | ported (1.42.0) | ported (1.41.0; `checked by:` and an orchestrator-run commit window stand in for `verified_by`) |
 | `stride-pi` | not started | not started | not started | not started | not started | not started | not started |
 | `stride-lite` | not applicable (no matrix) | not started | not started | not started | not started | not started | not started |
 | `stride-copilot-lite` | not applicable (no matrix) | not started | not started | not started | not started | not started | not started |
 | `stride-opencode-lite` | not applicable (no matrix) | not started | not started | not started | not started | not started (decomposer only) | not started |
+
+`stride-opencode` took the batch in two releases. 1.41.0 shipped W2293, W2294,
+W2295 and W2298 alongside the G446-G448 port, and 1.42.0 shipped W2292, W2296
+and W2297. Its changelog records the two things it carries differently: there is
+no claims census, so its statement check has no recorded `claims_verified_by`
+commands to re-run, and the explorer has no shell, so it records each check as
+`checked by:` while the orchestrator measures the commit window. Neither release adds a canon anchor.

@@ -97,6 +97,34 @@ Two facts from this table decide most of the porting work:
    ports, the review-round rule is prose only. They port W2252's rule text and
    skip the predicate work.
 
+## Port status
+
+Add a column as each port takes the batch. Use the notation from
+[`porting-rework-prevention.md`](porting-rework-prevention.md) § Port status:
+not started, in progress, ported (version), or not applicable (reason). Name
+the port's own task in brackets, so a cell can be traced to its commit.
+
+| Task | `stride-opencode` |
+|---|---|
+| W2248 | ported (1.40.0) [W2300] |
+| W2249 | ported (1.40.0) [W2301] |
+| W2250 | not applicable (no `task-runner` agent) |
+| W2251 | ported (1.40.0) [W2302] |
+| W2252 | ported (1.40.0) [W2303]; prose only, so the round-two triggers are followed, not enforced |
+| W2253 | ported (1.40.0) [W2303]; the canon check reports `review-round-cap` v2 at `skills/stride-workflow/SKILL.md:459` |
+| W2254 | not applicable (OpenCode's task tool blocks until the explorer returns, so there is nothing to overlap) [W2304] |
+| W2255 | not applicable (no blocking Stop gate; the advisory continuation cannot hold a stop) |
+| W2256 | ported (1.41.0) [W2305] |
+| W2257 | ported (1.41.0) [W2306] |
+| W2258 | ported (1.41.0) [W2307] |
+| W2259 | not applicable (measured `stride` on Claude Code only; the port claims no saving) |
+
+`stride-opencode` took the batch in two releases, not the one that rule 4 below
+asks for: 1.40.0 shipped before W2305–W2307 were done. Its 1.41.0 changelog
+entry gives the reason for each of the four not-applicable rows above, under
+"Not ported". The fleet table above is
+still the 2026-10-02 snapshot, so its `stride-opencode` anchor cell shows v1.
+
 ---
 
 ## G446 — accuracy

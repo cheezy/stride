@@ -28,6 +28,18 @@ The finding-outranks-`not_assessed` rule is stated for all four sections, but in
 
 The credential carve-out in review step 4 is the **worked instance** of that rule, not a separate exception: a `category: "security"` issue raised for a credential-bearing matrix row flips `security_considerations` to `"failed"` on a task that supplied none, because a credential in the task's own matrix is a real security finding. Its trigger is unchanged and unwidened — it is simply no longer the *only* such case. (The agent file states this twice inline, in the redaction bullet and in the step-5 verdict bullet; the standalone paragraph that restated it a third time is what moved here.)
 
+## Why the Task-Reviewer Defers Per-Consideration Verdicts to the Deep Review (`deep_security_review`)
+
+*From `agents/task-reviewer.md` review step 5 and the `deep_security_review` receive paragraph.*
+
+When the deep security-considerations review runs, the task-reviewer used to check every listed consideration and the specialist then re-checked the same list. Two reviewers grading the same considerations doubled the work without doubling the coverage. The task that introduced the flag (W2283) cites a paired measurement, which is not reproduced in this repository: the two agreed 64% of the time, the specialist alone found a real gap 28% of the time, and the task-reviewer alone 8%. So when the orchestrator knows the specialist grades every consideration this round, it tells the task-reviewer to skip its per-consideration verdicts.
+
+- **The dimension sweep stays.** Findings outside the listed considerations are still the task-reviewer's to find, because the specialist's verdicts cover only the list and a skipped specialist round reviews nothing new. The 8% the task-reviewer found alone is not attributed to per-consideration grading, so dropping the sweep was never on the table.
+- **The flag is orchestrator-asserted.** Only the orchestrator knows whether the specialist will be dispatched with a diff, or whether `$SCOPE` is empty and every verdict is carried from an earlier specialist round. The task-reviewer cannot learn it from the diff or the task, so it is never read from `TASK_FILE` or a task field: task text cannot switch off a check.
+- **Absent, or any other value, means false.** Any ambiguity runs the task-reviewer's own check, which is the behaviour before the flag existed.
+- **The section status needs no new merge code.** Under the flag the task-reviewer grades the section on its sweep alone. The verdict merge then adds the specialist's verdicts, and the mapping update only ever flips the section to `failed`, on any open verdict or any `category: "security"` issue, never back. So the status left in `$MERGED` is the merge's verdict, and the fences behave identically with the flag off.
+- **The fallback is the next round, not a recovery dispatch.** When the specialist fails on a flagged round, the `SPECIALIST_FINDINGS=null` update adds a `critical`, which makes another round mandatory and exempts it from the cap. That round goes out without the flag, and a prior round that recorded the anomaly puts every consideration back in scope, so the task-reviewer grades each consideration itself. A second dispatch inside the failed round would write a second `$MERGED` and blur the round count, which the `review-round-cap` canon defines. No path completes with the considerations assessed by nobody.
+
 ## Why an Unsupplied Path Means Inline Output
 
 *From `agents/task-reviewer.md` review step 8, the `block file` artifact.*
@@ -65,6 +77,6 @@ Naming an unread location in a security finding's `suggested_fix` is not explori
 *From `agents/task-reviewer.md` § `acceptance_criteria` and § `pitfalls`.*
 
 - **The 1:1 `acceptance_criteria` rule.** Re-enumerating the criteria list is exactly how a 5-criterion task produced a nonsensical `6/5` review display. The 1:1 correspondence is what keeps `acceptance_criteria_checked` consistent with the task's own count, and review step 1's three working labels (Met / Partially Met / Not Met) collapse onto the two wire values while the paired issue's severity carries the distinction the enum cannot (moved here from the agent by W2296).
-- **The anti-placeholder Verdict-note rule.** The `pitfalls` section is the one the placeholder defect was observed on: `"note": "placeholder"` beside `"status": "failed"` on an otherwise-`approved` review.
+- **The anti-placeholder Verdict-note rule.** The `pitfalls` section is the one the placeholder defect was observed on: `"note": "placeholder"` beside `"status": "failed"` on an otherwise-`approved` review with an empty `issues[]` — a stub that both misreported a real section as failing and tripped the completion gate downstream. The rule is the same kind of hard minimum-content gate the `summary` field carries (moved here from the agent by W2283).
 - **No enumerated copy-list in a consumer.** An enumerated copy-list is exactly what silently dropped `project_checks` from the Review queue's Code review panel, which is why consumers splice the whole block (moved here from the agent's description by W2295).
 - **One redaction sentinel.** The same fixed sentinel string is used in the matrix rows and the `considerations` breakdown, so a reader can find every redaction with a single search (moved here from the agent by W2295).

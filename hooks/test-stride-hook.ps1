@@ -12925,6 +12925,37 @@ if ((Test-Path -LiteralPath $g46Osr) -and (Test-Path -LiteralPath $g46Sub) -and 
 }
 
 # ============================================================
+# Test Group 47: W2283 - the deep_security_review dispatch flag, PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 67 text pins; the behavioural pins run in bash only.
+# Needles stay ASCII: Windows PowerShell 5.1 can misread a BOM-less UTF-8 script.
+Write-Host ""
+Write-Host "=== Test Group 47: W2283 deep_security_review dispatch flag (PowerShell) ==="
+$g47Rev = Join-Path $ScriptDir '../agents/task-reviewer.md'
+$g47Osr = Join-Path $ScriptDir '../skills/stride-workflow/optional-security-review.md'
+$g47Rbe = Join-Path $ScriptDir '../skills/stride-workflow/review-block-extraction.md'
+$g47Wf  = Join-Path $ScriptDir '../skills/stride-workflow/SKILL.md'
+if ((Test-Path -LiteralPath $g47Rev) -and (Test-Path -LiteralPath $g47Osr) -and (Test-Path -LiteralPath $g47Rbe) -and (Test-Path -LiteralPath $g47Wf)) {
+    $g47Text = @{
+        REV = Get-Content -LiteralPath $g47Rev -Raw -Encoding UTF8
+        OSR = Get-Content -LiteralPath $g47Osr -Raw -Encoding UTF8
+        RBE = Get-Content -LiteralPath $g47Rbe -Raw -Encoding UTF8
+        WF  = Get-Content -LiteralPath $g47Wf -Raw -Encoding UTF8
+    }
+    Assert-Contains "47a: the reviewer receives the flag" 'You may also receive **`deep_security_review`** `{ "runs": true }`' $g47Text.REV
+    Assert-Contains "47c: absent or any other value means false" '**Absent, or any other value, means false**' $g47Text.REV
+    Assert-Contains "47d: under the flag no listed consideration is judged, the sweep is kept" 'unless the dispatch sent `deep_security_review`: then judge no listed consideration, keep the dimension sweep' $g47Text.REV
+    Assert-Contains "47f: the section is graded on the sweep alone" '`failed` on a `security` issue you raised, else `passed`' $g47Text.REV
+    Assert-Contains "47i: review-block-extraction.md documents the assertion" '## The `deep_security_review` dispatch assertion' $g47Text.RBE
+    Assert-Contains "47m: Step 5 lists it beside break_it" '- **`deep_security_review`**, likewise:' $g47Text.WF
+    Assert-Contains "47o: the sub-step tells the task-reviewer" '**Tell the task-reviewer the specialist grades the considerations.**' $g47Text.OSR
+    Assert-Contains "47p: the section status comes from the merge" '**The section status comes from the merge.**' $g47Text.OSR
+    Assert-Contains "47q: a failed specialist restores the task-reviewer's own check" 'that round is dispatched without `deep_security_review`, so the task-reviewer grades every consideration itself' $g47Text.OSR
+} else {
+    Write-Host "  SKIP: Group 47 contract files not found"
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

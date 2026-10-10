@@ -436,6 +436,7 @@ Dispatch `stride:task-reviewer` agent — and, when the deep security gate below
 - **`commit_pending` — orchestrator-asserted, and NOT part of the bullet above.** A lifecycle fact only you know: send `{ "pending": true, "performed_by": "<step>", "base_ref": "<TASK_BASE_REF>", "head": "<HEAD>" }` when this task's commit is genuinely a step still ahead of the review. **When to set it, what it carries, and the `commit_pending_scope_ok` check that pins it — all in [review-block-extraction.md](review-block-extraction.md).** Its semantics are owned by `stride/agents/task-reviewer.md`.
 - **`review_round` — orchestrator-asserted, on the same terms as `commit_pending`.** Send `{ "round": <n>, "fixes": [ … ] }` on every round after the first; absent means round 1. What `fixes[]` may carry — and the never-paste rule that bounds it — is in [review-block-extraction.md](review-block-extraction.md); its semantics are owned by `stride/agents/task-reviewer.md`.
 - **`break_it`**, likewise: your Step 4 entries ([review-block-extraction.md](review-block-extraction.md)).
+- **`deep_security_review`**, likewise: `{ "runs": true }` only when the deep gate below fires and every consideration gets a specialist verdict this round ([review-block-extraction.md](review-block-extraction.md)).
 
 **Re-review and follow-up rounds — preserve the canonical criteria list.** When you re-dispatch the reviewer (or continue it) to re-verify after fixing issues from a `changes_requested` round, the follow-up dispatch prompt MUST pass the same `TASK_FILE` (or, without one, the task's `acceptance_criteria` field **unchanged**) and instruct the reviewer to keep its `acceptance_criteria` array **identical to the task's canonical list** — one entry per criterion line, verbatim and in the task's order, never split, merged, reworded, added, or dropped (the same 1:1 hard rule the reviewer schema enforces in `stride/agents/task-reviewer.md`). Never hand the re-review only the issues you fixed and let it re-derive the criteria: a re-review that re-enumerates the criteria in its own words corrupts the persisted count.
 
@@ -486,7 +487,7 @@ If either condition is false, **skip this sub-step entirely and use the task-rev
 | Non-Claude-Code environment (no `Agent` tool) | Skip deep dispatch → task-reviewer prose verdict is the sole source, no failure |
 | Plugin available + Claude Code + non-empty `security_considerations` | Dispatch security-reviewer, merge verdicts into `reviewer_result.security_considerations.considerations[]`, escalate on `partial`/`unmitigated` |
 | Plugin present but its agent not offered this session | Skip deep dispatch, **no failure** → task-reviewer prose verdict is the sole source |
-| Specialist crashed, or its verdicts are malformed, absent or short of one per consideration | Fail-closed, never a note alone: re-dispatch once, then the `SPECIALIST_FINDINGS=null` update (with a block) or `review_blocked` (Shape 2 / Source C) |
+| Specialist crashed, or its verdicts are malformed, absent or short of one per consideration | Fail-closed, never a note alone: re-dispatch once, then the `SPECIALIST_FINDINGS=null` update (with a block) or `review_blocked` (Shape 2 / Source C); the next round omits `deep_security_review` |
 
 ### When the resolved row's Review column says Skip: omit `review_report` from completion.
 

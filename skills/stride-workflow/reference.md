@@ -138,10 +138,15 @@ STEP 5: Code Review (Decision Matrix)
                   not mitigated, no path:line, or an evidence file the fixes
                   touched; [] --> no dispatch; carry every other verdict
                   verbatim from the prior round's $MERGED)
+                  (deep_security_review { runs: true } on the reviewer when
+                  the specialist covers every consideration this round --
+                  the reviewer then sweeps dimensions only and the merge sets
+                  the section status; never on the round after an anomaly)
                   (specialist crashed, or verdicts malformed/absent/short of one
                   per consideration? fail closed, never a note alone: re-dispatch
                   once, then the SPECIALIST_FINDINGS=null update with a block,
-                  or review_blocked on Shape 2 / Source C)
+                  or review_blocked on Shape 2 / Source C; the next round
+                  drops deep_security_review)
     [Other]       Self-review against acceptance criteria
   |
   v
@@ -290,7 +295,8 @@ CLAUDE CODE WORKFLOW:
 │     │                         + plugin, never on review)
 │     └─ Otherwise → Dispatch task-reviewer, fix issues, then evaluate the SAME deep-security
 │                     gate — it fires on both branches (malformed/absent verdicts → fail
-│                     closed: keep the prose verdict, never downgrade to passed)
+│                     closed: keep the prose verdict, never downgrade to passed; after a
+│                     flagged round the next round drops deep_security_review)
 ├─ 5.5 Manual & Exploratory Testing (optional, gated):
 │     ├─ manual_tests empty OR plugin unavailable → Skip to Step 6 (no failure)
 │     ├─ Plugin available → Dispatch the stride-exploratory-testing:explorer AGENT only,

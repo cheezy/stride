@@ -17108,6 +17108,141 @@ else
 fi
 
 # ============================================================
+# Test Group 67: W2283 -- the deep_security_review dispatch flag
+# ============================================================
+# When the deep security review grades every consideration in a round, the
+# task-reviewer is told so: it keeps its dimension sweep, judges no listed
+# consideration, and the merge sets the section's status. The round after a
+# specialist anomaly drops the flag, so the task-reviewer grades each
+# consideration itself. Text pins cover both sides of the flag; the merge and
+# mapping fences are extracted from the contract and run against flag-mode
+# fixtures, as Groups 46 and 66 do, to prove the status really comes from them.
+# DEFERRED, not covered here: the integration item -- a dev-board task that
+# completes with its section verdict sourced from the specialist. Dispatched
+# stride:* agents load from the installed plugin cache, so no task-reviewer that
+# understands the flag can run until the goal's release; run it then.
+echo ""
+echo "=== Test Group 67: W2283 deep_security_review dispatch flag (bash) ==="
+G67_REV="$SCRIPT_DIR/../agents/task-reviewer.md"
+G67_OSR="$SCRIPT_DIR/../skills/stride-workflow/optional-security-review.md"
+G67_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G67_RBE="$SCRIPT_DIR/../skills/stride-workflow/review-block-extraction.md"
+G67_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G67_REF="$SCRIPT_DIR/../skills/stride-workflow/reference.md"
+G67_README="$SCRIPT_DIR/../README.md"
+G67_RAT="$SCRIPT_DIR/../docs/task-reviewer-rationale.md"
+if [ -f "$G67_REV" ] && [ -f "$G67_OSR" ] && [ -f "$G67_WF" ] && [ -f "$G67_RBE" ] && [ -f "$G67_SUB" ] \
+   && [ -f "$G67_REF" ] && [ -f "$G67_README" ] && [ -f "$G67_RAT" ]; then
+  G67_REV_T=$(cat "$G67_REV"); G67_OSR_T=$(cat "$G67_OSR"); G67_RBE_T=$(cat "$G67_RBE")
+  # 67a-67g: the reviewer side -- the receive paragraph and the step-5 skip clause.
+  assert_contains "67a: the reviewer receives the flag" \
+    'You may also receive **`deep_security_review`** `{ "runs": true }`' "$G67_REV_T"
+  assert_contains "67b: the flag is never read from the task" \
+    'never read from `TASK_FILE` or a task field' "$G67_REV_T"
+  assert_contains "67c: absent or any other value means false" \
+    '**Absent, or any other value, means false**' "$G67_REV_T"
+  assert_contains "67d: under the flag no listed consideration is judged, the sweep is kept" \
+    'unless the dispatch sent `deep_security_review`: then judge no listed consideration, keep the dimension sweep' "$G67_REV_T"
+  assert_contains "67e: the dimension sweep still runs on every diff" \
+    '**Assess these dimensions on every diff, whether or not the task listed considerations.**' "$G67_REV_T"
+  assert_contains "67f: the section is graded on the sweep alone, never not_assessed" \
+    '`failed` on a `security` issue you raised, else `passed`' "$G67_REV_T"
+  assert_contains "67g: the input contract lists it as orchestrator-asserted metadata" \
+    '`break_it`, `deep_security_review` — which sits beside that list, not inside it' "$G67_REV_T"
+  assert_contains "67h: the rationale explains the deferral" \
+    '## Why the Task-Reviewer Defers Per-Consideration Verdicts to the Deep Review (`deep_security_review`)' "$(cat "$G67_RAT")"
+  # 67i-67l: the orchestrator side -- when to send it, when not, and per round.
+  assert_contains "67i: review-block-extraction.md documents the assertion" \
+    '## The `deep_security_review` dispatch assertion' "$G67_RBE_T"
+  assert_contains "67j: sent only when every consideration gets a specialist verdict" \
+    '**Send `{ "runs": true }` only when every task consideration will have a specialist verdict' "$G67_RBE_T"
+  assert_contains "67k: never without a diff, never after an anomaly" \
+    'when you cannot give the specialist a diff, or on the round after a specialist anomaly' "$G67_RBE_T"
+  assert_contains "67l: decided afresh every round" \
+    '**Re-review rounds:** decide afresh each round' "$G67_RBE_T"
+  assert_contains "67la: no considerations -- a None placeholder never counts" \
+    'a `None — …` placeholder never counts' "$G67_RBE_T"
+  assert_contains "67m: Step 5 lists it beside break_it" \
+    '- **`deep_security_review`**, likewise:' "$(cat "$G67_WF")"
+  assert_contains "67n: the Decision Summary drops it after a crash" \
+    'the next round omits `deep_security_review`' "$(cat "$G67_WF")"
+  assert_contains "67o: the sub-step tells the task-reviewer" \
+    '**Tell the task-reviewer the specialist grades the considerations.**' "$G67_OSR_T"
+  assert_contains "67p: the section status comes from the merge" \
+    '**The section status comes from the merge.**' "$G67_OSR_T"
+  assert_contains "67q: a failed specialist restores the task-reviewer's own check" \
+    'that round is dispatched without `deep_security_review`, so the task-reviewer grades every consideration itself' "$G67_OSR_T"
+  assert_contains "67r: a carried \$SCOPE=[] round still sends it" \
+    'it still carries `deep_security_review`' "$G67_OSR_T"
+  assert_contains "67s: the subagent-workflow mirror passes it" \
+    'Pass **`deep_security_review`** on the same terms only when the deep security dispatch grades every consideration this round' "$(cat "$G67_SUB")"
+  assert_contains "67t: the reference flow mirrors it" \
+    'deep_security_review { runs: true } on the reviewer when' "$(cat "$G67_REF")"
+  assert_contains "67u: the README mirrors it" \
+    'the task-reviewer is dispatched with `deep_security_review`' "$(cat "$G67_README")"
+
+  # 67v: neither fence reads the flag, so flag-off behaviour is unchanged.
+  G67_MERGE=$(awk '/\*\*The merge assembles one verdict per task consideration\*\*/{f=1} f&&/^  ```bash/{g=1;next} g&&/^  ```/{exit} g' "$G67_OSR" | sed 's/^  //')
+  G67_MAP=$(awk '/One jq update on `\$MERGED`/{f=1} f&&/^  ```bash/{g=1;next} g&&/^  ```/{exit} g' "$G67_OSR" | sed 's/^  //')
+  assert_eq "67v: both fences were extractable" "yes/yes" \
+    "$(printf '%s' "$G67_MERGE" | grep -q 'CONSIDERATION_VERDICTS' && echo yes || echo no)/$(printf '%s' "$G67_MAP" | grep -q 'SPECIALIST_FINDINGS' && echo yes || echo no)"
+  assert_eq "67v2: neither fence reads deep_security_review" "0" \
+    "$(printf '%s\n%s\n' "$G67_MERGE" "$G67_MAP" | grep -c 'deep_security_review' | tr -d ' ')"
+
+  # 67w-67zb: flag-mode fixtures run through the merge, then the mapping.
+  G67_DIR=$(mktemp -d "${TMPDIR:-/tmp}/stride-g67.XXXXXX")
+  G67_TC='["c1","c2","c3"]'
+  # A flag-mode block: the sweep was clean, the task-reviewer graded no consideration.
+  G67_CLEAN='{"status":"approved","issues":[],"issue_counts":{"critical":0,"important":0,"minor":0},"issues_found":0,"security_considerations":{"status":"passed","note":"Dimension sweep clean; considerations graded by the deep review."}}'
+  g67_v() { # $@ = status per consideration c1..cN -> a verdicts array
+    jq -nc --args '[$ARGS.positional | to_entries[] | {consideration: "c\(.key + 1)", status: .value, evidence: "lib/a.ex:9", note: "n"}]' "$@"
+  }
+  g67_run() { # $1=block $2=scope $3=verdicts|UNSET $4=prior|"" $5=findings -> "status/severities/considerations", or REFUSED/ABORT
+    printf '%s' "$1" > "$G67_DIR/merged.json"
+    if [ -n "$4" ]; then printf '%s' "$4"; else printf '{}'; fi > "$G67_DIR/prior.json"
+    g67_merge() {
+      if [ "$3" = UNSET ]; then
+        ( unset CONSIDERATION_VERDICTS; MERGED="$G67_DIR/merged.json" PRIOR_MERGED="$G67_DIR/prior.json" \
+          TASK_CONSIDERATIONS="$G67_TC" SCOPE="$2" eval "$G67_MERGE" 2>/dev/null )
+      else
+        MERGED="$G67_DIR/merged.json" PRIOR_MERGED="$G67_DIR/prior.json" TASK_CONSIDERATIONS="$G67_TC" \
+          SCOPE="$2" CONSIDERATION_VERDICTS="$3" eval "$G67_MERGE" 2>/dev/null
+      fi
+    }
+    g67_merge "$@" || printf 'REFUSED;'
+    if MERGED="$G67_DIR/merged.json" SPECIALIST_FINDINGS="$5" eval "$G67_MAP" 2>/dev/null; then
+      jq -r '"\(.security_considerations.status)/\([.issues[].severity] | join(","))/\((.security_considerations.considerations // []) | length)/\(.status)"' "$G67_DIR/merged.json" 2>/dev/null || echo ABORT
+    else
+      echo ABORT
+    fi
+  }
+  G67_W=$(g67_run "$G67_CLEAN" "$G67_TC" "$(g67_v mitigated mitigated mitigated)" "" '[]')
+  assert_eq "67w: flag on, every consideration mitigated -> passed from the merge" "passed//3/approved" "$G67_W"
+  assert_eq "67w2: and the merged array passes considerations_match_ok" "yes" \
+    "$(jq -e --argjson e "$G67_TC" '[.security_considerations.considerations[].consideration] == $e' "$G67_DIR/merged.json" >/dev/null 2>&1 && echo yes || echo no)"
+  assert_eq "67x: flag on, one partial verdict -> failed, critical, changes_requested" "failed/critical/3/changes_requested" \
+    "$(g67_run "$G67_CLEAN" "$G67_TC" "$(g67_v mitigated partial mitigated)" "" '[]')"
+  G67_FAILED='{"status":"changes_requested","issues":[{"severity":"important","category":"security","file":"lib/s.ex","line":4,"description":"sweep finding"}],"issue_counts":{"critical":0,"important":1,"minor":0},"issues_found":1,"security_considerations":{"status":"failed","note":"Dimension sweep found an unescaped sink at lib/s.ex:4."}}'
+  assert_eq "67y: a reviewer failed is never downgraded by an all-mitigated merge" "failed/important/3/changes_requested" \
+    "$(g67_run "$G67_FAILED" "$G67_TC" "$(g67_v mitigated mitigated mitigated)" "" '[]')"
+  assert_eq "67y2: and the reviewer's own note is kept" "Dimension sweep found an unescaped sink at lib/s.ex:4." \
+    "$(jq -r '.security_considerations.note' "$G67_DIR/merged.json" 2>/dev/null || echo ABORT)"
+  assert_eq "67z: specialist crashed after the reviewer skipped -> merge refused, null update fails the section critical" \
+    "REFUSED;failed/critical/0/changes_requested" \
+    "$(g67_run "$G67_CLEAN" "$G67_TC" UNSET "" 'null')"
+  assert_eq "67z2: and that critical is the anomaly the next round's scope fence re-checks in full" "yes" \
+    "$(jq -r '.issues[0].description' "$G67_DIR/merged.json" 2>/dev/null | grep -q '^The deep security review returned a malformed findings\[\]' && echo yes || echo no)"
+  assert_eq "67z3: the scope fence keys on that same text" "yes" \
+    "$(grep -qF 'startswith("The deep security review returned a malformed findings[]")' "$G67_OSR" && echo yes || echo no)"
+  G67_PRIOR=$(jq -nc --argjson v "$(g67_v mitigated mitigated mitigated)" '{security_considerations: {status: "passed", considerations: $v}}')
+  assert_eq "67zb: a carried \$SCOPE=[] round under the flag -> passed with every verdict carried" "passed//3/approved" \
+    "$(g67_run "$G67_CLEAN" '[]' '[]' "$G67_PRIOR" '[]')"
+  rm -rf "$G67_DIR"
+else
+  echo "  SKIP: Group 67 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

@@ -16988,6 +16988,126 @@ else
 fi
 
 # ============================================================
+# Test Group 66: W2278 -- the security dispatch contract
+# ============================================================
+# The deep security dispatch names the specialist's one mode tag, sends it the
+# task-reviewer's own TASK_BASE_REF diff (none -> no dispatch), takes the result
+# from its final message only, and checks one verdict per task consideration
+# with considerations_match_ok. The predicate and the merge are extracted from
+# the contract's own bytes and run against fixtures, as Groups 46 and 48 do, so
+# a wording-intact but broken fence goes red.
+echo ""
+echo "=== Test Group 66: W2278 security dispatch contract (bash) ==="
+G66_OSR="$SCRIPT_DIR/../skills/stride-workflow/optional-security-review.md"
+G66_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G66_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G66_REF="$SCRIPT_DIR/../skills/stride-workflow/reference.md"
+G66_CT="$SCRIPT_DIR/../skills/stride-completing-tasks/SKILL.md"
+G66_README="$SCRIPT_DIR/../README.md"
+if [ -f "$G66_OSR" ] && [ -f "$G66_WF" ] && [ -f "$G66_SUB" ] && [ -f "$G66_REF" ] && [ -f "$G66_CT" ] && [ -f "$G66_README" ]; then
+  G66_OSR_T=$(cat "$G66_OSR")
+  assert_contains "66a: the dispatch names the exact mode tag" \
+    '**Open the prompt with the mode tag `/security-review invocation, mode: considerations` on its own first line**' "$G66_OSR_T"
+  assert_contains "66b: the considerations follow under the command's own header" \
+    'then a `Security considerations to assess:` header with one `- <consideration>` line each' "$G66_OSR_T"
+  assert_contains "66c: the diff is the task-reviewer's" \
+    '**The diff is the one the task-reviewer gets in this same message**' "$G66_OSR_T"
+  assert_contains "66d: derived from TASK_BASE_REF" \
+    '`TASK_BASE_REF` read from `.stride-env-cache` at the project root, then committed plus staged plus unstaged plus untracked-new files' "$G66_OSR_T"
+  assert_contains "66e: never git diff HEAD, never the changed-files capture" \
+    'never a bare `git diff HEAD`, which loses every commit made mid-task, and never `.stride-changed-files.json`' "$G66_OSR_T"
+  assert_contains "66f: no diff means no dispatch" \
+    'When you cannot produce that diff, **do not dispatch the specialist**' "$G66_OSR_T"
+  assert_contains "66g: the result comes back in the final message" \
+    '**The result comes back in its final message**' "$G66_OSR_T"
+  assert_contains "66h: no other output file is ever requested" \
+    'never ask it to put verdicts, findings or a report in any other file or path' "$G66_OSR_T"
+  assert_contains "66i: a false check is the fail-closed anomaly" \
+    '**So is `considerations_match_ok: false`**' "$G66_OSR_T"
+  assert_contains "66j: so is a dispatch with no diff" \
+    '**So is a dispatch you could not give a diff**' "$G66_OSR_T"
+  assert_contains "66k: the cross-referenced Step 5 bullet exists" \
+    'The git diff of all your changes, computed and passed inline' "$(cat "$G66_WF")"
+  assert_contains "66l: the subagent-workflow mirror names the tag and the check" \
+    'Open the prompt with `/security-review invocation, mode: considerations` on its own line' "$(cat "$G66_SUB")"
+  assert_contains "66m: and the check" \
+    'once merged, `considerations_match_ok` must print `true`' "$(cat "$G66_SUB")"
+  assert_contains "66n: the reference flow mirrors it" \
+    'considerations_match_ok after the merge -- false --> fail' "$(cat "$G66_REF")"
+  assert_contains "66o: the README mirrors it" \
+    'the prompt opens with the one mode tag the specialist accepts' "$(cat "$G66_README")"
+  assert_contains "66p: the completion self-check names it" \
+    '`considerations_match_ok` must have printed `true`.' "$(cat "$G66_CT")"
+
+  # 66q-66z: the predicate, extracted from the contract and run.
+  G66_FN=$(awk '/\*\*Check one verdict per consideration/{f=1} f&&/^  ```bash/{g=1;next} g&&/^  ```/{exit} g' "$G66_OSR" | sed 's/^  //')
+  assert_eq "66q: the predicate was extractable from the contract" "yes" \
+    "$(printf '%s' "$G66_FN" | grep -q '^considerations_match_ok() {' && echo yes || echo no)"
+  eval "$G66_FN"
+  G66_RED="[REDACTED $(printf '\342\200\224') row text embedded a credential]"
+  G66_TC='["c1","c2","c3"]'
+  G66_OK='considerations_match_ok: true'
+  G66_NO='considerations_match_ok: false'
+  g66() { considerations_match_ok "$1" "$2" 2>&1; }
+  g66_v() { # $@ = consideration strings -> a verdicts array
+    jq -nc --args '[$ARGS.positional[] | {consideration: ., status: "mitigated", evidence: "lib/a.ex:1", note: "n"}]' "$@"
+  }
+  assert_eq "66r: a 1:1 verbatim set is true" "$G66_OK" "$(g66 "$(g66_v c1 c2 c3)" "$G66_TC")"
+  assert_eq "66r2: and exits 0" "0" "$(considerations_match_ok "$(g66_v c1 c2 c3)" "$G66_TC" >/dev/null 2>&1; echo $?)"
+  assert_eq "66s: a missing entry is false" "$G66_NO" "$(g66 "$(g66_v c1 c2)" "$G66_TC")"
+  assert_eq "66s2: and exits 1" "1" "$(considerations_match_ok "$(g66_v c1 c2)" "$G66_TC" >/dev/null 2>&1; echo $?)"
+  assert_eq "66t: an extra entry is false" "$G66_NO" "$(g66 "$(g66_v c1 c2 c3 c4)" "$G66_TC")"
+  assert_eq "66u: a reworded entry is false" "$G66_NO" "$(g66 "$(g66_v c1 'c2 ' c3)" "$G66_TC")"
+  assert_eq "66v: an entry out of order is false" "$G66_NO" "$(g66 "$(g66_v c2 c1 c3)" "$G66_TC")"
+  assert_eq "66w: a non-object entry is false" "$G66_NO" "$(g66 '[{"consideration":"c1"},"c2",{"consideration":"c3"}]' "$G66_TC")"
+  assert_eq "66w2: a non-string consideration is false" "$G66_NO" "$(g66 '[{"consideration":"c1"},{"consideration":2},{"consideration":"c3"}]' "$G66_TC")"
+  assert_eq "66x: an object, null or empty reply is false" "$G66_NO/$G66_NO/$G66_NO/$G66_NO" \
+    "$(g66 '{"consideration":"c1"}' "$G66_TC")/$(g66 null "$G66_TC")/$(g66 '' "$G66_TC")/$(g66 '[]' "$G66_TC")"
+  assert_eq "66x2: an unset reply is false" "$G66_NO" "$( (unset G66_UNSET; g66 "${G66_UNSET-}" "$G66_TC") )"
+  assert_eq "66x3: an empty expected list is never a match" "$G66_NO" "$(g66 '[]' '[]')"
+  assert_eq "66y: a redacted consideration is accepted at its position" "$G66_OK" "$(g66 "$(g66_v c1 "$G66_RED" c3)" "$G66_TC")"
+  assert_eq "66y2: but a near-miss sentinel is not" "$G66_NO" "$(g66 "$(g66_v c1 '[REDACTED]' c3)" "$G66_TC")"
+  assert_eq "66z: identical considerations each need their own entry" "$G66_OK/$G66_NO" \
+    "$(g66 "$(g66_v x x)" '["x","x"]')/$(g66 "$(g66_v x)" '["x","x"]')"
+  assert_eq "66z2: the predicate never prints consideration text" "$G66_NO/$G66_NO" \
+    "$(g66 "$(g66_v 'G66-SECRET-MARK reworded')" '["G66-SECRET-MARK"]')/$(g66 '[{"consideration":"G66-SECRET-MARK' '["G66-SECRET-MARK"]')"
+
+  # 66za-66zf: the merge accepts the sentinel and identical texts, end to end.
+  G66_MERGE=$(awk '/\*\*The merge assembles one verdict per task consideration\*\*/{f=1} f&&/^  ```bash/{g=1;next} g&&/^  ```/{exit} g' "$G66_OSR" | sed 's/^  //')
+  assert_eq "66za: the merge fence was extractable" "yes" \
+    "$(printf '%s' "$G66_MERGE" | grep -q 'CONSIDERATION_VERDICTS' && echo yes || echo no)"
+  G66_DIR=$(mktemp -d "${TMPDIR:-/tmp}/stride-g66.XXXXXX")
+  g66_merge() { # $1=task list $2=scope $3=reply [$4=prior] -> merged considerations, or REFUSED
+    printf '%s' '{"status":"approved","issues":[],"security_considerations":{"status":"passed","note":"r"}}' > "$G66_DIR/merged.json"
+    if [ -n "${4:-}" ]; then printf '%s' "$4"; else printf '{}'; fi > "$G66_DIR/prior.json"
+    if MERGED="$G66_DIR/merged.json" PRIOR_MERGED="$G66_DIR/prior.json" TASK_CONSIDERATIONS="$1" \
+       SCOPE="$2" CONSIDERATION_VERDICTS="$3" eval "$G66_MERGE" 2>/dev/null; then
+      jq -c '.security_considerations.considerations' "$G66_DIR/merged.json"
+    else
+      echo REFUSED
+    fi
+  }
+  G66_M1=$(g66_merge "$G66_TC" "$G66_TC" "$(g66_v c1 "$G66_RED" c3)")
+  assert_eq "66zb: round one keeps the sentinel at its position" "c1|$G66_RED|c3" \
+    "$(printf '%s' "$G66_M1" | jq -r 'map(.consideration) | join("|")' 2>/dev/null || echo ABORT)"
+  assert_eq "66zb2: and the merged array passes the check" "$G66_OK" "$(g66 "$G66_M1" "$G66_TC")"
+  assert_eq "66zc: identical texts take their verdicts in reply order" "x:1,x:2,y:3" \
+    "$(g66_merge '["x","x","y"]' '["x","x","y"]' '[{"consideration":"x","note":"1"},{"consideration":"x","note":"2"},{"consideration":"y","note":"3"}]' | jq -r 'map("\(.consideration):\(.note)") | join(",")' 2>/dev/null || echo ABORT)"
+  assert_eq "66zd: a reply short of a duplicate is refused" "REFUSED" \
+    "$(g66_merge '["x","x","y"]' '["x","x","y"]' "$(g66_v x y)")"
+  assert_eq "66ze: a sentinel moved off its position is refused" "REFUSED" \
+    "$(g66_merge '["a","k"]' '["a","k"]' "$(g66_v "$G66_RED" a)")"
+  G66_PRIOR=$(jq -nc --argjson v "$(g66_v c1 c2 c3)" '{security_considerations: {status: "passed", considerations: $v}}')
+  assert_eq "66zf: a scoped round redacts its one entry and carries the rest" "c1|$G66_RED|c3" \
+    "$(g66_merge "$G66_TC" '["c2"]' "$(g66_v "$G66_RED")" "$G66_PRIOR" | jq -r 'map(.consideration) | join("|")' 2>/dev/null || echo ABORT)"
+  assert_eq "66zg: a reversed reply is still restored to task order" "c1,c2,c3" \
+    "$(g66_merge "$G66_TC" "$G66_TC" "$(g66_v c3 c2 c1)" | jq -r 'map(.consideration) | join(",")' 2>/dev/null || echo ABORT)"
+  rm -rf "$G66_DIR"
+else
+  echo "  SKIP: Group 66 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

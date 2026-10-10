@@ -129,6 +129,11 @@ STEP 5: Code Review (Decision Matrix)
                   (the specialist gets SECURITY_RESULT_PATH; read its result
                   from that path only -- inline fence as the fallback,
                   neither --> fail closed; Step 7 deletes the file)
+                  (prompt line 1: /security-review invocation, mode:
+                  considerations; the task-reviewer's TASK_BASE_REF diff --
+                  none --> no dispatch; results only in its final message;
+                  considerations_match_ok after the merge -- false --> fail
+                  closed)
                   (round 2+: re-dispatch the specialist only for $SCOPE --
                   not mitigated, no path:line, or an evidence file the fixes
                   touched; [] --> no dispatch; carry every other verdict

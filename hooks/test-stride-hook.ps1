@@ -12887,6 +12887,44 @@ if (Test-Path -LiteralPath $g45Wf) {
 }
 
 # ============================================================
+# Test Group 46: W2278 - the security dispatch contract, PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 66 text pins; the behavioural pins run in bash only.
+# Needles stay ASCII: Windows PowerShell 5.1 can misread a BOM-less UTF-8 script.
+Write-Host ""
+Write-Host "=== Test Group 46: W2278 security dispatch contract (PowerShell) ==="
+$g46Osr    = Join-Path $ScriptDir '../skills/stride-workflow/optional-security-review.md'
+$g46Sub    = Join-Path $ScriptDir '../skills/stride-subagent-workflow/SKILL.md'
+$g46Ref    = Join-Path $ScriptDir '../skills/stride-workflow/reference.md'
+$g46Ct     = Join-Path $ScriptDir '../skills/stride-completing-tasks/SKILL.md'
+$g46Readme = Join-Path $ScriptDir '../README.md'
+if ((Test-Path -LiteralPath $g46Osr) -and (Test-Path -LiteralPath $g46Sub) -and (Test-Path -LiteralPath $g46Ref) -and (Test-Path -LiteralPath $g46Ct) -and (Test-Path -LiteralPath $g46Readme)) {
+    $g46Text = @{
+        OSR    = Get-Content -LiteralPath $g46Osr -Raw -Encoding UTF8
+        SUB    = Get-Content -LiteralPath $g46Sub -Raw -Encoding UTF8
+        REF    = Get-Content -LiteralPath $g46Ref -Raw -Encoding UTF8
+        CT     = Get-Content -LiteralPath $g46Ct -Raw -Encoding UTF8
+        README = Get-Content -LiteralPath $g46Readme -Raw -Encoding UTF8
+    }
+    Assert-Contains "46a: the dispatch names the exact mode tag" '**Open the prompt with the mode tag `/security-review invocation, mode: considerations` on its own first line**' $g46Text.OSR
+    Assert-Contains "46c: the diff is the task-reviewer's" '**The diff is the one the task-reviewer gets in this same message**' $g46Text.OSR
+    Assert-Contains "46e: never git diff HEAD, never the changed-files capture" 'never a bare `git diff HEAD`, which loses every commit made mid-task, and never `.stride-changed-files.json`' $g46Text.OSR
+    Assert-Contains "46f: no diff means no dispatch" 'When you cannot produce that diff, **do not dispatch the specialist**' $g46Text.OSR
+    Assert-Contains "46g: the result comes back in the final message" '**The result comes back in its final message**' $g46Text.OSR
+    Assert-Contains "46h: no other output file is ever requested" 'never ask it to put verdicts, findings or a report in any other file or path' $g46Text.OSR
+    Assert-Contains "46i: the predicate is defined in the contract" 'considerations_match_ok() {' $g46Text.OSR
+    Assert-Contains "46i2: it accepts the credential sentinel" 'row text embedded a credential]"))' $g46Text.OSR
+    Assert-Contains "46j: a false check is the fail-closed anomaly" '**So is `considerations_match_ok: false`**' $g46Text.OSR
+    Assert-Contains "46l: the subagent-workflow mirror names the tag" 'Open the prompt with `/security-review invocation, mode: considerations` on its own line' $g46Text.SUB
+    Assert-Contains "46m: and the check" 'once merged, `considerations_match_ok` must print `true`' $g46Text.SUB
+    Assert-Contains "46n: the reference flow mirrors it" 'considerations_match_ok after the merge -- false --> fail' $g46Text.REF
+    Assert-Contains "46o: the README mirrors it" 'the prompt opens with the one mode tag the specialist accepts' $g46Text.README
+    Assert-Contains "46p: the completion self-check names it" '`considerations_match_ok` must have printed `true`.' $g46Text.CT
+} else {
+    Write-Host "  SKIP: Group 46 contract files not found"
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

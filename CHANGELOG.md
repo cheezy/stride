@@ -23,7 +23,9 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.86.0] - 2026-10-10
+
+The deep security review costs less per round. Its dispatch contract is pinned: one mode tag, the task-reviewer's diff (no diff, no dispatch), results only in the final message or `SECURITY_RESULT_PATH`, and a `considerations_match_ok` check of one verdict per consideration (W2278). When the specialist grades every consideration in a round, the task-reviewer gets `deep_security_review`, keeps its dimension sweep, and leaves the per-consideration verdicts to the merge (W2283). W2278 pairs with `stride-security-review` 2.7.0. No task field, server or API change. Bash hook-suite Groups 66–67 and PowerShell Groups 46–47 pin both changes.
 
 ### Changed — the task-reviewer leaves per-consideration security verdicts to the deep review when it runs (W2283)
 

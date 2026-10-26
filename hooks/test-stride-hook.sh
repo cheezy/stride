@@ -17243,6 +17243,27 @@ else
 fi
 
 # ============================================================
+# Test Group 68: per-task scratch files in the task-runner
+# ============================================================
+# Two runners in one session once wrote the same fixed scratch name and one
+# submitted the other task's behaviour_test_matrix. The runner contract now
+# names a per-task directory; these pins keep that rule from being trimmed.
+echo ""
+echo "=== Test Group 68: per-task scratch files in the task-runner ==="
+G68_RUN="$SCRIPT_DIR/../agents/task-runner.md"
+if [ -f "$G68_RUN" ]; then
+  G68_T=$(tr '\n' ' ' < "$G68_RUN" | tr -s ' ')
+  assert_contains "68a: the runner keeps intermediate files in a per-task directory" \
+    "in a directory named for your task" "$G68_T"
+  assert_contains "68b: and names both places that directory may live" \
+    '`project_dir/.stride/.runner-<IDENTIFIER>/`' "$G68_T"
+  assert_contains "68c: and says why a fixed shared name is refused" \
+    "lets one runner submit another task's file as its own" "$G68_T"
+else
+  echo "  SKIP: Group 68 task-runner.md not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

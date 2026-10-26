@@ -112,7 +112,13 @@ gate — that is a finding to report in your record, not a shortcut to take.**
 
 5. **Implement.** This is the one phase you perform yourself rather than
    delegate — `stride-workflow` Step 4. Use repo-relative paths in anything you
-   will later report.
+   will later report. **Keep every intermediate file you write — payloads,
+   matrices, fixtures, logs — in a directory named for your task**: a
+   `<IDENTIFIER>/` subdirectory of any shared scratch directory your harness
+   gives you, or `project_dir/.stride/.runner-<IDENTIFIER>/`. Never a fixed
+   name such as `matrix.json` in a shared place: one session runs several
+   runners against the same scratch space, and a shared name lets one runner
+   submit another task's file as its own.
 
 6. **Dispatch `stride:task-reviewer`; fix, re-review, and cap the rounds.** What
    to pass the reviewer — every field the task supplies, never a subset — how to

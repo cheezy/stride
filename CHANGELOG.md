@@ -23,6 +23,12 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Changed — the task-runner keeps its scratch files in a per-task directory
+
+`agents/task-runner.md` step 5 now tells a runner to write every intermediate file (payloads, matrices, fixtures, logs) under a directory named for its task: `<IDENTIFIER>/` inside a shared scratch directory, or `.stride/.runner-<IDENTIFIER>/`. During the G478–G480 run, two runners in one session wrote the same fixed scratch name, and twice a runner submitted another task's `behaviour_test_matrix` before catching it. No dispatch-field, server or API change; the runner still receives exactly six fields. Bash hook-suite Group 68 pins the rule.
+
 ## [1.86.0] - 2026-10-10
 
 The deep security review costs less per round. Its dispatch contract is pinned: one mode tag, the task-reviewer's diff (no diff, no dispatch), results only in the final message or `SECURITY_RESULT_PATH`, and a `considerations_match_ok` check of one verdict per consideration (W2278). When the specialist grades every consideration in a round, the task-reviewer gets `deep_security_review`, keeps its dimension sweep, and leaves the per-consideration verdicts to the merge (W2283). W2278 pairs with `stride-security-review` 2.7.0. No task field, server or API change. Bash hook-suite Groups 66–67 and PowerShell Groups 46–47 pin both changes.

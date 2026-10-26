@@ -514,7 +514,7 @@ ported (version), or not applicable (reason).
 |---|---|---|---|---|---|---|---|
 | `stride-codex` | not started | not started | not started | not started | not started | not started | not started |
 | `stride-copilot` | not started | not started | not started | not started | not started | not started | not started |
-| `stride-gemini` | not started | not started | not started | not started | not started | not started | not started |
+| `stride-gemini` | ported (1.52.0) | ported (1.52.0) | ported (1.52.0) | ported (1.52.0; census hand-off not applicable; reviewer checks with read-only tools) | ported (1.52.0; counterparts found with `glob` and `grep_search`) | ported (1.52.0) | ported (1.52.0; `checked by:` plus a commit window the orchestrator measures replace `verified_by`) |
 | `stride-opencode` | ported (1.42.0) | ported (1.41.0) | ported (1.41.0) | ported (1.41.0; census hand-off not applicable) | ported (1.42.0) | ported (1.42.0) | ported (1.41.0; `checked by:` and an orchestrator-run commit window stand in for `verified_by`) |
 | `stride-pi` | not started | not started | not started | not started | not started | not started | not started |
 | `stride-lite` | not applicable (no matrix) | not started | not started | not started | not started | not started | not started |
@@ -527,3 +527,15 @@ and W2297. Its changelog records the two things it carries differently: there is
 no claims census, so its statement check has no recorded `claims_verified_by`
 commands to re-run, and the explorer has no shell, so it records each check as
 `checked by:` while the orchestrator measures the commit window. Neither release adds a canon anchor.
+
+`stride-gemini` took all seven in a single release, 1.52.0, which follows its
+G446-G448 release, 1.51.0. Its explorer works as `stride-opencode`'s does:
+read-only file tools, `checked by:` on each statement, and a commit window that
+the orchestrator measures in Step 3 Branch C and hands over. Its reviewer
+differs from what rule 6 suggests. During W2477 `run_shell_command` was taken
+off the reviewer's `tools:` list, but the statement check and the twin check
+stayed with the reviewer, run through `read_file`, `grep_search` and `glob`
+instead of being moved to the orchestrator. What only git history could settle
+is recorded as unverifiable, and twins are looked up in the working tree rather
+than git's index. The changelog lists these differences and the census
+hand-off under "Not ported from G455". No canon anchor was added.

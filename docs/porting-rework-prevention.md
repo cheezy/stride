@@ -513,7 +513,7 @@ ported (version), or not applicable (reason).
 | Port | W2292 | W2293 | W2294 | W2295 | W2296 | W2297 | W2298 |
 |---|---|---|---|---|---|---|---|
 | `stride-codex` | not started | not started | not started | not started | not started | not started | not started |
-| `stride-copilot` | not started | not started | not started | not started | not started | not started | not started |
+| `stride-copilot` | ported (2.43.0) | ported (2.43.0) | ported (2.43.0) | ported (2.43.0; census hand-off not applicable; reviewer checks with `read`, `search` and `glob`) | ported (2.43.0; counterparts found with `glob` and `search`) | ported (2.43.0) | ported (2.43.0; `checked by:` plus a commit window the orchestrator measures replace `verified_by`) |
 | `stride-gemini` | ported (1.52.0) | ported (1.52.0) | ported (1.52.0) | ported (1.52.0; census hand-off not applicable; reviewer checks with read-only tools) | ported (1.52.0; counterparts found with `glob` and `grep_search`) | ported (1.52.0) | ported (1.52.0; `checked by:` plus a commit window the orchestrator measures replace `verified_by`) |
 | `stride-opencode` | ported (1.42.0) | ported (1.41.0) | ported (1.41.0) | ported (1.41.0; census hand-off not applicable) | ported (1.42.0) | ported (1.42.0) | ported (1.41.0; `checked by:` and an orchestrator-run commit window stand in for `verified_by`) |
 | `stride-pi` | not started | not started | not started | not started | not started | not started | not started |
@@ -539,3 +539,17 @@ instead of being moved to the orchestrator. What only git history could settle
 is recorded as unverifiable, and twins are looked up in the working tree rather
 than git's index. The changelog lists these differences and the census
 hand-off under "Not ported from G455". No canon anchor was added.
+
+`stride-copilot` took all seven in 2.43.0, the same release as its G446-G448
+port. That version had been stamped for G446-G448 but not yet tagged when the
+G455 work landed, so the two batches ship under one heading rather than as two
+releases. Its explorer and reviewer both hold `read`, `search` and `glob` and
+no shell. The explorer marks each statement `checked by:` and gets its commit
+history from the orchestrator, which measures the window as
+`stride-subagent-workflow` describes and passes it in. Like `stride-gemini`'s,
+its reviewer differs from what rule 6 suggests: it runs the statement check
+and the twin check itself with those tools rather than leaving them to the
+orchestrator. What only git history could settle is recorded as unverifiable,
+and twins are looked up in the working tree rather than git's index. There is
+no claims census, so the census hand-off is not applicable. The changelog
+lists these under "Not ported from G455". No canon anchor was added.

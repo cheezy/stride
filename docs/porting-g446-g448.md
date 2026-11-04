@@ -105,20 +105,20 @@ Add a column as each port takes the batch. Use the notation from
 not started, in progress, ported (version), or not applicable (reason). Name
 the port's own task in brackets, so a cell can be traced to its commit.
 
-| Task | `stride-opencode` | `stride-gemini` | `stride-copilot` |
-|---|---|---|---|
-| W2248 | ported (1.40.0) [W2300] | ported (1.51.0) [W2463] | ported (2.43.0) [W2537] |
-| W2249 | ported (1.40.0) [W2301] | ported (1.51.0) [W2464] | ported (2.43.0) [W2538] |
-| W2250 | not applicable (no `task-runner` agent) | not applicable (no `task-runner` agent) | not applicable (no `task-runner` agent) |
-| W2251 | ported (1.40.0) [W2302] | ported (1.51.0) [W2465] | ported (2.43.0) [W2539] |
-| W2252 | ported (1.40.0) [W2303]; prose only, so the round-two triggers are followed, not enforced | ported (1.51.0) [W2466]; prose only, so the round-two grounds are followed, not enforced | ported (2.43.0) [W2540]; prose only, so the round-two trigger is followed, not enforced |
-| W2253 | ported (1.40.0) [W2303]; the canon check reports `review-round-cap` v2 at `skills/stride-workflow/SKILL.md:459` | ported (1.51.0) [W2466]; the canon check reports `review-round-cap` v2 at `skills/stride-workflow/SKILL.md:334` | ported (2.43.0) [W2540]; the canon check reports `review-round-cap` v2 at `skills/stride-workflow/SKILL.md:232` |
-| W2254 | not applicable (OpenCode's task tool blocks until the explorer returns, so there is nothing to overlap) [W2304] | not applicable (on Gemini CLI 0.65.0 a custom-agent invocation holds the turn until it returns, so there is nothing to overlap) [W2467] | not applicable (whether a Copilot CLI agent invocation releases the turn is unmeasured, so Phase 1 waits for the explorer) [W2541] |
-| W2255 | not applicable (no blocking Stop gate; the advisory continuation cannot hold a stop) | not applicable (the AfterAgent input lists no running agents, and the blocking invocation means the gate never fires while one runs) [W2467] | not applicable (the documented `agentStop` input lists no running agents, so there is no permit to grant or bound) [W2541] |
-| W2256 | ported (1.41.0) [W2305] | ported (1.51.0) [W2468]; no dispatcher size-gate fetch, since there is no dispatcher mode | ported (2.43.0) [W2542]; no dispatcher size-gate fetch, since there is no dispatcher mode |
-| W2257 | ported (1.41.0) [W2306] | ported (1.51.0) [W2469] | ported (2.43.0) [W2543] |
-| W2258 | ported (1.41.0) [W2307] | ported (1.51.0) [W2470] | ported (2.43.0) [W2544] |
-| W2259 | not applicable (measured `stride` on Claude Code only; the port claims no saving) | not applicable (measured `stride` on Claude Code only; the port claims no saving) | not applicable (measured `stride` on Claude Code only; the port claims no saving) |
+| Task | `stride-opencode` | `stride-gemini` | `stride-copilot` | `stride-pi` |
+|---|---|---|---|---|
+| W2248 | ported (1.40.0) [W2300] | ported (1.51.0) [W2463] | ported (2.43.0) [W2537] | ported (1.22.0) [W2607] |
+| W2249 | ported (1.40.0) [W2301] | ported (1.51.0) [W2464] | ported (2.43.0) [W2538] | ported (1.22.0) [W2608] |
+| W2250 | not applicable (no `task-runner` agent) | not applicable (no `task-runner` agent) | not applicable (no `task-runner` agent) | not applicable (no `task-runner` agent) |
+| W2251 | ported (1.40.0) [W2302] | ported (1.51.0) [W2465] | ported (2.43.0) [W2539] | ported (1.22.0) [W2609] |
+| W2252 | ported (1.40.0) [W2303]; prose only, so the round-two triggers are followed, not enforced | ported (1.51.0) [W2466]; prose only, so the round-two grounds are followed, not enforced | ported (2.43.0) [W2540]; prose only, so the round-two trigger is followed, not enforced | ported (1.22.0) [W2610]; prose only, so the round-two triggers are followed, not enforced |
+| W2253 | ported (1.40.0) [W2303]; the canon check reports `review-round-cap` v2 at `skills/stride-workflow/SKILL.md:459` | ported (1.51.0) [W2466]; the canon check reports `review-round-cap` v2 at `skills/stride-workflow/SKILL.md:334` | ported (2.43.0) [W2540]; the canon check reports `review-round-cap` v2 at `skills/stride-workflow/SKILL.md:232` | ported (1.22.0) [W2610]; the canon check reports `review-round-cap` v2 at `skills/stride-workflow/SKILL.md:266` |
+| W2254 | not applicable (OpenCode's task tool blocks until the explorer returns, so there is nothing to overlap) [W2304] | not applicable (on Gemini CLI 0.65.0 a custom-agent invocation holds the turn until it returns, so there is nothing to overlap) [W2467] | not applicable (whether a Copilot CLI agent invocation releases the turn is unmeasured, so Phase 1 waits for the explorer) [W2541] | not applicable (on Pi 0.67.68 a `dispatch_agent` call holds the turn until its subprocess exits, so there is nothing to overlap) [W2611] |
+| W2255 | not applicable (no blocking Stop gate; the advisory continuation cannot hold a stop) | not applicable (the AfterAgent input lists no running agents, and the blocking invocation means the gate never fires while one runs) [W2467] | not applicable (the documented `agentStop` input lists no running agents, so there is no permit to grant or bound) [W2541] | not applicable (no blocking Stop gate, and Pi's `turn_end` and `agent_end` events cannot hold a turn open) [W2611] |
+| W2256 | ported (1.41.0) [W2305] | ported (1.51.0) [W2468]; no dispatcher size-gate fetch, since there is no dispatcher mode | ported (2.43.0) [W2542]; no dispatcher size-gate fetch, since there is no dispatcher mode | ported (1.22.0) [W2612]; no dispatcher size-gate fetch, since there is no dispatcher mode |
+| W2257 | ported (1.41.0) [W2306] | ported (1.51.0) [W2469] | ported (2.43.0) [W2543] | ported (1.22.0) [W2613] |
+| W2258 | ported (1.41.0) [W2307] | ported (1.51.0) [W2470] | ported (2.43.0) [W2544] | ported (1.22.0) [W2614] |
+| W2259 | not applicable (measured `stride` on Claude Code only; the port claims no saving) | not applicable (measured `stride` on Claude Code only; the port claims no saving) | not applicable (measured `stride` on Claude Code only; the port claims no saving) | not applicable (measured `stride` on Claude Code only; the port claims no saving) |
 
 `stride-opencode` took the batch in two releases, not the one that rule 4 below
 asks for: 1.40.0 shipped before W2305–W2307 were done. Its 1.41.0 changelog
@@ -143,6 +143,15 @@ cell is left at the snapshot's v1 for the same reason as `stride-gemini`'s.
 Its hook-executable and `round_cap_ok` cells were corrected, because both were
 already wrong on that day: the PowerShell hook half has been tracked since
 2.1.0, and the predicate this row claimed never existed in this port.
+
+`stride-pi` took the batch in one release, 1.22.0, whose changelog entry
+gives the reason for each not-applicable row under "Not ported" and says the
+W2252 triggers are followed, not enforced. Its W2254 and W2255 rows were read
+from Pi 0.67.68's code and documentation rather than measured, because
+`pi -p` could not reach a model where the port was done; `docs/HOOK_RESEARCH.md`
+in that repository records each finding and when to look again (W2611). Its
+fleet-table anchor cell is left at the snapshot's v1 for the same reason as
+the other ports'; its other cells were right on the day and are unchanged.
 
 ---
 

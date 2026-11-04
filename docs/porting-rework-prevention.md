@@ -512,7 +512,7 @@ ported (version), or not applicable (reason).
 
 | Port | W2292 | W2293 | W2294 | W2295 | W2296 | W2297 | W2298 |
 |---|---|---|---|---|---|---|---|
-| `stride-codex` | not started | not started | not started | not started | not started | not started | not started |
+| `stride-codex` | ported (1.40.0; the creation skills and the decomposer agent) | ported (1.40.0) | ported (1.40.0; the procedure sits inline in Step 4) | ported (1.40.0; census hand-off not applicable; the reviewer picks read-only commands from a fixed list and hardens every git call) | ported (1.40.0; counterparts listed with `git ls-files -s` and searched with `grep`) | ported (1.40.0) | ported (1.40.0; `checked by:` plus an orchestrator-measured commit window stand in for `verified_by`) |
 | `stride-copilot` | ported (2.43.0) | ported (2.43.0) | ported (2.43.0) | ported (2.43.0; census hand-off not applicable; reviewer checks with `read`, `search` and `glob`) | ported (2.43.0; counterparts found with `glob` and `search`) | ported (2.43.0) | ported (2.43.0; `checked by:` plus a commit window the orchestrator measures replace `verified_by`) |
 | `stride-gemini` | ported (1.52.0) | ported (1.52.0) | ported (1.52.0) | ported (1.52.0; census hand-off not applicable; reviewer checks with read-only tools) | ported (1.52.0; counterparts found with `glob` and `grep_search`) | ported (1.52.0) | ported (1.52.0; `checked by:` plus a commit window the orchestrator measures replace `verified_by`) |
 | `stride-opencode` | ported (1.42.0) | ported (1.41.0) | ported (1.41.0) | ported (1.41.0; census hand-off not applicable) | ported (1.42.0) | ported (1.42.0) | ported (1.41.0; `checked by:` and an orchestrator-run commit window stand in for `verified_by`) |
@@ -569,3 +569,19 @@ from G455". The W2292 note above that the full ports already review the
 matrix does not hold for this port: its enricher has no matrix section and its
 reviewer does not judge the rows, both found during W2616 and left for a
 later task. No canon anchor was added.
+
+`stride-codex` took all seven in 1.40.0. That version was stamped for its
+G446-G448 port and had not been tagged when the G455 changes landed, so the two
+batches share one heading, as they do in `stride-copilot` and `stride-pi`. Its
+two agents are equipped differently. The task-reviewer has a shell: it settles
+statements with read-only commands chosen from a fixed list, finds twins with
+`git ls-files` and `grep`, and runs every git call with flags that stop
+repository configuration from starting other programs. It runs no tests and no
+project code, so rule 6 is kept. The task-explorer has only read, search and
+glob, so it marks each statement `checked by:` and is handed its commit window
+by the orchestrator, which measures it in `stride-workflow` Step 3. The
+break-it procedure lives inline in Step 4 rather than in a sibling file,
+because the installers copy only each skill's `SKILL.md`. With no claims
+census, the census hand-off does not apply. The changelog records the
+hand-off and the `checked by:` substitute under "Not ported from G455", and no
+canon anchor was added.

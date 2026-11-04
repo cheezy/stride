@@ -516,7 +516,7 @@ ported (version), or not applicable (reason).
 | `stride-copilot` | ported (2.43.0) | ported (2.43.0) | ported (2.43.0) | ported (2.43.0; census hand-off not applicable; reviewer checks with `read`, `search` and `glob`) | ported (2.43.0; counterparts found with `glob` and `search`) | ported (2.43.0) | ported (2.43.0; `checked by:` plus a commit window the orchestrator measures replace `verified_by`) |
 | `stride-gemini` | ported (1.52.0) | ported (1.52.0) | ported (1.52.0) | ported (1.52.0; census hand-off not applicable; reviewer checks with read-only tools) | ported (1.52.0; counterparts found with `glob` and `grep_search`) | ported (1.52.0) | ported (1.52.0; `checked by:` plus a commit window the orchestrator measures replace `verified_by`) |
 | `stride-opencode` | ported (1.42.0) | ported (1.41.0) | ported (1.41.0) | ported (1.41.0; census hand-off not applicable) | ported (1.42.0) | ported (1.42.0) | ported (1.41.0; `checked by:` and an orchestrator-run commit window stand in for `verified_by`) |
-| `stride-pi` | not started | not started | not started | not started | not started | not started | not started |
+| `stride-pi` | ported (1.22.0; creation skills and the decomposer agent and fallback skill) | ported (1.22.0; no matrix-row stand-in, since this reviewer judges no rows) | ported (1.22.0) | ported (1.22.0; census hand-off not applicable; reviewer checks with read-only shell commands it picks from a fixed list) | ported (1.22.0; counterparts found with `git ls-files` and `grep`) | ported (1.22.0) | ported (1.22.0; the explorer has a shell, so it records `verified_by` and runs the commit window itself) |
 | `stride-lite` | not applicable (no matrix) | not started | not started | not started | not started | not started | not started |
 | `stride-copilot-lite` | not applicable (no matrix) | not started | not started | not started | not started | not started | not started |
 | `stride-opencode-lite` | not applicable (no matrix) | not started | not started | not started | not started | not started (decomposer only) | not started |
@@ -553,3 +553,19 @@ orchestrator. What only git history could settle is recorded as unverifiable,
 and twins are looked up in the working tree rather than git's index. There is
 no claims census, so the census hand-off is not applicable. The changelog
 lists these under "Not ported from G455". No canon anchor was added.
+
+`stride-pi` took all seven in 1.22.0, the same release as its G446-G448
+port: both batches landed while 1.22.0 was still untagged, so they ship under
+one heading, as in `stride-copilot`. Unlike the ports that took the goal before
+it, its explorer holds a shell tool, so it records `verified_by` for each
+statement and runs the commit window itself. Its reviewer holds one too, as
+`stride-opencode`'s does, and runs the statement check with read-only commands it picks from a
+fixed list, and the twin check with `git ls-files` and `grep`, under quoting,
+symlink and credential-file rules. Rule 6 still holds: it runs no tests and no
+project code. Two things are not carried: the census hand-off, since there is
+no claims census, and W2293's matrix-row stand-in, since this reviewer judges
+no `behaviour_test_matrix` rows. Its changelog lists both under "Not ported
+from G455". The W2292 note above that the full ports already review the
+matrix does not hold for this port: its enricher has no matrix section and its
+reviewer does not judge the rows, both found during W2616 and left for a
+later task. No canon anchor was added.

@@ -76,6 +76,18 @@ Tasks routinely carry `manual_tests` and `edge_cases` in their `testing_strategy
 
 **Why every item is mapped in completion_notes.** Beyond the cap something is always left over. Naming it as a human responsibility is what keeps it owed instead of silently dropped.
 
+## Why a Signed-Out Session Is Not Coverage
+
+*From `skills/stride-workflow/optional-exploratory-testing.md` § Step 0: The Exploratory Environment and § Claude Code: Dispatch the Exploratory-Testing Plugin, step 1.*
+
+**The miss.** Every G489 dispatch said `Test accounts: none`. Sessions chartered on members-only features ran signed out, saw only the uniform refusal an unauthenticated request gets, and still ended as coverage of a feature they never reached (miss causes C1, C3 and C9).
+
+**Why Step 0 reads `.exploratory.md`.** The facts a signed-in session needs — the harness command, the services it connects to, the role fixtures — are project facts that rarely change, so asking for them afresh every session is what made "none" the easy answer. The file holds them once. It is confirmed rather than trusted because a cloned repository can carry a file the user did not write, and a harness command is a command the explorer will run: it must come from the user, typed or confirmed, in this session.
+
+**Why the harness travels as `PROBE_` lines.** The explorer counts a harness only on a line that begins with `PROBE_HARNESS`, and runs none without `PROBE_SERVICES`, so a human-readable label alone would be ignored and repeat the miss. The `Probe harness` label says whether the machine lines are there, so a reader can see which surface a session had.
+
+**Why the refusal may read task text.** Deciding that a target is auth-gated reads `where_context`, which the task author wrote. That is safe only because the test can do nothing but withhold a dispatch: forged text can stop a session from running, but never make one run, widen its hosts or supply a harness.
+
 ## Why the Budget Is Explicit and Endings Are Judged on the Sheet
 
 *From `skills/stride-workflow/optional-exploratory-testing.md` § step 2a and the Safety boundary paragraph.*

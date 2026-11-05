@@ -61,8 +61,9 @@ STEP 0: Prerequisites
   Mention missing .gitignore entries -- UNCONDITIONAL for .stride/ and .stride_auth.md,
     plus .exploratory/ only when the exploratory plugin is installed; never edit
     their .gitignore yourself
-  Exploratory plugin installed? --> collect the authorized/non-production affirmative HERE
-    or never (asking between steps is illegal)
+  Exploratory plugin installed? --> read .exploratory.md and have the user confirm it, or ask:
+    authorized/non-production affirmative, reach, probe harness or role accounts -- ONE
+    question, HERE or never (asking between steps is illegal)
   |
   v
 STEP 1: Task Discovery
@@ -160,6 +161,9 @@ STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
     Pass charter + ONE environment-context block: app reach, the user's authorized/non-prod
                   affirmative (no affirmative --> do not dispatch), tools, seed-data pointers,
                   and an explicit session budget in the INSTALLED agent's unit
+    Auth-gated charter (surface harness, or signed-in/members-only target) with neither test
+                  accounts nor a confirmed harness --> do not dispatch: not performed,
+                  'no signed-in surface'
     How the session ENDED bounds the coverage claim: charter quiet --> performed;
       probe budget exhausted --> partial coverage, file leftover risk as a follow-up;
       blocked or tool-call ceiling at ~zero probes --> NOT performed, hand the manual
@@ -266,7 +270,8 @@ CLAUDE CODE WORKFLOW:
 ├─ 0. Prerequisites: .stride_auth.md + .stride.md exist; write the activation marker (mandatory);
 │     mention missing .gitignore entries (.stride/ + .stride_auth.md unconditionally,
 │     .exploratory/ only when the exploratory plugin is installed — never edit it yourself);
-│     plugin installed → collect the exploratory authorized/non-prod affirmative HERE or never
+│     plugin installed → confirm .exploratory.md or ask (affirmative, reach, harness or
+│     role accounts) in ONE question, HERE or never
 ├─ 1. Discovery: GET /api/tasks/next?response_view=slim; review and enrich from the claim's full body
 ├─ 1.5 Dispatcher Mode (optional, gated):
 │     ├─ Opt-out (STRIDE_DISPATCHER_MODE=0 / "run inline") → Skip, run 2-8 inline (wins over all)
@@ -305,6 +310,8 @@ CLAUDE CODE WORKFLOW:
 │     │                     + edge cases as charters (never a command, never the router skill)
 │     │                     Pass charter + one env-context block incl. an explicit budget;
 │     │                     no authorized/non-prod affirmative from the user → do not dispatch
+│     │                     auth-gated charter, no accounts and no harness → not performed,
+│     │                     'no signed-in surface'
 │     ├─ Session ending bounds the coverage claim: quiet → performed | probe budget → partial +
 │     │   file leftover risk | blocked/ceiling at ~zero probes → NOT performed, hand back
 │     │   (obstacle ≠ finding) | budget too small → no dispatch

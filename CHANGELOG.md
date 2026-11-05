@@ -23,7 +23,9 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.87.0] - 2026-11-05
+
+Step 5.5 is built to catch what an implementation-time session used to miss. Its charters now come from manual tests, edge cases and change-risk lenses, with a real budget (W2582). Step 0 reads a `.exploratory.md` you confirm, or asks, for a signed-in probe surface, and Step 5.5 refuses to count a signed-out session on an auth-gated target (W2583). A main-loop visual pass covers sessions that have no observation surface (W2584). Completion is gated on a recorded outcome and an owner for every charter, and task-runners now receive the file's `observation` and `constraints` lines (W2585). A goal's last open child gets a goal-scope pass (W2586). Task authoring writes charter-ready manual tests and lens-driven edge cases (W2587). Pairs with `stride-exploratory-testing` 0.5.0 (explorer contract `1.1`, probe harness). No task field, server or API change. Hook-suite Groups 69–74 pin the changes.
 
 ### Changed — Task authoring writes charter-ready manual tests and lens-driven edge cases (W2587)
 

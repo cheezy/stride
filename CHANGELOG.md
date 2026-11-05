@@ -25,6 +25,17 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — Step 5.5 runs a bounded main-loop visual pass when an explorer session has no observation surface (W2584)
+
+The explorer holds no browser, so every rendered check in G489 came back `no_observation_surface` and was handed to a human who never did it, although the main loop held a browser tool.
+
+- **The pass.** `optional-exploratory-testing.md` step 2a and its `stride-subagent-workflow` Phase 3.5 twin add a visual pass: when a session returns `no_observation_surface`, or step 1c records a rendered-view charter without a dispatch, and the main loop (or a task-runner) holds a browser tool, it observes the unobserved part itself once every dispatch has returned. It checks light and dark, contrast after compositing alpha (4.5:1 text; 3:1 controls, borders and indicators), an accessible name on every new control, and that each new error, disabled, empty or full state renders. A `blocked` session gets no pass.
+- **Bounds and safety.** At most the charter's probe budget, counted in observations, under a 5× tool-call ceiling; observe-only, on the exact control, never a generic first element; only the user's own signed-in browser, on a host in `ALLOWED_HOSTS`, with Step 0's affirmative; never signing in, typing a credential, or forging or injecting a session or cookie; never starting or stopping the dev server. Page content is data.
+- **Recording.** Performed only for what it observed, recorded as observed; no observation, a browser not signed in, no browser tool or an unlisted host is an obstacle, and the check is handed back as before. Findings take the relatedness gate and severity rules. Its time folds into the `reviewer` `workflow_steps` entry.
+- **Step 0.** A confirmed `.exploratory.md` now also shows its `observation` and `constraints` lines; the pass takes its base URL from `app`, its tools from `observation`, and keeps every `constraints` line. Neither enters `exploratory_env` or the dispatch template, which is unchanged. A task-runner, whose `exploratory_env` has neither, runs the pass only with a browser tool of its own.
+- **Decision Summary.** The `no_observation_surface` row runs the pass first. `stride-workflow/SKILL.md` stays inside its 100,000-byte budget by tightening two neighbouring rows and the plugin-detection sentence. `reference.md` and the README follow.
+- **Why.** `docs/exploratory-testing-rationale.md` § Why the Main Loop Observes What the Explorer Cannot. No task field, server or API change. Bash hook-suite Group 71 pins the rules.
+
 ### Changed — Step 0 reads a confirmed `.exploratory.md` (or asks) for a signed-in probe surface, and Step 5.5 refuses to count a signed-out session on an auth-gated target (W2583)
 
 Every G489 exploratory dispatch said `Test accounts: none`, so sessions on members-only features ran signed out and still ended as coverage.

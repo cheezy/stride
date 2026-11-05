@@ -173,6 +173,7 @@ STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
       coverage, record the findings and say the coverage claim is incomplete;
       no_observation_surface --> NOT performed whatever it probed, hand the test back
       (tools = the explorer's own front-matter tools: line, never this session's)
+      -- holding a browser tool, the main loop first runs a bounded visual pass
     Relatedness gate FIRST, at ANY severity: responsible lines are lines this task
       changed, OR same defect class as the change --> fix in-task + re-review, never
       file; the severity/provenance policy below governs only out-of-scope findings
@@ -317,6 +318,7 @@ CLAUDE CODE WORKFLOW:
 │     │   (obstacle ≠ finding) | budget too small → no dispatch
 │     │   | blocked/ceiling AFTER meaningful probes → partial coverage, record + say so
 │     │   | no_observation_surface → NOT performed whatever it probed, hand back
+│     │     what a bounded main-loop visual pass (browser tool held) did not observe
 │     ├─ Relatedness gate FIRST, any severity: lines you changed OR same defect class →
 │     │   fix in-task + re-review, never file (moved-only lines predating the change ≠
 │     │   related; a follow-up task = the exception for a real out-of-scope bug)

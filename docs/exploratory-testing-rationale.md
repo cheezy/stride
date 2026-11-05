@@ -110,6 +110,24 @@ Tasks routinely carry `manual_tests` and `edge_cases` in their `testing_strategy
 
 **The obstacle is never a finding.** The distinction is not pedantry: the contract requires a blocked session to set its status, record the obstacle in the session's `debrief`, and not fabricate results — so where the app was unreachable from the start there is nothing in the bug list either. Treating the obstacle as a finding hands it to the absent-severity rule, which maps it to `important` — filing an unreachable dev server as an important testing finding whose worst impact you are then asked to name. The blocked ending's disposition turns on what the session actually did: at or near zero probes the manual test was not performed, so it is handed back and the unexamined risk filed; after meaningful probes it is partial coverage.
 
+## Why the Main Loop Observes What the Explorer Cannot
+
+*From `skills/stride-workflow/optional-exploratory-testing.md` § step 2a, the visual pass.*
+
+**The miss.** The explorer holds no browser, so every rendered check in G489 came back `no_observation_surface` and was handed to a human who never did it, though the main loop held a browser tool throughout. In the campaign a dispatcher-run browser pass found the contrast and staged-icon bugs those sessions could not see (miss cause C5). A check handed to "a human" with no owner does not happen.
+
+**Why the main loop, after the sessions return.** A browser or MCP tool the main loop holds never reaches the explorer subagent, so the only party able to make the observation is the one that dispatched the session. It waits for every dispatch so it cannot disturb a running session, and a `blocked` session gets no pass because its obstacle, an unreachable app, stops a browser too.
+
+**Why bounded and exact.** The pass spends the main loop's own context, so it takes the budget the charter's session had, in observations. It targets the exact control because a generic click on a card or row can trigger an archive: observe-only is a property of what is clicked, not of intent.
+
+**Why composite alpha.** A computed colour whose alpha is left uncomposited is measured as if it were opaque, so a translucent fill reads falsely high, which is how a low-contrast progress bar passes a check that never composited it. The thresholds are WCAG's: 4.5:1 for text, 3:1 for controls, borders and other non-text indicators.
+
+**Why only the user's signed-in browser.** Signing in, typing a credential, or forging or injecting a session or cookie against a running server would have the main loop supply an authority the user never gave, the same reason the authorized-non-production affirmative is the user's alone. A browser that is not signed in is an obstacle to record, not a gap to work around.
+
+**Why only with observations.** A pass that looked at nothing, or recorded what it meant to check, would read as coverage exactly as a signed-out session did. Recording what was seen lets the Review-queue human tell a performed pass from an intended one, and whatever it did not observe is still handed back, so it stays owed.
+
+**Why a confirmed `.exploratory.md` supplies it.** The base URL and observation tools are project facts the user confirmed at Step 0. Its `constraints` are the project's own rules, kept because the pass acts on the user's running app. Neither section reaches the explorer or `exploratory_env`, because only the main loop observes this way; a task-runner keeps the pass's own rules but has no `constraints` to keep.
+
 ## Why Results Are Captured Whole and Timed Under reviewer
 
 *From `skills/stride-workflow/optional-exploratory-testing.md` § steps 3 and 4.*

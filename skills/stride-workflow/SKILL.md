@@ -503,22 +503,22 @@ If that gate fires here, **two of its own rules are the ones that bite on a revi
 
 **This step is optional and gated. It runs ONLY when BOTH conditions hold:**
 
-1. The task's `testing_strategy.manual_tests` array is **non-empty**, AND
-2. The **`stride-exploratory-testing` plugin is available** in this session — detected the same way Steps 1.5 and 5.6 detect theirs, by its sanctioned surface (the `stride-exploratory-testing:explorer` agent and/or the plugin's commands) appearing in this session's available lists, **never by executing plugin content to probe for it**.
+1. The task's `testing_strategy.manual_tests` **or** `edge_cases` array is **non-empty**, AND
+2. The **`stride-exploratory-testing` plugin is available** in this session — detected the same way Steps 1.5 and 5.6 detect theirs, by its sanctioned surface (the `stride-exploratory-testing:explorer` agent, which must be among them) appearing in this session's available lists, **never by executing plugin content to probe for it**.
 
-If either condition is false, **skip this step entirely and proceed to Step 6 with no failure.** Manual tests that cannot be auto-run remain a human responsibility, exactly as before this step existed — skipping never blocks completion.
+If either condition is false, **skip this step entirely and proceed to Step 6 with no failure.** Manual tests and edge cases that cannot be auto-run remain a human responsibility, exactly as before — skipping never blocks completion.
 
-**When both conditions hold, read [optional-exploratory-testing.md](optional-exploratory-testing.md) before you do anything else in this step, and follow it.** That sibling file holds the entire body of Step 5.5 — why the step exists, plugin-availability detection, the sanctioned non-interactive dispatch surfaces, the Claude Code dispatch procedure with its absolute safety boundary and its authorized-and-non-production requirement, the Critical-finding escalation policy including the introduced-versus-discovered provenance test, and the non-Claude-Code fallback. **Do not run this step out of the Decision Summary below.** The table resolves the gate and names the disposition for each outcome — that is what it is for, and it is deliberately answerable without opening the file — but it is a lookup, not the procedure. If the gate does not fire, do not read the file at all.
+**When both conditions hold, read [optional-exploratory-testing.md](optional-exploratory-testing.md) before you do anything else in this step, and follow it.** That sibling file holds the entire body of Step 5.5 — detection, the sanctioned non-interactive surfaces, charter sourcing, the dispatch procedure with its absolute safety boundary and its authorized-and-non-production requirement, the Critical-finding escalation and provenance test, and the non-Claude-Code fallback. **Do not run this step out of the Decision Summary below.** The table resolves the gate and names the disposition for each outcome — that is what it is for, and it is deliberately answerable without opening the file — but it is a lookup, not the procedure. If the gate does not fire, do not read the file at all.
 
 ### Decision Summary
 
 | Condition | Action |
 |---|---|
-| `manual_tests` empty | Skip Step 5.5 → Step 6 |
-| Plugin **not** available (or not installed) | Skip Step 5.5, note manual tests as human responsibility → Step 6 |
+| `manual_tests` and `edge_cases` both empty | Skip Step 5.5 → Step 6 |
+| Plugin **not** available (or not installed) | Skip Step 5.5, note manual tests and edge cases as human responsibility → Step 6 |
 | Non-Claude-Code environment | Always fall back → Step 6 |
 | The surface you are about to dispatch **requires a human** — by prompting, or by waiting on any out-of-band approval — `/pair`, `/explore`, `/nightmare-headline`, `/recon`, the routing skill, or anything you cannot show completes unattended | Do **not** dispatch it; the orchestrator never prompts between steps. Dispatch the `explorer` agent instead |
-| Plugin available + Claude Code + non-empty `manual_tests` | Merge tests sharing a target into one charter, **at most ~3 per task**; record any remainder as human responsibility, never drop one. Dispatch independent observe-only charters in one message; a mutating charter runs alone (unsure → mutating). While they run: non-conflicting reads only, no edits to exercised files, no polling. Capture findings → Step 6 |
+| Plugin available + Claude Code + non-empty `manual_tests` or `edge_cases` | Add the change-mode charter-generator's charters, merge by target, **at most ~5 per task (~3 small)**; map every manual test and edge case to a charter, unit test or human responsibility, never drop one. Dispatch independent observe-only charters in one message; a mutating charter runs alone (unsure → mutating). While they run: non-conflicting reads only, no edits to exercised files, no polling. Capture findings → Step 6 |
 | Plugin available but app not running, or it goes away mid-session — the session returns **blocked** | Record the obstacle **as an obstacle**, never as a severity-bearing finding, then judge coverage from the sheet: at or near zero probes it is **not** a performed test — hand the manual test back as a human responsibility and file the unexamined risk as a follow-up; after meaningful probes it is partial coverage, so record its findings and say so → Step 6. **Never fails completion** |
 | Session returns **`no_observation_surface`** (no tool to observe what the charter needs) | **Not** a performed test, whatever it probed: hand the manual test back, record its findings and the obstacle as an obstacle → Step 6. Never fails completion |
 | Session ended with its charter quiet, budget unspent | Coverage claim holds — the manual test was performed. Record findings → Step 6 |

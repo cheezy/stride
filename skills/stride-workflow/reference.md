@@ -118,7 +118,7 @@ STEP 5: Code Review (Decision Matrix)
                             deep security-considerations gate (security_considerations
                             + plugin, no reviewer precondition; non-Claude-Code -->
                             skip it), then CONTINUE TO STEP 5.5 (not Step 6):
-                            5.5 likewise gates on manual_tests + plugin only,
+                            5.5 likewise gates on manual_tests/edge_cases + plugin only,
                             never on review
   Otherwise:
     [Claude Code] Evaluate the SAME deep security-considerations gate first —
@@ -151,11 +151,12 @@ STEP 5: Code Review (Decision Matrix)
   |
   v
 STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
-  manual_tests empty OR plugin not available OR non-Claude-Code? --> Skip to Step 6 (no failure)
-  Otherwise (Claude Code + plugin available + non-empty manual_tests):
-    [Claude Code] Dispatch the stride-exploratory-testing:explorer AGENT (the only sanctioned
-                  surface -- never /explore, /pair, or the plugin's router skill),
-                  each manual_test as a charter, capture findings (safety boundary preserved)
+  manual_tests and edge_cases empty OR plugin not available OR non-Claude-Code? --> Skip to Step 6 (no failure)
+  Otherwise (Claude Code + plugin available + non-empty manual_tests or edge_cases):
+    [Claude Code] Dispatch the read-only charter-generator once (change mode), then the
+                  stride-exploratory-testing:explorer AGENT (the only session surface --
+                  never /explore, /pair, or the plugin's router skill), charters from
+                  manual_tests + edge cases (~5; ~3 small), capture findings (safety boundary preserved)
     Pass charter + ONE environment-context block: app reach, the user's authorized/non-prod
                   affirmative (no affirmative --> do not dispatch), tools, seed-data pointers,
                   and an explicit session budget in the INSTALLED agent's unit
@@ -234,7 +235,7 @@ STEP 8: Post-Completion
 | Task exploration | Dispatch `stride:task-explorer` agent | Read key_files manually |
 | Implementation planning | Dispatch Plan agent | Outline approach manually |
 | Code review | Dispatch `stride:task-reviewer` agent | Self-review against criteria |
-| Manual & exploratory testing | Dispatch the `stride-exploratory-testing:explorer` agent (when installed) with an explicit session budget and the user's authorized/non-production affirmative; never a command or the router skill; else fall back | Always fall back (human responsibility) |
+| Manual & exploratory testing | Dispatch the `stride-exploratory-testing:explorer` agent (when installed) with an explicit session budget (default 12), after one change-mode `charter-generator` dispatch, and the user's authorized/non-production affirmative; never a command or the router skill; else fall back | Always fall back (human responsibility) |
 | Hardening findings into checks | Optional Step 5.6: dispatch `/harden` (when available) to draft regression checks; staged by default, never left red in the tree | Not available — no `/harden` |
 | Hook failure diagnosis | Dispatch `stride:hook-diagnostician` | Debug manually |
 | Goal decomposition | Dispatch `stride:task-decomposer` agent | Break down manually, create via API |
@@ -292,15 +293,16 @@ CLAUDE CODE WORKFLOW:
 │     │                         security gate (security_considerations + plugin,
 │     │                         no reviewer precondition), then continue to 5.5
 │     │                         (NOT Step 6 — 5.5 likewise gates on manual_tests
-│     │                         + plugin, never on review)
+│     │                         /edge_cases + plugin, never on review)
 │     └─ Otherwise → Dispatch task-reviewer, fix issues, then evaluate the SAME deep-security
 │                     gate — it fires on both branches (malformed/absent verdicts → fail
 │                     closed: keep the prose verdict, never downgrade to passed; after a
 │                     flagged round the next round drops deep_security_review)
 ├─ 5.5 Manual & Exploratory Testing (optional, gated):
-│     ├─ manual_tests empty OR plugin unavailable → Skip to Step 6 (no failure)
-│     ├─ Plugin available → Dispatch the stride-exploratory-testing:explorer AGENT only,
-│     │                     manual_tests as charters (never a command, never the router skill)
+│     ├─ manual_tests and edge_cases empty OR plugin unavailable → Skip to Step 6 (no failure)
+│     ├─ Plugin available → charter-generator once (change mode), then the
+│     │                     stride-exploratory-testing:explorer AGENT for sessions, manual_tests
+│     │                     + edge cases as charters (never a command, never the router skill)
 │     │                     Pass charter + one env-context block incl. an explicit budget;
 │     │                     no authorized/non-prod affirmative from the user → do not dispatch
 │     ├─ Session ending bounds the coverage claim: quiet → performed | probe budget → partial +

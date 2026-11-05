@@ -16,7 +16,7 @@ Matrix says YES in the Review column? ─YES→ Dispatch stride:task-reviewer
     ←─────────────────────────────────────←──────────────←─┘
     ↓
 Step 5.5 / Phase 3.5: Manual & Exploratory Testing (optional, gated)
-  Gate = manual_tests non-empty AND the exploratory plugin is available.
+  Gate = manual_tests or edge_cases non-empty AND the exploratory plugin is available.
   NO review precondition — the NO branch above reaches this too.
   Gate not met → straight on to the hook, no failure.
     ↓
@@ -88,7 +88,7 @@ CLAUDE CODE COMPLETION WORKFLOW (automatic hooks):
 ├─ 1. Work is complete ✓
 ├─ 2. [Optional] Dispatch task-reviewer for code review ✓
 ├─ 2a. [Optional, gated] Step 5.5 manual & exploratory testing ✓
-│      Gate = manual_tests non-empty AND plugin available — never on review,
+│      Gate = manual_tests or edge_cases non-empty AND plugin available — never on review,
 │      so a small 0-1 key_files task that skipped step 2 still reaches this
 │      (then Step 5.6 /harden, if that session returned convertible findings)
 ├─ 3. Call PATCH /api/tasks/:id/complete directly ✓

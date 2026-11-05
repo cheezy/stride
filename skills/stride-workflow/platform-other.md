@@ -76,7 +76,7 @@ OTHER ENVIRONMENTS (Cursor, Windsurf, Continue):
 ├─ 4. Implement: Write code using task metadata as guide
 ├─ 5. Review (check decision matrix):
 │     ├─ Row's Review column says Skip → Skip the review, continue to 5.5 (NOT Step 6 —
-│     │                         5.5 gates on manual_tests + plugin, never on review)
+│     │                         5.5 gates on manual_tests/edge_cases + plugin, never on review)
 │     └─ Otherwise → Self-review against acceptance criteria + pitfalls
 ├─ 5.5 Manual & Exploratory Testing (optional, gated):
 │     └─ No Agent tool → Always fall back (note manual tests as human responsibility)

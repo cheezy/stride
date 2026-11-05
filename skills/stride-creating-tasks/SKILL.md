@@ -319,12 +319,13 @@ The task object below is what goes inside that `task` key.
       "Test theme applies to all pages"
     ],
     "manual_tests": [
-      "Visual verification of dark mode styles",
-      "Test in multiple browsers"
+      "Explore the theme toggle across pages and sessions to discover where the saved preference is ignored or goes stale"
     ],
     "edge_cases": [
       "User with no theme preference set",
-      "Rapid toggle switching"
+      "Rapid toggle switching",
+      "Who Else Is Watching: a second open tab after the toggle",
+      "Every Surface: modals, emails and error pages honour the theme"
     ],
     "coverage_target": "100% for theme preference logic"
   },
@@ -615,10 +616,13 @@ Use these exact values — any other value will be rejected.
 **Valid keys:** `unit_tests`, `integration_tests`, `manual_tests`, `edge_cases`, `coverage_target`
 **All values** must be strings or arrays of strings.
 
-> **Advisory (optional) — phrase `manual_tests` as chartable scenarios.** When the `stride-exploratory-testing` plugin is installed, each `manual_tests` entry is run as an exploratory **charter** (see `stride-workflow` Step 5.5). Terse fragments make weak charters, so phrase each entry as a chartable scenario — a **target** plus the **information/risk to discover** — rather than a bare test fragment. This is **advisory only**: it does **not** change the required `testing_strategy` shape, does **not** make `manual_tests` entries longer-required, and does **not** alter the review_queue empty-pill gate — existing terse entries still validate.
->
-> - Before: `"Test in multiple browsers"`
-> - After: `"Explore the theme toggle across browsers to discover rendering inconsistencies"`
+**Charter-ready manual tests (the default).** Write each `manual_tests` entry as a risk charter: a **target** plus the **information to discover** ("Explore <target> to discover <information>"), not a click script of steps, tools, browsers or modes. When the `stride-exploratory-testing` plugin is installed, each entry is run as an exploratory **charter** (see `stride-workflow` Step 5.5), and a script such as "open the devtools Network tab" or "check it in light and dark mode" becomes a visual charter that is handed back rather than explored. This is authoring guidance only: the `testing_strategy` shape, the API's validation and the review_queue empty-pill gate are unchanged, `manual_tests` entries are not longer-required, and terse entries still validate. A task with no manual tests needs none; a docs-only or backend-only task charters its own target (a document, a function, an endpoint).
+
+**Lens-driven edge cases (UI or HTTP features).** For a UI or HTTP feature, write `edge_cases` after considering each change-risk lens whose *When it applies* trigger matches the change, and name the lens in the entry: **Change the Rights** (rights changed mid-session), **Shadow Decision** (client and server deciding the same thing), **Who Else Is Watching** (which views refresh), **Pull the Rug** (the parent deleted underneath), **Every Surface** (every surface that renders the entity), **Every Locale** (every shipped locale) and **Developer Guidebook** (docs drift), plus, for web/HTTP targets only, **Other Verbs** (other HTTP verbs) and **After the Headers** (failure after the headers are sent). Skip a lens whose trigger does not match; a backend-only or docs-only task keeps its ordinary edge cases, though Developer Guidebook may still match its docs drift. The lenses live in the `stride-exploratory-testing` plugin's heuristics skill (`stride-exploratory-testing/skills/heuristics/SKILL.md`), which is their only catalog: name them, never copy their text. The rights and failure lenses mean testing your own system under authorization, on test data you created, and none of this changes who may authorize an exploratory target.
+
+- Before: `"Open the devtools Network tab and test in light and dark mode"`
+- After: `"Explore the theme toggle across pages and sessions to discover where the saved preference is ignored or goes stale"`
+- Edge case after a matching lens: `"Who Else Is Watching: a second open tab after the toggle still shows the old theme"`
 
 ### behaviour_test_matrix
 

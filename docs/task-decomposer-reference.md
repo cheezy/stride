@@ -84,8 +84,8 @@ Reference material for the `stride:task-decomposer` agent, split out of `agents/
           "testing_strategy": {
             "unit_tests": ["Test comment form renders", "Test comment submission creates comment", "Test comment list displays existing comments"],
             "integration_tests": ["Test full comment flow: open task, submit comment, see it appear"],
-            "manual_tests": ["Verify comment UI in both light and dark mode"],
-            "edge_cases": ["Long comment text wrapping", "Many comments scrolling"],
+            "manual_tests": ["Explore the task comments section as a board member and as a read-only viewer to discover whether posting, the live list and the shown author honour each user's rights"],
+            "edge_cases": ["Long comment text wrapping", "Many comments scrolling", "Change the Rights: the commenter loses access to the board while the task is open, then posts", "Who Else Is Watching: a second user's open task view shows the new comment without a reload", "Pull the Rug: the task is deleted while its comment form is open", "Every Surface: the comment count on the board card and in the task history", "Every Locale: comment timestamps and labels in each shipped locale"],
             "coverage_target": "100% for comment LiveView handlers"
           },
           "security_considerations": [
@@ -171,6 +171,13 @@ Reference material for the `stride:task-decomposer` agent, split out of `agents/
 ```
 
 The example leaves out each task's `behaviour_test_matrix` for length. All four tasks list unit and integration tests, so a real decomposition gives each one a complete seven-category matrix — see Step 5 of `agents/task-decomposer.md`.
+
+**Before/after for Task 1's manual test** (an example, not a rule; the rule is in Step 5 of `agents/task-decomposer.md`). The goal asked for a working comment UI, and a first draft wrote the check as a browser script:
+
+- Before: `"manual_tests": ["Verify comment UI in both light and dark mode"]`, with edge cases about wrapping and scrolling only
+- After: the charter above, a **target** (the comments section, as two kinds of user) plus the **information to discover** (whether posting, the live list and the author honour each user's rights), and edge cases that name the matching change-risk lenses
+
+The script yields a visual charter, which an unattended session hands back because it has nothing to judge but colours. The charter gives the session a risk it can probe and an oracle to judge it by. Other Verbs and After the Headers are left out because the comment UI adds no route or streamed response.
 
 A real decomposition also runs the cross-field consistency pass in Step 7 of `agents/task-decomposer.md` on every child before returning; the pass is stated there, not here.
 

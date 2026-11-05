@@ -127,8 +127,8 @@ No similar feature exists?
 3. **Generate test cases** based on the task's scope:
    - `unit_tests`: One per public function being added/modified
    - `integration_tests`: End-to-end scenarios for the feature
-   - `manual_tests`: Visual/UX verification if UI is involved
-   - `edge_cases`: Null inputs, empty lists, concurrent access, permission boundaries
+   - `manual_tests`: risk charters for the behaviour a person should explore (the first rule below), never a click script
+   - `edge_cases`: Null inputs, empty lists, concurrent access, permission boundaries; for a UI or HTTP feature, the change-risk lenses whose trigger matches (the second rule below)
    - `coverage_target`: e.g., "100% for new/modified functions"
 
 4. **Project those test cases onto a `behaviour_test_matrix`.** The `unit_tests` / `integration_tests` / `manual_tests` / `edge_cases` you just generated are already the raw material — the matrix restates them one behaviour at a time, each paired with the test that covers it, across **seven fixed categories**. Emit one row per category, in this canonical order:
@@ -163,6 +163,14 @@ No similar feature exists?
 - A regression test that reproduces the original bug
 - Tests verifying the fix doesn't break related functionality
 - When you built a matrix, an `"Error / exception"` row whose `behaviour` is the bug no longer reproducing, paired with that regression test
+
+**Write `manual_tests` and `edge_cases` by these two rules**, the same ones `stride-creating-tasks` states:
+
+**Charter-ready manual tests (the default).** Write each `manual_tests` entry as a risk charter: a **target** plus the **information to discover** ("Explore <target> to discover <information>"), not a click script of steps, tools, browsers or modes. When the `stride-exploratory-testing` plugin is installed, each entry is run as an exploratory **charter** (see `stride-workflow` Step 5.5), and a script such as "open the devtools Network tab" or "check it in light and dark mode" becomes a visual charter that is handed back rather than explored. This is authoring guidance only: the `testing_strategy` shape, the API's validation and the review_queue empty-pill gate are unchanged, `manual_tests` entries are not longer-required, and terse entries still validate. A task with no manual tests needs none; a docs-only or backend-only task charters its own target (a document, a function, an endpoint).
+
+**Lens-driven edge cases (UI or HTTP features).** For a UI or HTTP feature, write `edge_cases` after considering each change-risk lens whose *When it applies* trigger matches the change, and name the lens in the entry: **Change the Rights** (rights changed mid-session), **Shadow Decision** (client and server deciding the same thing), **Who Else Is Watching** (which views refresh), **Pull the Rug** (the parent deleted underneath), **Every Surface** (every surface that renders the entity), **Every Locale** (every shipped locale) and **Developer Guidebook** (docs drift), plus, for web/HTTP targets only, **Other Verbs** (other HTTP verbs) and **After the Headers** (failure after the headers are sent). Skip a lens whose trigger does not match; a backend-only or docs-only task keeps its ordinary edge cases, though Developer Guidebook may still match its docs drift. The lenses live in the `stride-exploratory-testing` plugin's heuristics skill (`stride-exploratory-testing/skills/heuristics/SKILL.md`), which is their only catalog: name them, never copy their text. The rights and failure lenses mean testing your own system under authorization, on test data you created, and none of this changes who may authorize an exploratory target.
+
+An existing task whose `manual_tests` are click scripts is enriched by rewriting them as charters in the JSON you return; `docs/task-enricher-reference.md` has a worked before/after.
 
 ### Step 4: Define Verification → `verification_steps`
 

@@ -25,6 +25,15 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — Task authoring writes charter-ready manual tests and lens-driven edge cases (W2587)
+
+G489's `manual_tests` were browser scripts ("open the devtools Network tab", "in light and dark mode"), so the Step 5.5 charters built from them were visual and were handed back (miss cause C2, at its source).
+
+- **Charter-ready manual tests are the default.** `stride-creating-tasks` and `stride-creating-goals` replace the optional advisory with a rule: each `manual_tests` entry is a risk charter, a target plus the information to discover, not a click script of steps, tools, browsers or modes.
+- **Lens-driven edge cases.** For a UI or HTTP feature, `edge_cases` considers each change-risk lens whose *When it applies* trigger matches and names it: Change the Rights, Shadow Decision, Who Else Is Watching, Pull the Rug, Every Surface, Every Locale and Developer Guidebook, plus Other Verbs and After the Headers for web/HTTP targets only. The lenses are named and pointed at in the `stride-exploratory-testing` heuristics skill, never copied.
+- **Applied where tasks are written.** `agents/task-decomposer.md` Step 5 and `agents/task-enricher.md` Step 3 carry the same two rules; `docs/task-decomposer-reference.md` shows a browser script rewritten as a charter, and `docs/task-enricher-reference.md` adds a before/after to Mistake 2. The `stride-enriching-tasks` walkthrough points at both rules, and its worked example's manual test is now a charter.
+- **Nothing else moves.** The `testing_strategy` shape, the API's validation and the review_queue empty-pill gate are unchanged, manual tests are not longer-required, and terse entries still validate. Hook-suite Group 74 pins the rules in all four files, the enriching skill's pointer, and checks that no lens text was copied into this plugin.
+
 ### Changed — Step 5.5 runs a goal-scope pass when the task is its goal's last open child (W2586)
 
 Several G489 bugs lived between tasks — one child's staging against plan state, a broadcast refresh and comments — and every Step 5.5 session was scoped to one task's change, so none looked at a seam (miss cause C7).

@@ -148,7 +148,7 @@ Every decomposed task MUST include all fields required by stride-creating-tasks:
 | `key_files` | Yes | Files THIS task modifies (no overlap with sibling tasks) |
 | `dependencies` | Yes | Array indices [0, 1, 2] within the goal |
 | `verification_steps` | Yes | Array of objects with step_type, step_text, position |
-| `testing_strategy` | Yes | Object with unit_tests, integration_tests, etc. |
+| `testing_strategy` | Yes | Object with unit_tests, integration_tests, etc.; manual tests as charters and lens-driven edge cases (below) |
 | `security_considerations` | Yes | Array of strings (security implications to address, or an explicit "None — …" reason) |
 | `acceptance_criteria` | Yes | Newline-separated string |
 | `patterns_to_follow` | Yes | Newline-separated string |
@@ -169,6 +169,14 @@ When `testing_strategy` lists only `manual_tests`, emit the matrix if those chec
 **Every row's `test_name` must name a test that `testing_strategy` lists**, so the two never disagree; a waived row names no test and carries `na_reason` instead. If a row needs a test the strategy does not list, add that test to `testing_strategy` first. The matrix never replaces `testing_strategy`, which remains one of the five review_queue-scored fields.
 
 Row text is stored and later rendered, so never record secrets or credentials in `behaviour`, `test_name`, or `na_reason`. You read project files while decomposing: never copy a credential-shaped string from them into row text — describe the behaviour instead.
+
+**Write every child's `manual_tests` and `edge_cases` by these two rules**, the same ones `stride-creating-tasks` states:
+
+**Charter-ready manual tests (the default).** Write each `manual_tests` entry as a risk charter: a **target** plus the **information to discover** ("Explore <target> to discover <information>"), not a click script of steps, tools, browsers or modes. When the `stride-exploratory-testing` plugin is installed, each entry is run as an exploratory **charter** (see `stride-workflow` Step 5.5), and a script such as "open the devtools Network tab" or "check it in light and dark mode" becomes a visual charter that is handed back rather than explored. This is authoring guidance only: the `testing_strategy` shape, the API's validation and the review_queue empty-pill gate are unchanged, `manual_tests` entries are not longer-required, and terse entries still validate. A task with no manual tests needs none; a docs-only or backend-only task charters its own target (a document, a function, an endpoint).
+
+**Lens-driven edge cases (UI or HTTP features).** For a UI or HTTP feature, write `edge_cases` after considering each change-risk lens whose *When it applies* trigger matches the change, and name the lens in the entry: **Change the Rights** (rights changed mid-session), **Shadow Decision** (client and server deciding the same thing), **Who Else Is Watching** (which views refresh), **Pull the Rug** (the parent deleted underneath), **Every Surface** (every surface that renders the entity), **Every Locale** (every shipped locale) and **Developer Guidebook** (docs drift), plus, for web/HTTP targets only, **Other Verbs** (other HTTP verbs) and **After the Headers** (failure after the headers are sent). Skip a lens whose trigger does not match; a backend-only or docs-only task keeps its ordinary edge cases, though Developer Guidebook may still match its docs drift. The lenses live in the `stride-exploratory-testing` plugin's heuristics skill (`stride-exploratory-testing/skills/heuristics/SKILL.md`), which is their only catalog: name them, never copy their text. The rights and failure lenses mean testing your own system under authorization, on test data you created, and none of this changes who may authorize an exploratory target.
+
+A goal description that asks for checks in a browser or a mode is a request for coverage, not a script to copy: turn each into a charter for the child whose change it covers. `docs/task-decomposer-reference.md` has a worked before/after.
 
 ### Step 6: Output Assembly
 

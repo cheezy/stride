@@ -135,6 +135,8 @@ List sibling modules in the same directory as `key_files`. Find the closest anal
 
 Map each `key_file` to its corresponding test file (e.g., `lib/foo.ex` → `test/foo_test.exs`). Read existing tests to learn helper modules, factories, and assertion style. Generate `unit_tests`, `integration_tests`, `manual_tests`, `edge_cases`, and `coverage_target`.
 
+**Write `manual_tests` and `edge_cases` by the two rules in `stride-creating-tasks` § testing_strategy:** each manual test is a risk charter (a target plus the information to discover, never a click script), and a UI or HTTP feature's edge cases consider each change-risk lens whose trigger matches, named and never copied. `agents/task-enricher.md` Step 3 carries both rules in full; this walkthrough follows them.
+
 **`behaviour_test_matrix` (built here):** Project the behaviours the change must satisfy onto a `behaviour_test_matrix` — an array of rows, each pairing one behaviour with the real test that covers it — by mapping the `unit_tests` / `integration_tests` / `manual_tests` / `edge_cases` you just derived onto the **7 fixed categories**. If you produced test cases above, emit the matrix: that is the normal outcome. It is **not** one of the five review_queue-scored fields, so a legitimately absent matrix is never an empty pill — but omit it only when the task has no testable behaviour at all (a pure copy, docs, or config change), never just because some categories don't apply (that is what `na_reason` is for), and never emit filler rows:
 
 - `category` — exactly one of `"Happy path"`, `"Boundary"`, `"Error / exception"`, `"Null / empty"`, `"Concurrency"`, `"Lifecycle / wiring"`, `"Contract / serialization"`. No other value is accepted.
@@ -292,8 +294,8 @@ The following shows a defect task after enrichment. `title`, `type`, and `descri
   "testing_strategy": {
     "unit_tests": ["Test comment render includes inserted_at timestamp"],
     "integration_tests": ["Test task detail view displays comments with timestamps"],
-    "manual_tests": ["Visual verification that timestamps appear and are readable in both light and dark mode"],
-    "edge_cases": ["Comment created just now", "Comment from previous year (shows full date)"],
+    "manual_tests": ["Explore comment timestamps on old and new comments to discover where the shown time disagrees with when the comment was posted"],
+    "edge_cases": ["Comment created just now", "Comment from previous year (shows full date)", "Every Locale: timestamps in each shipped locale", "Who Else Is Watching: a second open view of the task when a comment is posted"],
     "coverage_target": "100% for comment timestamp rendering"
   },
   "security_considerations": [

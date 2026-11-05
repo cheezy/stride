@@ -102,6 +102,16 @@ When the human provides just a title like "Add search":
      "Test paginated query with offset skips correct number of records",
      "Test paginated query with empty result set returns []"
    ]
+
+❌ "manual_tests": ["Open the devtools Network tab and click Next"]
+
+✅ "manual_tests": [
+     "Explore task-list pagination to discover pages that skip or repeat tasks and counts that go stale"
+   ],
+   "edge_cases": [
+     "Who Else Is Watching: a task created elsewhere while page 2 is open",
+     "Other Verbs: a HEAD request to a paginated URL"
+   ]
 ```
 
 ### Mistake 3: Skipping exploration for "simple" tasks
@@ -179,13 +189,14 @@ A fully-populated enriched-task object. It illustrates the field shapes the body
       "Test full pagination flow: load page, click next, verify new results"
     ],
     "manual_tests": [
-      "Visual verification of pagination controls",
-      "Test with 0, 1, 25, and 100+ tasks"
+      "Explore the paginated task list with 0, 1, 25 and 100+ tasks to discover off-by-one pages, missing controls and counts that disagree with the list"
     ],
     "edge_cases": [
       "Empty task list (0 tasks)",
       "Exactly one page of tasks (25)",
-      "Invalid page parameter in URL"
+      "Invalid page parameter in URL",
+      "Who Else Is Watching: a task created or deleted elsewhere while page 2 is open",
+      "Every Locale: the page labels and counts in each shipped locale"
     ],
     "coverage_target": "100% for pagination query and LiveView handlers"
   },

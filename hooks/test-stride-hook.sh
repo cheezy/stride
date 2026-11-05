@@ -18647,6 +18647,207 @@ else
 fi
 
 # ============================================================
+# Test Group 74: W2587 -- task authoring writes charter-ready manual tests and
+# lens-driven edge cases
+# ============================================================
+# Miss cause C2: G489's manual_tests were browser scripts, so the charters
+# built from them were visual and were handed back. The two creating skills,
+# the decomposer and the enricher now state, in the section where each writes
+# testing_strategy, that a manual test is a risk charter (a target plus the
+# information to discover) and that a UI or HTTP feature's edge_cases consider
+# every change-risk lens whose trigger matches, named and never copied. Bash
+# only, like Groups 62 and 64. Two tiers: 1. literal pins and absent-checks,
+# including a repo-wide check that no lens's catalog text was copied into this
+# plugin; 2. section-scoped python3 checks, each proven able to fail on mutated
+# COPIES under $TMPDIR_TEST via g57_mut (which reports MISSING rather than
+# mutating nothing). What this does NOT prove: that a live decomposer or
+# enricher actually writes charters -- that is the task's manual charter.
+echo ""
+echo "=== Test Group 74: W2587 charter-ready manual tests and lens-driven edge cases in task authoring (bash) ==="
+G74_CT="$SCRIPT_DIR/../skills/stride-creating-tasks/SKILL.md"
+G74_GO="$SCRIPT_DIR/../skills/stride-creating-goals/SKILL.md"
+G74_DE="$SCRIPT_DIR/../agents/task-decomposer.md"
+G74_EN="$SCRIPT_DIR/../agents/task-enricher.md"
+G74_RD="$SCRIPT_DIR/../docs/task-decomposer-reference.md"
+G74_RE="$SCRIPT_DIR/../docs/task-enricher-reference.md"
+if [ -f "$G74_CT" ] && [ -f "$G74_GO" ] && [ -f "$G74_DE" ] && [ -f "$G74_EN" ] && [ -f "$G74_RD" ] && [ -f "$G74_RE" ]; then
+  # --- Tier 1: literal pins and absent-checks ---
+  for g74_f in "$G74_CT" "$G74_GO" "$G74_DE" "$G74_EN"; do
+    g74_n="${g74_f#"$SCRIPT_DIR/../"}"
+    assert_contains "74a: New hook-test group: charter-ready rule present in $g74_n" \
+      '**Charter-ready manual tests (the default).**' "$(cat "$g74_f")"
+    assert_contains "74a2: New hook-test group: lens-driven edge-case rule present in $g74_n" \
+      '**Lens-driven edge cases (UI or HTTP features).**' "$(cat "$g74_f")"
+    assert_contains "74a3: $g74_n names the lenses by name (Change the Rights)" \
+      '**Change the Rights**' "$(cat "$g74_f")"
+  done
+  g74_absent() {  # <label> <needle> <file>
+    assert_eq "$1" "0" "$(grep -cF -- "$2" "$3" | tr -d ' ')"
+  }
+  g74_absent "74j: creating-tasks no longer carries the optional advisory" 'Advisory (optional) — phrase `manual_tests` as chartable scenarios' "$G74_CT"
+  g74_absent "74j2: nor does creating-goals" 'Advisory (optional) — phrase `manual_tests` as chartable scenarios' "$G74_GO"
+  g74_absent "74j3: the enricher no longer asks for visual verification as a manual test" 'Visual/UX verification if UI is involved' "$G74_EN"
+  G74_ES="$SCRIPT_DIR/../skills/stride-enriching-tasks/SKILL.md"
+  assert_contains "74a4: the enriching-tasks walkthrough points at both rules" \
+    '**Write `manual_tests` and `edge_cases` by the two rules in `stride-creating-tasks` § testing_strategy:**' "$(cat "$G74_ES")"
+  g74_absent "74j5: the enriching-tasks example no longer models a mode script as the manual test" 'Visual verification that timestamps appear and are readable in both light and dark mode' "$G74_ES"
+  g74_absent "74j4: the decomposer reference no longer models a mode script as the manual test" '"manual_tests": ["Verify comment UI in both light and dark mode"],' "$G74_RD"
+  # New hook-test group: no lens catalog copied into stride. Each fragment is a
+  # distinctive phrase of one lens's "What to try" cell in the
+  # stride-exploratory-testing heuristics skill; none may appear anywhere in
+  # this plugin outside this test file.
+  # The heuristics skill lives in the sibling stride-exploratory-testing checkout
+  # when there is one; there, each fragment must be FOUND, which proves the
+  # absent-check below searches for real catalog text and could find a hit.
+  G74_HEUR="$SCRIPT_DIR/../../stride-exploratory-testing/skills/heuristics/SKILL.md"
+  while IFS= read -r g74_frag; do
+    [ -z "$g74_frag" ] && continue
+    if [ -f "$G74_HEUR" ]; then
+      assert_eq "74k0: the fragment '$g74_frag' is real catalog text in the heuristics skill" "1" \
+        "$(grep -cF -- "$g74_frag" "$G74_HEUR" | tr -d ' ')"
+    fi
+    assert_eq "74k: New hook-test group: no lens catalog copied into stride -- '$g74_frag' appears nowhere" "" \
+      "$(grep -rlF --exclude='test-stride-hook.*' --exclude-dir=.git -- "$g74_frag" "$SCRIPT_DIR/.." 2>/dev/null)"
+  done <<'FRAGS'
+while their view stays open
+client re-decides what the server decides
+list every open view that shows the changed data
+delete, archive or move the parent of a view
+Enumerate every place that renders or edits the entity
+Read each new or changed string in every shipped locale
+Extend the **Guidebook Tour** to developer-facing documents
+Send the route ordinary requests with other methods
+fail the source of a streamed response after its status
+FRAGS
+
+  # --- Tier 2: section-scoped checks (python3), proven on mutated copies ---
+  # g74_check <ct> <go> <de> <en> <rd> <re> -> OK, or the sorted ids of the failed checks.
+  g74_check() {
+    python3 - "$@" <<'PY'
+import sys
+ct, go, de, en, rd, re_ = (open(p, encoding="utf-8").read() for p in sys.argv[1:7])
+fails = []
+def chk(cid, fn):
+    try:
+        ok = fn()
+    except Exception:
+        ok = False
+    if not ok:
+        fails.append(cid)
+def span(text, start, end):
+    i = text.index(start)
+    j = text.index(end, i + len(start))
+    return text[i:j]
+def grab(fn):
+    try:
+        return fn()
+    except Exception:
+        return ""
+def has_all(text, *needles):
+    return bool(text) and all(n in text for n in needles)
+R1 = "**Charter-ready manual tests (the default).**"
+R2 = "**Lens-driven edge cases (UI or HTTP features).**"
+SLICES = {
+    "ct": grab(lambda: span(ct, "\n### testing_strategy\n", "\n### behaviour_test_matrix")),
+    "go": grab(lambda: span(go, "**The five review_queue-scored fields", "\nEvery nested task follows the same")),
+    "de": grab(lambda: span(de, "### Step 5: Full Specification per Task", "### Step 6: Output Assembly")),
+    "en": grab(lambda: span(en, "### Step 3: Analyze Testing", "### Step 4: Define Verification")),
+}
+def para(text, lead):
+    # the one line carrying the lead-in, from the lead-in to the end of that line
+    i = text.index(lead)
+    j = text.find("\n", i)
+    return text[i:] if j == -1 else text[i:j]
+CHARTER = ("a **target** plus the **information to discover**", "not a click script",
+           "terse entries still validate",
+           "the `testing_strategy` shape, the API's validation and the review_queue empty-pill gate are unchanged",
+           "`manual_tests` entries are not longer-required", "A task with no manual tests needs none",
+           "a docs-only or backend-only task charters its own target")
+GENERAL = ("Change the Rights", "Shadow Decision", "Who Else Is Watching", "Pull the Rug",
+           "Every Surface", "Every Locale", "Developer Guidebook")
+WEB = ("Other Verbs", "After the Headers")
+LENSES = ("whose *When it applies* trigger matches", "Skip a lens whose trigger does not match",
+          "`stride-exploratory-testing/skills/heuristics/SKILL.md`", "never copy their text",
+          "testing your own system under authorization",
+          "none of this changes who may authorize an exploratory target")
+def lens_ok(p):
+    web_at = p.index("for web/HTTP targets only")
+    return (all(n in p for n in LENSES)
+            and all(f"**{n}**" in p and p.index(f"**{n}**") < web_at for n in GENERAL)
+            and all(f"**{n}**" in p and p.index(f"**{n}**") > web_at for n in WEB))
+for key, sl in SLICES.items():
+    # 74b: the charter rule sits in the section that writes testing_strategy, whole.
+    chk(f"74b-{key}", lambda sl=sl: bool(sl) and all(n in para(sl, R1) for n in CHARTER))
+    # 74c: the lens rule names all nine, web-only ones scoped to web/HTTP targets, by name, under authorization.
+    chk(f"74c-{key}", lambda sl=sl: bool(sl) and lens_ok(para(sl, R2)))
+# 74d: each lead-in occurs exactly once per file, so a stray copy elsewhere cannot satisfy the slice pin.
+for key, text in (("ct", ct), ("go", go), ("de", de), ("en", en)):
+    chk(f"74d-{key}", lambda text=text: text.count(R1) == 1 and text.count(R2) == 1)
+# 74e: the decomposer reference carries the worked before/after, marked as an example, not a rule.
+RDB = grab(lambda: span(rd, "**Before/after for Task 1's manual test**", "A real decomposition also runs"))
+chk("74e", lambda: has_all(RDB, "an example, not a rule", "Step 5 of `agents/task-decomposer.md`",
+                           'Before: `"manual_tests": ["Verify comment UI in both light and dark mode"]`',
+                           "a **target**", "the **information to discover**", "yields a visual charter")
+    and "Explore the task comments section" in rd and "Change the Rights: the commenter" in rd
+    and "**This file carries one worked decomposition — never a rule.**" in rd)
+# 74f: the enricher reference's Mistake 2 shows a click script and its charter rewrite.
+M2 = grab(lambda: span(re_, "### Mistake 2: Generic testing_strategy", "### Mistake 3"))
+chk("74f", lambda: has_all(M2, '❌ "manual_tests": ["Open the devtools Network tab and click Next"]',
+                           "Explore task-list pagination to discover", "Who Else Is Watching:")
+    and "Visual verification of pagination controls" not in re_)
+print(" ".join(sorted(fails)) if fails else "OK")
+PY
+  }
+  if command -v python3 >/dev/null 2>&1; then
+    assert_eq "74b-74f: New hook-test group: charter-ready rule present in both creating skills, lens-driven edge-case rule present in decomposer and enricher, worked examples in both references" \
+      "OK" "$(g74_check "$G74_CT" "$G74_GO" "$G74_DE" "$G74_EN" "$G74_RD" "$G74_RE")"
+    G74_M="$TMPDIR_TEST/g74-mut"; mkdir -p "$G74_M"
+    # g74_mut <label> <expected> <ct|go|de|en|rd|re> <old> <new>: mutate one file's copy, run the checker.
+    g74_mut() {
+      local a="$G74_CT" b="$G74_GO" c="$G74_DE" d="$G74_EN" e="$G74_RD" f="$G74_RE" res
+      case "$3" in
+        ct) res=$(g57_mut "$G74_CT" "$G74_M/ct.md" "$4" "$5"); a="$G74_M/ct.md" ;;
+        go) res=$(g57_mut "$G74_GO" "$G74_M/go.md" "$4" "$5"); b="$G74_M/go.md" ;;
+        de) res=$(g57_mut "$G74_DE" "$G74_M/de.md" "$4" "$5"); c="$G74_M/de.md" ;;
+        en) res=$(g57_mut "$G74_EN" "$G74_M/en.md" "$4" "$5"); d="$G74_M/en.md" ;;
+        rd) res=$(g57_mut "$G74_RD" "$G74_M/rd.md" "$4" "$5"); e="$G74_M/rd.md" ;;
+        re) res=$(g57_mut "$G74_RE" "$G74_M/re.md" "$4" "$5"); f="$G74_M/re.md" ;;
+      esac
+      [ "$res" = "MISSING" ] && { assert_eq "$1" "$2" "MISSING"; return; }
+      assert_eq "$1" "$2" "$(g74_check "$a" "$b" "$c" "$d" "$e" "$f")"
+    }
+    g74_mut "74b2: a creating-tasks copy that lets a click script stand fails 74b" "74b-ct" ct \
+      'not a click script of steps' 'or a short script of steps'
+    g74_mut "74b3: a creating-goals copy that makes terse entries invalid fails 74b" "74b-go" go \
+      'and terse entries still validate' 'and terse entries are rejected'
+    g74_mut "74b4: an enricher copy whose charter rule moves out of Step 3 fails 74b and 74c" "74b-en 74c-en" en \
+      '### Step 3: Analyze Testing' '### Step 3a: Analyze Testing'
+    g74_mut "74c2: a decomposer copy that drops Other Verbs fails 74c" "74c-de" de \
+      '**Other Verbs** (other HTTP verbs) and ' ''
+    g74_mut "74c3: a creating-tasks copy that applies After the Headers to every target fails 74c" "74c-ct" ct \
+      'and **Developer Guidebook** (docs drift), plus, for web/HTTP targets only, **Other Verbs** (other HTTP verbs) and **After the Headers** (failure after the headers are sent)' \
+      '**Developer Guidebook** (docs drift) and **After the Headers** (failure after the headers are sent), plus, for web/HTTP targets only, **Other Verbs** (other HTTP verbs)'
+    g74_mut "74c4: an enricher copy that drops the authorization framing fails 74c" "74c-en" en \
+      'mean testing your own system under authorization' 'mean testing any system'
+    g74_mut "74c5: a creating-goals copy that copies the catalog instead of pointing at it fails 74c" "74c-go" go \
+      'never copy their text' 'copy their text here'
+    g74_mut "74d2: a decomposer copy with the charter lead-in twice fails 74d" "74d-de" de \
+      '### Step 6: Output Assembly' '**Charter-ready manual tests (the default).** again
+
+### Step 6: Output Assembly'
+    g74_mut "74e2: a decomposer-reference copy that presents the example as a rule fails 74e" "74e" rd \
+      '(an example, not a rule;' '(the rule;'
+    g74_mut "74f2: an enricher-reference copy that drops the click-script counter-example fails 74f" "74f" re \
+      '❌ "manual_tests": ["Open the devtools Network tab and click Next"]' '❌ "manual_tests": []'
+    rm -rf "$G74_M"
+  else
+    echo "  SKIP: 74b-74f2: python3 not installed -- Group 74's section checks need it"
+  fi
+else
+  echo "  SKIP: Group 74 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

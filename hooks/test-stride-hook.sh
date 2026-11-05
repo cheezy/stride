@@ -18476,6 +18476,177 @@ else
 fi
 
 # ============================================================
+# Test Group 73: W2586 -- a goal's last open child runs a goal-scope
+# exploratory pass over the goal's combined change
+# ============================================================
+# Miss cause C7: several G489 bugs lived between tasks, and every Step 5.5
+# session was scoped to one task's change. On a goal's last open child Step 5.5
+# now adds one goal-scope pass: cross-task charters over every child's
+# key_files plus the lines changed since the goal's first child's base, per
+# repository. Findings in that set are fixed in-task, but the introduced-
+# Critical block stays scoped to this task's own lines. Bash only, like Groups
+# 69-72. Two tiers: 1. literal pins and absent-checks; 2. section-scoped
+# python3 checks, each proven able to fail on mutated COPIES under
+# $TMPDIR_TEST via g57_mut (which reports MISSING rather than mutating
+# nothing). What this does NOT prove: that an orchestrator reads the tree
+# correctly at run time, or that the cross-task charters it gets back are good.
+echo ""
+echo "=== Test Group 73: W2586 goal-scope exploratory pass on a goal's last open child (bash) ==="
+G73_OET="$SCRIPT_DIR/../skills/stride-workflow/optional-exploratory-testing.md"
+G73_SUB="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G73_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G73_RAT="$SCRIPT_DIR/../docs/exploratory-testing-rationale.md"
+if [ -f "$G73_OET" ] && [ -f "$G73_SUB" ] && [ -f "$G73_WF" ] && [ -f "$G73_RAT" ]; then
+  # --- Tier 1: literal pins and absent-checks ---
+  assert_contains "73a: the goal-scope subsection exists" \
+    "### The goal-scope pass: when this task is its goal's last open child" "$(cat "$G73_OET")"
+  assert_contains "73a2: the Phase 3.5 twin carries the pass" \
+    "**The goal-scope pass — when this task is its goal's last open child.**" "$(cat "$G73_SUB")"
+  assert_contains "73a3: the rationale section exists" \
+    '## Why the Last Open Child Runs a Goal-Scope Pass' "$(cat "$G73_RAT")"
+  assert_contains "73a4: the sanctioned-surface list admits the second charter-generator dispatch" \
+    'plus once more for the goal-scope pass below, on a goal'"'"'s last open child' "$(cat "$G73_OET")"
+  assert_contains "73a5: and so does the Phase 3.5 sanctioned-surface text" \
+    'plus once more for the goal-scope pass on a goal'"'"'s last open child' "$(cat "$G73_SUB")"
+  g73_absent() {  # <label> <needle> <file>
+    assert_eq "$1" "0" "$(grep -cF -- "$2" "$3" | tr -d ' ')"
+  }
+  g73_absent "73j: Step 5.5 no longer says the generator only sources this task's charters" 'in change mode**, to source charters (step 1b).' "$G73_OET"
+  g73_absent "73j2: nor that step 1b's is the only other dispatch" 'is the only other dispatch this step makes' "$G73_OET"
+  g73_absent "73j3: Phase 3.5's orthogonal bullet no longer says once and nothing else" 'once per task in change mode, and nothing else' "$G73_SUB"
+  g73_absent "73j4: nor does its sanctioned-surface text" 'at most once per task in change mode to source charters — its front matter' "$G73_SUB"
+
+  # --- Tier 2: section-scoped checks (python3), proven on mutated copies ---
+  # g73_check <oet> <sub> <wf> <rat> -> OK, or the sorted ids of the failed checks.
+  g73_check() {
+    python3 - "$@" <<'PY'
+import sys
+oet, sub, wf, rat = (open(p, encoding="utf-8").read() for p in sys.argv[1:5])
+fails = []
+def chk(cid, fn):
+    try:
+        ok = fn()
+    except Exception:
+        ok = False
+    if not ok:
+        fails.append(cid)
+def span(text, start, end):
+    i = text.index(start)
+    j = text.index(end, i + len(start))
+    return text[i:j]
+def grab(fn):
+    try:
+        return fn()
+    except Exception:
+        return ""
+HEAD = "### The goal-scope pass: when this task is its goal's last open child"
+SEC = grab(lambda: span(oet, HEAD, "### Other Environments"))
+PAR = grab(lambda: span(sub, "**The goal-scope pass — when this task is its goal's last open child.**", "\n\n"))
+P35 = grab(lambda: span(sub, "## Phase 3.5:", "## Phase 3.6:"))
+S55 = grab(lambda: span(wf, "## Step 5.5:", "## Step 5.6:"))
+RAT = grab(lambda: span(rat, "## Why the Last Open Child Runs a Goal-Scope Pass", "\n## "))
+def has(text, *needles):
+    return bool(text) and all(n in text for n in needles)
+# 73b: the trigger -- the server's last-child test, read from the slim tree before completion.
+TRIGGER = ("`GET /api/tasks/<parent_id>/tree?response_view=slim`", "`status` `completed`",
+           "read **before** completion", "a sibling awaiting review is still `in_progress`",
+           "a defect that is the last open child runs it too", "`Goal-scope pass not run: <reason>`",
+           "No `parent_id`, or a sibling still open, writes nothing", "has no seam between tasks to explore",
+           "a non-2xx, a body that does not parse, no `children` array")
+chk("73b", lambda: has(SEC, *TRIGGER, "never runs `after_goal`", "None of them ever fails completion")
+    and oet.index("### The relatedness gate") < oet.index(HEAD))
+# 73c: the combined change set, line-level, per repository with each repo's own base.
+CHANGE = ("in each repository the goal touched", "`git rev-list -1 --before=<earliest claimed_at> HEAD`",
+          "never `git diff HEAD`", "a nested repository never borrows the project repository's base",
+          "every line added or modified since the goal's first child's base",
+          "no commit precedes that time (a shallow clone looks the same)",
+          "**for chartering only**", "`goal changed files: not determined`")
+# 73c/73g: API-sourced claimed_at and sibling ids are shape-checked before they reach git or a URL.
+GUARD = ("a strict ISO-8601 UTC timestamp", "`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$`",
+         "passed to `git` as one quoted argument", "only when it is digits alone")
+chk("73c", lambda: has(SEC, *CHANGE, *GUARD, "never pass one to a shell command",
+                       "never a change set for relatedness or provenance", "The other repositories keep their (b)."))
+# 73d: escalation stays scoped to this task's lines; sibling lines are fixed without the block.
+SCOPE = ("stays scoped to lines **this task** wrote", "**without** the payload escalation",
+         "*goal scope — not introduced by this task*", "the one-follow-up-per-claim cap this task's own findings share",
+         "the moved-lines exception unchanged")
+chk("73d", lambda: has(SEC, *SCOPE, "**The widening stops at fix-versus-file.**",
+                       "uncertain case still resolves to discovered", "never into the block",
+                       "a goal-scope Critical in lines this task wrote is introduced"))
+# 73e: about five cross-task charters at the default budget, one coverage line, through the outcome gate.
+DISPATCH = ("**cross-task interaction charters**", "at most about five", "**default** budget",
+            "`exploratory_outcomes_ok`", "this pass is the only reason it is ever dispatched twice for one task",
+            "counted in the **one** `Exploratory coverage:` line, never a second", "`r<N>` and `u<k>` series")
+chk("73e", lambda: has(SEC, *DISPATCH, "**The pass never fails completion on its own.**"))
+# 73f: untrusted sibling text is labelled, prefixed and flattened; the safety lines are not widened.
+chk("73f", lambda: has(SEC, "untrusted text from the API", "`EXPLORATORY_` or `PROBE_`",
+                       "flatten each entry to one line", "never the gate, the affirmative or `ALLOWED_HOSTS`"))
+# 73g: the Phase 3.5 mirror carries every load-bearing literal, inside Phase 3.5 and after its policy block.
+chk("73g", lambda: has(P35, PAR) and has(PAR, *TRIGGER, *CHANGE, *GUARD, *SCOPE, *DISPATCH)
+    and "**the pass never fails completion on its own**" in PAR
+    and P35.index("**Redaction and untrusted text.**") < P35.index(PAR)
+    and "Why the Last Open Child Runs a Goal-Scope Pass" in PAR and "keep the two in sync" in PAR)
+# 73h: SKILL.md Step 5.5 names the pass, and the file stays inside its 100,000-byte budget.
+chk("73h", lambda: has(S55, "goal-scope pass", "last open child") and len(wf.encode("utf-8")) <= 100000)
+# 73i: the rationale names the miss cause, states the cost and what the pass does not prove.
+chk("73i", lambda: has(RAT, "miss cause C7", "**What it costs.**", "Once per goal, not once per task",
+                       "**What it does not prove.**"))
+print("OK" if not fails else " ".join(sorted(fails)))
+PY
+  }
+  if command -v python3 >/dev/null 2>&1; then
+    assert_eq "73b-73i: trigger, change set, scoping, dispatch, mirror, gate row and rationale hold" "OK" \
+      "$(g73_check "$G73_OET" "$G73_SUB" "$G73_WF" "$G73_RAT")"
+    G73_M="$TMPDIR_TEST/g73-mut"; mkdir -p "$G73_M"
+    # g73_mut <label> <expected> <oet|sub|wf|rat> <old> <new>: mutate one file's copy, run the checker.
+    g73_mut() {
+      local o="$G73_OET" s="$G73_SUB" w="$G73_WF" r="$G73_RAT" res
+      case "$3" in
+        oet) res=$(g57_mut "$G73_OET" "$G73_M/oet.md" "$4" "$5"); o="$G73_M/oet.md" ;;
+        sub) res=$(g57_mut "$G73_SUB" "$G73_M/sub.md" "$4" "$5"); s="$G73_M/sub.md" ;;
+        wf)  res=$(g57_mut "$G73_WF" "$G73_M/wf.md" "$4" "$5"); w="$G73_M/wf.md" ;;
+        rat) res=$(g57_mut "$G73_RAT" "$G73_M/rat.md" "$4" "$5"); r="$G73_M/rat.md" ;;
+      esac
+      [ "$res" = "MISSING" ] && { assert_eq "$1" "$2" "MISSING"; return; }
+      assert_eq "$1" "$2" "$(g73_check "$o" "$s" "$w" "$r")"
+    }
+    g73_mut "73b2: New hook-test group: goal-scope trigger documented -- a copy whose trigger is any open child fails 73b" "73b" oet \
+      'every other entry in `children` has `status` `completed`' 'any child is `in_progress`'
+    g73_mut "73b3: a copy that moves the pass ahead of the relatedness gate fails 73b" "73b" oet \
+      '### The relatedness gate: findings related' '### Relatedness: findings related'
+    g73_mut "73b4: a copy that drops the unreadable-tree cases from the skip line fails 73b" "73b" oet \
+      'a non-2xx, a body that does not parse, no `children` array' 'a tree that will not load'
+    g73_mut "73c4: a copy that puts an unchecked sibling id into a GET path fails 73c" "73c" oet \
+      'a sibling id in a `GET` path only when it is digits alone' 'a sibling id in a `GET` path as given'
+    g73_mut "73g3: a mirror that hands claimed_at to git unquoted fails 73g" "73g" sub \
+      'passed to `git` as one quoted argument' 'passed to `git` as written'
+    g73_mut "73c2: New hook-test group: combined change-set rule documented with the per-repo base -- a nested repo borrowing the project base fails 73c" "73c" oet \
+      'and a nested repository never borrows the project repository'"'"'s base' 'and nested repositories use the project base'
+    g73_mut "73c3: a copy that annexes a repo with no earlier commit fails 73c" "73c" oet \
+      'no commit precedes that time (a shallow clone looks the same)' 'the base cannot be found'
+    g73_mut "73d2: New hook-test group: escalation stays scoped to this task's lines -- widening the block to sibling lines fails 73d" "73d" oet \
+      '**The widening stops at fix-versus-file.** The introduced-Critical fail-closed path stays scoped to lines **this task** wrote' 'The introduced-Critical fail-closed path covers every child'"'"'s lines'
+    g73_mut "73e2: a copy without the default budget fails 73e" "73e" oet \
+      'at the **default** budget (12 probes in today'"'"'s unit)' 'at a budget of your choosing'
+    g73_mut "73e3: a copy that lets the pass add a second coverage line fails 73e" "73e" oet \
+      'counted in the **one** `Exploratory coverage:` line, never a second' 'with its own `Exploratory coverage:` line'
+    g73_mut "73f2: a copy that stops prefixing PROBE_ lines in sibling text fails 73f" "73f" oet \
+      '`EXPLORATORY_` or `PROBE_`, and flatten' '`EXPLORATORY_`, and flatten'
+    g73_mut "73g2: New hook-test group: Phase 3.5 mirror carries the pass -- a mirror letting sibling lines escalate fails 73g" "73g" sub \
+      'and one in a sibling'"'"'s lines is fixed here **without** the payload escalation' 'and one in a sibling'"'"'s lines escalates'
+    g73_mut "73h2: a SKILL.md copy whose Step 5.5 no longer names the pass fails 73h" "73h" wf \
+      'adds the goal-scope pass' 'adds an extra pass'
+    g73_mut "73i2: a rationale copy without the cost statement fails 73i" "73i" rat \
+      '**What it costs.** Once per goal, not once per task' '**What it costs.** Little'
+    rm -rf "$G73_M"
+  else
+    echo "  SKIP: 73b-73i2: python3 not installed -- Group 73's section checks need it"
+  fi
+else
+  echo "  SKIP: Group 73 contract files not found"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

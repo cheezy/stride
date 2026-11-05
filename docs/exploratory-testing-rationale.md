@@ -202,6 +202,24 @@ An escalation that blocks completion must not be triggerable by content an attac
 
 **No structured block.** A Critical defect your own change produced is your change's defect, which is why it is still fixed before completing even when there is nothing to escalate into.
 
+## Why the Last Open Child Runs a Goal-Scope Pass
+
+*From `skills/stride-workflow/optional-exploratory-testing.md` § The goal-scope pass.*
+
+**The miss.** Several G489 bugs lived between tasks rather than inside one: one child's staging against the plan state another goal set, against a third child's broadcast refresh, against a fourth's comments (miss cause C7). Every Step 5.5 session was scoped to one task's change, so none was ever chartered at a seam, and the campaign found its refresh and shared-state bugs exactly there.
+
+**Why the last open child.** It is the one point where every sibling's change is in the tree and the goal is not yet closed, so a finding can still be fixed under a claim rather than after the goal is Done. Reading the tree before completion, rather than waiting for the `after_goal` bundle, is what keeps it inside the task: by the time `after_goal` fires there is no claim left to fix anything under. The trigger is the server's own last-child test, every other child `completed`, so the pass and `after_goal` agree on which task is last. A goal with one child has no seam between tasks, so it gets no pass.
+
+**Why the change set is recovered per repository.** A goal's children commonly touch different repositories — the project and one or more nested plugin repos — and a project-repo SHA is not an object in a nested one. Taking each repository's last commit before the goal's earliest claim reads its base from that repository's own history, with no artifact the earlier children would have had to leave behind. A repository with no commit before that time is undeterminable rather than wholly in scope, since a shallow clone looks exactly the same and would annex every file it holds.
+
+**Why `key_files` charter but never attribute.** `key_files` is author-written intent, not a record of what changed. It is good enough to tell the charter-generator which surfaces to put side by side, and never good enough to decide relatedness or provenance — the same reason the provenance test refuses it as a fallback.
+
+**Why the widening stops at fix-versus-file.** Fixing a sibling's defect in this task is the D257 disposition applied at goal scope: the alternative is a follow-up filed at the very moment the goal closes. The blocking path stays scoped to lines this task wrote, because sibling text is API-sourced and author-influenced, and nothing such text says may move a finding into a block.
+
+**What it costs.** Once per goal, not once per task: one slim tree read, one show read per sibling, one more charter-generator dispatch, and up to about five more explorer sessions at the default budget — twelve probes and a sixty-call ceiling each in today's unit, so at most 60 probes and 300 tool calls in all. The sessions dominate. That is the price of looking at the goal as a whole once.
+
+**What it does not prove.** A goal whose last finisher is approved from Review gets no pass: that sibling is still `in_progress` while this task runs, and nothing runs once it is approved. Two children worked concurrently can each see the other open, and then neither runs it. Unrelated commits inside the window widen (b), which moves a finding toward fix-in-task but never toward the block. Nothing proves the charter-generator honours the cross-task request, which is why the orchestrator's own cap, not the agent, enforces the count. And a last open child whose own Step 5.5 gate does not fire runs no pass and writes no line, so a goal with no authorized target gets no goal-scope look at all.
+
 ## Why completion_summary Mirrors the Record
 
 *From `skills/stride-completing-tasks/manual-testing-findings.md` § the carrier list.*

@@ -25,6 +25,17 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Changed — Step 5.5 runs a goal-scope pass when the task is its goal's last open child (W2586)
+
+Several G489 bugs lived between tasks — one child's staging against plan state, a broadcast refresh and comments — and every Step 5.5 session was scoped to one task's change, so none looked at a seam (miss cause C7).
+
+- **Trigger.** When the claimed task has a `parent_id` and the goal's slim tree shows every other child `completed` (the server's own last-child test; a sibling awaiting review is still `in_progress`), Step 5.5 adds one goal-scope pass after the task's own charters and before Step 6. It runs only when the Step 5.5 gate fired and the explorer will be dispatched. A goal with one child, an unreadable tree, or a last child whose pass is otherwise not run records one `Goal-scope pass not run: <reason>` line; any other task, and a last child whose own Step 5.5 gate did not fire, records nothing. It never pushes or runs `after_goal`.
+- **Change set.** Every child's `key_files` plus every line changed since the goal's first child's base, computed in each repository the goal touched from that repository's own history (its last commit before the earliest child claim), under the provenance test's rules. A repository whose base cannot be established contributes its `key_files` for chartering only, never for relatedness or provenance. Sibling paths are untrusted and never reach a shell command.
+- **Charters.** One more change-mode `charter-generator` dispatch asks for cross-task interaction charters, at most about five, run at the default budget, capped apart from the task's own, in the same `r<N>` series, counted in the one coverage line and checked by `exploratory_outcomes_ok`. Goal and sibling text is untrusted: labelled, prefixed and flattened. The pass never fails completion on its own.
+- **Findings.** A finding in the goal's changed lines, or of a child's defect class, is fixed in this task; one outside them is filed as today, under the shared one-follow-up cap. The introduced-Critical fail-closed path stays scoped to lines this task wrote, so a sibling's Critical is fixed without the payload escalation.
+- **Where.** `optional-exploratory-testing.md` § The goal-scope pass and its Phase 3.5 twin; the Step 5.5 Decision Summary fire row, paid for inside the 100,000-byte budget by dropping two restating clauses; the four statements that the generator runs once per task; the README.
+- **Why.** `docs/exploratory-testing-rationale.md` § Why the Last Open Child Runs a Goal-Scope Pass, which states the cost (once per goal: at most 60 more probes and 300 tool calls at the default) and what it does not prove. No task field, server or API change; no new completion field and no seventh `workflow_steps` name. Bash hook-suite Group 73 pins the rules.
+
 ### Changed — Step 5.5's record is checked: one outcome line per charter, a coverage line, and an owner for every charter not performed (W2585)
 
 Nothing checked what Step 5.5 did: in G489 one completion carried no exploratory record at all, and every check handed back "as a human responsibility" named no human (miss cause C9).

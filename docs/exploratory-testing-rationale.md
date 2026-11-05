@@ -126,7 +126,7 @@ Tasks routinely carry `manual_tests` and `edge_cases` in their `testing_strategy
 
 **Why only with observations.** A pass that looked at nothing, or recorded what it meant to check, would read as coverage exactly as a signed-out session did. Recording what was seen lets the Review-queue human tell a performed pass from an intended one, and whatever it did not observe is still handed back, so it stays owed.
 
-**Why a confirmed `.exploratory.md` supplies it.** The base URL and observation tools are project facts the user confirmed at Step 0. Its `constraints` are the project's own rules, kept because the pass acts on the user's running app. Neither section reaches the explorer or `exploratory_env`, because only the main loop observes this way; a task-runner keeps the pass's own rules but has no `constraints` to keep.
+**Why a confirmed `.exploratory.md` supplies it.** The base URL and observation tools are project facts the user confirmed at Step 0. Its `constraints` are the project's own rules, kept because the pass acts on the user's running app. Neither section reaches the explorer, because only the orchestrating context — the main loop, or a task-runner — observes this way. Both reach `exploratory_env` (since W2585), so a task-runner running the pass keeps the project's own rules too; a set too long to carry whole leaves the runner no exploratory environment, because truncating a rule list drops a rule and dropping an `observation` limit widens the pass.
 
 ## Why Results Are Captured Whole and Timed Under reviewer
 
@@ -137,6 +137,26 @@ Tasks routinely carry `manual_tests` and `edge_cases` in their `testing_strategy
 **Capture everything.** Enumerating fields in the skill rather than passing them through is how a later contract change silently drops one — the same failure this workflow already warns about for `reviewer_result`. The root-level `status` is the coarse signal; the sheet is the only carrier of the stop reason and the probe counts. Recording how the session ended matters because an exhausted session and a complete one otherwise produce identical records, and the Review-queue human is the only remaining control on this path.
 
 **Telemetry.** The no-reviewer case is not an edge case: the small 0-1 `key_files` path, where the decision matrix skipped review, reaches Step 5.5 routinely with no dispatched reviewer entry to fold into. All six names are always present, and dropping one would be the very incomplete-telemetry record the rule exists to prevent. A time-boxed session can be the largest single block of wall-clock in the whole task, and this integration exists to make that phase visible.
+
+## Why Every Charter Needs a Record and an Owner
+
+*From `skills/stride-workflow/optional-exploratory-testing.md` § "Check the record before you submit", and `skills/stride-completing-tasks/manual-testing-findings.md` § Outcome Lines, Coverage and Hand-Backs.*
+
+**The miss.** Nothing checked what Step 5.5 actually did. In G489 one completion carried no exploratory record at all, and every check another handed back "as a human responsibility" named no human, so none was done (miss cause C9). The prose already asked for both; prose alone did not produce them, so the record now has a fixed shape and a check refuses a payload that lacks it.
+
+**Why keyed by `r<N>`.** The charter's text is application-influenced and restated in the agent's own words, so it cannot be matched against anything. The report path's `<N>` is allocated by the orchestrator, carries no content, and already ties one dispatch to one file, so it is the one key both sides hold.
+
+**Why copy the counted fields.** `stop_reason`, the probe count and the surfaces are the facts a reader needs to judge a coverage claim, and the report has them exactly; a copied field is checkable where a judged one is not. The outcome is the one judgement left, and the check bounds it from above only: it refuses `performed` for a session that ran out of budget and anything but `not performed` for one that ran no probes, but never refuses a more cautious claim.
+
+**Why an owner, not coverage.** A session that could not run is a normal outcome and must never block completion. What failed in G489 was not the missing coverage but the missing owner: a follow-up names one in the system, and a `HANDED BACK:` line names one in the conversation, which is why Step 8 repeats those lines to the user — a hand-back no human reads has no owner either.
+
+**Why only the paths you supplied.** The check reads the payload and the report files the orchestrator itself named, under the same anchored path rule every report path follows, and never a path a summary or finding names. It prints a boolean only, so neither report text nor charter text reaches the transcript through it.
+
+**Why the skip line.** A completion that never mentions exploratory testing cannot be told apart from one that skipped it for a reason. One line saying why makes the skip a recorded decision, and it costs nothing when the task carried no manual tests or edge cases, because then nothing is owed.
+
+**Why the fence is written to the path.** When the explorer's report file is missing and its inline fence is used, writing the parsed object to the supplied path — the D248 precedent for `$MERGED` — gives the check, and Step 5.6's `/harden`, one shape to read. Step 5.6's "report not on disk" skip therefore fires only when neither a file nor a fence came back.
+
+**What it does not prove.** It cannot judge a restatement's fidelity or its redaction, cannot see a charter whose report path and line were both left out, and checks an owner's identifier for form only. Those stay with the human reading the Review queue.
 
 ## Why the Artifact Directory Must Be Gitignored
 

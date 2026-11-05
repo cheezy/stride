@@ -566,7 +566,7 @@ If any is false, **skip this step entirely and proceed to Step 6 with no failure
 | The target path already exists in the test tree | **You** must check this — `/harden` never writes there, so nothing suffixes it for you. Do not write; defer → Step 6 |
 | No detectable test framework | Pass `--framework none`; `/harden` drafts nothing runnable; record that → Step 6 |
 | Suite not runnable here, runner nameable | Still pass its name; drafts stay staged → Step 6 |
-| A report is missing or unparsable (fence fallback, crashed dispatch) | Skip that report; record *report not on disk, hardening skipped* → Step 6 |
+| A report is missing or unparsable (no file or fence, crashed dispatch) | Skip that report; record *report not on disk, hardening skipped* → Step 6 |
 | `/harden` would ask a question | Never answer it for the user; record hardening as needing a human → Step 6 |
 | Anything written after review | Surface in `completion_notes`, one line of `completion_summary`, and `actual_files_changed` if it entered the tree; re-review whenever a check entered the tree |
 | Dispatched, but `/harden` converted zero bugs | Record that it ran and converted nothing, naming the index file **when one was written** — on the no-framework path it writes nothing to disk and renders specs in conversation instead, so record those → Step 6 |
@@ -669,9 +669,11 @@ When a blocking hook fails, dispatch `stride:hook-diagnostician` agent with the 
 **Who "the agent" is in this step depends on which mode you are in, and it decides one thing that must have exactly one owner.** In the ordinary inline run it is you, throughout. Under Step 1.5's dispatcher mode the owner is **whichever context issued the call that carried the `after_goal` bundle** — and because that bundle rides on `/complete` in one branch and `/mark_reviewed` in the other, the two branches have *different* owners. Name them both, or the push silently never lands:
 
 - **`needs_review=false` — the runner owns it.** The runner made the completion curl, so `after_goal` fired in *its* context; it owns the local `## after_goal` execution, the result PATCH below, and the push verification. **The dispatcher never PATCHes this one** — it holds no `GOAL_ID`, saw no hook output, and a second PATCH would race the first. `stride/agents/task-runner.md` step 8 already assigns all three to the runner and states that an `after_goal` failure never changes its status; it is reported in one clause of the record's `summary`.
-- **`needs_review=true` — the runner cannot own it, and does not.** It returned `completed_needs_review` and ended; the bundle arrives later, on the `/mark_reviewed` response, after a human approves. **The owner is whichever context issues `mark_reviewed`** — the resumed dispatcher session, or the human doing it by hand. That context runs `## after_goal`, PATCHes the result, and **must verify the push landed** (`git log origin/main..main --oneline`), because the grace-window worker flips the goal to Done but does **not** push. This is the one after_goal path dispatcher mode does not carry end to end, and it is called out here rather than left to be discovered when a goal reaches Done with its work unpushed.
+- **`needs_review=true` — the runner cannot own it, and does not.** It returned `completed_needs_review` and ended; the bundle arrives later, on the `/mark_reviewed` response, after a human approves. **The owner is whichever context issues `mark_reviewed`** — the resumed dispatcher session, or the human doing it by hand. That context runs `## after_goal`, PATCHes the result, and **must verify the push landed** (`git log origin/main..main --oneline`), because the grace-window worker flips the goal to Done but does **not** push.
 
 The dispatcher's own reading of this step is narrower: it does not read `needs_review` here at all — it reads the record's `status`, which Step 1.5's Decision Summary maps to loop or stop.
+
+**Repeat every `HANDED BACK:` line this completion wrote to the user**, in the next status summary and in the report that ends the session: a handed-back check has no owner until a human reads it. Dispatcher mode: the runner names each in one clause of its record's `summary`.
 
 ### If `needs_review=true`:
 1. Task moves to Review column
@@ -702,7 +704,7 @@ The hook captures `{exit_code, output, duration_ms}` and emits the structured re
 git log origin/main..main --oneline
 ```
 
-An empty result means local `main` is level with the remote — the push landed. If it lists commits, the `## after_goal` section did not run (truncated response with no capture and an unreachable status endpoint) — run the `## after_goal` steps from `.stride.md` manually (push, then PATCH the after_goal result per the hook-execution.md section above) so the goal's work reaches the remote. The back-compat grace-window rules for runtimes that predate this feature are in that same section.
+An empty result means local `main` is level with the remote — the push landed. If it lists commits, the `## after_goal` section did not run (truncated response with no capture and an unreachable status endpoint) — run the `## after_goal` steps from `.stride.md` manually (push, then PATCH the after_goal result per the hook-execution.md section above) so the goal's work reaches the remote.
 
 ### Terminal States
 

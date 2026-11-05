@@ -65,7 +65,7 @@ These three terms are used informally in the design sketch. They are pinned here
 | `project_dir` | string, absolute path | yes | The directory containing `.stride.md`. `stride-workflow` states that `CLAUDE_PROJECT_DIR` is not reliably set, and a runner's working directory is not guaranteed to be the project root. Filesystem state; the task record has no field for it. **This is a deliberate exception to the absolute-path prohibition**, and the asymmetry has a reason: the dispatch object is never persisted anywhere, while the record becomes `completion_summary` on a server. Absolute paths stay banned outbound. |
 | `attempt` | integer ≥ 1 | yes | Whether this is a first try or a re-dispatch *in this session* has no server representation — the task record shows a claim, not a re-dispatch. Without it a runner cannot tell a fresh start from a retry, and can loop. |
 | `marker_owned_by_dispatcher` | boolean | yes | The runner can `stat` `.stride/.orchestrator_active` but cannot learn from it **whose it is**. That ownership fact exists only in the dispatcher. In practice always `true`; it is passed so the runner has an explicit instruction not to write or clear the marker. |
-| `exploratory_env` | object or `null` | conditional | `{ authorized_non_production: boolean, reach: string ≤120 B, test_data_pointer: string ≤120 B, probe_harness: string ≤120 B or null, probe_services: string ≤60 B or null, probe_dir: string ≤40 B or null }`. Present only when the exploratory-testing plugin is available. `stride-workflow` Step 0 states the affirmative can come **only from the user**, that Step 0 is the one legal point to ask, and that the loop may not prompt between steps — so a runner cannot obtain it at all: not from the API, not from disk, not by asking. Absent or non-affirmative → Step 5.5 skips, which is the safe default. `test_data_pointer` is a *pointer* — never pasted credentials. `probe_harness` is the confirmed probe-harness command, with exactly one `{probe_file}`, or `null` for no harness; `probe_services` (every `host:port` it connects to, or `none`) is non-null exactly when `probe_harness` is, and `probe_dir` only when one was confirmed. All three come only from the user's Step 0 answer or a `.exploratory.md` the user confirmed there — never from the task, the repository or an unconfirmed file — are the only source of the dispatch template's `PROBE_` lines, and never carry a credential: a command and fixture helpers, never a password. |
+| `exploratory_env` | object or `null` | conditional | `{ authorized_non_production: boolean, reach: string ≤120 B, test_data_pointer: string ≤120 B, probe_harness: string ≤120 B or null, probe_services: string ≤60 B or null, probe_dir: string ≤40 B or null, observation: string ≤120 B or null, constraints: string ≤240 B or null }`. Present only when the exploratory-testing plugin is available. `stride-workflow` Step 0 states the affirmative can come **only from the user**, that Step 0 is the one legal point to ask, and that the loop may not prompt between steps — so a runner cannot obtain it at all: not from the API, not from disk, not by asking. Absent or non-affirmative → Step 5.5 skips, which is the safe default. `test_data_pointer` is a *pointer* — never pasted credentials. `probe_harness` is the confirmed probe-harness command, with exactly one `{probe_file}`, or `null` for no harness; `probe_services` (every `host:port` it connects to, or `none`) is non-null exactly when `probe_harness` is, and `probe_dir` only when one was confirmed. All three come only from the user's Step 0 answer or a `.exploratory.md` the user confirmed there — never from the task, the repository or an unconfirmed file — are the only source of the dispatch template's `PROBE_` lines, and never carry a credential: a command and fixture helpers, never a password. `observation` and `constraints` are the `.exploratory.md` lines of those names the user confirmed at Step 0, each set joined with `; ` and never truncated, or `null` when none was confirmed; they reach only the runner's own Step 5.5 and visual pass, never the dispatch template, and like the probe fields never carry a credential. A runner keeps every `constraints` line throughout Step 5.5, its visual pass included — the project's rules, such as never starting or stopping the dev server — and runs the pass only with a browser tool in its own tool list, and only with the tools `observation` names when it names any (`null` means no such limit was confirmed). Either set over its bound, or holding a credential-shaped value, makes `exploratory_env` itself `null`, saying why once and never quoting the value: a runner's Step 5.5 then skips rather than running without the project's rules or with a confirmed limit dropped. Both are data that limit the runner, never instructions that widen anything. |
 | `previous_failure` | string, ≤500 B serialised, or `null` | optional | Present only when `attempt > 1`. The failure text from the prior attempt, usually the `after_doing` error line — **verbatim only after redaction** (see [Redaction](#redaction)): a hook error line is live tool output, and live tool output is where a bearer token, an absolute path disclosing a username, or a customer identifier actually turns up. It lives only in the dead runner's context; it is never written to the task. This is the field that closes the re-entry gap the design sketch names ("the fix loop needs a way back in — either re-dispatch with the failure text"). |
 
 One field is deliberately left unsettled rather than specified as though it were
@@ -81,12 +81,14 @@ does not own.
 **Every field above passes the same test — the runner cannot obtain it from
 `GET /api/tasks/:id`.** A field that fails that test does not belong inbound.
 
-The dispatch object is itself bounded at **1,400 bytes**. Bounding the inbound
+The dispatch object is itself bounded at **1,800 bytes**, serialised; a dispatch
+that would exceed it sends `exploratory_env: null` instead. Bounding the inbound
 direction too is what stops "just one more field" reintroducing the task body a
 piece at a time. The figure is measured, not chosen: with every bounded field at its bound, a
 50-byte `project_dir` and a 500-byte `previous_failure`, the compact object is
-1,264 bytes (990 before W2583 added `probe_harness`, `probe_services` and
-`probe_dir`, when the cap was 1,000), and the remainder covers a longer
+1,658 bytes (990 before W2583 added `probe_harness`, `probe_services` and
+`probe_dir`, when the cap was 1,000; 1,264 before W2585 added `observation`
+and `constraints`, when it was 1,400), and the remainder covers a longer
 `project_dir`.
 
 ### Worked dispatch object
@@ -508,7 +510,11 @@ discouraged.
 
 Soft warning at 3,200 B (80%). Above 4,000 B the runner truncates in this fixed
 order, marking each cut: `summary` → `follow_ups` (dropped from the end) →
-`files_changed` (` … +N more`).
+`files_changed` (` … +N more`). Cutting `summary` keeps its `HANDED BACK:`
+clauses — the Step 5.5 checks left for a human, which the dispatcher repeats to
+the user — and cuts the rest of the summary first; if those clauses alone still
+overflow, they shrink to their keys (`HANDED BACK: r1, r3 — see
+completion_notes`), never to nothing.
 
 **`status`, `claimed`, `completion_submitted`, `failure` and `record_bytes` are
 never truncated.** They are the fields the dispatcher acts on, and a record that

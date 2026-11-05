@@ -174,6 +174,9 @@ STEP 5.5: Manual & Exploratory Testing (Optional, Gated)
       no_observation_surface --> NOT performed whatever it probed, hand the test back
       (tools = the explorer's own front-matter tools: line, never this session's)
       -- holding a browser tool, the main loop first runs a bounded visual pass
+    Record: one 'Exploratory charter r<N>:' outcome line per charter, an owner
+      (follow-up ID or HANDED BACK) for every charter not performed, and one
+      'Exploratory coverage:' line in completion_summary
     Relatedness gate FIRST, at ANY severity: responsible lines are lines this task
       changed, OR same defect class as the change --> fix in-task + re-review, never
       file; the severity/provenance policy below governs only out-of-scope findings
@@ -218,6 +221,8 @@ STEP 7: Complete
     must pass before you submit. The not_assessed check is SCOPED to payloads where
     a structured review block was parsed; Shape 2 skips and Source C carry no verdict
     and pass -- never hand-write a verdict to satisfy it
+  Step 5.5 fired? --> exploratory_outcomes_ok must print true (skipped on a task with
+    manual tests or edge cases --> one 'Exploratory testing skipped:' line)
   PATCH /api/tasks/:id/complete with ALL required fields
     (pipe only into tee -- the Step 2 curl rule applies here too)
   |
@@ -227,6 +232,7 @@ STEP 8: Post-Completion
   needs_review=false? --> Execute after_review, loop to Step 1
   Last child of a goal? --> verify the push landed (git log origin/main..main empty) --
     the grace worker flips the goal to Done but does NOT push
+  HANDED BACK: lines? --> repeat each to the user
   Workflow stops (no tasks / halt / review wait / abort)? --> clear the activation marker
 ```
 
@@ -319,6 +325,8 @@ CLAUDE CODE WORKFLOW:
 │     │   | blocked/ceiling AFTER meaningful probes → partial coverage, record + say so
 │     │   | no_observation_surface → NOT performed whatever it probed, hand back
 │     │     what a bounded main-loop visual pass (browser tool held) did not observe
+│     ├─ Record one outcome line per charter + one coverage line; every charter not
+│     │   performed names an owner (follow-up ID or HANDED BACK)
 │     ├─ Relatedness gate FIRST, any severity: lines you changed OR same defect class →
 │     │   fix in-task + re-review, never file (moved-only lines predating the change ≠
 │     │   related; a follow-up task = the exception for a real out-of-scope bug)
@@ -340,10 +348,12 @@ CLAUDE CODE WORKFLOW:
 ├─ 6. Hooks: Automatic via hooks.json (fires on curl call)
 ├─ 7. Complete: run the mandatory pre-submission self-check FIRST (must pass; the not_assessed
 │     check is scoped to parsed-block payloads — never hand-write a verdict to satisfy it), then
-│     PATCH /api/tasks/:id/complete with ALL fields
+│     PATCH /api/tasks/:id/complete with ALL fields; Step 5.5 fired → exploratory_outcomes_ok
+│     must print true (skipped with manual tests/edge cases → one skip line)
 └─ 8. Loop: needs_review=false → after_review auto-fires, loop to Step 1 | needs_review=true →
       STOP (changes requested → re-enter at Step 4). Last child of a goal → verify the push
-      landed (the grace worker does NOT push). Workflow stops → clear the activation marker
+      landed (the grace worker does NOT push). Repeat every HANDED BACK: line to the user.
+      Workflow stops → clear the activation marker
 
 OTHER ENVIRONMENTS (Cursor, Windsurf, Continue): see platform-other.md
 

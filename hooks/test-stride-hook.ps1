@@ -42,6 +42,7 @@ $script:StrideHookEnvVars = @(
     'GOAL_IDENTIFIER'         # $env:
     'HOOK_NAME'               # GetEnvironmentVariable, stride-hook.ps1
     'STRIDE_HOOK_TIMEOUT_OVERRIDE'  # GetEnvironmentVariable
+    'STRIDE_ATTACHMENT_BUDGET_SECONDS'  # $env: - shortens the attachment budget
     'TASK_BASE_REF'           # GetEnvironmentVariable — selects the diff range
     'TASK_ID'                 # both forms
 )
@@ -12954,6 +12955,467 @@ if ((Test-Path -LiteralPath $g47Rev) -and (Test-Path -LiteralPath $g47Osr) -and 
 } else {
     Write-Host "  SKIP: Group 47 contract files not found"
 }
+
+# ============================================================
+# Test Group 48: W2522 - task attachments downloaded by the claim hook, PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 75 (download) and Group 76 (guard). A
+# looping HttpListener on localhost stands in for the API: a plain-http API URL
+# is allowed only for loopback, so nothing leaves the machine. The cross-half
+# byte-identical manifest check runs in the bash suite (75p), because this
+# suite cannot run bash. Needles stay ASCII: Windows PowerShell 5.1 can misread
+# a BOM-less UTF-8 script, so non-ASCII test text is built from [char] codes.
+Write-Host ""
+Write-Host "=== Test Group 48: W2522 task attachments (PowerShell) ==="
+
+$g48Port = 18985
+$g48Dir = Join-Path $TmpDir 'w2522'
+New-Item -ItemType Directory -Path $g48Dir -Force | Out-Null
+$g48Routes = Join-Path $g48Dir 'routes.json'
+$g48Log = Join-Path $g48Dir 'requests.log'
+$g48Token = 'g48_fake_tok_5d1e'
+$g48Api = "http://localhost:$g48Port"
+$g48ClaimCmd = "curl -sS -X POST $g48Api/api/tasks/claim -d @c.json | tee r.json"
+
+# path -> { status, body (base64), location, sleep (seconds to stall before
+# answering) }. Re-read on every request, so a
+# case can change the routes without restarting the listener.
+function Set-G48Routes {
+    param([hashtable]$Routes)
+    $o = [ordered]@{}
+    foreach ($k in $Routes.Keys) { $o[$k] = $Routes[$k] }
+    [System.IO.File]::WriteAllText($g48Routes, ($o | ConvertTo-Json -Depth 5 -Compress))
+}
+function New-G48Route {
+    param([string]$Body, [int]$Status = 200, [string]$Location = '', [int]$Sleep = 0, [switch]$Chunked, [switch]$Drip)
+    return @{ status = $Status; body = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Body)); location = $Location; sleep = $Sleep; chunked = [bool]($Chunked -or $Drip); drip = [bool]$Drip }
+}
+function Get-G48Sha {
+    param([string]$Body)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Body))
+        return (($h | ForEach-Object { $_.ToString('x2') }) -join '')
+    } finally { $sha.Dispose() }
+}
+function New-G48Att {
+    param([int]$Id, [string]$Filename, [string]$Body)
+    return [ordered]@{
+        id = $Id; filename = $Filename; content_type = 'text/plain'
+        byte_size = [System.Text.Encoding]::UTF8.GetByteCount($Body); sha256 = (Get-G48Sha $Body)
+        comment_id = $null; uploaded_at = '2026-11-08T10:00:00Z'
+        download_url = "/api/tasks/77/attachments/$Id"
+    }
+}
+function New-G48Claim {
+    param($Attachments)
+    $data = [ordered]@{ id = 77; identifier = 'W5001'; title = 'attach' }
+    if ($null -ne $Attachments) { $data['attachments'] = @($Attachments) }
+    return ([ordered]@{ data = $data } | ConvertTo-Json -Depth 8 -Compress)
+}
+function New-G48Project {
+    param([string]$Name)
+    $d = Join-Path $g48Dir "proj-$Name"
+    if (Test-Path $d) { Remove-Item -Recurse -Force $d }
+    New-Item -ItemType Directory -Path (Join-Path $d '.stride') -Force | Out-Null
+    Set-Content -Path (Join-Path $d '.stride.md') -Encoding UTF8 -Value @"
+## before_doing
+
+``````bash
+``````
+"@
+    [System.IO.File]::WriteAllText((Join-Path $d '.stride_auth.md'),
+        ("- **API URL:** ``{0}```n- **API Token:** ``{1}```n" -f $g48Api, $g48Token))
+    return $d
+}
+function Invoke-G48Claim {
+    param([string]$Dir, [string]$Stdout)
+    if (Test-Path $g48Log) { Remove-Item -Force $g48Log }
+    $in = New-G34Input -SessionId 's' -Command $g48ClaimCmd -Stdout $Stdout
+    return (Invoke-HookScript -InputJson $in -Phase 'post' -ProjectDir $Dir)
+}
+function Get-G48Manifest {
+    param([string]$Dir)
+    $p = Join-Path $Dir '.stride/attachments/W5001/manifest.json'
+    if (-not (Test-Path -LiteralPath $p)) { return $null }
+    return ([System.IO.File]::ReadAllText($p) | ConvertFrom-Json)
+}
+function Get-G48Requested {
+    if (-not (Test-Path $g48Log)) { return @() }
+    return @(Get-Content -LiteralPath $g48Log | ForEach-Object { ($_ | ConvertFrom-Json).path })
+}
+
+Set-G48Routes @{}
+$g48Job = Start-Job -ArgumentList $g48Port, $g48Routes, $g48Log -ScriptBlock {
+    param($Port, $Routes, $Log)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        while ($l.IsListening) {
+            $ctx = $l.GetContext()
+            $req = $ctx.Request
+            $resp = $ctx.Response
+            $entry = @{ path = $req.RawUrl; auth = $req.Headers['Authorization']; ua = $req.UserAgent } | ConvertTo-Json -Compress
+            Add-Content -LiteralPath $Log -Value $entry
+            $map = [System.IO.File]::ReadAllText($Routes) | ConvertFrom-Json
+            $route = $null
+            if ($map.PSObject.Properties.Name -contains $req.RawUrl) { $route = $map.($req.RawUrl) }
+            if ($null -eq $route) {
+                $resp.StatusCode = 404
+            } else {
+                if ([int]$route.sleep -gt 0) { Start-Sleep -Seconds ([int]$route.sleep) }
+                $resp.StatusCode = [int]$route.status
+                if ($route.location) { $resp.RedirectLocation = $route.location }
+                $bytes = [Convert]::FromBase64String($route.body)
+                if ($route.chunked) { $resp.SendChunked = $true } else { $resp.ContentLength64 = $bytes.Length }
+                $resp.OutputStream.Write($bytes, 0, $bytes.Length)
+                if ($route.drip) {
+                    # ~10 s more of 1 KiB chunks; a client that stopped
+                    # reading closes the socket and the write throws.
+                    $chunk = New-Object byte[] 1024
+                    try {
+                        for ($j = 0; $j -lt 200; $j++) {
+                            $resp.OutputStream.Write($chunk, 0, $chunk.Length)
+                            $resp.OutputStream.Flush()
+                            Start-Sleep -Milliseconds 50
+                        }
+                    } catch { }
+                }
+            }
+            try { $resp.OutputStream.Close() } catch { }
+        }
+    } catch {
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+}
+
+try {
+    $null = Wait-ForListener -Port $g48Port
+
+    # 48a: several files download; oversize-by-metadata and bad-sha files are
+    # skipped or removed; the hook exits 0.
+    $g48Bodies = @{ 812 = 'png-ish bytes'; 813 = 'pdf-ish bytes'; 814 = 'plain notes'; 816 = 'wrong hash body' }
+    $g48Map = @{}
+    foreach ($k in $g48Bodies.Keys) { $g48Map["/api/tasks/77/attachments/$k"] = (New-G48Route $g48Bodies[$k]) }
+    Set-G48Routes $g48Map
+    $g48Big = New-G48Att 815 'big.bin' 'x'
+    $g48Big['byte_size'] = 26214401
+    $g48BadSha = New-G48Att 816 'hash.bin' $g48Bodies[816]
+    $g48BadSha['sha256'] = ('0' * 64)
+    $g48Atts = @((New-G48Att 812 'screenshot.png' $g48Bodies[812]), (New-G48Att 813 'spec.pdf' $g48Bodies[813]),
+        (New-G48Att 814 'notes.txt' $g48Bodies[814]), $g48Big, $g48BadSha)
+    $g48d = New-G48Project 'a'
+    $r = Invoke-G48Claim $g48d (New-G48Claim $g48Atts)
+    Assert-Exit "48a: the claim hook still exits 0" 0 $r.ExitCode
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48a: statuses follow the contract" 'downloaded,downloaded,downloaded,skipped,failed' (($m.attachments | ForEach-Object { $_.status }) -join ',')
+    Assert-Eq "48a: reasons follow the contract" ',,,too_large,sha256_mismatch' (($m.attachments | ForEach-Object { [string]$_.reason }) -join ',')
+    Assert-Eq "48a: files are saved as <id>-<name> and the bad one removed" '812-screenshot.png,813-spec.pdf,814-notes.txt,manifest.json' `
+        ((Get-ChildItem -LiteralPath (Join-Path $g48d '.stride/attachments/W5001') -Force | Sort-Object Name | ForEach-Object { $_.Name }) -join ',')
+    Assert-Eq "48a: the saved bytes are the served bytes" $g48Bodies[812] ([System.IO.File]::ReadAllText((Join-Path $g48d '.stride/attachments/W5001/812-screenshot.png')))
+    Assert-Eq "48a: a too_large file is never requested" 'False' ([string]((Get-G48Requested) -contains '/api/tasks/77/attachments/815'))
+    Assert-Eq "48a: .gitignore holds exactly *" "*`n" ([System.IO.File]::ReadAllText((Join-Path $g48d '.stride/attachments/.gitignore')))
+    $g48Raw = [System.IO.File]::ReadAllBytes((Join-Path $g48d '.stride/attachments/W5001/manifest.json'))
+    Assert-Eq "48a: manifest.json has no byte-order mark" 'False' ([string]($g48Raw.Length -ge 3 -and $g48Raw[0] -eq 0xEF -and $g48Raw[1] -eq 0xBB -and $g48Raw[2] -eq 0xBF))
+    Assert-Eq "48a: manifest.json ends in exactly one LF" '10,125' ("{0},{1}" -f $g48Raw[$g48Raw.Length - 1], $g48Raw[$g48Raw.Length - 2])
+    Assert-Contains "48a: one summary line on stderr" 'stride: attachments W5001: 3 downloaded, 1 skipped, 1 failed' $r.Stderr
+
+    # 48b: unsafe filenames, ids and download_url values are refused or
+    # sanitised exactly as the bash half does them.
+    $g48Map = @{}
+    foreach ($i in 840..846) { $g48Map["/api/tasks/77/attachments/$i"] = (New-G48Route 'x') }
+    Set-G48Routes $g48Map
+    $g48Emoji = [char]::ConvertFromUtf32(0x1F600)
+    $g48Names = @('../../etc/passwd', '..', 'C:\temp\.env', ("caf{0} r{0}sum{0}.pdf" -f [char]0x00E9), ("smile {0}.png" -f $g48Emoji), 'same.txt', 'same.txt')
+    $g48Atts = @()
+    for ($i = 0; $i -lt $g48Names.Count; $i++) { $g48Atts += (New-G48Att (840 + $i) $g48Names[$i] 'x') }
+    $g48UnsafeId = New-G48Att 847 'x' 'x'; $g48UnsafeId['id'] = '../x'
+    $g48Off = New-G48Att 848 'x' 'x'; $g48Off['download_url'] = 'https://evil.example/x'
+    $g48Dot = New-G48Att 849 'x' 'x'; $g48Dot['download_url'] = '/api/../x'
+    $g48Other = New-G48Att 850 'x' 'x'; $g48Other['download_url'] = '/api/tasks/78/attachments/850'
+    $g48Atts += @($g48UnsafeId, $g48Off, $g48Dot, $g48Other)
+    $g48d = New-G48Project 'b'
+    $r = Invoke-G48Claim $g48d (New-G48Claim $g48Atts)
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48b: names are sanitised per code point inside the task directory" `
+        '840-passwd,841-attachment,842-env,843-caf__r_sum_.pdf,844-smile__.png,845-same.txt,846-same.txt,,,,' `
+        (($m.attachments | ForEach-Object { [string]$_.local_file }) -join ',')
+    Assert-Eq "48b: an unsafe id is unsafe_id and unsafe URLs unsafe_url" 'unsafe_id,unsafe_url,unsafe_url,unsafe_url' `
+        (($m.attachments[7..10] | ForEach-Object { $_.reason }) -join ',')
+    Assert-Eq "48b: no request was made for a refused entry" '7' ([string]@(Get-G48Requested).Count)
+
+    # 48c: a redirect is not followed, so the Authorization header never
+    # reaches the redirect target; it is recorded as http_302.
+    $g48Map = @{}
+    $g48Map['/api/tasks/77/attachments/860'] = (New-G48Route -Body 'moved' -Status 302 -Location "$g48Api/elsewhere/860")
+    $g48Map['/api/tasks/77/attachments/861'] = (New-G48Route -Body 'boom' -Status 500)
+    $g48Map['/api/tasks/77/attachments/862'] = (New-G48Route 'fine')
+    $g48Map['/elsewhere/860'] = (New-G48Route 'moved')
+    Set-G48Routes $g48Map
+    $g48d = New-G48Project 'c'
+    $r = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 860 'a' 'moved'), (New-G48Att 861 'b' 'boom'), (New-G48Att 862 'c' 'fine')))
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48c: a 302 is http_302 and a 500 http_500, the rest still download" 'http_302,http_500,' `
+        (($m.attachments | ForEach-Object { [string]$_.reason }) -join ',')
+    Assert-Eq "48c: the redirect target is never requested" 'False' ([string]((Get-G48Requested) -contains '/elsewhere/860'))
+    Assert-Exit "48c: the hook exit code is unchanged" 0 $r.ExitCode
+
+    # 48d: the token stays in the header, with a curl-like User-Agent.
+    $g48Lines = @(Get-Content -LiteralPath $g48Log | ForEach-Object { $_ | ConvertFrom-Json })
+    Assert-Eq "48d: every request carried the token as its Authorization header" 'True' `
+        ([string](@($g48Lines | Where-Object { $_.auth -ceq "Bearer $g48Token" }).Count -eq $g48Lines.Count))
+    Assert-Eq "48d: and a curl-like User-Agent" 'True' ([string](@($g48Lines | Where-Object { $_.ua -clike 'curl/*' }).Count -eq $g48Lines.Count))
+    $g48Leak = @(Get-ChildItem -LiteralPath (Join-Path $g48d '.stride') -Recurse -File -Force | Where-Object {
+        [System.IO.File]::ReadAllText($_.FullName).Contains($g48Token) })
+    Assert-Eq "48d: the token is in no file under .stride/" '0' ([string]$g48Leak.Count)
+    Assert-NotContains "48d: nor on stdout" $g48Token $r.Stdout
+    Assert-NotContains "48d: nor on stderr" $g48Token $r.Stderr
+
+    # 48e: no attachments key, null or [] creates no directory.
+    foreach ($g48Case in @('{"data":{"id":77,"identifier":"W5001"}}', '{"data":{"id":77,"identifier":"W5001","attachments":null}}',
+                           '{"data":{"id":77,"identifier":"W5001","attachments":[]}}')) {
+        $g48d = New-G48Project 'e'
+        $null = Invoke-G48Claim $g48d $g48Case
+        Assert-Eq "48e: $g48Case creates no attachments directory" 'False' ([string](Test-Path (Join-Path $g48d '.stride/attachments')))
+    }
+
+    # 48f: a claim whose own response does not prove the identity downloads nothing.
+    $g48d = New-G48Project 'f'
+    [System.IO.File]::WriteAllText((Join-Path $g48d '.stride/.last-api-response.json'), (New-G48Claim @((New-G48Att 862 'c' 'fine'))))
+    $null = Invoke-G48Claim $g48d '{"data":{"id":77,"identifier":"W5001","attach'
+    Assert-Eq "48f: a truncated claim downloads nothing" 'False' ([string](Test-Path (Join-Path $g48d '.stride/attachments')))
+
+    # 48g: a symlinked .stride/attachments is refused and nothing written through it.
+    $g48d = New-G48Project 'g'
+    $g48Else = Join-Path $g48Dir 'elsewhere-g'
+    New-Item -ItemType Directory -Path $g48Else -Force | Out-Null
+    $g48Linked = $true
+    try { New-Item -ItemType SymbolicLink -Path (Join-Path $g48d '.stride/attachments') -Target $g48Else -ErrorAction Stop | Out-Null } catch { $g48Linked = $false }
+    if ($g48Linked) {
+        $r = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+        Assert-Eq "48g: a symlinked .stride/attachments is refused" '0' ([string]@(Get-ChildItem -LiteralPath $g48Else -Force).Count)
+        Assert-Contains "48g: and says so on stderr" 'symlink' $r.Stderr
+    } else {
+        Write-Host "  SKIP: 48g: this host cannot create a symbolic link"
+    }
+
+    # 48g2: a symlinked task directory and a symlinked .stride are refused
+    # too, and nothing lands through either.
+    if ($g48Linked) {
+        $g48Map = @{}
+        $g48Map['/api/tasks/77/attachments/862'] = (New-G48Route 'fine')
+        Set-G48Routes $g48Map
+        $g48d = New-G48Project 'g2'
+        $g48Else2 = Join-Path $g48Dir 'elsewhere-g2'
+        New-Item -ItemType Directory -Path $g48Else2 -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $g48d '.stride/attachments') -Force | Out-Null
+        New-Item -ItemType SymbolicLink -Path (Join-Path $g48d '.stride/attachments/W5001') -Target $g48Else2 | Out-Null
+        $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+        Assert-Eq "48g: a symlinked task directory is refused" '0/True' `
+            ("{0}/{1}" -f @(Get-ChildItem -LiteralPath $g48Else2 -Force).Count, [bool]((Get-Item -LiteralPath (Join-Path $g48d '.stride/attachments/W5001') -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+        $g48d = New-G48Project 'g3'
+        $g48Else3 = Join-Path $g48Dir 'elsewhere-g3'
+        if (Test-Path $g48Else3) { Remove-Item -Recurse -Force $g48Else3 }
+        Move-Item -LiteralPath (Join-Path $g48d '.stride') -Destination $g48Else3
+        New-Item -ItemType SymbolicLink -Path (Join-Path $g48d '.stride') -Target $g48Else3 | Out-Null
+        $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+        Assert-Eq "48g: a symlinked .stride is refused" 'False' ([string](Test-Path (Join-Path $g48Else3 'attachments')))
+    }
+
+    # 48n: the half's own size enforcement: a declared length past byte_size,
+    # a short body, and a chunked body that runs past byte_size are each
+    # removed and recorded size_mismatch.
+    $g48Map = @{}
+    $g48Map['/api/tasks/77/attachments/880'] = (New-G48Route 'longer than three')
+    $g48Map['/api/tasks/77/attachments/881'] = (New-G48Route 'short')
+    $g48Map['/api/tasks/77/attachments/882'] = (New-G48Route 'chunked and longer' -Chunked)
+    Set-G48Routes $g48Map
+    $g48Long = New-G48Att 880 'long' 'abc'
+    $g48Short = New-G48Att 881 'short' 'short'; $g48Short['byte_size'] = 50
+    $g48Chunk = New-G48Att 882 'chunk' 'abc'
+    $g48d = New-G48Project 'n'
+    $null = Invoke-G48Claim $g48d (New-G48Claim @($g48Long, $g48Short, $g48Chunk))
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48n: longer, shorter and chunked over-long bodies fail size_mismatch" `
+        'failed/size_mismatch,failed/size_mismatch,failed/size_mismatch' (($m.attachments | ForEach-Object { "{0}/{1}" -f $_.status, $_.reason }) -join ',')
+    Assert-Eq "48n: and no file is left for any of them" 'manifest.json' `
+        ((Get-ChildItem -LiteralPath (Join-Path $g48d '.stride/attachments/W5001') -Force | ForEach-Object { $_.Name }) -join ',')
+
+    # 48n2: an over-long streamed body is cut off as soon as it passes
+    # byte_size, not read for the ~10 s the server keeps sending.
+    $g48Map = @{}
+    $g48Map['/api/tasks/77/attachments/883'] = (New-G48Route 'drip' -Drip)
+    Set-G48Routes $g48Map
+    $g48d = New-G48Project 'n2'
+    $g48Sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 883 'drip' 'abc')))
+    $g48Sw.Stop()
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48n: an over-long streamed body fails size_mismatch" 'failed/size_mismatch' (($m.attachments | ForEach-Object { "{0}/{1}" -f $_.status, $_.reason }) -join ',')
+    Assert-Eq "48n: and is cut off at once rather than read to the end" 'True' ([string]($g48Sw.Elapsed.TotalSeconds -lt 6))
+
+    # 48p: a .gitignore that is a link is replaced, never written through;
+    # one that is a directory stops the download.
+    $g48Map = @{}
+    $g48Map['/api/tasks/77/attachments/862'] = (New-G48Route 'fine')
+    Set-G48Routes $g48Map
+    if ($g48Linked) {
+        $g48d = New-G48Project 'p'
+        New-Item -ItemType Directory -Path (Join-Path $g48d '.stride/attachments') -Force | Out-Null
+        $g48Out = Join-Path $g48Dir 'outside-gitignore'
+        [System.IO.File]::WriteAllText($g48Out, "outside`n")
+        New-Item -ItemType SymbolicLink -Path (Join-Path $g48d '.stride/attachments/.gitignore') -Target $g48Out | Out-Null
+        $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+        $g48Gi = Get-Item -LiteralPath (Join-Path $g48d '.stride/attachments/.gitignore') -Force
+        Assert-Eq "48p: a linked .gitignore is replaced by a regular file holding *" "False|*`n|outside`n" `
+            ("{0}|{1}|{2}" -f [bool]($g48Gi.Attributes -band [System.IO.FileAttributes]::ReparsePoint), [System.IO.File]::ReadAllText($g48Gi.FullName), [System.IO.File]::ReadAllText($g48Out))
+        # A link to a directory is the case a plain move gets wrong.
+        $g48d = New-G48Project 'p3'
+        New-Item -ItemType Directory -Path (Join-Path $g48d '.stride/attachments') -Force | Out-Null
+        $g48OutDir = Join-Path $g48Dir 'outside-gidir'
+        if (Test-Path $g48OutDir) { Remove-Item -Recurse -Force $g48OutDir }
+        New-Item -ItemType Directory -Path $g48OutDir -Force | Out-Null
+        New-Item -ItemType SymbolicLink -Path (Join-Path $g48d '.stride/attachments/.gitignore') -Target $g48OutDir | Out-Null
+        $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+        $g48Gi = Get-Item -LiteralPath (Join-Path $g48d '.stride/attachments/.gitignore') -Force -ErrorAction SilentlyContinue
+        Assert-Eq "48p: a .gitignore linked to a directory is replaced, nothing lands inside it" 'True|0' `
+            ("{0}|{1}" -f [bool]($null -ne $g48Gi -and -not $g48Gi.PSIsContainer -and -not ($g48Gi.Attributes -band [System.IO.FileAttributes]::ReparsePoint)), @(Get-ChildItem -LiteralPath $g48OutDir -Force).Count)
+    }
+    $g48d = New-G48Project 'p2'
+    New-Item -ItemType Directory -Path (Join-Path $g48d '.stride/attachments/.gitignore') -Force | Out-Null
+    $r = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+    Assert-Eq "48p: a .gitignore that is a directory downloads nothing" 'False' ([string](Test-Path (Join-Path $g48d '.stride/attachments/W5001')))
+    Assert-Contains "48p: and says so on stderr" '.gitignore is not a regular file' $r.Stderr
+
+    # 48h: the budget override only shortens it; 0 skips every accepted entry.
+    $g48d = New-G48Project 'h'
+    $env:STRIDE_ATTACHMENT_BUDGET_SECONDS = '0'
+    try { $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine'))) } finally { Remove-Item Env:STRIDE_ATTACHMENT_BUDGET_SECONDS -ErrorAction SilentlyContinue }
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48h: an exhausted budget skips the entry time_budget" 'skipped/time_budget/0' ("{0}/{1}/{2}" -f $m.attachments[0].status, $m.attachments[0].reason, $m.caps.budget_seconds)
+    $env:STRIDE_ATTACHMENT_BUDGET_SECONDS = '999'
+    try { $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine'))) } finally { Remove-Item Env:STRIDE_ATTACHMENT_BUDGET_SECONDS -ErrorAction SilentlyContinue }
+    Assert-Eq "48h: a budget over 120 s is ignored" '120' ([string](Get-G48Manifest $g48d).caps.budget_seconds)
+
+    # 48j: number ids must be plain digits, ids are at most 64 characters, and
+    # a byte_size that is not a non-negative integer is too_large -- all
+    # without a request. The claim text is written by hand so 1e3 and 1.5 stay
+    # literal.
+    $g48d = New-G48Project 'j'
+    $g48LongId = 'a' * 65
+    $g48Text = '{"data":{"id":77,"identifier":"W5001","attachments":[' +
+        '{"id":1e3,"filename":"n","byte_size":3,"download_url":"/api/tasks/77/attachments/1000"},' +
+        '{"id":"' + $g48LongId + '","filename":"n","byte_size":3,"download_url":"/api/tasks/77/attachments/862"},' +
+        '{"id":-5,"filename":"n","byte_size":3,"download_url":"/api/tasks/77/attachments/862"},' +
+        '{"id":905,"filename":"s","byte_size":"12","download_url":"/api/tasks/77/attachments/905"},' +
+        '{"id":906,"filename":"s","byte_size":-1,"download_url":"/api/tasks/77/attachments/906"},' +
+        '{"id":907,"filename":"s","byte_size":1.5,"download_url":"/api/tasks/77/attachments/907"}]}}'
+    $null = Invoke-G48Claim $g48d $g48Text
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48j: exponent, long and negative ids are unsafe_id; bad sizes too_large" `
+        'unsafe_id,unsafe_id,unsafe_id,too_large,too_large,too_large' (($m.attachments | ForEach-Object { $_.reason }) -join ',')
+    Assert-Eq "48j: and none of them is requested" '0' ([string]@(Get-G48Requested).Count)
+
+    # 48k: no token, or no API URL, fetches nothing and records transport; the
+    # URL in the intercepted command is never a fallback.
+    $g48d = New-G48Project 'k'
+    [System.IO.File]::WriteAllText((Join-Path $g48d '.stride_auth.md'), ("- **API URL:** ``{0}```n" -f $g48Api))
+    $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48k: no API token records transport with no request" 'failed/transport/0' `
+        ("{0}/{1}/{2}" -f $m.attachments[0].status, $m.attachments[0].reason, @(Get-G48Requested).Count)
+    [System.IO.File]::WriteAllText((Join-Path $g48d '.stride_auth.md'), ("- **API Token:** ``{0}```n" -f $g48Token))
+    $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48k: no API URL records transport with no request" 'failed/transport/0' `
+        ("{0}/{1}/{2}" -f $m.attachments[0].status, $m.attachments[0].reason, @(Get-G48Requested).Count)
+
+    # A plain-http URL not spelled exactly as loopback is refused. LOCALHOST
+    # reaches the stand-in listener (its host match ignores case), so the
+    # refusal is the only thing stopping the request.
+    [System.IO.File]::WriteAllText((Join-Path $g48d '.stride_auth.md'), ("- **API URL:** ``http://LOCALHOST:{0}```n- **API Token:** ``{1}```n" -f $g48Port, $g48Token))
+    $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48k: a non-loopback http API URL records transport with no request" 'failed/transport/0' `
+        ("{0}/{1}/{2}" -f $m.attachments[0].status, $m.attachments[0].reason, @(Get-G48Requested).Count)
+
+    # 48l: a re-claim replaces the directory, and a re-claim with no
+    # attachments removes it.
+    $g48d = New-G48Project 'l'
+    $g48Td = Join-Path $g48d '.stride/attachments/W5001'
+    New-Item -ItemType Directory -Path $g48Td -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $g48Td '999-stale.txt'), "stale`n")
+    [System.IO.File]::WriteAllText((Join-Path $g48Td 'manifest.json'), "{`"manifest_version`":1,`"stale`":true}`n")
+    $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+    Assert-Eq "48l: a re-claim replaces the previous directory" '862-c,manifest.json' `
+        ((Get-ChildItem -LiteralPath $g48Td -Force | Sort-Object Name | ForEach-Object { $_.Name }) -join ',')
+    Assert-Eq "48l: and its manifest describes this claim" 'False' `
+        ([string]((Get-G48Manifest $g48d).PSObject.Properties.Name -contains 'stale'))
+    $null = Invoke-G48Claim $g48d '{"data":{"id":77,"identifier":"W5001","attachments":[]}}'
+    Assert-Eq "48l: a re-claim with no attachments removes the stale directory" 'False' ([string](Test-Path -LiteralPath $g48Td))
+
+    # 48m: the budget is a wall clock across the whole download: a request that
+    # stalls past it fails time_budget, and the next entry is skipped without a
+    # request. Last in the try, because the stall holds the one-at-a-time
+    # listener for its whole length.
+    $g48Map = @{}
+    $g48Map['/api/tasks/77/attachments/870'] = (New-G48Route -Body 'slow body' -Sleep 8)
+    $g48Map['/api/tasks/77/attachments/871'] = (New-G48Route 'never reached')
+    Set-G48Routes $g48Map
+    $g48d = New-G48Project 'm'
+    $env:STRIDE_ATTACHMENT_BUDGET_SECONDS = '2'
+    $g48Sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try { $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 870 'slow' 'slow body'), (New-G48Att 871 'next' 'never reached'))) } finally { Remove-Item Env:STRIDE_ATTACHMENT_BUDGET_SECONDS -ErrorAction SilentlyContinue }
+    $g48Sw.Stop()
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48m: a stalled request fails time_budget and the next is skipped time_budget" 'failed/time_budget,skipped/time_budget' `
+        (($m.attachments | ForEach-Object { "{0}/{1}" -f $_.status, $_.reason }) -join ',')
+    Assert-Eq "48m: the request was cut off near the 2 s budget, not at the 8 s stall" 'True' ([string]($g48Sw.Elapsed.TotalSeconds -lt 7))
+    Assert-Eq "48m: the entry after the deadline was never requested" 'False' ([string]((Get-G48Requested) -contains '/api/tasks/77/attachments/871'))
+} finally {
+    Stop-Job $g48Job -ErrorAction SilentlyContinue
+    Remove-Job $g48Job -Force -ErrorAction SilentlyContinue
+}
+
+# 48i: the curl-guard exemption -- exactly a GET of an attachments path whose
+# -o target is under <project>/.stride/attachments/. Everything else is refused.
+$g48gd = New-G48Project 'guard'
+New-Item -ItemType Directory -Path (Join-Path $g48gd '.stride/attachments/W5001') -Force | Out-Null
+$g48Root = ([System.IO.Path]::GetFullPath($g48gd)).TrimEnd('\', '/').Replace('\', '/')
+$g48T = "$g48Root/.stride/attachments/W5001/812-shot.png"
+$g48U = 'https://www.stridelikeaboss.com/api/tasks/77/attachments/812'
+function Invoke-G48Guard {
+    param([string]$Cmd)
+    $in = @{ tool_input = @{ command = $Cmd } } | ConvertTo-Json -Compress -Depth 4
+    return (Invoke-HookScript -InputJson $in -Phase 'pre' -ProjectDir $g48gd).ExitCode
+}
+Assert-Exit "48i: a GET of an attachments path with -o under .stride/attachments/ is allowed" 0 (Invoke-G48Guard "curl -sS -H `"Authorization: Bearer `$T`" -o `"$g48T`" `"$g48U`"")
+Assert-Exit "48i: a clustered -o is allowed" 0 (Invoke-G48Guard "curl -sSo $g48T $g48U")
+Assert-Exit "48i: allowlisted options and a quoted `${VAR} base are allowed" 0 (Invoke-G48Guard "curl -sS --fail --max-time 30 -A curl/8 -o $g48T `"`${STRIDE_API_URL}/api/tasks/77/attachments/812`"")
+Assert-Exit "48i: an unquoted `$VAR base is refused" 2 (Invoke-G48Guard "curl -sS -o $g48T `$STRIDE_API_URL/api/tasks/77/attachments/812")
+Assert-Exit "48i: an empty word is refused" 2 (Invoke-G48Guard "curl -sS -o $g48T '' $g48U")
+Assert-Exit "48i: an empty option value is refused too" 2 (Invoke-G48Guard "curl -sS -A '' -o $g48T $g48U")
+Assert-Exit "48i: -o outside .stride/attachments/ is still refused" 2 (Invoke-G48Guard "curl -sS -o /tmp/812.png $g48U")
+Assert-Exit "48i: -o elsewhere under .stride/ is still refused" 2 (Invoke-G48Guard "curl -sS -o $g48Root/.stride/812.png $g48U")
+Assert-Exit "48i: -o onto a manifest is refused" 2 (Invoke-G48Guard "curl -sS -o $g48Root/.stride/attachments/W5001/manifest.json $g48U")
+Assert-Exit "48i: a non-GET with -o is refused" 2 (Invoke-G48Guard "curl -sS -X POST -o $g48T $g48U")
+Assert-Exit "48i: a pipe into jq on an attachments path is still refused" 2 (Invoke-G48Guard "curl -sS $g48U | jq .")
+Assert-Exit "48i: a stdout redirect on an attachments path is still refused" 2 (Invoke-G48Guard "curl -sS $g48U > $g48T")
+Assert-Exit "48i: an exempt curl cannot carry a second, unsafe one" 2 (Invoke-G48Guard "curl -sS -o $g48T $g48U; curl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete")
+Assert-Exit "48i: a non-attachments path with the exempt target is refused" 2 (Invoke-G48Guard "curl -sS -o $g48T https://www.stridelikeaboss.com/api/tasks/77/complete")
+Assert-Exit "48i: a `$VAR-prefixed target is refused" 2 (Invoke-G48Guard "curl -sS -o `"`$CLAUDE_PROJECT_DIR/.stride/attachments/W5001/812-shot.png`" $g48U")
+Assert-Exit "48i: --location-trusted is not on the allowlist" 2 (Invoke-G48Guard "curl -sS --location-trusted -o $g48T $g48U")
+Assert-Exit "48i: -v is not on the allowlist" 2 (Invoke-G48Guard "curl -v -o $g48T $g48U")
+Assert-Exit "48i: a relative target is refused" 2 (Invoke-G48Guard "curl -sS -o .stride/attachments/W5001/812-shot.png $g48U")
+Assert-Exit "48i: a second URL is refused" 2 (Invoke-G48Guard "curl -sS -o $g48T $g48U https://www.stridelikeaboss.com/x")
+Assert-Exit "48i: a pipe into tee is refused" 2 (Invoke-G48Guard "curl -sS -o $g48T $g48U | tee x")
+Assert-Exit "48i: a && list is refused" 2 (Invoke-G48Guard "curl -sS -o $g48T $g48U && echo done")
+Assert-Exit "48i: an unquoted glob in an option value is refused" 2 (Invoke-G48Guard "curl -sS -H X:* -o $g48T $g48U")
+Assert-Exit "48i: an unquoted brace expansion is refused" 2 (Invoke-G48Guard "curl -sS -A a{b,c} -o $g48T $g48U")
+Assert-Exit "48i: an operator inside an option value is refused" 2 (Invoke-G48Guard "curl -sS -A x|tee -o $g48T $g48U")
+Assert-Exit "48i: a command substitution is never exempt" 2 (Invoke-G48Guard "curl -sS -o $g48T `"`$(cat u)/api/tasks/77/attachments/812`"")
 
 # ============================================================
 # Summary

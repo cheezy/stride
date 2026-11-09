@@ -36,18 +36,38 @@ applicable, with its reason, and is never dropped from the table.
 | Port | Download task | Use task | Status |
 |---|---|---|---|
 | `stride` | W2522 — Download task attachments in the stride claim hook (stride-hook.sh and stride-hook.ps1 in lockstep) | W2523 — Use downloaded attachments in the stride workflow, its agents and the Step 7 cleanup | landed in 1.88.0 |
-| `stride-codex` | W2528 — Download task attachments in the stride-codex PostToolUse claim arm | W2529 — Use downloaded attachments in stride-codex skills and agents, and remove them at Step 8 | planned |
-| `stride-copilot` | W2526 — Download task attachments from the observed claim response in the stride-copilot hook | W2527 — Use downloaded attachments in stride-copilot's reading, explorer and self-review steps, and add Step 7 cleanup | planned |
+| `stride-codex` | W2528 — Download task attachments in the stride-codex PostToolUse claim arm | W2529 — Use downloaded attachments in stride-codex skills and agents, and remove them at Step 8 | landed in stride-codex 1.42.0 |
+| `stride-copilot` | W2526 — Download task attachments from the observed claim response in the stride-copilot hook | W2527 — Use downloaded attachments in stride-copilot's reading, explorer and self-review steps, and add Step 7 cleanup | landed in stride-copilot 2.45.0 |
 | `stride-copilot-lite` | — | — | not applicable: it issues no Stride API request, so it never sees an attachment list |
-| `stride-gemini` | W2524 — Download task attachments in the stride-gemini claim hook (stride-hook.sh and stride-hook.ps1) | W2525 — Use downloaded attachments in stride-gemini skills and agents, and remove them at Step 7 | planned |
+| `stride-gemini` | W2524 — Download task attachments in the stride-gemini claim hook (stride-hook.sh and stride-hook.ps1) | W2525 — Use downloaded attachments in stride-gemini skills and agents, and remove them at Step 7 | landed in stride-gemini 1.54.0 |
 | `stride-lite` | — | — | not applicable: it issues no Stride API request, so it never sees an attachment list |
-| `stride-opencode` | W2530 — Download and remove task attachments in the stride-opencode plugin (new src/attachments.ts) | W2531 — Use downloaded attachments in stride-opencode skills and agents | planned |
-| `stride-pi` | W2532 — Download task attachments in the stride-pi hook-bridge extension (new attachments.ts) | W2533 — Use downloaded attachments in stride-pi skills and both agent copies, and add Step 7 cleanup | planned |
+| `stride-opencode` | W2530 — Download and remove task attachments in the stride-opencode plugin (new src/attachments.ts) | W2531 — Use downloaded attachments in stride-opencode skills and agents | landed in stride-opencode 1.43.0 |
+| `stride-pi` | W2532 — Download task attachments in the stride-pi hook-bridge extension (new attachments.ts) | W2533 — Use downloaded attachments in stride-pi skills and both agent copies, and add Step 7 cleanup | landed in stride-pi 1.23.0 |
 | `stride-opencode-lite` | — | — | not applicable: it issues no Stride API request, so it never sees an attachment list |
 
 `stride` goes first, as the source of record. Each other port's download task
 depends on W2522, and each use task depends on W2523 and on that port's own
 download task. `stride-import` is not a registry port, so it has no row here.
+
+**Differences recorded at release (2026-11-09).** Every port shipped the
+download and the hand-off, but no port has had a live end-to-end run with a
+PNG, a PDF and a text attachment. Every test suite is hermetic. Where a port
+differs from this contract or could not verify it:
+
+- `stride-codex` 1.42.0: whether `view_image` shows the attachments was not
+  checked, and no Codex CLI version is recorded. Its PreToolUse guard does not
+  refuse `curl -o` on attachment paths. That gap predates this goal.
+- `stride-copilot` 2.45.0: the `read` tool's PNG and PDF behaviour was not
+  checked, and no Copilot CLI version is recorded. The README describes the
+  fallback to filename, type and size.
+- `stride-gemini` 1.54.0: in a git repository, Gemini CLI's default
+  `respectGitIgnore` is expected to make `read_file` refuse the attachments,
+  because `.stride/attachments/.gitignore` holds `*`. That expectation comes
+  from reading the source, not from a run. Turning the filter off is left to
+  the operator, because it also exposes `.stride_auth.md`. Its BeforeTool
+  re-fetch exemption is narrower than stride's.
+- `stride-pi` 1.23.0: there is no mechanical curl guard. The rule against
+  `curl -o` exists only as prompt text, a gap that predates this goal.
 
 ## The server shape this goal designs against
 

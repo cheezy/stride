@@ -3026,7 +3026,7 @@ function Get-StrideGuardCmdWord {
 # stride-hook.sh's stride_guard_attachment_exempt, rule for rule; read that
 # comment for why each rule exists. A GET of /api/tasks/<id>/attachments/<id>,
 # one simple curl and nothing else (no operator, substitution, unquoted glob or
-# $, or empty word),
+# $, double-quoted $ other than a plain $NAME or ${NAME}, or empty word),
 # every option on the allowlist, exactly one -o/--output, whose target is an
 # absolute literal path under this project's .stride/attachments/<dir>/<file>.
 # Returns $true only for an exempt command.
@@ -3054,7 +3054,9 @@ function Test-StrideAttachmentCurlExempt {
                 $d = $Cmd[$i + 1]
                 if ($d -eq [char]'"' -or $d -eq [char]'\' -or $d -eq [char]'$') { [void]$w.Append($d); $i++; continue }
             }
-            if ($c -eq [char]'$' -and ($i + 1) -lt $n -and $Cmd[$i + 1] -eq [char]'(') { return $false }
+            # Inside double quotes only a plain $NAME or ${NAME} is one word
+            # for certain; "$@", "${a[@]}", "$*" and the rest are refused.
+            if ($c -eq [char]'$' -and -not ([regex]'\G(?:[A-Za-z_]|\{[A-Za-z_][A-Za-z0-9_]*\})').Match($Cmd, $i + 1).Success) { return $false }
             [void]$w.Append($c)
             continue
         }

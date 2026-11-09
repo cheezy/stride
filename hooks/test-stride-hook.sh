@@ -19422,6 +19422,16 @@ if command -v jq > /dev/null 2>&1; then
   assert_exit "76b: an empty word is refused (curl would read it as a second URL)" 2 "$G76_RC"
   g76_run "curl -sS -A '' -o $G76_T $G76_U"
   assert_exit "76b: an empty option value is refused too" 2 "$G76_RC"
+  # A quoted "$@", "${a[@]}" or "$*" can expand to zero or several words,
+  # which would re-pair the words after it; only a plain $NAME is allowed.
+  g76_run "curl -sS -A \"\$@\" -o $G76_T $G76_U"
+  assert_exit "76b: a quoted \"\$@\" is refused (it can expand to zero words)" 2 "$G76_RC"
+  g76_run "curl -sS -A \"\${a[@]}\" -o $G76_T $G76_U"
+  assert_exit "76b: a quoted \"\${a[@]}\" is refused" 2 "$G76_RC"
+  g76_run "curl -sS -A \"\$*\" -o $G76_T $G76_U"
+  assert_exit "76b: a quoted \"\$*\" is refused" 2 "$G76_RC"
+  g76_run "curl -sS -A \"\$UA\" -o $G76_T $G76_U"
+  assert_exit "76a: a quoted plain \$NAME option value is allowed" 0 "$G76_RC"
   g76_run "curl --output=$G76_T -X GET $G76_U"
   assert_exit "76a: --output=VALUE with an explicit -X GET is allowed" 0 "$G76_RC"
 
@@ -19496,8 +19506,12 @@ else
 fi
 
 # 76c: the documentation names the exemption and the download.
+# Each needle occurs once in the README, in the paragraph it names, so
+# losing that paragraph fails the assertion.
 assert_contains "76c: README documents the attachment download" \
-  ".stride/attachments/" "$(cat "$SCRIPT_DIR/../README.md")"
+  "**Task attachments (since W2522).** When that same proven claim lists" "$(cat "$SCRIPT_DIR/../README.md")"
+assert_contains "76c: README documents the re-fetch exemption" \
+  "**Attachment re-fetch exemption (since W2522).** The one \`-o\` the guard allows" "$(cat "$SCRIPT_DIR/../README.md")"
 
 # ============================================================
 # Summary

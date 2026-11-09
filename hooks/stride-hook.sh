@@ -5663,8 +5663,11 @@ stride_guard_cmd_word() {
 #     `)`, newline, backtick or command substitution anywhere (even inside
 #     double quotes), no unquoted glob or brace character (`* ? [ ] { } ~`),
 #     no unquoted `$` (a $NAME base must be double-quoted, so the shell
-#     cannot split its value into extra words) and no empty word, so every
-#     word judged here is exactly a word the shell will pass. Rules 2 and 3
+#     cannot split its value into extra words), no `$` inside double quotes
+#     except a plain $NAME or ${NAME} (a quoted "$@", "${a[@]}" or "$*" can
+#     expand to zero or several words and re-pair the words after it), and no
+#     empty word, so every word judged here is exactly one word the shell will
+#     pass. Rules 2 and 3
 #     therefore have nothing left to judge, so returning early cannot hide a
 #     pipe or a redirect;
 #   * the command word is curl itself, with no wrapper or assignment before it;
@@ -5705,7 +5708,9 @@ stride_guard_attachment_exempt() {
           if (c == "\"") { q = ""; continue }
           if (c == "\\" && i < n) { d = substr(s, i + 1, 1)
             if (d == "\"" || d == "\\" || d == "$") { w = w d; i++; continue } }
-          if (c == "$" && substr(s, i + 1, 1) == "(") { bad = 1; break }
+          # Inside double quotes only a plain $NAME or ${NAME} is one word
+          # for certain; "$@", "${a[@]}", "$*" and the rest are refused.
+          if (c == "$" && substr(s, i + 1) !~ /^([A-Za-z_]|\{[A-Za-z_][A-Za-z0-9_]*\})/) { bad = 1; break }
           w = w c; continue
         }
         if (c == " " || c == "\t") {

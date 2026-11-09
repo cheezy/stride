@@ -13397,6 +13397,11 @@ Assert-Exit "48i: allowlisted options and a quoted `${VAR} base are allowed" 0 (
 Assert-Exit "48i: an unquoted `$VAR base is refused" 2 (Invoke-G48Guard "curl -sS -o $g48T `$STRIDE_API_URL/api/tasks/77/attachments/812")
 Assert-Exit "48i: an empty word is refused" 2 (Invoke-G48Guard "curl -sS -o $g48T '' $g48U")
 Assert-Exit "48i: an empty option value is refused too" 2 (Invoke-G48Guard "curl -sS -A '' -o $g48T $g48U")
+# A quoted "$@", "${a[@]}" or "$*" can expand to zero or several words.
+Assert-Exit "48i: a quoted `"`$@`" is refused" 2 (Invoke-G48Guard "curl -sS -A `"`$@`" -o $g48T $g48U")
+Assert-Exit "48i: a quoted `"`${a[@]}`" is refused" 2 (Invoke-G48Guard "curl -sS -A `"`${a[@]}`" -o $g48T $g48U")
+Assert-Exit "48i: a quoted `"`$*`" is refused" 2 (Invoke-G48Guard "curl -sS -A `"`$*`" -o $g48T $g48U")
+Assert-Exit "48i: a quoted plain `$NAME option value is allowed" 0 (Invoke-G48Guard "curl -sS -A `"`$UA`" -o $g48T $g48U")
 Assert-Exit "48i: -o outside .stride/attachments/ is still refused" 2 (Invoke-G48Guard "curl -sS -o /tmp/812.png $g48U")
 Assert-Exit "48i: -o elsewhere under .stride/ is still refused" 2 (Invoke-G48Guard "curl -sS -o $g48Root/.stride/812.png $g48U")
 Assert-Exit "48i: -o onto a manifest is refused" 2 (Invoke-G48Guard "curl -sS -o $g48Root/.stride/attachments/W5001/manifest.json $g48U")

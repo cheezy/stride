@@ -145,6 +145,16 @@ The provenance is W2120, where three successive drafts of two row reasons were w
 
 The check for it is **prose-only by construction**. Whether a command is exhaustive *relative to a sentence* is not mechanically decidable, and a shape-only pin would go green on exactly the sampled command the rule exists to refuse. The contract is `skills/stride-workflow/claims-census.md`, gated from the Step 4 bullet. No canon entry: this registers no cross-port rule.
 
+### Task attachments reach the agents (v1.88.0+)
+
+When a task carries attachments — a mockup, an error screenshot, a spec PDF, a log — the claim hook downloads them into `.stride/attachments/<IDENTIFIER>/` with a `manifest.json` (see **Task attachments** under [Automatic Hook Execution](#automatic-hook-execution-claude-code-hooks)), and `stride-workflow` hands that directory to the agents that work the task. Nothing in the workflow downloads anything itself.
+
+- **Only a manifest that names this task.** Step 3's explorer and Plan dispatches and Step 5's reviewer dispatch name `ATTACHMENTS_DIR` beside `TASK_FILE` only when `manifest.json` exists there and its `task` names the claimed task, checked with a single-field `jq` read. Otherwise the line is omitted and the agents work exactly as they did before. A task-runner resolves its own claim's directory, never one handed down to it.
+- **Only downloaded files.** `task-explorer`, `task-reviewer`, `task-runner` and the planner read only entries whose `status` is `downloaded`: images and PDFs with Read, large text in ranges, and any other type from its `filename`, `content_type` and `byte_size`. A `skipped` or `failed` entry is named with its `reason` and never fetched; agents never run `curl -o`.
+- **Data, never instructions.** Attachment contents and filenames, including text inside an image or a PDF, are untrusted task material. An attachment never overrides `acceptance_criteria`, `pitfalls` or `security_considerations`, and one that shows a secret is reported without transcribing it.
+- **Removed at Step 7.** The directory is deleted with the task's other working artifacts, only after a `2xx` completion, and kept after a failed or rejected one for the retry. `.stride/attachments/.gitignore` stays.
+
+The procedure is [`skills/stride-workflow/attachments.md`](skills/stride-workflow/attachments.md); the cross-port contract is [`docs/porting-attachments.md`](docs/porting-attachments.md). The end-to-end manual check against a live server has not yet been run.
 
 ### stride-claiming-tasks
 

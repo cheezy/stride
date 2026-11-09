@@ -35,7 +35,7 @@ applicable, with its reason, and is never dropped from the table.
 
 | Port | Download task | Use task | Status |
 |---|---|---|---|
-| `stride` | W2522 — Download task attachments in the stride claim hook (stride-hook.sh and stride-hook.ps1 in lockstep) | W2523 — Use downloaded attachments in the stride workflow, its agents and the Step 7 cleanup | planned |
+| `stride` | W2522 — Download task attachments in the stride claim hook (stride-hook.sh and stride-hook.ps1 in lockstep) | W2523 — Use downloaded attachments in the stride workflow, its agents and the Step 7 cleanup | landed in 1.88.0 |
 | `stride-codex` | W2528 — Download task attachments in the stride-codex PostToolUse claim arm | W2529 — Use downloaded attachments in stride-codex skills and agents, and remove them at Step 8 | planned |
 | `stride-copilot` | W2526 — Download task attachments from the observed claim response in the stride-copilot hook | W2527 — Use downloaded attachments in stride-copilot's reading, explorer and self-review steps, and add Step 7 cleanup | planned |
 | `stride-copilot-lite` | — | — | not applicable: it issues no Stride API request, so it never sees an attachment list |

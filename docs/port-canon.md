@@ -62,11 +62,19 @@ gate itself — a record, not a contract.
 > of a deliberate version bump rather than a fault. A recorded deferral is not
 > one of the grounds — deferred cells cannot make the script exit non-zero.
 > What is gated is `--self-test`, which is hermetic. Revisit this if the scan
-> ever gains a mode scoped to a single repository — and before wiring it into
-> anything automated, close **D301**, which records that the `--ports-parent`
-> and `--canon` overrides are not confined to the fleet trees. That is harmless
-> while the scan is advisory and a caller needs local shell access to set argv;
-> it is the property that has to hold first if that ever stops being true.
+> ever gains a mode scoped to a single repository. The precondition this
+> paragraph used to name for that, **D301**, is now met: both halves refuse a
+> `--ports-parent` or `--canon` that does not resolve, physically, under the
+> repository's parent directory or the system temp directory, with the existing
+> exit-2 `GATE ERROR`, before reading either path, and apply the same test to
+> each port and catalog directory, since a symlinked one is descended. So the
+> overrides can no longer aim the walk at an arbitrary directory, and the
+> tokenizer's syntax errors report position rather than echoing the token.
+> Schema-validation messages still name the value they refuse. One residual is
+> stated rather than closed: the system temp directory is an allowed root, and
+> on a host where that is a shared `/tmp` any local user can write a tree there
+> for the scan to walk. Wiring the scan in is still a decision for the grounds
+> above; this one no longer blocks it.
 
 > **The last two `deferred` cells were the failure this file exists to
 > prevent, occurring inside this file.** `deferred` is the only status the

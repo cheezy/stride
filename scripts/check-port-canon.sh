@@ -425,7 +425,9 @@ usage: check-port-canon.sh [--ports-parent DIR] [--canon PATH] [-h|--help]
   -h, --help          Print this message.
 
 --ports-parent and --canon exist so the check can be exercised against a
-synthetic fixture tree. Neither is needed in normal use.
+synthetic fixture tree. Neither is needed in normal use. Each must resolve,
+physically, under the repository's parent directory or the system temp
+directory; anything else is refused with exit 2 before it is read.
 
 Exit codes: 0 all clear, 1 drift found, 2 no verdict possible.
 The PowerShell half accepts these same spellings as well as its own.
@@ -474,7 +476,7 @@ self_test() {
   # tmp is deliberately NOT local: the EXIT trap fires after this function has
   # returned, and a local would be out of scope by then -- which set -u makes a
   # fatal error rather than a silent one.
-  local pass fail out rc f3
+  local pass fail out rc f3 _outside
   tmp="$(mktemp -d)" || { echo "GATE ERROR: could not create a temp dir for --self-test" >&2; exit 2; }
   # Single-quoted body: $tmp is resolved by the shell when the trap fires,
   # never interpolated into the trap string. An interpolated value containing a
@@ -1752,6 +1754,61 @@ planted.md"
   out="$(bash "$SELF" --ports-parent /nonexistent/nope 2>&1)"; rc=$?
   st_assert "a missing ports parent exits 2" 2 "$rc" "ports parent directory not found" "$out"
 
+  # --- D301: both path overrides are confined to an allowed root, judged on
+  # --- the PHYSICAL path. Every other case here that reaches a scan passes
+  # --- overrides into this temp dir, so all of those are the permitted path
+  # --- too (the missing-path cases above never reach the check,
+  # --- which skips a path that does not exist).
+  mkdir -p "$tmp/conf/alpha" "$tmp/conf/beta"
+  st_canon "$tmp/conf.md" 1
+  printf 'x\n<!-- canon:rule-one v1 -->\n' > "$tmp/conf/alpha/a.md"
+  printf 'x\n<!-- canon:rule-one v1 -->\n' > "$tmp/conf/beta/b.md"
+  out="$(st_run "$tmp/conf.md" /)"; rc=$?
+  st_assert "a --ports-parent outside the allowed roots exits 2" 2 "$rc" "ports-parent resolves outside the allowed roots" "$out"
+  out="$(st_run /etc/hosts "$tmp/conf")"; rc=$?
+  st_assert "a --canon outside the allowed roots exits 2" 2 "$rc" "canon resolves outside the allowed roots" "$out"
+  # Two levels up from the sandbox is the temp root's parent: the spelling
+  # starts with the temp root, the physical path does not.
+  out="$(st_run "$tmp/conf.md" "$tmp/../..")"; rc=$?
+  st_assert "a ports parent spelled under the temp root but resolving outside it exits 2" 2 "$rc" "ports-parent resolves outside the allowed roots" "$out"
+  out="$(cd "$tmp" && bash "$SELF" --canon conf.md --ports-parent conf 2>&1)"; rc=$?
+  st_assert "relative overrides resolving inside an allowed root are not refused" 0 "$rc" "ok: rule-one v1" "$out"
+  out="$(st_run "$ROOT/docs/port-canon.md" "$tmp/conf")"
+  st_refute "the repository's own canon is inside an allowed root" "outside the allowed roots" "$out"
+  out="$(st_run "$tmp/conf.md" "$ROOT/..")"
+  st_refute "the default ports parent is inside an allowed root" "outside the allowed roots" "$out"
+  # A symlinked port or catalog directory is descended, so its PHYSICAL target
+  # is confined as well. The link points outside every allowed root; rm -rf
+  # removes the link, never its target. /var/empty is preferred where it exists
+  # because it is empty: if confinement ever regresses, the walk it lets through
+  # finishes at once and the case fails, rather than hanging the suite on a walk
+  # of a large tree. Two levels above the sandbox is the portable fallback.
+  _outside="$tmp/../.."
+  [ -d /var/empty ] && _outside=/var/empty
+  mkdir -p "$tmp/escp/beta"
+  printf 'x\n<!-- canon:rule-one v1 -->\n' > "$tmp/escp/beta/b.md"
+  ln -s "$_outside" "$tmp/escp/alpha"
+  out="$(st_run "$tmp/conf.md" "$tmp/escp")"; rc=$?
+  st_assert "a symlinked port directory resolving outside the allowed roots exits 2" 2 "$rc" "port dir .alpha. resolves outside the allowed roots" "$out"
+  rm -f "$tmp/escp/alpha"
+  mkdir -p "$tmp/escc/alpha" "$tmp/escc/beta" "$tmp/escc/stride-codex-marketplace/plugins"
+  printf 'x\n<!-- canon:rule-one v1 -->\n' > "$tmp/escc/alpha/a.md"
+  printf 'x\n<!-- canon:rule-one v1 -->\n' > "$tmp/escc/beta/b.md"
+  ln -s "$_outside" "$tmp/escc/stride-codex-marketplace/plugins/stride-codex"
+  out="$(st_run "$tmp/conf.md" "$tmp/escc")"; rc=$?
+  st_assert "a symlinked catalog directory resolving outside the allowed roots exits 2" 2 "$rc" "catalog dir .stride-codex-marketplace/plugins/stride-codex. resolves outside the allowed roots" "$out"
+  rm -f "$tmp/escc/stride-codex-marketplace/plugins/stride-codex"
+
+  # --- D301: a parser failure reports position, never bytes from the file.
+  { echo "# canon"; echo "${f3}json"; echo '{ "canon_schema_version": LEAKEDTOKEN }'; echo "${f3}"; } > "$tmp/leak1.md"
+  out="$(st_run "$tmp/leak1.md" "$tmp/conf")"; rc=$?
+  st_assert "a bad json token in the canon exits 2" 2 "$rc" "json block #1" "$out"
+  st_refute "a bad json token is not echoed from the canon" "LEAKEDTOKEN" "$out"
+  { echo "# canon"; echo "${f3}json"; echo '{ "LEAKEDKEY" 1 }'; echo "${f3}"; } > "$tmp/leak2.md"
+  out="$(st_run "$tmp/leak2.md" "$tmp/conf")"; rc=$?
+  st_assert "a key with no colon in the canon exits 2" 2 "$rc" "json block #1" "$out"
+  st_refute "a key with no colon is not echoed from the canon" "LEAKEDKEY" "$out"
+
   echo ""
   echo "self-test: $pass passed, $fail failed"
   rm -rf "$tmp"
@@ -1809,6 +1866,64 @@ if [ -e "$CANON" ]; then
 fi
 if [ -d "$PORTS_PARENT" ]; then
   PORTS_PARENT="$(cd -P "$PORTS_PARENT" && pwd -P)"
+fi
+
+# D301: confine both paths to an allowed root BEFORE anything reads them.
+# Every traversal defence below works one level DOWN, inside a chosen parent:
+# the registry dir charset test, the ./.. refusal, the symlink refusal, the
+# canon self-exclusion. None of them constrained the parent itself, so a caller
+# controlling --ports-parent and --canon could aim the walk at any directory.
+# Harmless while nothing automated calls this script; the canon's Release gate
+# section names this as the property that must hold before anything does.
+#
+# The allowed roots are the repository's parent directory -- where the default
+# ports parent and the default canon both live, in its physical spelling and in
+# the logical one the default was computed from -- and the system temp
+# directory, because --self-test and the hook suite's cross-check legitimately
+# build their fixture trees under mktemp -d. Guarding the flags instead (bare
+# runs only) would have broken all three of those callers.
+#
+# The temp root comes from TMPDIR, an environment value. That is deliberate,
+# not an oversight: a caller who controls this process's environment controls
+# PATH and so already chooses what runs, so the boundary defended here is the
+# argument vector, not the environment.
+#
+# The comparison is on PHYSICAL paths only. Both paths were resolved with -P
+# just above, and each root is resolved the same way here, so a lexical prefix
+# such as "$TMPDIR/../.." is judged by where it lands, never by how it was
+# spelled. The trailing "/" in the pattern is the boundary: /x/kanban-evil does
+# not sit under /x/kanban. A path that does not exist is left to the refusals
+# below, which already end the run without reading it.
+#
+# This is a gate fault, not a finding: an out-of-bounds path means the run
+# proved nothing, which is exactly what exit 2 already means.
+_croot_phys="$(cd -P "$ROOT" 2>/dev/null && pwd -P)"
+_allowed_roots=(
+  "$(cd -P "$(dirname "$_croot_phys")" 2>/dev/null && pwd -P)"
+  "$(cd -P "$(cd "$ROOT/.." 2>/dev/null && pwd)" 2>/dev/null && pwd -P)"
+  "$(cd -P "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P)"
+)
+within_allowed_root() { # $1 = a physical absolute path
+  local _r
+  for _r in "${_allowed_roots[@]}"; do
+    [ -n "$_r" ] || continue
+    [ "$_r" = "/" ] && return 0
+    case "$1" in
+      "$_r"|"$_r"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+# A canon still standing on a symlink after the 40-hop bound above was not
+# resolved at all, so where it lands is unknown: refuse it as outside rather
+# than judge the link's own spelling.
+if [ -e "$CANON" ] && { [ -L "$CANON" ] || ! within_allowed_root "$CANON"; }; then
+  echo "GATE ERROR: --canon resolves outside the allowed roots (the repository's parent directory or the system temp directory): $CANON" >&2
+  exit 2
+fi
+if [ -d "$PORTS_PARENT" ] && ! within_allowed_root "$PORTS_PARENT"; then
+  echo "GATE ERROR: --ports-parent resolves outside the allowed roots (the repository's parent directory or the system temp directory): $PORTS_PARENT" >&2
+  exit 2
 fi
 
 # D298: -f as well as -r. A named pipe is READABLE by -r, so a FIFO handed in
@@ -1896,6 +2011,14 @@ function safe(v, what) {
 }
 
 # --- tokenizer -------------------------------------------------------------
+# D301: a tokenizer failure reports POSITION only -- block number and line --
+# never the offending bytes. Two messages here used to interpolate the token or
+# object key they choked on, so a file handed in as --canon that merely carried
+# a json fence could have a fragment of itself echoed to stderr. The PowerShell
+# half already reported position only ("did not parse as json"), so this change
+# is bash-only and brings the halves into line. Scope, stated so nobody reads
+# more into it: the schema-validation messages further down still name the
+# value they refuse, in both halves, for a canon that tokenizes cleanly.
 function tok_init(s) { buf = s; pos = 1; tlen = length(s) }
 function skipws(c) {
   while (pos <= tlen) { c = substr(buf, pos, 1); if (c == " " || c == "\t" || c == "\n" || c == "\r") pos++; else break }
@@ -1931,7 +2054,7 @@ function nexttok(   c, start, out, esc, u) {
   tval = substr(buf, start, pos - start)
   if (tval == "true" || tval == "false" || tval == "null") return "LIT"
   if (tval ~ /^-?[0-9]+(\.[0-9]+)?$/) return "NUM"
-  fail("bad token \"" tval "\" in json block #" blocknum " (line " blockline ")")
+  fail("bad token in json block #" blocknum " (line " blockline ")")
 }
 
 # --- recursive-descent value reader; flattens into V[path] -----------------
@@ -1942,7 +2065,7 @@ function readval(path,   t, k, i, kt) {
     do {
       if (kt != "STR") fail("expected object key in json block #" blocknum " (line " blockline ")")
       k = tval
-      if (nexttok() != ":") fail("expected ':' after key \"" k "\" in json block #" blocknum)
+      if (nexttok() != ":") fail("expected ':' after an object key in json block #" blocknum " (line " blockline ")")
       readval(path == "" ? k : path "." k)
       t = nexttok()
       if (t == "}") return
@@ -2793,6 +2916,23 @@ for pline in $PORT_LINES; do
       continue ;;
   esac
   ptree="$PORTS_PARENT/$pdir"
+  # D301: a port directory checked out as a symlink is descended (see the
+  # symlinked-port self-test), so confining the ports parent alone would still
+  # let one planted link aim the walk anywhere. Its PHYSICAL target must sit
+  # under an allowed root too; otherwise this port is a gate fault, refused in
+  # the same shape as the charset refusal above.
+  if [ -d "$ptree" ]; then
+    _pphys="$(cd -P "$ptree" 2>/dev/null && pwd -P)"
+    if [ -z "$_pphys" ] || ! within_allowed_root "$_pphys"; then
+      echo "GATE ERROR: port dir \"$pdir\" resolves outside the allowed roots (the repository's parent directory or the system temp directory): $_pphys" >&2
+      GATE_FAULT=1
+      echo ""
+      continue
+    fi
+    # Walk the identity that was judged, not the spelling: re-resolving a link
+    # at walk time would let an entry swapped after this check escape it.
+    ptree="$_pphys"
+  fi
   PORT_DIRTY=0
 
   echo "$pid"
@@ -3205,6 +3345,14 @@ for cat in $CATALOGS; do
     CAT_ABSENT=$((CAT_ABSENT + 1))
     continue
   fi
+  # D301: the same physical confinement as a port directory, for the same reason.
+  _cphys="$(cd -P "$ctree" 2>/dev/null && pwd -P)"
+  if [ -z "$_cphys" ] || ! within_allowed_root "$_cphys"; then
+    echo "GATE ERROR: catalog dir \"$cat\" resolves outside the allowed roots (the repository's parent directory or the system temp directory): $_cphys" >&2
+    GATE_FAULT=1
+    continue
+  fi
+  ctree="$_cphys"
   if ! CFOUND="$(scan_anchors "$ctree")"; then
     record UNVERIFIABLE "  " \
       "catalog $cat -- could not fully enumerate $ctree; refusing to judge anchors on a partial file list" \

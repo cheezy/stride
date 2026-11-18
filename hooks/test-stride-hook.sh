@@ -10883,6 +10883,24 @@ else
     echo -e "  ${GREEN}PASS${RESET}: 31: an unknown option names it and prints usage on both halves"
     PASS=$((PASS + 1))
   fi
+
+  # 14. D301: a ports parent outside the allowed roots is refused by both
+  #     halves with the same message, the same physical path and the same exit
+  #     code. The filesystem root is outside every allowed root on any host
+  #     whose temp directory is not itself the root.
+  d="$D296_DIR/confine"; mkdir -p "$d/p/alpha" "$d/p/beta"
+  d296_canon "$d/c.md" anchor rule-one required
+  d296_case "a ports parent outside the allowed roots is refused with the same message" "$d/c.md" /
+  # Parity alone would stay green if BOTH halves stopped refusing, so pin the
+  # refusal itself on the bash half (the parity case above carries it to pwsh).
+  _cfo="$(bash "$SCRIPT_DIR/../scripts/check-port-canon.sh" --canon "$d/c.md" --ports-parent / 2>&1)"; _cfr=$?
+  if [ "$_cfr" = "2" ] && printf '%s' "$_cfo" | grep -q 'ports-parent resolves outside the allowed roots'; then
+    echo -e "  ${GREEN}PASS${RESET}: 31: a ports parent outside the allowed roots exits 2 with the refusal"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 31: a ports parent outside the allowed roots was not refused (exit $_cfr)"
+    FAIL=$((FAIL + 1))
+  fi
 fi
 
 # ============================================================

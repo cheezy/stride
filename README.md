@@ -637,6 +637,17 @@ bash scripts/check-port-canon.sh --self-test     # prove the gate still detects 
 pwsh scripts/check-port-canon.ps1 -SelfTest      # the other half's own suite
 ```
 
+`--ports-parent` and `--canon` exist for fixture trees and are **confined**
+(D301): each must resolve, physically, under the repository's parent directory
+(where the default ports parent and canon live) or the system temp directory
+(where the self-tests build their fixtures). Anything else is refused with the
+exit-2 `GATE ERROR` before it is read, and so is a port or catalog directory
+checked out as a symlink whose physical target leaves those roots, so neither
+flag can point the walk at an arbitrary directory. A json fence whose syntax the
+parser cannot read is reported by block and line only, never by echoing the
+token. Schema-validation messages for a canon that parses are not covered by
+that: they still name the value they refused.
+
 The two suites cover the same cases apart from the sanctioned asymmetries
 described below, and `hooks/test-stride-hook.sh` Group
 **30c** (with its PowerShell mirror, Group 32c) is what holds them to it: each

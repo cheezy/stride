@@ -230,7 +230,9 @@ usage: check-port-canon.ps1 [-PortsParent DIR] [-Canon PATH] [-SelfTest] [-h|-He
   -h, -Help           Print this message.
 
 -PortsParent and -Canon exist so the check can be exercised against a
-synthetic fixture tree. Neither is needed in normal use.
+synthetic fixture tree. Neither is needed in normal use. Each must resolve,
+physically, under the repository's parent directory or the system temp
+directory; anything else is refused with exit 2 before it is read.
 
 Exit codes: 0 all clear, 1 drift found, 2 no verdict possible.
 The bash spellings --canon / --ports-parent / --self-test are also accepted.
@@ -1039,6 +1041,11 @@ function Resolve-PhysicalPath {
     # that promise literally and hand back the original path.
     if ($guard -ge 40 -and $item.LinkType) { return $Path }
     $full = $item.FullName
+    # D301: the filesystem root has no parent, and Split-Path -Parent on it is
+    # a terminating error rather than an empty string, so -PortsParent / used to
+    # stop the run on an unhandled error instead of reaching a refusal. Return
+    # the root as it is -- it is already physical.
+    if ([System.IO.Path]::GetPathRoot($full) -ceq $full) { return $full }
     $parent = Split-Path -Parent $full
     if ($parent -and $parent -cne $full) {
         $rp = Resolve-PhysicalPath -Path $parent
@@ -1392,6 +1399,19 @@ function Invoke-CanonCheck {
             continue
         }
         $ptree = Join-Path $PortsParentPath $p.Dir
+        # D301: a symlinked port directory is descended, so its PHYSICAL target
+        # is confined too -- the bash half's check, same message and shape.
+        if (Test-Path -LiteralPath $ptree -PathType Container) {
+            $pphys = Resolve-PhysicalPath -Path (Resolve-Path -LiteralPath $ptree).Path
+            if ((Test-StillLink -Path $pphys) -or -not (Test-WithinAllowedRoot -Path $pphys)) {
+                [Console]::Error.WriteLine("GATE ERROR: port dir ""$($p.Dir)"" resolves outside the allowed roots (the repository's parent directory or the system temp directory): $pphys")
+                $script:GateFault = $true
+                $script:Out.Add('')
+                continue
+            }
+            # Walk the identity that was judged, not the spelling (bash half too).
+            $ptree = $pphys
+        }
         $script:PortDirty = $false
         $script:Out.Add($p.Id)
 
@@ -1709,6 +1729,14 @@ function Invoke-CanonCheck {
             $catAbsent++
             continue
         }
+        # D301: the same physical confinement as a port directory.
+        $cphys = Resolve-PhysicalPath -Path (Resolve-Path -LiteralPath $ctree).Path
+        if ((Test-StillLink -Path $cphys) -or -not (Test-WithinAllowedRoot -Path $cphys)) {
+            [Console]::Error.WriteLine("GATE ERROR: catalog dir ""$cat"" resolves outside the allowed roots (the repository's parent directory or the system temp directory): $cphys")
+            $script:GateFault = $true
+            continue
+        }
+        $ctree = $cphys
         $cwalk = Get-PortMarkdown -Root $ctree
         $cfound = Get-PortAnchors -Walk $cwalk -ExcludeCanon $CanonPath
         if (-not $cfound.Ok) {
@@ -2964,6 +2992,77 @@ function Invoke-SelfTestBody {
     $r = Invoke-StRaw -ScriptArgs @('--ports-parent', '/nonexistent/nope')
     St-Assert "a missing ports parent exits 2" 2 $r.ExitCode "ports parent directory not found" $r.Output
 
+    # --- D301: both path overrides are confined to an allowed root, judged on
+    # --- the PHYSICAL path. Every other case here that reaches a scan passes
+    # --- overrides into this temp dir, so all of those are the permitted path
+    # --- too (the missing-path cases above never reach the check,
+    # --- which skips a path that does not exist).
+    New-StDir @("$Tmp/conf/alpha", "$Tmp/conf/beta")
+    New-StCanon -Path "$Tmp/conf.md" -Schema 1
+    Set-StFile -Path "$Tmp/conf/alpha/a.md" -Text "x`n<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/conf/beta/b.md" -Text "x`n<!-- canon:rule-one v1 -->`n"
+    $r = Invoke-StRun -Canon "$Tmp/conf.md" -PortsParent '/'
+    St-Assert "a --ports-parent outside the allowed roots exits 2" 2 $r.ExitCode "ports-parent resolves outside the allowed roots" $r.Output
+    $outsideFile = '/etc/hosts'
+    if ($script:OnWindows) { $outsideFile = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts' }
+    $r = Invoke-StRun -Canon $outsideFile -PortsParent "$Tmp/conf"
+    St-Assert "a --canon outside the allowed roots exits 2" 2 $r.ExitCode "canon resolves outside the allowed roots" $r.Output
+    # Two levels up from the sandbox is the temp root's parent: the spelling
+    # starts with the temp root, the physical path does not.
+    $r = Invoke-StRun -Canon "$Tmp/conf.md" -PortsParent "$Tmp/../.."
+    St-Assert "a ports parent spelled under the temp root but resolving outside it exits 2" 2 $r.ExitCode "ports-parent resolves outside the allowed roots" $r.Output
+    $r = Invoke-StRun -Canon 'conf.md' -PortsParent 'conf' -WorkDir $Tmp
+    St-Assert "relative overrides resolving inside an allowed root are not refused" 0 $r.ExitCode "ok: rule-one v1" $r.Output
+    $r = Invoke-StRun -Canon (Join-Path $script:RepoRoot 'docs/port-canon.md') -PortsParent "$Tmp/conf"
+    St-Refute "the repository's own canon is inside an allowed root" "outside the allowed roots" $r.Output
+    $r = Invoke-StRun -Canon "$Tmp/conf.md" -PortsParent (Split-Path -Parent $script:RepoRoot)
+    St-Refute "the default ports parent is inside an allowed root" "outside the allowed roots" $r.Output
+    # A symlinked port or catalog directory is descended, so its PHYSICAL target
+    # is confined as well. These two links are the one place in this file that
+    # points OUTSIDE the sandbox, so they bypass New-StLink's sandbox assertion
+    # deliberately -- and each is removed as a link, non-recursively, in a
+    # finally, before the teardown could ever recurse through it. /var/empty is
+    # preferred where it exists, as in the bash half: it is empty, so a
+    # regressed confinement fails at once instead of hanging on a large walk.
+    $outsideDir = [System.IO.Path]::GetFullPath((Join-Path $Tmp '../..'))
+    if (Test-Path -LiteralPath '/var/empty' -PathType Container) { $outsideDir = '/var/empty' }
+    New-StDir @("$Tmp/escp/beta", "$Tmp/escc/alpha", "$Tmp/escc/beta", "$Tmp/escc/stride-codex-marketplace/plugins")
+    Set-StFile -Path "$Tmp/escp/beta/b.md" -Text "x`n<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/escc/alpha/a.md" -Text "x`n<!-- canon:rule-one v1 -->`n"
+    Set-StFile -Path "$Tmp/escc/beta/b.md" -Text "x`n<!-- canon:rule-one v1 -->`n"
+    $escLinks = @(
+        @{ Link = "$Tmp/escp/alpha"; Tree = "$Tmp/escp"; Name = "a symlinked port directory resolving outside the allowed roots exits 2"; Want = 'port dir .alpha. resolves outside the allowed roots' },
+        @{ Link = "$Tmp/escc/stride-codex-marketplace/plugins/stride-codex"; Tree = "$Tmp/escc"; Name = "a symlinked catalog directory resolving outside the allowed roots exits 2"; Want = 'catalog dir .stride-codex-marketplace/plugins/stride-codex. resolves outside the allowed roots' }
+    )
+    foreach ($e in $escLinks) {
+        $made = $false
+        try {
+            New-Item -ItemType SymbolicLink -Path $e.Link -Target $outsideDir -ErrorAction Stop | Out-Null
+            $made = $true
+        } catch { }
+        if (-not $made) {
+            St-Skip $e.Name 'cannot create a directory symlink here'
+            continue
+        }
+        try {
+            $r = Invoke-StRun -Canon "$Tmp/conf.md" -PortsParent $e.Tree
+            St-Assert $e.Name 2 $r.ExitCode $e.Want $r.Output
+        } finally {
+            (Get-Item -LiteralPath $e.Link -Force).Delete()
+        }
+    }
+
+    # --- D301: a parser failure reports position, never bytes from the file.
+    # --- This half already did; the cases are shared so the pair stays pinned.
+    Set-StFile -Path "$Tmp/leak1.md" -Text ("# canon`n~~~json`n{ ""canon_schema_version"": LEAKEDTOKEN }`n~~~`n".Replace('~~~', '```'))
+    $r = Invoke-StRun -Canon "$Tmp/leak1.md" -PortsParent "$Tmp/conf"
+    St-Assert "a bad json token in the canon exits 2" 2 $r.ExitCode "json block #1" $r.Output
+    St-Refute "a bad json token is not echoed from the canon" "LEAKEDTOKEN" $r.Output
+    Set-StFile -Path "$Tmp/leak2.md" -Text ("# canon`n~~~json`n{ ""LEAKEDKEY"" 1 }`n~~~`n".Replace('~~~', '```'))
+    $r = Invoke-StRun -Canon "$Tmp/leak2.md" -PortsParent "$Tmp/conf"
+    St-Assert "a key with no colon in the canon exits 2" 2 $r.ExitCode "json block #1" $r.Output
+    St-Refute "a key with no colon is not echoed from the canon" "LEAKEDKEY" $r.Output
+
     # --- the enumeration is ONE walk. The bash half's previous guard compared
     # --- two separate walks, so removing a file between them cancelled the
     # --- difference and let a newline-named file through -- a TOCTOU on a
@@ -3338,6 +3437,58 @@ if (Test-Path -LiteralPath $Canon) {
 }
 if (Test-Path -LiteralPath $PortsParent -PathType Container) {
     $PortsParent = Resolve-PhysicalPath -Path (Resolve-Path -LiteralPath $PortsParent).Path
+}
+
+# D301: confine both paths to an allowed root BEFORE anything reads them -- the
+# bash half's check, with the same roots, the same order and the same messages,
+# so the pair refuses the identical argument identically. The full reasoning is
+# beside that check in check-port-canon.sh; in short: every traversal defence
+# below works one level down, inside a chosen parent, so nothing constrained the
+# parent itself. The roots are the repository's parent directory (physical, and
+# the logical spelling the default ports parent was computed from) and the
+# system temp directory, where -SelfTest and the hook suites build fixtures.
+# GetTempPath() reads TMPDIR on Unix, as the bash half does: the environment is
+# not the boundary defended here, the argument vector is. The comparison is on
+# PHYSICAL paths with a separator boundary, so a lexical "$tmp/../.." is judged
+# by where it lands, and C:\x\kanban-evil does not sit under C:\x\kanban.
+# Windows compares case-insensitively, because its filesystem does.
+$script:AllowedRoots = @(
+    (Split-Path -Parent (Resolve-PhysicalPath -Path $script:RepoRoot)),
+    (Resolve-PhysicalPath -Path (Split-Path -Parent $script:RepoRoot)),
+    (Resolve-PhysicalPath -Path ([System.IO.Path]::GetTempPath()))
+)
+function Test-WithinAllowedRoot {
+    param([string]$Path)
+    $sep = [string][System.IO.Path]::DirectorySeparatorChar
+    $cmp = [System.StringComparison]::Ordinal
+    if ($script:OnWindows) { $cmp = [System.StringComparison]::OrdinalIgnoreCase }
+    foreach ($r in $script:AllowedRoots) {
+        if ([string]::IsNullOrEmpty($r)) { continue }
+        $root = $r.TrimEnd([char]'/', [char]'\')
+        # A root that trims to nothing, or to a bare drive, is the filesystem
+        # root itself, and everything sits under it.
+        if ($root -eq '' -or $root -match '^[A-Za-z]:$') { return $true }
+        if ([string]::Equals($Path, $root, $cmp)) { return $true }
+        if ($Path.StartsWith($root + $sep, $cmp)) { return $true }
+    }
+    return $false
+}
+# Resolve-PhysicalPath hands back the ORIGINAL path when its 40-hop bound runs
+# out (D295), and Windows allows longer chains than that. A result still
+# standing on a link was not resolved, so where it lands is unknown: refuse it as
+# outside rather than judge the link's own spelling. The bash half does the same.
+function Test-StillLink {
+    param([string]$Path)
+    $it = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    # LinkType also reads "HardLink" for a file with a second name, which is a
+    # real file rather than an unresolved link, so only the two link kinds count.
+    return [bool]($it -and ("$($it.LinkType)" -ceq 'SymbolicLink' -or "$($it.LinkType)" -ceq 'Junction'))
+}
+if ((Test-Path -LiteralPath $Canon) -and ((Test-StillLink -Path $Canon) -or -not (Test-WithinAllowedRoot -Path $Canon))) {
+    Stop-Gate "--canon resolves outside the allowed roots (the repository's parent directory or the system temp directory): $Canon"
+}
+if ((Test-Path -LiteralPath $PortsParent -PathType Container) -and ((Test-StillLink -Path $PortsParent) -or -not (Test-WithinAllowedRoot -Path $PortsParent))) {
+    Stop-Gate "--ports-parent resolves outside the allowed roots (the repository's parent directory or the system temp directory): $PortsParent"
 }
 
 # D298: establish the canon is a REGULAR file BEFORE reading a byte of it. A

@@ -23,6 +23,30 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.88.1] - 2026-11-18
+
+Two security hardening fixes, both pre-existing and neither known to be exploited: the claim hook's attachment handling (D403) and the path flags of the port-canon drift check (D301). Both land in the bash and PowerShell halves.
+
+### Changed
+
+- **Claim hook (sh + ps1): the attachment re-fetch exemption is narrower** (D403). It now refuses `-w`/`--write-out`, a `-H`/`--header` value that starts with `@` or `$`, `manifest.json` in any letter case, a target name ending in a dot, a symlinked target, a tree without `.stride/attachments/.gitignore`, and, off Windows, a backslash in the target. The documented re-fetch is unchanged.
+- **Claim hook (sh + ps1): duplicate and malformed attachment entries are skipped** (D403). An attachment whose id or saved name was already taken by an earlier accepted entry is skipped as `unsafe_id`. The comparison ignores letter case, and ignores trailing dots on names. A `byte_size` not written as plain digits is skipped as `too_large`, whatever the jq version.
+- **`check-port-canon.sh` / `.ps1`: `--canon` and `--ports-parent` are confined** (D301). Each is judged on its physical path and must resolve under the repository's parent directory or the system temp directory. The same check applies to symlinked port and catalog directories, and to any path still on a link after resolution. A path that fails it is refused with exit 2 before anything is read, and the walk uses the judged physical path. A shared-`/tmp` residual is recorded in `docs/port-canon.md`.
+
+### Fixed
+
+- **Claim hook: staging files left by an interrupted run are swept on every claim** (D403). `git add -A` can no longer commit one. A missing `.stride/attachments/.gitignore` is recreated in place.
+- **`stride-hook.ps1` reads its hook input as UTF-8 whatever the console code page** (D403). A non-ASCII attachment filename now gets the same saved name under Windows PowerShell 5.1 as in the bash half.
+- **`check-port-canon.sh`: json tokenizer syntax errors no longer echo bytes from the canon file** (D301). They report the block and line only. The schema-validation `GATE ERROR` messages still echo refused values; that is left as follow-up work.
+- **`check-port-canon.ps1`: `-PortsParent /` no longer stops on an unhandled error** (D301).
+- **`docs/porting-attachments.md` states the D403 rules as port contract**, so the other ports can take them.
+
+### Not verified in this release
+
+- **D403:** the last full hook-suite runs were bash 2914/2915 and pwsh 1755/1755. The one bash failure was a known duration flake, now normalised and green on rerun. Those runs predate the last change, a pure reorder of two PowerShell helpers, which was checked by an AST comparison and direct calls rather than another full run. The manual exploratory test of the exemption was not run.
+- **D301:** the `check-port-canon` self-tests pass (bash 171/0, pwsh 169/0), but **the full `test-stride-hook` suites were not run**, because of a time limit. New hook-suite case Group 31 case 14 has never been run in the suite. The review hit its two-round cap, and the two findings fixed after round two (a comment, and a walk-time TOCTOU narrowing) were not re-reviewed. Running the bare scan exits 1 on 4 pre-existing STALE cells, which have nothing to do with this change.
+- **The other ports do not carry either fix yet.** Each port that takes the work carries it in its own release.
+
 ## [1.88.0] - 2026-11-09
 
 A task's attachments now reach the agents that work it (goal G491). When a proven claim lists `attachments`, the claim hook downloads them into `.stride/attachments/<IDENTIFIER>/` and writes a `manifest.json` last, under per-file, count, total and time caps, with a SHA-256 check, and never fails the claim (W2522). The workflow then hands that directory to the explorer, the planner, the reviewer and a task-runner, only once the manifest names the claimed task, treats every attachment as untrusted data, and removes the directory at Step 7 after a `2xx` completion (W2523). `docs/porting-attachments.md` is the cross-port contract the other ports implement against (W2521). No task field or API change: the plugin reads the claim response's `data.attachments` and the attachment download endpoint, and against a server whose claim carries no `attachments` it downloads nothing and behaves as before. Bash hook-suite Groups 75–77 and PowerShell Group 48 pin the changes.

@@ -18868,7 +18868,7 @@ mkdir -p "$G75_DIR"
 
 if ! command -v jq > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1 \
    || ! command -v curl > /dev/null 2>&1; then
-  echo "  SKIP: 75a-75s: jq, python3 or curl missing -- Group 75 needs all three"
+  echo "  SKIP: 75a-75v: jq, python3 or curl missing -- Group 75 needs all three"
 else
   # The stand-in API: serves $1/<path> as a file; <path>.status holds a status
   # (and an optional Location) to answer instead; <path>.extra holds bytes to
@@ -19031,15 +19031,17 @@ G75PY
   # download -- budget 0 downloads nothing and is otherwise the same claim.
   G75_D=$(g75_proj b)
   STRIDE_ATTACHMENT_BUDGET_SECONDS=0 g75_claim "$G75_D" "$(g75_task "$G75_THREE")"
-  G75_OUT_NONE=$(printf '%s' "$G75_OUT" | sed -E 's/"duration_ms": *[0-9]+/"duration_ms":0/g')
+  G75_OUT_NONE=$(printf '%s' "$G75_OUT" | sed -E -e 's/"duration_ms": *[0-9]+/"duration_ms":0/g' -e 's/"duration_seconds": *[0-9]+/"duration_seconds":0/g')
   G75_D=$(g75_proj b2)
   g75_claim "$G75_D" "$(g75_task "$G75_THREE")"
-  # duration_ms is the section's own wall clock, so it is the one field that
-  # may differ between two runs; everything else must be identical.
+  # duration_ms and duration_seconds are the section's own wall clock, so
+  # they are the fields that may differ between two runs (duration_seconds
+  # rounds across a second boundary under load); everything else must be
+  # identical.
   # Compared as raw text, so a stray line on stdout is a difference rather
   # than a parse error that empties both sides.
   assert_eq "75b: hook stdout is unchanged by the download" "$G75_OUT_NONE" \
-    "$(printf '%s' "$G75_OUT" | sed -E 's/"duration_ms": *[0-9]+/"duration_ms":0/g')"
+    "$(printf '%s' "$G75_OUT" | sed -E -e 's/"duration_ms": *[0-9]+/"duration_ms":0/g' -e 's/"duration_seconds": *[0-9]+/"duration_seconds":0/g')"
   assert_eq "75b: and it is exactly one JSON document" "ok" \
     "$(printf '%s' "$G75_OUT" | python3 -c 'import json,sys; json.loads(sys.stdin.read()); print("ok")' 2>/dev/null)"
 
@@ -19344,6 +19346,104 @@ G75WRAP
     "$([ -e "$G75_D/.stride/attachments/W5001" ] && echo present || echo absent)"
   assert_contains "75r: and says so on stderr" ".gitignore is not a regular file" "$G75_ERR"
 
+  # 75s: (D403) an id an accepted entry already took --
+  # the same id, 7 against "7", or one differing only in letter case -- is
+  # refused unsafe_id, so two entries never share one local file; and a
+  # byte_size not written as plain digits (7.0, 7.00000000000000001) is
+  # too_large in both halves, where a double would round it to 7.
+  g75_body 860 'dup-one'
+  g75_body 861 'dup-two'
+  G75_DUP=$(jq -nc --argjson a "$(g75_att 860 a.txt)" --argjson b "$(g75_att 861 a.txt)" '[
+      $a, ($b | .id = 860),
+      ($a | .id = "7" | .download_url = "/api/tasks/77/attachments/860"),
+      ($b | .id = 7 | .download_url = "/api/tasks/77/attachments/861"),
+      ($a | .id = "ab" | .download_url = "/api/tasks/77/attachments/860"),
+      ($b | .id = "AB" | .download_url = "/api/tasks/77/attachments/861")]')
+  G75_D=$(g75_proj s)
+  g75_claim "$G75_D" "$(g75_task "$G75_DUP")"
+  assert_eq "75s: a repeated, 7-vs-\"7\" or case-only id is skipped unsafe_id" \
+    '[[null,"860-a.txt"],["unsafe_id",null],[null,"7-a.txt"],["unsafe_id",null],[null,"ab-a.txt"],["unsafe_id",null]]' \
+    "$(g75_m "$G75_D" '[.attachments[] | [.reason, .local_file]]')"
+  assert_eq "75s: and every downloaded entry's sha256 matches the file it names" "3" \
+    "$(cd "$G75_D/.stride/attachments/W5001" && jq -r '.attachments[] | select(.status == "downloaded") | "\(.sha256)  \(.local_file)"' manifest.json | shasum -a 256 -c - 2>/dev/null | grep -c ': OK$')"
+  G75_FRAC=$(g75_att 860 f.txt | sed 's/"byte_size":7,/"byte_size":7.0,/')
+  G75_FRAC2=$(g75_att 861 g.txt | sed 's/"byte_size":7,/"byte_size":7.00000000000000001,/')
+  G75_D=$(g75_proj s2)
+  g75_claim "$G75_D" "{\"data\":{\"id\":77,\"identifier\":\"W5001\",\"title\":\"attach\",\"attachments\":[$G75_FRAC,$G75_FRAC2]}}"
+  assert_eq "75s: a byte_size not written as plain digits is skipped too_large" '["too_large","too_large"]' \
+    "$(g75_m "$G75_D" '[.attachments[].reason]')"
+  # jq renders 7e0 and 0.7e1 as 7, so the bash half judges the literal before
+  # jq parses the claim, under an escaped key name as well. The claim text is
+  # built by hand here: g75_task would pass it through jq and normalise it.
+  G75_EXP=$(g75_att 860 h.txt | sed 's/"byte_size":7,/"byte_size":7e0,/')
+  G75_EXP2=$(g75_att 861 i.txt | sed 's/"byte_size":7,/"byte_size":0.7e1,/')
+  G75_EXP3=$(g75_att 860 j.txt | sed -e 's/"byte_size":7,/"byte\\u005fsize":7E0,/' -e 's/"id":860,/"id":869,/')
+  G75_D=$(g75_proj s3)
+  g75_claim "$G75_D" "{\"data\":{\"id\":77,\"identifier\":\"W5001\",\"title\":\"attach\",\"attachments\":[$G75_EXP,$G75_EXP2,$G75_EXP3]}}"
+  assert_eq "75s: an exponent byte_size, under any key spelling, is skipped too_large" '["too_large","too_large","too_large"]' \
+    "$(g75_m "$G75_D" '[.attachments[].reason]')"
+
+  # 75t: (D403) a staging file an interrupted earlier run
+  # left in .stride/attachments/ -- either half's name -- is swept, and a
+  # missing .gitignore is created in place, so no staging file is ever left
+  # where git add -A would commit it. A link that looks like one is left alone.
+  G75_D=$(g75_proj t)
+  mkdir -p "$G75_D/.stride/attachments"
+  printf '*\n' > "$G75_D/.stride/attachments/.gitignore.Ab12Cd"
+  printf '*\n' > "$G75_D/.stride/attachments/.stage.j3v2oj3x.c0l"
+  ln -s "$G75_DIR/nowhere" "$G75_D/.stride/attachments/.gitignore.Zz99Yy"
+  g75_claim "$G75_D" "$(g75_task "[$(g75_att 812 screenshot.png)]")"
+  assert_eq "75t: both halves' leftover staging files are swept, a link is not" ".gitignore .gitignore.Zz99Yy W5001" \
+    "$(ls -A "$G75_D/.stride/attachments" | tr '\n' ' ' | sed 's/ $//')"
+  assert_eq "75t: the .gitignore still holds exactly *" "*" "$(cat "$G75_D/.stride/attachments/.gitignore")"
+  # The sweep runs on a claim with no attachments too, and takes only the
+  # exact staging names: .gitignore.a_b-cd is no name either half creates.
+  G75_D2=$(g75_proj t2)
+  mkdir -p "$G75_D2/.stride/attachments"
+  printf '*\n' > "$G75_D2/.stride/attachments/.gitignore.Ab12Cd"
+  printf '*\n' > "$G75_D2/.stride/attachments/.stage.j3v2oj3x.c0l"
+  printf 'x\n' > "$G75_D2/.stride/attachments/.gitignore.a_b-cd"
+  g75_claim "$G75_D2" "$(g75_task "[]")"
+  assert_eq "75t: a claim with no attachments sweeps them too, and only exact names" ".gitignore.a_b-cd" \
+    "$(ls -A "$G75_D2/.stride/attachments" | tr '\n' ' ' | sed 's/ $//')"
+  assert_eq "75t: and the download still happened" '["downloaded"]' "$(g75_m "$G75_D" '[.attachments[].status]')"
+
+  # 75u: (D403) the PowerShell half reads stdin as UTF-8
+  # whatever the console code page, so a non-ASCII filename gets the bash
+  # half's local name and a byte-identical manifest under a Latin-1 locale.
+  if command -v pwsh > /dev/null 2>&1; then
+    G75_DB=$(g75_proj u-bash); G75_DP=$(g75_proj u-ps)
+    G75_U8="[$(g75_att 812 'café résumé.pdf')]"
+    g75_claim "$G75_DB" "$(g75_task "$G75_U8")"
+    LC_ALL=en_US.ISO8859-1 g75_claim "$G75_DP" "$(g75_task "$G75_U8")" "$SCRIPT_DIR/stride-hook.ps1"
+    assert_eq "75u: under a Latin-1 locale the PowerShell half names the file per code point" '"812-caf__r_sum_.pdf"' \
+      "$(g75_m "$G75_DP" '.attachments[0].local_file')"
+    assert_eq "75u: and writes the same manifest bytes as the bash half" "same" \
+      "$(cmp -s "$G75_DB/.stride/attachments/W5001/manifest.json" "$G75_DP/.stride/attachments/W5001/manifest.json" && echo same || echo differ)"
+  else
+    echo "  SKIP: 75u: pwsh not installed"
+  fi
+
+  # 75v: (D403) two ids whose saved names collide -- "a"
+  # with "b-x.txt" and "a-b" with "x.txt" both save as a-b-x.txt, and "s" with
+  # "x-Y.txt" against "s-X" with "y.txt" differ only in letter case -- take one
+  # file each: the later entry is skipped unsafe_id, never overwriting a file
+  # the manifest says was verified. "t-b-x.txt." and "t-b-x.txt" collide too:
+  # Windows strips the trailing dot, so the key drops it.
+  g75_body 880 'name-one'
+  g75_body 881 'name-two'
+  G75_NAMES=$(jq -nc --argjson a "$(g75_att 880 b-x.txt)" --argjson b "$(g75_att 881 x.txt)" '[
+      ($a | .id = "a"), ($b | .id = "a-b"),
+      ($a | .id = "s" | .filename = "x-Y.txt"), ($b | .id = "s-X" | .filename = "y.txt"),
+      ($a | .id = "t" | .filename = "b-x.txt."), ($b | .id = "t-b" | .filename = "x.txt")]')
+  G75_D=$(g75_proj v)
+  g75_claim "$G75_D" "$(g75_task "$G75_NAMES")"
+  assert_eq "75v: a saved name an accepted entry took is skipped unsafe_id, in any case" \
+    '[[null,"a-b-x.txt"],["unsafe_id",null],[null,"s-x-Y.txt"],["unsafe_id",null],[null,"t-b-x.txt."],["unsafe_id",null]]' \
+    "$(g75_m "$G75_D" '[.attachments[] | [.reason, .local_file]]')"
+  assert_eq "75v: and each saved file is the one its entry verified" "3" \
+    "$(cd "$G75_D/.stride/attachments/W5001" && jq -r '.attachments[] | select(.status == "downloaded") | "\(.sha256)  \(.local_file)"' manifest.json | shasum -a 256 -c - 2>/dev/null | grep -c ': OK$')"
+
   # 75q: the budget is a wall clock across the whole download: a request that
   # stalls past it is cut off and recorded time_budget, and the entries after
   # it are skipped time_budget without a request.
@@ -19402,6 +19502,8 @@ echo "=== Test Group 76: W2522 attachment re-fetch guard exemption (bash) ==="
 
 G76_PROJ="$TMPDIR_TEST/w2522-guard"
 mkdir -p "$G76_PROJ/.stride/attachments/W5001"
+# The claim hook's .gitignore: since D403 no re-fetch is exempt without it.
+printf '*\n' > "$G76_PROJ/.stride/attachments/.gitignore"
 printf '## after_doing\n```bash\n```\n' > "$G76_PROJ/.stride.md"
 G76_ROOT=$(cd "$G76_PROJ" && pwd)
 G76_T="$G76_ROOT/.stride/attachments/W5001/812-shot.png"
@@ -19503,6 +19605,105 @@ if command -v jq > /dev/null 2>&1; then
   assert_exit "76b: a symlinked task directory target is refused" 2 "$G76_RC"
 else
   echo "  SKIP: 76a-76b: jq not installed"
+fi
+
+# 76d: (D403) shapes the exemption admitted that it must
+# not: -w/--write-out (its %output{} directive writes a second file
+# anywhere), an @file header (curl reads headers from that file), manifest.json
+# in another letter case (APFS and NTFS fold it), a target that is itself a
+# symlink, and a tree with no .gitignore yet (the download could be committed).
+if command -v jq > /dev/null 2>&1; then
+  g76_run "curl -sS -w '%output{/tmp/elsewhere.txt}x' -o $G76_T $G76_U"
+  assert_eq "76d: -w with %output{} is refused" "2" "$G76_RC"
+  g76_run "curl -sS --write-out=x -o $G76_T $G76_U"
+  assert_eq "76d: --write-out is refused" "2" "$G76_RC"
+  g76_run "curl -sSw x -o $G76_T $G76_U"
+  assert_eq "76d: a clustered -w is refused" "2" "$G76_RC"
+  g76_run "curl -sS -H @$G76_ROOT/.stride_auth.md -o $G76_T $G76_U"
+  assert_eq "76d: an @file header is refused" "2" "$G76_RC"
+  g76_run "curl -sS --header=@h.txt -o $G76_T $G76_U"
+  assert_eq "76d: an --header=@file is refused" "2" "$G76_RC"
+  g76_run "curl -sSH@h.txt -o $G76_T $G76_U"
+  assert_eq "76d: a clustered -H@file is refused" "2" "$G76_RC"
+  g76_run "curl -sS -H \"\$H\" -o $G76_T $G76_U"
+  assert_eq "76d: a header value led by \$ (it could expand to @file) is refused" "2" "$G76_RC"
+  g76_run "curl -sS --header=\"\$H\" -o $G76_T $G76_U"
+  assert_eq "76d: an --header=\$NAME is refused" "2" "$G76_RC"
+  g76_run "curl -sS --header \"\${H}\" -o $G76_T $G76_U"
+  assert_eq "76d: an --header \${NAME} is refused" "2" "$G76_RC"
+  g76_run "curl -sSH\"\$H\" -o $G76_T $G76_U"
+  assert_eq "76d: a clustered -H\$NAME is refused" "2" "$G76_RC"
+  g76_run "curl -sS -o $G76_ROOT/.stride/attachments/W5001/MANIFEST.JSON $G76_U"
+  assert_eq "76d: manifest.json in another case is refused" "2" "$G76_RC"
+  g76_run "curl -sS -o $G76_ROOT/.stride/attachments/W5001/manifest.json. $G76_U"
+  assert_eq "76d: a trailing-dot name (Windows strips it) is refused" "2" "$G76_RC"
+  g76_run "curl -sS -o $G76_ROOT/.stride/attachments/W5001/812-shot.png. $G76_U"
+  assert_eq "76d: any name ending in a dot is refused" "2" "$G76_RC"
+  ln -s "$TMPDIR_TEST/d403-outside" "$G76_ROOT/.stride/attachments/W5001/9-link.txt"
+  g76_run "curl -sS -o $G76_ROOT/.stride/attachments/W5001/9-link.txt $G76_U"
+  assert_eq "76d: a target that is a symlink is refused" "2" "$G76_RC"
+  rm -f "$G76_ROOT/.stride/attachments/W5001/9-link.txt"
+  mv "$G76_ROOT/.stride/attachments/.gitignore" "$G76_ROOT/.stride/attachments/gi.saved"
+  g76_run "curl -sS -o $G76_T $G76_U"
+  assert_eq "76d: no .gitignore yet means no exemption" "2" "$G76_RC"
+  mkdir "$G76_ROOT/.stride/attachments/.gitignore"
+  g76_run "curl -sS -o $G76_T $G76_U"
+  assert_eq "76d: a .gitignore that is a directory means no exemption" "2" "$G76_RC"
+  rmdir "$G76_ROOT/.stride/attachments/.gitignore"
+  ln -s "$G76_ROOT/.stride/attachments/gi.saved" "$G76_ROOT/.stride/attachments/.gitignore"
+  g76_run "curl -sS -o $G76_T $G76_U"
+  assert_eq "76d: a .gitignore that is a link to a regular file means no exemption" "2" "$G76_RC"
+  rm -f "$G76_ROOT/.stride/attachments/.gitignore"
+  mv "$G76_ROOT/.stride/attachments/gi.saved" "$G76_ROOT/.stride/attachments/.gitignore"
+  g76_run "curl -sS -H \"Authorization: Bearer \$T\" -o $G76_T $G76_U"
+  assert_eq "76d: and the documented re-fetch is still allowed" "0" "$G76_RC"
+fi
+
+# 76e: the exemption runs in its own subshell, so the caller's noglob survives
+# it on every return path, on a refusal and on an exempt verdict alike (the
+# hand-written `set +f` on each return path turned it back ON). Sourcing the
+# hook stops before the guard's functions are defined, so the function is
+# lifted out of the script text instead; the verdict is printed too, so the
+# test cannot pass on a function that never ran.
+G76_NOGLOB=$(
+  PROJECT_DIR="$G76_PROJ"
+  eval "$(sed -n '/^stride_guard_attachment_exempt() ($/,/^)$/p' "$HOOK_SCRIPT")"
+  set -f
+  stride_guard_attachment_exempt "curl -sS -X POST -o $G76_T $G76_U"; printf '%s:' "$?"
+  case $- in (*f*) printf 'kept ' ;; (*) printf 'lost ' ;; esac
+  stride_guard_attachment_exempt "curl -sS -o $G76_T $G76_U"; printf '%s:' "$?"
+  case $- in (*f*) printf 'kept' ;; (*) printf 'lost' ;; esac
+)
+assert_eq "76e: noglob survives a refused and an exempt verdict" "1:kept 0:kept" "$G76_NOGLOB"
+
+# 76f: the PowerShell half reaches the same verdict on the same shapes.
+if command -v jq > /dev/null 2>&1 && command -v pwsh > /dev/null 2>&1; then
+  g76_ps() { # $1 = command -> prints the PowerShell half's exit code
+    jq -nc --arg c "$1" '{tool_input:{command:$c}}' \
+      | CLAUDE_PROJECT_DIR="$G76_PROJ" pwsh -NoProfile -File "$SCRIPT_DIR/stride-hook.ps1" pre > /dev/null 2>&1
+    echo $?
+  }
+  for g76_pair in "0|curl -sS -H \"Authorization: Bearer \$T\" -o \"$G76_T\" \"$G76_U\"" \
+                  "0|curl --output=$G76_T -X GET $G76_U" \
+                  "2|curl -sS -o /tmp/812.png $G76_U" \
+                  "2|curl -sS -X POST -o $G76_T $G76_U" \
+                  "2|curl -sS -A \"\$@\" -o $G76_T $G76_U" \
+                  "2|curl -sS -o $G76_T $G76_U | tee x" \
+                  "2|curl -sS -w '%output{/tmp/x}y' -o $G76_T $G76_U" \
+                  "2|curl -sS -H @h.txt -o $G76_T $G76_U" \
+                  "2|curl -sS -H \"\$H\" -o $G76_T $G76_U" \
+                  "2|curl -sS --header=\"\$H\" -o $G76_T $G76_U" \
+                  "2|curl -sSH\"\$H\" -o $G76_T $G76_U" \
+                  "2|curl -sS -H '@"$'\xcc\x81'"x' -o $G76_T $G76_U" \
+                  "2|curl -sS -o $G76_ROOT/.stride/attachments/W5001/manifest.json. $G76_U" \
+                  "2|curl -sS -o $G76_ROOT/.stride/attachments/W5001/Manifest.Json $G76_U" \
+                  "2|curl -sS -o '$G76_ROOT/.stride\\attachments\\W5001\\9.txt' $G76_U"; do
+    g76_want="${g76_pair%%|*}"; g76_cmd="${g76_pair#*|}"
+    g76_run "$g76_cmd"
+    assert_eq "76f: bash and pwsh agree ($g76_want): $g76_cmd" "$g76_want $g76_want" "$G76_RC $(g76_ps "$g76_cmd")"
+  done
+else
+  echo "  SKIP: 76f: jq or pwsh not installed"
 fi
 
 # 76c: the documentation names the exemption and the download.

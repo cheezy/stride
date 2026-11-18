@@ -65,7 +65,9 @@ differs from this contract or could not verify it:
   because `.stride/attachments/.gitignore` holds `*`. That expectation comes
   from reading the source, not from a run. Turning the filter off is left to
   the operator, because it also exposes `.stride_auth.md`. Its BeforeTool
-  re-fetch exemption is narrower than stride's.
+  re-fetch exemption carries the narrower rules in
+  [Curl-guard exemption](#curl-guard-exemption); stride adopted them from it
+  in D403.
 - `stride-pi` 1.23.0: there is no mechanical curl guard. The rule against
   `curl -o` exists only as prompt text, a gap that predates this goal.
 
@@ -128,6 +130,19 @@ Downloads go under the project root, next to the task file:
 - **The `.gitignore` sits inside `.stride/attachments/`** and contains `*`. It
   is written before the first file, so a downloaded file can never be
   committed, even in a project whose own `.gitignore` does not list `.stride/`.
+  A missing one is **created in place, exclusively** (bash `set -C`, .NET
+  `FileMode.CreateNew`), so no staging file exists before it does. One that
+  already holds exactly `*` and a LF is left alone. Only a wrong one is staged
+  under a temporary name and renamed into place.
+- **Staging files an interrupted earlier run left are swept on every
+  claim**, before the no-attachments early exit and before the `.gitignore`
+  is written, whenever `.stride/attachments/` exists. They sit in `.stride/attachments/` itself, where
+  nothing ignores them until the `.gitignore` exists, so a later `git add -A`
+  would commit them. The sweep removes only regular files (never a link)
+  directly in `.stride/attachments/` whose names are a staging name of either
+  half, matched exactly: `.gitignore.` and six of `[A-Za-z0-9]` (bash
+  `mktemp`), or `.stage.`, eight of `[a-z0-9]`, `.` and three of `[a-z0-9]`
+  (PowerShell `Path.GetRandomFileName`). Any other name is left alone.
 - A claim with **no attachments creates no directory**.
 - The hook **refuses to write through a symlink**. If `.stride`,
   `.stride/attachments` or the task's directory is a symlink, it writes nothing
@@ -155,6 +170,16 @@ reaches a path.
 6. **The id.** The `id`, rendered as a decimal string, must match
    `\A[A-Za-z0-9-]{1,64}\z`. An entry whose id does not match is skipped with
    reason `unsafe_id`, and no file is written for it.
+7. **No two entries share a file.** An entry whose id an **accepted** entry
+   already used, or whose saved name an accepted entry already took, is
+   skipped with reason `unsafe_id`, with no request. Both comparisons ignore
+   letter case, because APFS and NTFS fold it, and the id is compared as its
+   string, so `7` and `"7"` are the same id. The saved name needs its own
+   check: id `a` with `b-x.txt` and id `a-b` with `x.txt` both save as
+   `a-b-x.txt`. The saved-name comparison also ignores trailing dots, because
+   Windows strips them: `t-b-x.txt.` and `t-b-x.txt` are one file there.
+   Without these checks a later entry would overwrite a file the manifest
+   says an earlier entry verified.
 
 | `filename` | Saved as (id 812) |
 |---|---|
@@ -164,8 +189,8 @@ reaches a path.
 | `..` | `812-attachment` |
 | `résumé final.pdf` | `812-r_sum__final.pdf` |
 
-The `<id>-` prefix keeps names unique within a task. It also means no saved
-file can be named `manifest.json` or `.gitignore`.
+The `<id>-` prefix, with rule 7, keeps names unique within a task. It also
+means no saved file can be named `manifest.json` or `.gitignore`.
 
 ## manifest.json, version 1
 
@@ -190,7 +215,7 @@ Each `attachments` entry, in this order:
 | `filename` | The original filename, kept as data. It is never a path |
 | `local_file` | The saved name, relative to the manifest's directory, or `null` when nothing was saved |
 | `content_type` | As the server sent it |
-| `byte_size` | As the server sent it |
+| `byte_size` | As the server sent it. One exception: a `byte_size` not written as plain digits is `null` in the bash half's manifest, because that half nulls it before jq parses the claim (see "Plain digits is judged on the literal" below); the PowerShell half keeps the literal. The entry is skipped `too_large` in both |
 | `sha256` | As the server sent it |
 | `comment_id` | As the server sent it |
 | `uploaded_at` | As the server sent it |
@@ -200,9 +225,9 @@ Each `attachments` entry, in this order:
 
 | `reason` | `status` | Meaning |
 |---|---|---|
-| `unsafe_id` | skipped | The id failed the id rule in [File naming](#file-naming) |
+| `unsafe_id` | skipped | The id failed the id rule in [File naming](#file-naming), or an accepted entry already used the id or the saved name (rule 7) |
 | `unsafe_url` | skipped | `download_url` failed the relative-path check |
-| `too_large` | skipped | `byte_size` is over 26,214,400 bytes, or is not a non-negative integer |
+| `too_large` | skipped | `byte_size` is over 26,214,400 bytes, or is not a JSON number written as plain digits (`7.0` and `7.00000000000000001` are refused, though a double rounds each to 7) |
 | `count_cap` | skipped | 20 entries have already been accepted |
 | `total_cap` | skipped | Adding its `byte_size` to the accepted entries' total would take the task past 104,857,600 bytes |
 | `time_budget` | skipped or failed | The wall-clock budget ran out: before the download started (skipped) or during it (failed) |
@@ -210,6 +235,18 @@ Each `attachments` entry, in this order:
 | `transport` | failed | The request failed without an HTTP status, for example DNS, TLS, a reset or a timeout |
 | `size_mismatch` | failed | The body was longer or shorter than `byte_size`; a longer body is cut off and removed |
 | `sha256_mismatch` | failed | The body's SHA-256 did not match `sha256` |
+
+**Plain digits is judged on the literal, not on a rendering of it.** A JSON
+parser may normalise a number before code sees it: jq renders `7e0` and
+`0.7e1` as `7`, and a jq older than 1.7 renders `7.0` as `7` too. So the bash
+half does not trust jq here. Before jq parses the claim, a pass over the raw
+JSON text replaces with `null` every number literal holding `.`, `e` or `E`
+that is the value of a `byte_size` key (or of any key written with a `\`
+escape, which could spell `byte_size`), and a `null` size is `too_large`. The
+PowerShell half reads the literal itself. Both halves therefore refuse `7.0`,
+`7.00000000000000001`, `7e0` and `0.7e1` on any jq. The server writes
+`byte_size` as an integer, so none of these shapes arrive from it; a port must
+not widen either half to match the other.
 
 The checks run per entry, in server order, before any download starts, in the
 order of the table: `unsafe_id`, `unsafe_url`, `too_large`, `count_cap`,
@@ -350,6 +387,46 @@ than GET.
   curl guard.
 - The exemption **never** permits an agent to download attachments. Under
   [Agent rules](#agent-rules), an agent never runs `curl -o`.
+
+A port that implements the exemption implements **all** of these narrower
+rules, in every half. They close shapes that matched the sentence above but
+let the command write or read somewhere it says it cannot. `stride-gemini`
+found them by exploratory testing (W2524), and stride adopted them in D403:
+
+- **No `-w` or `--write-out`**, in any spelling: `-w x`, `--write-out=x`, or
+  `w` inside a short-option cluster such as `-sSw x`. Its `%output{}`
+  directive writes a second file anywhere, so the `-o` target would no longer
+  be the command's only output.
+- **No header read from a file.** `-H @h.txt`, `--header=@h.txt`, `--header
+  @h.txt` and the clustered `-sSH@h.txt` are refused, because curl reads
+  headers from that file and the exemption would read a local file. A header
+  value that **starts with `$`** (`-H "$H"`, `--header="$H"`, `-sSH"$H"`) is
+  refused on the same ground: the guard judges the word before the shell
+  expands it, and `$H` could expand to `@h.txt`. The documented
+  `-H "Authorization: Bearer $T"` starts with a letter and stays exempt.
+- **`manifest.json` in any letter case** is refused as a target. APFS and NTFS
+  fold case, so `MANIFEST.JSON` there is the manifest.
+- **A target file name may not end in a dot.** Windows strips trailing dots,
+  so `manifest.json.` there opens the manifest. The name must match
+  `\A[A-Za-z0-9_-]([A-Za-z0-9._-]{0,162}[A-Za-z0-9_-])?\z`: 1 to 164
+  characters that begin and end with a letter, digit, `_` or `-`.
+- **No link anywhere on the target's path**, the target file itself included,
+  even a dangling one: `.stride`, `.stride/attachments`, the task directory
+  and the file. A symlinked target would write outside the ignored tree.
+- **No exemption before the tree exists.** `.stride/attachments/.gitignore`
+  must already exist as a regular file that is not a link; a directory or a
+  link to a regular file of that name is refused. Without it a
+  re-fetch would create a tree that git could commit.
+- **On a host whose path separator is `/`, a target with a backslash is
+  refused.** There a backslash is an ordinary filename character, so a
+  backslash-spelled target would land outside `.stride/attachments/`. On
+  Windows the backslash is the separator and stays allowed.
+- **A PowerShell half reads its hook input as UTF-8**, whatever the console
+  code page, through a `StreamReader` on standard input, never the automatic
+  `$input`. Windows PowerShell 5.1 decodes `$input` with the OEM code page,
+  which turns a non-ASCII filename into a different saved name from the bash
+  half's. The script must not mention `$input` at its top level in any letter
+  case, because a reference makes the host drain standard input first.
 
 ## Agent rules
 

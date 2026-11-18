@@ -177,16 +177,27 @@ def att_id:
 (.id | if type == "number" then (tostring | if test("\\A[0-9]{1,20}\\z") then . else null end)
        elif type == "string" and test("\\A[0-9]{1,20}\\z") then . else null end) as $tid
 | (.attachments | if type == "array" then . else [] end) as $list
-| reduce range(0; $list | length) as $i ({n: 0, total: 0, out: []};
+| reduce range(0; $list | length) as $i ({n: 0, total: 0, seen: {}, names: {}, out: []};
     ($list[$i] | if type == "object" then . else {} end) as $o
     | ($o.id | att_id) as $sid
+    | (if $sid == null then null else ($sid + "-" + ($o.filename | att_name)) end) as $local
     | ($o.download_url
        | if $tid != null and type == "string"
             and test("\\A/api/tasks/" + $tid + "/attachments/[0-9]{1,20}\\z")
          then . else null end) as $path
+    # A byte_size must be written as plain digits. jq 1.7 keeps the literal
+    # of a number, so 64.0 or 64.00000000000000001 (which a double rounds to 64)
+    # is refused here exactly as the PowerShell half refuses it (D403).
     | ($o.byte_size
-       | if type == "number" and . >= 0 and . == floor then floor else null end) as $size
-    | (if $sid == null then "unsafe_id"
+       | if type == "number" and (tostring | test("\\A[0-9]{1,20}\\z")) then . else null end) as $size
+    # An id, or a saved name, already taken by an accepted entry,
+    # case-insensitively, would give two entries one local file, so it is
+    # refused as unsafe_id (D403). The name matters on its own: id "a" with
+    # "b-x" and id "a-b" with "x" both save as a-b-x. Its key drops trailing
+    # dots as well, because Windows strips them: "a-b-x." is "a-b-x" there.
+    | (if $local == null then "" else ($local | ascii_downcase | sub("[.]+\\z"; "")) end) as $nkey
+    | (if $sid == null or (.seen[$sid | ascii_downcase] // false)
+          or (.names[$nkey] // false) then "unsafe_id"
        elif $path == null then "unsafe_url"
        elif $size == null or $size > $file_bytes then "too_large"
        elif .n >= $max_files then "count_cap"
@@ -194,12 +205,52 @@ def att_id:
        else null end) as $reason
     | .out += [{
         id: $o.id, filename: $o.filename,
-        local_file: (if $reason == null then $sid + "-" + ($o.filename | att_name) else null end),
+        local_file: (if $reason == null then $local else null end),
         content_type: $o.content_type, byte_size: $o.byte_size, sha256: $o.sha256,
         comment_id: $o.comment_id, uploaded_at: $o.uploaded_at, download_path: $path,
         status: (if $reason == null then "pending" else "skipped" end), reason: $reason }]
-    | if $reason == null then .n += 1 | .total += $size else . end)
+    | if $reason == null then .n += 1 | .total += $size | .seen[$sid | ascii_downcase] = true
+        | .names[$nkey] = true else . end)
 | .out'
+
+# (D403) A byte_size must be WRITTEN as plain digits, but jq 1.7 normalises an
+# exponent literal (7e0 and 0.7e1 both render as 7), and an older jq turns
+# every number into a double (7.0 renders as 7), so the plan cannot see what
+# the server wrote. This pass runs on the raw claim text first and replaces
+# every number literal with a '.', 'e' or 'E' that is the value of a
+# "byte_size" key with null, so the plan skips it too_large exactly as the
+# PowerShell half, which reads the literal, does. A key spelled with an escape
+# ("byte_size" decodes to byte_size) gets the same treatment. Strings are
+# tracked, so text inside one is never touched; nothing else is rewritten.
+attachment_null_inexact_sizes() {
+  LC_ALL=C awk '
+    {
+      n = length($0); i = 1; s = 1; out = ""
+      while (i <= n) {
+        c = substr($0, i, 1)
+        if (instr) {
+          if (esc) esc = 0
+          else if (c == "\\") esc = 1
+          else if (c == "\"") { instr = 0; str = substr($0, ks, i - ks); st = 1 }
+          i++; continue
+        }
+        if (c == " " || c == "\t" || c == "\r") { i++; continue }
+        if (c == "\"") { instr = 1; ks = i + 1; st = 0; i++; continue }
+        if (c == ":" && st == 1) { key = str; st = 2; i++; continue }
+        if (st == 2 && index("-0123456789", c) > 0) {
+          j = i
+          while (j <= n && index("+-.0123456789eE", substr($0, j, 1)) > 0) j++
+          tok = substr($0, i, j - i)
+          if ((key == "byte_size" || index(key, "\\") > 0) && tok ~ /[.eE]/) {
+            out = out substr($0, s, i - s) "null"; s = j
+          }
+          st = 0; i = j; continue
+        }
+        st = 0; i++
+      }
+      print out substr($0, s)
+    }'
+}
 
 # The wall-clock budget. STRIDE_ATTACHMENT_BUDGET_SECONDS may only SHORTEN it
 # (tests use 0); anything else, including a larger value, is ignored, so no
@@ -242,7 +293,7 @@ attachment_dir_ok() {
 download_task_attachments() {
   local _task="${1:-}" _stem _root _adir _tdir _plan _count _api _tok _proto _ua
   local _budget _deadline _left _results="" _idx _path _size _sha _local _part
-  local _code _codef _rc _reason _got _actual _ok=0 _skip=0 _fail=0 _tmp _tmeta
+  local _code _codef _rc _reason _got _actual _ok=0 _skip=0 _fail=0 _tmp _tmeta _an _ln
   [ "${HAS_JQ:-false}" = "true" ] || return 0
   [ -n "$_task" ] || return 0
   _stem=$(task_file_stem "$_task")
@@ -255,6 +306,17 @@ download_task_attachments() {
   if ! attachment_dir_ok "$_root" || ! attachment_dir_ok "$_adir" || ! attachment_dir_ok "$_tdir"; then
     [ "$_count" -eq 0 ] || printf 'stride: attachments %s: a .stride, .stride/attachments or task directory is a symlink or not a directory; nothing written\n' "$_stem" >&2
     return 0
+  fi
+  # A staging file an interrupted earlier run left is not ignored until the
+  # .gitignore exists, so a later git add -A would commit it. Sweep both
+  # halves' staging names on EVERY claim, attachments or none (D403): regular
+  # files only (find -type f skips links), and only the exact names the two
+  # halves create -- mktemp's six alphanumerics, and PowerShell's
+  # GetRandomFileName (eight lowercase alphanumerics, a dot, three more).
+  if [ -d "$_adir" ]; then
+    _an='[A-Za-z0-9]'; _ln='[a-z0-9]'
+    find "$_adir" -maxdepth 1 -type f \( -name ".gitignore.$_an$_an$_an$_an$_an$_an" \
+      -o -name ".stage.$_ln$_ln$_ln$_ln$_ln$_ln$_ln$_ln.$_ln$_ln$_ln" \) -exec rm -f {} + 2>/dev/null
   fi
   if [ "$_count" -eq 0 ]; then
     # No attachments: create nothing. A directory left by an EARLIER claim of
@@ -287,8 +349,16 @@ download_task_attachments() {
     printf 'stride: attachments %s: .stride/attachments/.gitignore is not a regular file; nothing downloaded\n' "$_stem" >&2
     return 0
   fi
-  _tmp=$(mktemp "$_adir/.gitignore.XXXXXX" 2>/dev/null) || _tmp=""
-  if [ -z "$_tmp" ] || ! printf '*\n' > "$_tmp" 2>/dev/null || ! mv -f "$_tmp" "$_adir/.gitignore" 2>/dev/null; then
+  # A missing .gitignore is created in place with noclobber (O_EXCL, never
+  # through a link), so no staging file exists in the window before it; one
+  # that already holds exactly '*' is left alone. Only a wrong one is staged.
+  if [ ! -e "$_adir/.gitignore" ] && [ ! -L "$_adir/.gitignore" ]; then
+    ( set -C; printf '*\n' > "$_adir/.gitignore" ) 2>/dev/null
+  fi
+  _tmp=""
+  if printf '*\n' | cmp -s - "$_adir/.gitignore" 2>/dev/null && [ ! -L "$_adir/.gitignore" ]; then
+    :
+  elif ! _tmp=$(mktemp "$_adir/.gitignore.XXXXXX" 2>/dev/null) || ! printf '*\n' > "$_tmp" 2>/dev/null || ! mv -f "$_tmp" "$_adir/.gitignore" 2>/dev/null; then
     [ -n "$_tmp" ] && rm -f "$_tmp" 2>/dev/null
     printf 'stride: attachments %s: could not write .stride/attachments/.gitignore; nothing downloaded\n' "$_stem" >&2
     return 0
@@ -5675,23 +5745,33 @@ stride_guard_cmd_word() {
 #     (--location-trusted, --proxy, -K, --next, -v, ...) means no exemption
 #     rather than a pass. Flags: -s -S -f -g, --silent --show-error --fail
 #     --fail-with-body --globoff --no-progress-meter --compressed
-#     --create-dirs. Options with a value: -o/--output, -H/--header,
-#     -A/--user-agent, -w/--write-out, -m/--max-time, --connect-timeout,
-#     --retry, --max-filesize, --proto, and -X/--request only as GET;
+#     --create-dirs. Options with a value: -o/--output, -H/--header (never
+#     an @file value), -A/--user-agent, -m/--max-time, --connect-timeout,
+#     --retry, --max-filesize, --proto, and -X/--request only as GET.
+#     -w/--write-out is NOT allowed: its %output{} directive writes a second
+#     file anywhere (D403);
 #   * exactly one -o/--output, and exactly one other word: the attachments
 #     path with no query, fragment or percent-encoding, after a scheme and host
 #     (an optional port) or a double-quoted $NAME / ${NAME} base; no other word mentions /api/;
 #   * the target is an ABSOLUTE literal path: the project root as this hook
 #     sees it, then .stride/attachments/<dir>/<file>, <dir> matching
-#     [A-Za-z0-9_-]{1,64} and <file> [A-Za-z0-9_-][A-Za-z0-9._-]{0,163}, not
-#     manifest.json. A $NAME prefix is refused: the guard cannot know what the
+#     [A-Za-z0-9_-]{1,64} and <file> 1-164 of [A-Za-z0-9._-] beginning and
+#     ending with [A-Za-z0-9_-] (no trailing dot, which Windows strips), not
+#     manifest.json in any letter case (APFS and NTFS fold case). A $NAME prefix is refused: the guard cannot know what the
 #     shell running the command will expand it to (an unset $CLAUDE_PROJECT_DIR
 #     writes to /.stride/...), so it cannot say where the file lands;
-#   * neither .stride, .stride/attachments nor <dir> is a symlink.
-# Anything that misses a single rule is judged by Rules 1-3 exactly as before.
-# Prints nothing; returns 0 only for an exempt command. stride-hook.ps1's
-# Test-StrideAttachmentCurlExempt is its twin, rule for rule.
-stride_guard_attachment_exempt() {
+#   * neither .stride, .stride/attachments, <dir> nor the <file> itself is a
+#     symlink, and .stride/attachments/.gitignore already exists as a regular
+#     file, so a re-fetch never creates a tree that git would commit.
+# Anything that misses a single rule is judged by Rules 1-3 exactly
+# as before. Prints nothing; returns 0 only for an exempt command.
+# stride-hook.ps1's Test-StrideAttachmentCurlExempt is its twin, rule for rule.
+#
+# The body is a SUBSHELL: it changes IFS and noglob, and the subshell puts
+# both back on every return path, so no early return can leak `set -f` into
+# the guard, and none can turn globbing back ON for a caller that had it off
+# (the hand-written `set +f` on each return path did exactly that).
+stride_guard_attachment_exempt() (
   local _cmd="$1" _words _w _expect="" _outs=0 _target="" _api=0 _pos=0 _url_ok=0
   local _root _rest _dir _file _cluster _ch _first=1 _oldifs="$IFS"
   [ "${#_cmd}" -le 4000 ] || return 1
@@ -5742,14 +5822,18 @@ stride_guard_attachment_exempt() {
     IFS="$_oldifs"
     if [ "$_first" = "1" ]; then
       _first=0
-      [ "$_w" = "curl" ] || { set +f; return 1; }
+      [ "$_w" = "curl" ] || return 1
       continue
     fi
     case "$_w" in */api/*) _api=$((_api + 1)) ;; esac
     if [ -n "$_expect" ]; then
       case "$_expect" in
         output) _target="$_w" ;;
-        method) [ "$_w" = "GET" ] || { set +f; return 1; } ;;
+        method) [ "$_w" = "GET" ] || return 1 ;;
+        # curl reads -H @file as headers FROM that file; never allowed. A
+        # value led by a quoted $NAME is refused too: the shell could expand
+        # it to @file, and this function judges the word before expansion.
+        header) case "$_w" in @* | '$'*) return 1 ;; esac ;;
       esac
       _expect=""
       continue
@@ -5758,17 +5842,19 @@ stride_guard_attachment_exempt() {
       --output) _outs=$((_outs + 1)); _expect=output ;;
       --output=*) _outs=$((_outs + 1)); _target="${_w#--output=}" ;;
       --request) _expect=method ;;
-      --request=*) [ "${_w#--request=}" = "GET" ] || { set +f; return 1; } ;;
+      --request=*) [ "${_w#--request=}" = "GET" ] || return 1 ;;
       --silent | --show-error | --fail | --fail-with-body | --globoff \
         | --no-progress-meter | --compressed | --create-dirs) : ;;
-      --header | --user-agent | --write-out | --max-time | --connect-timeout \
+      --header) _expect=header ;;
+      --header=@* | --header='$'*) return 1 ;;
+      --user-agent | --max-time | --connect-timeout \
         | --retry | --max-filesize | --proto) _expect=value ;;
-      --header=* | --user-agent=* | --write-out=* | --max-time=* | --connect-timeout=* \
+      --header=* | --user-agent=* | --max-time=* | --connect-timeout=* \
         | --retry=* | --max-filesize=* | --proto=*) : ;;
-      -) set +f; return 1 ;;
+      -) return 1 ;;
       -*)
         _cluster="${_w#-}"
-        case "$_cluster" in -*) set +f; return 1 ;; esac
+        case "$_cluster" in -*) return 1 ;; esac
         while [ -n "$_cluster" ]; do
           _ch="${_cluster%"${_cluster#?}"}"
           _cluster="${_cluster#?}"
@@ -5778,14 +5864,17 @@ stride_guard_attachment_exempt() {
                if [ -n "$_cluster" ]; then _target="$_cluster"; else _expect=output; fi
                break ;;
             X) if [ -n "$_cluster" ]; then
-                 [ "$_cluster" = "GET" ] || { set +f; return 1; }
+                 [ "$_cluster" = "GET" ] || return 1
                else _expect=method; fi
                break ;;
             # A value-taking short option consumes the rest of the cluster, or
             # the next word, so a value is never read as an option.
-            H | A | w | m) [ -n "$_cluster" ] || _expect=value
+            H) case "$_cluster" in @* | '$'*) return 1 ;; esac
+               [ -n "$_cluster" ] || _expect=header
                break ;;
-            *) set +f; return 1 ;;
+            A | m) [ -n "$_cluster" ] || _expect=value
+               break ;;
+            *) return 1 ;;
           esac
         done
         ;;
@@ -5800,7 +5889,6 @@ stride_guard_attachment_exempt() {
 '
   done
   IFS="$_oldifs"
-  set +f
   [ "$_first" = "0" ] && [ -z "$_expect" ] || return 1
   [ "$_outs" -eq 1 ] && [ "$_api" -eq 1 ] && [ "$_pos" -eq 1 ] && [ "$_url_ok" = "1" ] || return 1
   case "$_target" in
@@ -5811,12 +5899,17 @@ stride_guard_attachment_exempt() {
   _file="${_rest#*/}"
   [ "$_dir" != "$_rest" ] || return 1
   printf '%s' "$_dir" | grep -Eq '^[A-Za-z0-9_-]{1,64}$' || return 1
-  printf '%s' "$_file" | grep -Eq '^[A-Za-z0-9_-][A-Za-z0-9._-]{0,163}$' || return 1
-  [ "$_file" != "manifest.json" ] || return 1
+  # The name may not end in a dot: Windows strips trailing dots, so a
+  # manifest.json. there opens the manifest (D403, kept twin with the ps1).
+  printf '%s' "$_file" | grep -Eq '^[A-Za-z0-9_-]([A-Za-z0-9._-]{0,162}[A-Za-z0-9_-])?$' || return 1
+  [ "$(printf '%s' "$_file" | tr 'A-Z' 'a-z')" != "manifest.json" ] || return 1
   [ ! -L "$_root/.stride" ] && [ ! -L "$_root/.stride/attachments" ] \
-    && [ ! -L "$_root/.stride/attachments/$_dir" ] || return 1
+    && [ ! -L "$_root/.stride/attachments/$_dir" ] \
+    && [ ! -L "$_root/.stride/attachments/$_dir/$_file" ] || return 1
+  [ -f "$_root/.stride/attachments/.gitignore" ] \
+    && [ ! -L "$_root/.stride/attachments/.gitignore" ] || return 1
   return 0
-}
+)
 
 stride_guard_unsafe_reason() {
   _g_cmd="$1"
@@ -6336,7 +6429,9 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
       # shared resolver takes from the canonical response file first. The ids
       # agree here, but that file can still be a stale copy of this same task
       # when this call's capture write failed. Exactly one JSON value, or none.
-      ATTACHMENT_TASK_JSON=$(printf '%s' "$_own_call_payload" | jq -cs '
+      # (D403) attachment_null_inexact_sizes first, so jq never gets to
+      # normalise a byte_size literal the plan has to refuse.
+      ATTACHMENT_TASK_JSON=$(printf '%s' "$_own_call_payload" | attachment_null_inexact_sizes | jq -cs '
         if length == 1 then .[0] else empty end
         | if (.data? | type) == "object" and (.data.id? // null) != null then .data
           elif type == "object" and (.id? // null) != null then .

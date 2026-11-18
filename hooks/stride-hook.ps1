@@ -1933,6 +1933,15 @@ function Invoke-AttachmentRequest {
     }
 }
 
+# (D403) The key two saved names collide on: letter case folded (APFS and
+# NTFS fold it) and trailing dots dropped (Windows strips them), so id "a"
+# with "b-x.txt." and id "a-b" with "x.txt" are one file. The bash twin is
+# the names[] key in ATTACHMENT_PLAN_JQ.
+function Get-AttachmentNameKey {
+    param([string]$Name)
+    return $Name.ToLowerInvariant().TrimEnd('.')
+}
+
 # Download every attachment the proven claim lists. $TaskText is the RAW text
 # of the claim's `data` object (never the canonical response file). Never
 # throws, never writes to stdout.
@@ -1964,6 +1973,19 @@ function Invoke-TaskAttachmentDownload {
         }
         return
     }
+    # A staging file an interrupted earlier run left is not ignored until the
+    # .gitignore exists, so a later git add -A would commit it. Sweep both
+    # halves' staging names on EVERY claim, attachments or none (D403):
+    # regular files only (never a link), and only the exact names the two
+    # halves create, as in the bash half.
+    if (Test-Path -LiteralPath $adir -PathType Container) {
+        foreach ($old in @(Get-ChildItem -LiteralPath $adir -Force -File -ErrorAction SilentlyContinue)) {
+            if ($old.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+            if ($old.Name -cmatch '\A\.gitignore\.[A-Za-z0-9]{6}\z' -or $old.Name -cmatch '\A\.stage\.[a-z0-9]{8}\.[a-z0-9]{3}\z') {
+                try { [System.IO.File]::Delete($old.FullName) } catch { }
+            }
+        }
+    }
     if ($list.Count -eq 0) {
         # No attachments: create nothing. A directory left by an EARLIER claim
         # of this task is removed, manifest first, so its manifest can never
@@ -1976,6 +1998,8 @@ function Invoke-TaskAttachmentDownload {
     $entries = New-Object System.Collections.ArrayList
     $accepted = 0
     $acceptedBytes = [decimal]0
+    $seenIds = @{}
+    $seenNames = @{}
     foreach ($raw in $list) {
         $o = New-Object System.Collections.Specialized.OrderedDictionary
         if ($raw -is [System.Collections.IDictionary]) { $o = $raw }
@@ -1984,21 +2008,33 @@ function Invoke-TaskAttachmentDownload {
         $url = $o['download_url']
         if ($null -ne $tid -and ($url -is [string]) -and
             ($url -cmatch ('\A/api/tasks/' + $tid + '/attachments/[0-9]{1,20}\z'))) { $path = $url }
-        $size = Get-StrideJsonInteger $o['byte_size']
-        if ($null -ne $size -and $size -lt 0) { $size = $null }
+        # A byte_size must be written as plain digits, as in the bash half:
+        # 64.0 or 64.00000000000000001 is refused in both (D403).
+        $size = $null
+        if ((Test-StrideJsonNumber $o['byte_size']) -and ($o['byte_size'].StrideJsonNumber -cmatch '\A[0-9]{1,20}\z')) {
+            $size = Get-StrideJsonInteger $o['byte_size']
+        }
         $reason = $null
-        if (-not $sid) { $reason = 'unsafe_id' }
+        # An id, or a saved name, an accepted entry already took,
+        # case-insensitively, would give two entries one local file, so it is
+        # refused as unsafe_id (D403). The name matters on its own: id "a"
+        # with "b-x" and id "a-b" with "x" both save as a-b-x.
+        $local = $null
+        if ($sid) { $local = $sid + '-' + (Get-AttachmentSafeName $o['filename']) }
+        if (-not $sid -or $seenIds.ContainsKey($sid.ToLowerInvariant()) -or $seenNames.ContainsKey((Get-AttachmentNameKey $local))) { $reason = 'unsafe_id' }
         elseif ($null -eq $path) { $reason = 'unsafe_url' }
         elseif ($null -eq $size -or $size -gt $script:AttachmentFileBytes) { $reason = 'too_large' }
         elseif ($accepted -ge $script:AttachmentMaxFiles) { $reason = 'count_cap' }
         elseif (($acceptedBytes + $size) -gt $script:AttachmentTotalBytes) { $reason = 'total_cap' }
-        $local = $null
         $status = 'skipped'
         if ($null -eq $reason) {
-            $local = $sid + '-' + (Get-AttachmentSafeName $o['filename'])
             $status = 'pending'
             $accepted++
             $acceptedBytes += $size
+            $seenIds[$sid.ToLowerInvariant()] = $true
+            $seenNames[(Get-AttachmentNameKey $local)] = $true
+        } else {
+            $local = $null
         }
         $sha = $o['sha256']
         $e = New-Object System.Collections.Specialized.OrderedDictionary
@@ -2038,7 +2074,26 @@ function Invoke-TaskAttachmentDownload {
         [Console]::Error.WriteLine(('stride: attachments {0}: .stride/attachments/.gitignore is not a regular file; nothing downloaded' -f $stem))
         return
     }
-    if (-not (Write-AttachmentFileAtomic -Dir $adir -Dest $gitignore -Text "*`n")) {
+    # A missing .gitignore is created in place, exclusively (CreateNew), so no
+    # staging file exists in the window before it; one already holding exactly
+    # '*' is left alone. Only a wrong one is staged and renamed.
+    $giBytes = [byte[]](42, 10)
+    if (-not (Test-Path -LiteralPath $gitignore)) {
+        $fs = $null
+        try {
+            $fs = New-Object System.IO.FileStream($gitignore, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+            $fs.Write($giBytes, 0, 2)
+        } catch { } finally { if ($null -ne $fs) { $fs.Dispose() } }
+    }
+    $giOk = $false
+    try {
+        $giNow = Get-Item -LiteralPath $gitignore -Force -ErrorAction Stop
+        if (-not ($giNow.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and -not $giNow.PSIsContainer) {
+            $have = [System.IO.File]::ReadAllBytes($gitignore)
+            $giOk = ($have.Length -eq 2 -and $have[0] -eq 42 -and $have[1] -eq 10)
+        }
+    } catch { $giOk = $false }
+    if (-not $giOk -and -not (Write-AttachmentFileAtomic -Dir $adir -Dest $gitignore -Text "*`n")) {
         [Console]::Error.WriteLine(('stride: attachments {0}: could not write .stride/attachments/.gitignore; nothing downloaded' -f $stem))
         return
     }
@@ -2966,17 +3021,36 @@ if (-not (Test-Path $StrideMd)) { exit 0 }
 # capture path sits below this gate, so such a project captures nothing and has
 # no diff to lose -- and the hoist widened the guard's blast radius to every
 # project on the machine. Mirrors the same revert in stride-hook.sh.
-$Input = @($input) -join "`n"
-if (-not $Input) { exit 0 }
+#
+# Read it as UTF-8 (Claude Code writes UTF-8 JSON). The automatic $input
+# decodes with the console code page, which on Windows PowerShell 5.1 is the
+# OEM one, and turned a non-ASCII attachment filename into mojibake and a
+# different local name than the bash half's (D403). $input must not appear at
+# this script's top level at all: a reference to it makes the host drain stdin
+# before the first line runs -- and PowerShell names are case-insensitive, so
+# a variable spelled with a capital I IS that automatic variable. Lines are re-joined
+# with LF exactly as @($input) -join "`n" did; a console (not redirected)
+# stdin reads as empty, as $input did.
+$RawInput = ''
+if ([Console]::IsInputRedirected) {
+    try {
+        $stdinReader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), (New-Object System.Text.UTF8Encoding($false)))
+        $stdinLines = [regex]::Split($stdinReader.ReadToEnd(), "\r\n|\r|\n")
+        $stdinCount = $stdinLines.Count
+        if ($stdinCount -gt 0 -and $stdinLines[$stdinCount - 1] -eq '') { $stdinCount-- }
+        if ($stdinCount -gt 0) { $RawInput = $stdinLines[0..($stdinCount - 1)] -join "`n" }
+    } catch { $RawInput = '' }
+}
+if (-not $RawInput) { exit 0 }
 
 # --- Extract the Bash command from hook JSON ---
 $Command = ''
 try {
-    $json = $Input | ConvertFrom-Json
+    $json = $RawInput | ConvertFrom-Json
     $Command = $json.tool_input.command
 } catch {
     # Fallback: simple string extraction for "command" : "value"
-    if ($Input -match '"command"\s*:\s*"([^"]*)"') {
+    if ($RawInput -match '"command"\s*:\s*"([^"]*)"') {
         $Command = $Matches[1]
     }
 }
@@ -3022,13 +3096,25 @@ function Get-StrideGuardCmdWord {
     return ($words[$i] -replace '^.*/', '')
 }
 
+# (D403) A -H/--header value that curl would read from a file (@...) or that
+# the shell could expand into one ($...). Compared on the first CHARACTER,
+# ordinally: the culture-sensitive String.StartsWith treats '@' followed by a
+# combining mark as a different grapheme and says no.
+function Test-StrideHeaderValueRefused {
+    param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) { return $false }
+    return ($Value[0] -eq [char]'@' -or $Value[0] -eq [char]'$')
+}
+
 # (W2522) The ONE exemption from the -o/--output refusal -- the twin of
 # stride-hook.sh's stride_guard_attachment_exempt, rule for rule; read that
 # comment for why each rule exists. A GET of /api/tasks/<id>/attachments/<id>,
 # one simple curl and nothing else (no operator, substitution, unquoted glob or
 # $, double-quoted $ other than a plain $NAME or ${NAME}, or empty word),
 # every option on the allowlist, exactly one -o/--output, whose target is an
-# absolute literal path under this project's .stride/attachments/<dir>/<file>.
+# absolute literal path under this project's .stride/attachments/<dir>/<file>
+# (never manifest.json in any case, never a link, and only once the claim
+# hook's .gitignore exists). No -w/--write-out and no -H @file (D403).
 # Returns $true only for an exempt command.
 function Test-StrideAttachmentCurlExempt {
     param([string]$Cmd)
@@ -3087,7 +3173,10 @@ function Test-StrideAttachmentCurlExempt {
     $urlRe = '\A(https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\})/api/tasks/[0-9]{1,20}/attachments/[0-9]{1,20}\z'
     $flagLong = @('--silent', '--show-error', '--fail', '--fail-with-body', '--globoff',
         '--no-progress-meter', '--compressed', '--create-dirs')
-    $valueLong = @('--header', '--user-agent', '--write-out', '--max-time', '--connect-timeout',
+    # No --write-out/-w: its %output{} directive writes a second file
+    # anywhere. No @file header value: curl would read headers from a file
+    # (D403; the bash twin's rule).
+    $valueLong = @('--user-agent', '--max-time', '--connect-timeout',
         '--retry', '--max-filesize', '--proto')
     for ($k = 1; $k -lt $words.Count; $k++) {
         $word = [string]$words[$k]
@@ -3095,6 +3184,11 @@ function Test-StrideAttachmentCurlExempt {
         if ($expect) {
             if ($expect -eq 'output') { $target = $word }
             elseif ($expect -eq 'method' -and $word -cne 'GET') { return $false }
+            # A header value led by @ reads a file; one led by $ could expand to @.
+            # Ordinal, never the culture-sensitive default: under ICU '@' and a
+            # combining mark is one grapheme, so StartsWith('@') says no while
+            # curl, reading the first byte, still opens the file.
+            elseif ($expect -eq 'header' -and (Test-StrideHeaderValueRefused $word)) { return $false }
             $expect = ''
             continue
         }
@@ -3104,6 +3198,8 @@ function Test-StrideAttachmentCurlExempt {
         elseif ($word -clike '--output=*') { $outs++; $target = $word.Substring(9) }
         elseif ($word -ceq '--request') { $expect = 'method' }
         elseif ($word -clike '--request=*') { if ($word.Substring(10) -cne 'GET') { return $false } }
+        elseif ($word -ceq '--header') { $expect = 'header' }
+        elseif ($word -clike '--header=*') { if (Test-StrideHeaderValueRefused $word.Substring(9)) { return $false } }
         elseif ($flagLong -ccontains $word) { }
         elseif ($valueLong -ccontains $word) { $expect = 'value' }
         elseif ($eq -gt 0 -and ($valueLong -ccontains $longName)) { }
@@ -3125,7 +3221,12 @@ function Test-StrideAttachmentCurlExempt {
                 }
                 # A value-taking short option consumes the rest of the cluster,
                 # or the next word, so a value is never read as an option.
-                if ('HAwm'.IndexOf($ch) -ge 0) {
+                if ($ch -ceq [char]'H') {
+                    if (Test-StrideHeaderValueRefused $restOf) { return $false }
+                    if (-not $restOf) { $expect = 'header' }
+                    break
+                }
+                if ('Am'.IndexOf($ch) -ge 0) {
                     if (-not $restOf) { $expect = 'value' }
                     break
                 }
@@ -3140,6 +3241,11 @@ function Test-StrideAttachmentCurlExempt {
     if ($expect -or $outs -ne 1 -or $api -ne 1 -or $pos -ne 1 -or -not $urlOk) { return $false }
 
     try { $root = ([System.IO.Path]::GetFullPath($ProjectDir)).TrimEnd('\', '/') } catch { return $false }
+    # A backslash separates path parts only on Windows. Elsewhere it is an
+    # ordinary filename character, so a backslash-spelled target would land
+    # outside .stride/attachments/ (and its .gitignore): refused there, as the
+    # bash twin refuses it (D403).
+    if ([System.IO.Path]::DirectorySeparatorChar -eq [char]'/' -and $target.Contains('\')) { return $false }
     $t = $target.Replace('\', '/')
     $prefix = $root.Replace('\', '/') + '/.stride/attachments/'
     if (-not $t.StartsWith($prefix, [System.StringComparison]::Ordinal)) { return $false }
@@ -3149,15 +3255,23 @@ function Test-StrideAttachmentCurlExempt {
     $dir = $rest.Substring(0, $slash)
     $file = $rest.Substring($slash + 1)
     if ($dir -cnotmatch '\A[A-Za-z0-9_-]{1,64}\z') { return $false }
-    if ($file -cnotmatch '\A[A-Za-z0-9_-][A-Za-z0-9._-]{0,163}\z' -or $file -ceq 'manifest.json') { return $false }
+    # manifest.json in any letter case: APFS and NTFS fold case. The name must
+    # not end in a dot either: Windows strips trailing dots, so manifest.json.
+    # would open the manifest there (D403).
+    if ($file -cnotmatch '\A[A-Za-z0-9_-]([A-Za-z0-9._-]{0,162}[A-Za-z0-9_-])?\z' -or $file -ieq 'manifest.json') { return $false }
     $strideDir = Join-Path $root '.stride'
     $adir = Join-Path $strideDir 'attachments'
-    foreach ($p in @($strideDir, $adir, (Join-Path $adir $dir))) {
-        if (Test-Path -LiteralPath $p) {
-            $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
-            if ($null -eq $item -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }
-        }
+    # No link anywhere on the path, the target file included. FileInfo reads
+    # the link itself (a dangling one too) on both editions; -1 is "absent".
+    foreach ($p in @($strideDir, $adir, (Join-Path $adir $dir), (Join-Path (Join-Path $adir $dir) $file))) {
+        $attr = (New-Object System.IO.FileInfo($p)).Attributes
+        if ([int]$attr -ne -1 -and ($attr -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }
     }
+    # A re-fetch only lands in a tree the claim hook made: its .gitignore must
+    # already be a regular file, so the download can never be committed.
+    $gi = Join-Path $adir '.gitignore'
+    $giAttr = (New-Object System.IO.FileInfo($gi)).Attributes
+    if ([int]$giAttr -eq -1 -or ($giAttr -band [System.IO.FileAttributes]::ReparsePoint) -or ($giAttr -band [System.IO.FileAttributes]::Directory)) { return $false }
     return $true
 }
 
@@ -3464,7 +3578,7 @@ if (-not $HookName) { exit 0 }
 # prior-call file (no staleness regression) and a truncated stdout leaves an
 # out-of-band copy intact.
 if ($Phase -eq 'post') {
-    Save-CanonicalResponse -InputJson $Input
+    Save-CanonicalResponse -InputJson $RawInput
 }
 
 # --- Environment variable caching ---
@@ -3490,7 +3604,7 @@ if ($HookName -eq 'before_doing') {
             }
         }
 
-        $json = $Input | ConvertFrom-Json
+        $json = $RawInput | ConvertFrom-Json
         $response = $json.tool_response
         if (-not $taskJson -and $response) {
 
@@ -4567,11 +4681,11 @@ function Set-AfterGoalEnv {
 $afterGoalRouted = $false
 $responsePayload = $null
 if ($Phase -eq 'post') {
-    $responsePayload = Get-ResponsePayload -InputJson $Input
+    $responsePayload = Get-ResponsePayload -InputJson $RawInput
     Set-HookEnv -EnvMap (Get-HookEnvFromPayload -Payload $responsePayload -HookEntryName $HookName)
     # (W2123) Record the loop state for a successful completion. Self-gates on
     # HookName=before_review; best-effort, never fatal to the completion.
-    Write-LoopStateForCompletion -InputJson $Input -ResponsePayload $responsePayload
+    Write-LoopStateForCompletion -InputJson $RawInput -ResponsePayload $responsePayload
 }
 
 # Resolve the Stride API base URL for the changed_files upload. Primary source

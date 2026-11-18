@@ -13341,6 +13341,73 @@ try {
     Assert-Eq "48k: a non-loopback http API URL records transport with no request" 'failed/transport/0' `
         ("{0}/{1}/{2}" -f $m.attachments[0].status, $m.attachments[0].reason, @(Get-G48Requested).Count)
 
+    # 48q: (D403) an id an accepted entry already took
+    # -- the same id, 7 against "7", or one differing only in letter case --
+    # is refused unsafe_id, so two entries never share one local file; and a
+    # byte_size not written as plain digits is too_large, as in the bash half.
+    Set-G48Routes @{ '/api/tasks/77/attachments/860' = (New-G48Route 'dup-one'); '/api/tasks/77/attachments/861' = (New-G48Route 'dup-two') }
+    $g48d = New-G48Project 'q'
+    $g48Sha1 = Get-G48Sha 'dup-one'; $g48Sha2 = Get-G48Sha 'dup-two'
+    $g48Text = '{"data":{"id":77,"identifier":"W5001","attachments":[' +
+        '{"id":860,"filename":"a.txt","byte_size":7,"sha256":"' + $g48Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":860,"filename":"a.txt","byte_size":7,"sha256":"' + $g48Sha2 + '","download_url":"/api/tasks/77/attachments/861"},' +
+        '{"id":"7","filename":"a.txt","byte_size":7,"sha256":"' + $g48Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":7,"filename":"a.txt","byte_size":7,"sha256":"' + $g48Sha2 + '","download_url":"/api/tasks/77/attachments/861"},' +
+        '{"id":"ab","filename":"a.txt","byte_size":7,"sha256":"' + $g48Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":"AB","filename":"a.txt","byte_size":7,"sha256":"' + $g48Sha2 + '","download_url":"/api/tasks/77/attachments/861"},' +
+        '{"id":870,"filename":"f.txt","byte_size":7.0,"sha256":"' + $g48Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":871,"filename":"g.txt","byte_size":7.00000000000000001,"sha256":"' + $g48Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":872,"filename":"h.txt","byte_size":7e0,"sha256":"' + $g48Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":873,"filename":"i.txt","byte_size":0.7e1,"sha256":"' + $g48Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":874,"filename":"j.txt","byte\u005fsize":7E0,"sha256":"' + $g48Sha1 + '","download_url":"/api/tasks/77/attachments/860"}]}}'
+    $null = Invoke-G48Claim $g48d $g48Text
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48q: a repeated, 7-vs-`"7`" or case-only id is skipped unsafe_id" ',unsafe_id,,unsafe_id,,unsafe_id,too_large,too_large,too_large,too_large,too_large' `
+        (($m.attachments | ForEach-Object { [string]$_.reason }) -join ',')
+    Assert-Eq "48q: so each downloaded entry names its own file" '860-a.txt,7-a.txt,ab-a.txt' `
+        ((@($m.attachments | Where-Object { $_.status -eq 'downloaded' } | ForEach-Object { $_.local_file })) -join ',')
+
+    # 48r: (D403) a staging file an interrupted earlier
+    # run left in .stride/attachments/ -- either half's name -- is swept, so
+    # git add -A can never commit one.
+    Set-G48Routes @{ '/api/tasks/77/attachments/862' = (New-G48Route 'fine') }
+    $g48d = New-G48Project 'r'
+    $g48Ad = Join-Path $g48d '.stride/attachments'
+    New-Item -ItemType Directory -Path $g48Ad -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $g48Ad '.gitignore.Ab12Cd'), "*`n")
+    [System.IO.File]::WriteAllText((Join-Path $g48Ad '.stage.j3v2oj3x.c0l'), "*`n")
+    $null = Invoke-G48Claim $g48d (New-G48Claim @((New-G48Att 862 'c' 'fine')))
+    Assert-Eq "48r: both halves' leftover staging files are swept" '.gitignore,W5001' `
+        ((Get-ChildItem -LiteralPath $g48Ad -Force | Sort-Object Name | ForEach-Object { $_.Name }) -join ',')
+    Assert-Eq "48r: and the .gitignore holds exactly *" "*`n" ([System.IO.File]::ReadAllText((Join-Path $g48Ad '.gitignore')))
+    # The sweep runs on a claim with no attachments too, and takes only the
+    # exact staging names: .gitignore.a_b-cd is no name either half creates.
+    $g48d = New-G48Project 'r3'
+    $g48Ad = Join-Path $g48d '.stride/attachments'
+    New-Item -ItemType Directory -Path $g48Ad -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $g48Ad '.gitignore.Ab12Cd'), "*`n")
+    [System.IO.File]::WriteAllText((Join-Path $g48Ad '.stage.j3v2oj3x.c0l'), "*`n")
+    [System.IO.File]::WriteAllText((Join-Path $g48Ad '.gitignore.a_b-cd'), "x`n")
+    $null = Invoke-G48Claim $g48d (New-G48Claim @())
+    Assert-Eq "48r: a claim with no attachments sweeps them too, and only exact names" '.gitignore.a_b-cd' `
+        ((Get-ChildItem -LiteralPath $g48Ad -Force | Sort-Object Name | ForEach-Object { $_.Name }) -join ',')
+
+    # 48s: (D403) two ids whose saved names collide take one
+    # file each -- the later entry is skipped unsafe_id -- as in the bash half.
+    Set-G48Routes @{ '/api/tasks/77/attachments/880' = (New-G48Route 'name-one'); '/api/tasks/77/attachments/881' = (New-G48Route 'name-two'); '/api/tasks/77/attachments/862' = (New-G48Route 'fine') }
+    $g48d = New-G48Project 's'
+    $g48A1 = New-G48Att 880 'b-x.txt' 'name-one'; $g48A1['id'] = 'a'
+    $g48A2 = New-G48Att 881 'x.txt' 'name-two'; $g48A2['id'] = 'a-b'
+    $g48A3 = New-G48Att 880 'x-Y.txt' 'name-one'; $g48A3['id'] = 's'
+    $g48A4 = New-G48Att 881 'y.txt' 'name-two'; $g48A4['id'] = 's-X'
+    # "t-b-x.txt." and "t-b-x.txt" collide too: Windows strips the trailing dot.
+    $g48A5 = New-G48Att 880 'b-x.txt.' 'name-one'; $g48A5['id'] = 't'
+    $g48A6 = New-G48Att 881 'x.txt' 'name-two'; $g48A6['id'] = 't-b'
+    $null = Invoke-G48Claim $g48d (New-G48Claim @($g48A1, $g48A2, $g48A3, $g48A4, $g48A5, $g48A6))
+    $m = Get-G48Manifest $g48d
+    Assert-Eq "48s: a saved name an accepted entry took is skipped unsafe_id, in any case" '/a-b-x.txt,unsafe_id/,/s-x-Y.txt,unsafe_id/,/t-b-x.txt.,unsafe_id/' `
+        (($m.attachments | ForEach-Object { '{0}/{1}' -f [string]$_.reason, [string]$_.local_file }) -join ',')
+
     # 48l: a re-claim replaces the directory, and a re-claim with no
     # attachments removes it.
     $g48d = New-G48Project 'l'
@@ -13383,6 +13450,8 @@ try {
 # -o target is under <project>/.stride/attachments/. Everything else is refused.
 $g48gd = New-G48Project 'guard'
 New-Item -ItemType Directory -Path (Join-Path $g48gd '.stride/attachments/W5001') -Force | Out-Null
+# The claim hook's .gitignore: since D403 a re-fetch is exempt only into a tree it made.
+[System.IO.File]::WriteAllText((Join-Path $g48gd '.stride/attachments/.gitignore'), "*`n")
 $g48Root = ([System.IO.Path]::GetFullPath($g48gd)).TrimEnd('\', '/').Replace('\', '/')
 $g48T = "$g48Root/.stride/attachments/W5001/812-shot.png"
 $g48U = 'https://www.stridelikeaboss.com/api/tasks/77/attachments/812'
@@ -13421,6 +13490,58 @@ Assert-Exit "48i: an unquoted glob in an option value is refused" 2 (Invoke-G48G
 Assert-Exit "48i: an unquoted brace expansion is refused" 2 (Invoke-G48Guard "curl -sS -A a{b,c} -o $g48T $g48U")
 Assert-Exit "48i: an operator inside an option value is refused" 2 (Invoke-G48Guard "curl -sS -A x|tee -o $g48T $g48U")
 Assert-Exit "48i: a command substitution is never exempt" 2 (Invoke-G48Guard "curl -sS -o $g48T `"`$(cat u)/api/tasks/77/attachments/812`"")
+# (D403) -w/--write-out (its %output{} writes a second
+# file), an @file header, manifest.json in another case, a target that is a
+# link, and a tree with no .gitignore yet are all refused.
+Assert-Exit "48i: -w with %output{} is refused" 2 (Invoke-G48Guard "curl -sS -w '%output{/tmp/elsewhere.txt}x' -o $g48T $g48U")
+Assert-Exit "48i: --write-out is refused" 2 (Invoke-G48Guard "curl -sS --write-out=x -o $g48T $g48U")
+Assert-Exit "48i: a clustered -w is refused" 2 (Invoke-G48Guard "curl -sSw x -o $g48T $g48U")
+Assert-Exit "48i: an @file header is refused" 2 (Invoke-G48Guard "curl -sS -H @h.txt -o $g48T $g48U")
+Assert-Exit "48i: an --header=@file is refused" 2 (Invoke-G48Guard "curl -sS --header=@h.txt -o $g48T $g48U")
+Assert-Exit "48i: a clustered -H@file is refused" 2 (Invoke-G48Guard "curl -sSH@h.txt -o $g48T $g48U")
+Assert-Exit "48i: manifest.json in another case is refused" 2 (Invoke-G48Guard "curl -sS -o $g48Root/.stride/attachments/W5001/MANIFEST.JSON $g48U")
+Assert-Exit "48i: a header value led by `$ (it could expand to @file) is refused" 2 (Invoke-G48Guard "curl -sS -H `"`$H`" -o $g48T $g48U")
+Assert-Exit "48i: an --header=`$NAME is refused" 2 (Invoke-G48Guard "curl -sS --header=`"`$H`" -o $g48T $g48U")
+Assert-Exit "48i: an --header `${NAME} is refused" 2 (Invoke-G48Guard "curl -sS --header `"`${H}`" -o $g48T $g48U")
+Assert-Exit "48i: a clustered -H`$NAME is refused" 2 (Invoke-G48Guard "curl -sSH`"`$H`" -o $g48T $g48U")
+Assert-Exit "48i: an @ header followed by a combining mark is refused (ordinal check)" 2 (Invoke-G48Guard "curl -sS -H '@$([char]0x301)x' -o $g48T $g48U")
+Assert-Exit "48i: an --header=@ followed by a combining mark is refused" 2 (Invoke-G48Guard "curl -sS --header='@$([char]0x301)x' -o $g48T $g48U")
+Assert-Exit "48i: a trailing-dot name (Windows strips it) is refused" 2 (Invoke-G48Guard "curl -sS -o $g48Root/.stride/attachments/W5001/manifest.json. $g48U")
+Assert-Exit "48i: any name ending in a dot is refused" 2 (Invoke-G48Guard "curl -sS -o $g48Root/.stride/attachments/W5001/812-shot.png. $g48U")
+if ([System.IO.Path]::DirectorySeparatorChar -eq [char]'/') {
+    Assert-Exit "48i: a backslash-spelled target is refused off Windows" 2 (Invoke-G48Guard "curl -sS -o '$g48Root/.stride\attachments\W5001\9.txt' $g48U")
+} else {
+    Write-Host "  SKIP: 48i: backslash target (backslash is a separator here)"
+}
+$g48Link = Join-Path $g48gd '.stride/attachments/W5001/9-link.txt'
+$g48LinkOk = $true
+try { New-Item -ItemType SymbolicLink -Path $g48Link -Target (Join-Path $g48Dir 'outside') -ErrorAction Stop | Out-Null } catch { $g48LinkOk = $false }
+if ($g48LinkOk) {
+    Assert-Exit "48i: a target that is a symlink is refused" 2 (Invoke-G48Guard "curl -sS -o $g48Root/.stride/attachments/W5001/9-link.txt $g48U")
+    try { [System.IO.File]::Delete($g48Link) } catch { }
+} else {
+    Write-Host "  SKIP: 48i: symlink target (cannot create a symlink here)"
+}
+$g48Gi = Join-Path $g48gd '.stride/attachments/.gitignore'
+[System.IO.File]::Delete($g48Gi)
+Assert-Exit "48i: no .gitignore yet means no exemption" 2 (Invoke-G48Guard "curl -sS -o $g48T $g48U")
+New-Item -ItemType Directory -Path $g48Gi -Force | Out-Null
+Assert-Exit "48i: a .gitignore that is a directory means no exemption" 2 (Invoke-G48Guard "curl -sS -o $g48T $g48U")
+[System.IO.Directory]::Delete($g48Gi)
+$g48GiSaved = Join-Path $g48gd '.stride/attachments/gi.saved'
+[System.IO.File]::WriteAllText($g48GiSaved, "*`n")
+$g48GiLinkOk = $true
+try { New-Item -ItemType SymbolicLink -Path $g48Gi -Target $g48GiSaved -ErrorAction Stop | Out-Null } catch { $g48GiLinkOk = $false }
+if ($g48GiLinkOk) {
+    Assert-Exit "48i: a .gitignore that is a link to a regular file means no exemption" 2 (Invoke-G48Guard "curl -sS -o $g48T $g48U")
+    try { [System.IO.File]::Delete($g48Gi) } catch { }
+} else {
+    Write-Host "  SKIP: 48i: .gitignore link (cannot create a symlink here)"
+}
+[System.IO.File]::Delete($g48GiSaved)
+[System.IO.File]::WriteAllText($g48Gi, "*`n")
+Assert-Exit "48i: and the documented re-fetch is still allowed" 0 (Invoke-G48Guard "curl -sS -H `"Authorization: Bearer `$T`" -o $g48T $g48U")
+
 
 # ============================================================
 # Summary
